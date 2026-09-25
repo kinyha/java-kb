@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: диагностика · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script><script src="../assets/search.js"></script>
+</head><body data-page="topic" data-root="../" data-topic="jvm-diagnostics">
+<main class="page">
+<header class="topic-head"><h1>JVM: диагностика</h1></header>
+<div class="lesson"><section class="step" id="symptom">
+<h2>У сервиса вырос p99: сначала собери свидетельства</h2>
+<p>Платежи начали отвечать медленно. Перезапуск освободит память и уничтожит часть следов, но не объяснит причину. Сначала уточни симптом: CPU занят, потоки ждут, heap растёт или паузы GC совпадают с p99. У каждого случая свой снимок.</p><p>JDK даёт <code>jcmd</code> для команд работающей JVM, JFR для временной шкалы событий и GC-логи для сборки мусора. Снимки помогают сформулировать гипотезу, а не заменяют сравнение с нагрузкой и кодом.</p>
+</section><section class="step" id="thread-dump">
+<h2>Thread dump показывает, где остановились потоки</h2>
+<p>При зависшем запросе несколько раз сними стеки потоков через <code>jcmd &lt;pid&gt; Thread.print -l</code>. Один снимок может попасть на нормальное ожидание; повторяющийся кадр и состояние важнее одиночной строки. <code>BLOCKED</code> указывает на монитор, <code>WAITING</code> бывает нормальным ожиданием очереди, а <code>RUNNABLE</code> не всегда значит работу CPU.</p><pre><code class="language-text">jcmd -l
+jcmd &lt;pid&gt; Thread.print -l</code></pre><p>Если поток платежа ждёт соединение БД, исправление в пуле или запросе, а не в GC. При подозрении на deadlock ищи цикл владельцев и ожидающих блокировок в дампе.</p>
+</section><section class="step" id="heap-dump">
+<h2>Heap dump отвечает, кто удерживает память</h2>
+<p>Для роста heap сначала сравни live set после сборок и histogram классов. Если растёт число <code>byte[]</code>, это ещё не доказательство утечки: нужно найти путь удержания. Heap dump сохраняет объекты и ссылки; в анализаторе смотри dominator tree и путь от подозрительного объекта к GC root.</p><pre><code class="language-java">import java.util.ArrayList;
+import java.util.List;
+public class DiagDemo {
+    static final List&lt;byte[]&gt; retained = new ArrayList&lt;&gt;();
+    public static void main(String[] args) throws InterruptedException {
+        for (int i = 0; i &lt; 3; i++) retained.add(new byte[1024 * 1024]);
+        System.out.println(&quot;ready&quot;);
+        Thread.sleep(30_000);
+    }
+}</code></pre>
+<pre class="out">ready</pre><pre><code class="language-text">jcmd &lt;pid&gt; GC.class_histogram
+jcmd &lt;pid&gt; GC.heap_dump /tmp/payments.hprof</code></pre><p>В примере static-список удерживает три массива примерно по мегабайту. Dump может содержать персональные данные платежей и занимать много диска; команда способна вызвать тяжёлую работу JVM. Сохраняй его только в защищённом месте и планируй влияние на продакшн.</p>
+</section><section class="step" id="jfr-gc">
+<h2>JFR и GC-лог связывают задержку с событием</h2>
+<p>JFR записывает события с временем: CPU, allocation, блокировки, I/O и GC. Для короткого исследования можно запустить запись на 60 секунд, затем открыть файл в JDK Mission Control или посмотреть сводку через <code>jfr summary</code>. Профиль <code>profile</code> подробнее обычного <code>default</code> и дороже по накладным расходам.</p><pre><code class="language-text">jcmd &lt;pid&gt; JFR.start name=incident settings=profile duration=60s filename=/tmp/incident.jfr
+jfr summary /tmp/incident.jfr
+java -Xlog:gc* -jar payments.jar</code></pre><p>GC-лог показывает тип и длительность сборок. Сопоставь время длинной паузы с p99 запроса; если совпадения нет, ищи другую причину. В идеале GC-лог включают при старте сервиса, а JFR запускают для нужного окна наблюдения.</p>
+</section><section class="step" id="limits">
+<h2>Команда диагностики тоже расходует ресурсы</h2>
+<p><code>jcmd</code> обычно требует того же пользователя ОС, что запустил JVM; в контейнере важны PID namespace и доступ к процессу. Histogram и heap dump могут остановить потоки или потребовать заметный диск, поэтому на нагруженном сервисе выбирай момент и снимай минимально нужные данные.</p><figure class="fig play"><div class="fig-box"><svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Порядок разбора инцидента с ростом памяти"><g data-s="1-"><rect x="24" y="25" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="45" class="dg-t">метрика: heap после GC растёт</text></g><g data-s="2-"><rect x="24" y="61" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="81" class="dg-t">GC-лог/JFR: рост подтверждён</text></g><g data-s="3-"><rect x="24" y="97" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="117" class="dg-t">histogram: растут byte[]</text></g><g data-s="4-"><rect x="24" y="133" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="153" class="dg-t">heap dump: путь к static retained</text></g><g data-s="5-"><rect x="24" y="169" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="189" class="dg-t">исправление кеша → повторный профиль</text></g></svg></div><ol class="play-steps"><li>Отдели устойчивый рост живых объектов от обычной пилы выделений.</li><li>Проверь временную связь роста памяти, пауз и запросов.</li><li>Найди классы с растущим числом экземпляров.</li><li>Определи, какая коллекция или загрузчик удерживает объекты.</li><li>После исправления сравни live set и p99 на той же нагрузке.</li></ol></figure><p>Если растёт память процесса, а heap стабилен, проверь native-области. Native Memory Tracking включают при старте: <code>-XX:NativeMemoryTracking=summary</code>, затем смотрят <code>jcmd &lt;pid&gt; VM.native_memory summary</code>. NMT не показывает выделения стороннего native-кода.</p>
+</section><div class="summary"><ul><li>Thread dump помогает разбирать ожидания, блокировки и deadlock; полезны несколько снимков.</li><li>Histogram показывает распределение классов, heap dump — цепочки удержания.</li><li>JFR и GC-логи дают время событий для сравнения с p99.</li><li>Dump дорог и может содержать данные пользователя; учитывай ресурсы и доступ.</li><li>Стабильный heap при росте RSS переводит расследование к native-памяти и лимитам контейнера.</li></ul></div></div>
+<section class="interview" id="interview"><h2>На собеседовании</h2><article class="q" id="slow-requests" data-freq="3">
+<h3>Как разберёшь внезапный рост p99 у Java-сервиса?</h3>
+<div class="answer"><div data-level="middle"><p>Сопоставлю задержки запросов с CPU, GC и числом ожидающих потоков. Если запросы зависают, сниму несколько thread dump; если есть подозрение на паузы — посмотрю GC-лог и JFR за тот же интервал.</p><p>Например, поток может ждать соединение из пула БД, пока GC-паузы короткие. Тогда настройка сборщика не решит проблему.</p></div><div data-level="senior"><ul><li>Один thread dump — снимок, а не история; повторение и JFR помогают увидеть длительность ожидания.</li><li>В контейнере команда <code>jcmd -l</code> может не увидеть процесс в другом PID namespace.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>RUNNABLE означает 100% CPU?</summary><p>Нет. Состояние Java-потока не всегда отражает состояние ОС; он может находиться в native I/O. Сопоставляй с CPU-профилем.</p></details><details data-kind="уточнение"><summary>Как найти deadlock?</summary><p>В thread dump ищи цикл: поток A держит монитор, который ждёт B, а B ждёт монитор A. Несколько снимков помогают подтвердить устойчивость.</p></details></div>
+</article><article class="q" id="memory-leak" data-freq="3">
+<h3>Как искать утечку памяти в JVM?</h3>
+<div class="answer"><div data-level="middle"><p>Сначала убеждаюсь, что после GC растёт live set при сопоставимой нагрузке. Histogram покажет, какие классы растут; heap dump и пути к GC roots покажут удерживающий объект, например static-кеш платежей.</p><p>Исправление — ограничить срок жизни данных и повторить наблюдение. Просто увеличить <code>-Xmx</code> значит отложить падение, если коллекция продолжает расти.</p></div><div data-level="senior"><ul><li>Histogram и heap dump сами могут дать паузу и потребовать существенные ресурсы.</li><li>Рост RSS при стабильном heap требует NMT и проверки native-библиотек или потоков.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Что даёт dominator tree?</summary><p>Он помогает найти объект, удержание которого объясняет большой объём heap, например кеш с миллионами значений.</p></details><details data-kind="уточнение"><summary>Почему файл dump нужно защищать?</summary><p>В нём могут быть строки, токены, DTO и другие данные живых объектов процесса.</p></details></div>
+</article><article class="q" id="jfr" data-freq="2">
+<h3>Чем JFR отличается от heap dump и thread dump?</h3>
+<div class="answer"><div data-level="middle"><p>JFR — запись событий во времени: где процесс тратил CPU, выделял объекты, блокировался и собирал мусор. Thread dump — один снимок стеков. Heap dump — один снимок объектов и ссылок.</p><p>Для скачка p99 я предпочту временную шкалу JFR; для вопроса «кто держит 2 ГБ объектов» нужен heap dump. Инструмент выбираю под гипотезу.</p></div><div data-level="senior"><ul><li>Настройка <code>default</code> пригодна для длительной записи с меньшим overhead; <code>profile</code> подробнее и дороже.</li><li>События allocation не равны полному списку всех живых объектов; это разные вопросы.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Как начать JFR без перезапуска?</summary><p><code>jcmd &lt;pid&gt; JFR.start ...</code>; список поддерживаемых параметров проверь через <code>jcmd &lt;pid&gt; help JFR.start</code>.</p></details><details data-kind="уточнение"><summary>Где смотреть записанный файл без GUI?</summary><p><code>jfr summary file.jfr</code> показывает сводку, <code>jfr print</code> печатает события для фильтрации.</p></details></div>
+</article></section>
+<div class="qa"></div>
+<div class="refs"><ul><li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jcmd.html">jcmd, JDK 21</a> — основа урока: Thread.print, GC.heap_dump, JFR.start и ограничения команд.</li><li><a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/diagnostic-tools.html">JDK 21 Diagnostic Tools</a> — histogram, heap dump и NMT.</li><li><a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/troubleshooting-memory-leaks.html">Troubleshoot Memory Leaks</a> — порядок поиска утечки и анализ dump.</li><li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jfr.html">jfr command</a> — summary и print записей.</li></ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body></html>

@@ -442,7 +442,7 @@ window.KB_TREE = [
           scope: 'достижимость, поколения, G1, ZGC, паузы, weak и soft ссылки, настройка' },
         { id: 'jit', freq: 1, status: 'draft', title: 'JIT',
           scope: 'tiered compilation, C1 и C2, inlining, деоптимизация, прогрев' },
-        { id: 'jvm-diagnostics', freq: 2, status: 'empty', title: 'Diagnostics',
+        { id: 'jvm-diagnostics', freq: 2, status: 'draft', title: 'Diagnostics',
           scope: 'heap dump, thread dump, JFR, jcmd, GC-логи, поиск утечек памяти' },
       ] },
       { id: 'stdlib', title: 'Standard Library', source: 'Core Java т. II: Input and Output, Date and Time', items: [
