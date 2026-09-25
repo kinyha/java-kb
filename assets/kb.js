@@ -8,10 +8,12 @@
 
   const MARKS = 'kb:v1';        // { "topic/qid": { c: 0|1|2, t: время оценки, n: сколько раз подряд «объясню», prev } }
   const PREFS = 'kb:prefs';     // { theme, level, due, path }
+  const REPS = 'kb:rep';        // повторение тем целиком: { "topic": { q: когда поставлена в очередь, c, t, n } }
 
   const FREQ = { 3: 'часто', 2: 'иногда', 1: 'редко' };
   const CONF = ['не знаю', 'плаваю', 'объясню'];
   const CONF_TASK = ['не решил', 'с подсказкой', 'решил'];      // для задач: data-type="task"
+  const CONF_TOPIC = ['не помню', 'плаваю', 'помню'];            // для темы целиком
   const KINDS = { 'задача': 'k-task', 'ревью': 'k-review' };
   const DAY = 864e5;
 
@@ -20,6 +22,8 @@
   const dueIn = m => Math.ceil((m.t + interval(m) * DAY - Date.now()) / DAY);
   const isDue = m => !m || dueIn(m) <= 0;
   const sameDay = t => new Date(t).toDateString() === new Date().toDateString();
+  // тема в повторении: поставлена в очередь кнопкой или подошёл срок после оценки
+  const topicDue = r => !!r && (!!r.q || (r.c != null && dueIn(r) <= 0));
 
   const $ = (s, r = document) => r.querySelector(s);
   const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -60,6 +64,7 @@
   const QCOUNT = QS.reduce((m, c) => { m[c.topic] = (m[c.topic] || 0) + 1; return m; }, {});
   const prefs = Object.assign({ theme: null, level: 'middle', due: false, path: null }, load(PREFS, {}));
   const marks = load(MARKS, {});
+  const reps = load(REPS, {});
 
   const topicHref = id => ROOT + 'topics/' + id + '.html';
   const pbar = (k, total) => {
@@ -220,6 +225,8 @@
     const DUE = 'due';
     const isDueCard = c => { const m = marks[c.topic + '/' + c.id]; return !!m && dueIn(m) <= 0; };
     const dueCards = () => QS.filter(isDueCard);
+    const dueTopics = () => ALL.filter(t => t.status !== 'empty' && topicDue(reps[t.id]));
+    const dueCount = () => dueTopics().length + dueCards().length;
     const topicsIn = folder => ALL.filter(t => t.path.includes(folder));
 
     // путь из id в узлы; лишнее и несуществующее отрезается
@@ -264,7 +271,8 @@
     const freqBars = f => h('span', { class: 'freq', 'data-f': f, title: 'спрашивают ' + FREQ[f], 'aria-label': 'спрашивают ' + FREQ[f] }, h('i'), h('i'), h('i'));
     const cdot = m => h('i', { class: 'cdot', 'data-c': m ? m.c : null, 'aria-hidden': 'true' });
     const countMeta = topics => {
-      const due = QS.filter(c => topics.some(t => t.id === c.topic) && isDueCard(c)).length;
+      const due = QS.filter(c => topics.some(t => t.id === c.topic) && isDueCard(c)).length
+        + topics.filter(t => t.status !== 'empty' && topicDue(reps[t.id])).length;
       return [due ? h('b', { class: 'badge', title: 'к повторению: ' + due, text: String(due) }) : null, h('span', { text: String(topics.length) })];
     };
     const nodeItem = (c, n) => n.items
@@ -282,7 +290,9 @@
       return [
         h('p', { class: 'pv-path', text: pathTitle(t) }),
         h('h2', { class: 'pv-title', text: t.title }),
-        h('p', { class: 'pv-facts', text: 'спрашивают ' + FREQ[t.freq] + ' · ' + (empty ? 'пусто' : t.status === 'draft' ? 'черновик' : 'готово') }),
+        h('p', { class: 'pv-facts' }, 'спрашивают ' + FREQ[t.freq] + ' · ' + (empty ? 'пусто' : t.status === 'draft' ? 'черновик' : 'готово'),
+          empty || !reps[t.id] ? null : [' · ', topicDue(reps[t.id]) ? h('b', { class: 'it-due', text: 'повторить тему' })
+            : 'повторить тему через ' + plural(dueIn(reps[t.id]), 'день', 'дня', 'дней')]),
         h('p', { class: 'pv-scope', text: t.scope }),
         empty ? null : h('div', { class: 'pv-open' },
           h('a', { class: 'btn', href: topicHref(t.id), text: 'Открыть →' }),
@@ -302,7 +312,7 @@
     const buildCol = i => {
       const ns = nodesOf(sel);
       if (i === 0) {
-        const due = dueCards().length;
+        const due = dueCount();
         return column(0, 'Разделы', [
           item(0, DUE, { title: 'К повторению', meta: due ? h('b', { class: 'badge', text: String(due) }) : h('span', { text: '0' }), more: true, dim: !due }),
           h('hr', { class: 'col-sep' }),
@@ -313,11 +323,13 @@
       if (parent === undefined) return null;
       if (parent === DUE) {
         if (i !== 1) return null;
-        const due = dueCards();
-        return column(1, 'К повторению', due.length
-          ? due.map(q => { const tp = BY_ID.get(q.topic); return item(1, q.topic + '/' + q.id,
-              { title: q.title, sub: tp ? tp.title : q.topic, href: topicHref(q.topic) + '#' + q.id, dot: cdot(marks[q.topic + '/' + q.id]), cls: 'it-q' }); })
-          : h('p', { class: 'col-empty', text: 'Повторять нечего. Оценённые карточки появятся здесь, когда подойдёт срок.' }), true);
+        const due = dueCards(), topics = dueTopics();
+        return column(1, 'К повторению', due.length || topics.length ? [
+          topics.map(t => item(1, t.id, { title: t.title, sub: 'тема · ' + pathTitle(t), href: topicHref(t.id), dot: cdot(reps[t.id].q ? null : reps[t.id]), cls: 'it-q' })),
+          topics.length && due.length ? h('hr', { class: 'col-sep' }) : null,
+          due.map(q => { const tp = BY_ID.get(q.topic); return item(1, q.topic + '/' + q.id,
+              { title: q.title, sub: tp ? tp.title : q.topic, href: topicHref(q.topic) + '#' + q.id, dot: cdot(marks[q.topic + '/' + q.id]), cls: 'it-q' }); }),
+        ] : h('p', { class: 'col-empty', text: 'Повторять нечего. Здесь появятся темы, которые ты добавил в повторение, и оценённые карточки, когда подойдёт срок.' }), true);
       }
       if (typeof parent === 'string') return null;
       if (parent.items) return column(i, parent.title, parent.items.map(n => nodeItem(i, n)), true);
@@ -405,7 +417,7 @@
     const stats = () => {
       const known = QS.filter(c => { const m = marks[c.topic + '/' + c.id]; return m && m.c === 2; }).length;
       $('#stats').textContent = [plural(ALL.length, 'тема', 'темы', 'тем'), 'с материалом ' + ALL.filter(t => t.status !== 'empty').length,
-        plural(QS.length, 'вопрос', 'вопроса', 'вопросов'), 'объясню ' + known, 'к повторению ' + dueCards().length].join(' · ');
+        plural(QS.length, 'вопрос', 'вопроса', 'вопросов'), 'объясню ' + known, 'к повторению ' + dueCount()].join(' · ');
     };
     const all = () => { stats(); renderFrom(0); };
     // узкий экран открывается на самой глубокой колонке пути
@@ -416,6 +428,8 @@
       if (!e.persisted) return;
       Object.keys(marks).forEach(k => delete marks[k]);
       Object.assign(marks, load(MARKS, {}));
+      Object.keys(reps).forEach(k => delete reps[k]);
+      Object.assign(reps, load(REPS, {}));
       all();
     });
     all();
@@ -474,6 +488,26 @@
     if (head && steps.length && interview) head.append(h('nav', { class: 'parts', 'aria-label': 'Части темы' },
       h('a', { href: '#' + steps[0].id }, h('b', { text: 'Урок' }), ' · ' + plural(steps.length, 'шаг', 'шага', 'шагов')),
       h('a', { href: '#interview' }, h('b', { text: ivTitle }), ' · ' + nCards(cards.length))));
+
+    // повторение темы целиком: кнопка ставит тему в «К повторению», оценка назначает следующий раз
+    const repBox = h('div', { class: 'rep', role: 'group', 'aria-label': 'Повторение темы' });
+    const setRep = r => { if (r) reps[id] = r; else delete reps[id]; save(REPS, reps); paintRep(); };
+    const paintRep = () => {
+      const r = reps[id];
+      const btn = (text, onclick, cls) => h('button', { type: 'button', class: cls || 'chip', text, onclick });
+      if (!r) { repBox.replaceChildren(btn('Добавить в повторение', () => setRep({ q: Date.now() }))); return; }
+      const due = topicDue(r);
+      const conf = h('div', { class: 'conf', role: 'group', 'aria-label': 'Как помнишь тему' },
+        CONF_TOPIC.map((label, c) => h('button', { type: 'button', 'data-c': c, 'aria-pressed': String(!r.q && r.c === c), text: label,
+          onclick: () => setRep({ c, t: Date.now(), n: c === 2 ? (r.c === 2 ? (r.n || 1) + 1 : 1) : 0 }) })));
+      repBox.replaceChildren(...[
+        h('span', { class: 'rep-st' }, 'Повторение темы: ', due ? h('b', { class: 'due', text: 'пора повторить' })
+          : 'через ' + plural(dueIn(r), 'день', 'дня', 'дней')),
+        due ? h('span', { text: 'как помнишь?' }) : null, conf,
+        due ? null : btn('Повторить сейчас', () => setRep(Object.assign({}, r, { q: Date.now() }))),
+        btn('Убрать', () => setRep(null), 'rep-x')].filter(Boolean));
+    };
+    if (head && meta) { head.append(repBox); paintRep(); }
 
     const layout = h('div', { class: 'wrap layout' });
     const side = h('aside', { class: 'side' });
