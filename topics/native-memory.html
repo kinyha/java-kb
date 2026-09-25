@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Native Memory · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="native-memory">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: Native Memory</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="oomkilled">
+      <h2>Под убили за память, хотя heap был заполнен наполовину</h2>
+      <p>Платёжный шлюз работает в Kubernetes с лимитом памяти 1 ГБ. Чтобы «использовать всю память», в запуске стоит <code>-Xmx1g</code>. Раз в несколько часов под перезапускается. В логах приложения ни одной ошибки, <code>OutOfMemoryError</code> нет, график heap показывает 500–600 МБ. А <code>kubectl describe pod</code> говорит:</p>
+      <pre><code class="language-text">Last State:     Terminated
+  Reason:       OOMKilled          # процесс убило ядро Linux, а не JVM
+  Exit Code:    137                # 128 + 9: пришёл SIGKILL</code></pre>
+      <p>Лимит пода считает всю память процесса, а <code>-Xmx</code> ограничивает только heap. Всё остальное — Metaspace, стеки потоков, code cache, структуры сборщика мусора, direct-буферы сетевой библиотеки — живёт в native-памяти процесса, вне heap. Heap в 1 ГБ плюс несколько сотен мегабайт сверху не помещаются в лимит 1 ГБ. Когда процесс его переходит, ядро убивает его сигналом SIGKILL. У JVM нет шанса даже записать ошибку, и shutdown hooks не выполняются.</p>
+      <p>В этом уроке разберём, из чего складывается память процесса, как её измерить и как выбрать размеры, чтобы под не убивали.</p>
+    </section>
+
+    <section class="step" id="beyond-heap">
+      <h2>Память процесса — это heap плюс всё, что JVM держит рядом</h2>
+      <p>Смоделируем небольшой сервис: 100 МБ данных в heap, 64 МБ direct-буферов, как у сетевой библиотеки, и 200 потоков.</p>
+      <pre><code class="language-java">import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+
+public class Footprint {
+    public static void main(String[] args) throws Exception {
+        List&lt;ByteBuffer&gt; buffers = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 64; i++) {
+            buffers.add(ByteBuffer.allocateDirect(1024 * 1024));   // 64 МБ вне heap, как у Netty
+        }
+        List&lt;byte[]&gt; heapData = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 100; i++) {
+            heapData.add(new byte[1024 * 1024]);                   // 100 МБ живых данных в heap
+        }
+        CountDownLatch stop = new CountDownLatch(1);
+        for (int i = 0; i &lt; 200; i++) {                            // 200 потоков, как пул веб-сервера
+            Thread worker = new Thread(() -&gt; {
+                try { stop.await(); } catch (InterruptedException e) { }
+            });
+            worker.setDaemon(true);
+            worker.start();
+        }
+        System.out.println("ready " + ProcessHandle.current().pid());
+        Thread.sleep(600_000);                                      // живём, пока снимаем замеры
+    }
+}</code></pre>
+      <p>Запустим с heap в 256 МБ. Флаг <code>-XX:+AlwaysPreTouch</code> заставляет JVM сразу занять весь heap, как это происходит у нагруженного сервиса. RSS — сколько физической памяти реально занимает процесс — посмотрим через <code>ps</code>. Реальный замер на JDK 21:</p>
+      <pre><code class="language-text">$ java -Xms256m -Xmx256m -XX:+AlwaysPreTouch -cp out Footprint &amp;
+ready 93917
+$ ps -o rss= -p 93917
+419728            # в КБ: 410 МБ при heap 256 МБ</code></pre>
+      <p>410 МБ при <code>-Xmx256m</code> — на 60% больше heap. Куда ушли 154 МБ, покажет Native Memory Tracking из следующего шага. Вот итог:</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 196" role="img" aria-label="Полоса памяти процесса 410 МБ: heap 256 МБ, дальше вне heap структуры сборщика мусора около 66 МБ, direct-буферы 64 МБ и около 24 МБ классов, code cache и прочего. Отметка -Xmx стоит на 256 МБ, а лимит пода 384 МБ пересекает полосу внутри direct-буферов: такой процесс убьют.">
+            <text x="20" y="20" class="dg-cap">ПАМЯТЬ ПРОЦЕССА ПРИ -Xmx256m</text>
+
+            <!-- отметки -->
+            <line x1="430" y1="30" x2="430" y2="112" class="dg-sep"/>
+            <text x="426" y="44" class="dg-n" text-anchor="end">-Xmx: 256 МБ</text>
+            <line x1="634" y1="30" x2="634" y2="112" class="dg-line bad"/>
+            <text x="628" y="44" class="dg-bad" text-anchor="end">лимит пода 384 МБ</text>
+            <text x="676" y="44" class="dg-t" text-anchor="middle">RSS 410</text>
+
+            <!-- полоса: 1,6 px на мегабайт -->
+            <rect x="20" y="56" width="410" height="48" rx="4" class="dg-cell hit"/>
+            <rect x="430" y="56" width="106" height="48" rx="4" class="dg-cell"/>
+            <rect x="536" y="56" width="102" height="48" rx="4" class="dg-cell"/>
+            <rect x="638" y="56" width="38" height="48" rx="4" class="dg-cell"/>
+            <text x="225" y="85" class="dg-t" text-anchor="middle">heap</text>
+            <text x="483" y="85" class="dg-t" text-anchor="middle">GC</text>
+            <text x="587" y="85" class="dg-t" text-anchor="middle">direct</text>
+
+            <!-- подписи частей -->
+            <text x="225" y="126" class="dg-n" text-anchor="middle">256 МБ: объекты</text>
+            <text x="483" y="126" class="dg-n" text-anchor="middle">≈66 МБ</text>
+            <text x="587" y="126" class="dg-n" text-anchor="middle">64 МБ</text>
+            <text x="657" y="126" class="dg-n" text-anchor="middle">≈24</text>
+            <text x="483" y="142" class="dg-n" text-anchor="middle">карты G1</text>
+            <text x="587" y="142" class="dg-n" text-anchor="middle">буферы</text>
+            <text x="657" y="142" class="dg-n" text-anchor="middle">прочее</text>
+            <text x="20" y="176" class="dg-s">«Прочее» — классы, code cache, символы, стеки. Сами стеки 200 потоков</text>
+            <text x="20" y="192" class="dg-s">зарезервировали сотни мегабайт, но в RSS попадают только тронутые страницы.</text>
+          </svg>
+        </div>
+        <figcaption>Зелёное — то, что ограничивает <code>-Xmx</code>. Всё правее отметки лимит пода тоже считает.</figcaption>
+      </figure>
+      <p>При лимите пода 384 МБ этот процесс убили бы, хотя heap занят меньше чем наполовину. И это маленький пример. В реальном сервисе к нему добавятся несколько тысяч классов Spring и Hibernate в Metaspace, JIT-код от многих методов, буферы Netty и драйверов.</p>
+    </section>
+
+    <section class="step" id="nmt">
+      <h2>Native Memory Tracking показывает, кто сколько взял</h2>
+      <p>JVM умеет сама учитывать свою native-память. Включается это флагом при старте, а смотрят через <code>jcmd</code> у живого процесса:</p>
+      <pre><code class="language-text">$ java -XX:NativeMemoryTracking=summary -Xms256m -Xmx256m -XX:+AlwaysPreTouch -cp out Footprint &amp;
+$ jcmd 93917 VM.native_memory summary scale=MB
+
+Total: reserved=2216MB, committed=883MB
+-                 Java Heap (reserved=264MB, committed=256MB)     # heap: -Xmx
+-                     Class (reserved=1024MB, committed=0MB)      # compressed class space: резерв 1 ГБ
+                            (classes #721)
+-                    Thread (reserved=455MB, committed=455MB)     # стеки 226 потоков по 2 МБ
+                            (threads #226)
+-                      Code (reserved=242MB, committed=7MB)       # code cache
+-                        GC (reserved=66MB, committed=66MB)       # remembered sets, card table, bitmaps G1
+-                     Other (reserved=64MB, committed=64MB)       # direct ByteBuffer
+-        Shared class space (reserved=32MB, committed=28MB)       # CDS: классы JDK из общего архива
+-                 Metaspace (reserved=64MB, committed=0MB)</code></pre>
+      <p>Вывод обрезан до главных категорий. Три слова, без которых его не прочитать:</p>
+      <ul>
+        <li><b>reserved</b> — диапазон адресов, который JVM зарезервировала у ОС на будущее. Это не память, а обещание. Поэтому 2216 МБ reserved никого не пугают.</li>
+        <li><b>committed</b> — память, которую JVM попросила у ОС реально использовать. ОС выдаёт физические страницы, только когда в них впервые пишут.</li>
+        <li><b>RSS</b> — сколько физических страниц процесс уже тронул. Его видит ядро и по нему убивает контейнер.</li>
+      </ul>
+      <p>Отсюда расхождение: committed 883 МБ, а RSS 410. Стеки на 455 МБ committed, но поток трогает лишь несколько килобайт своего стека. А heap благодаря <code>AlwaysPreTouch</code> тронут весь.</p>
+      <p>Для поиска утечки вне heap пригодится режим сравнения. Делаешь снимок-базу, ждёшь, пока память вырастет, и смотришь, какая категория выросла:</p>
+      <pre><code class="language-text">jcmd &lt;pid&gt; VM.native_memory baseline        # запомнить текущее состояние
+# ... через час, когда RSS вырос ...
+jcmd &lt;pid&gt; VM.native_memory summary.diff    # рост по каждой категории относительно базы</code></pre>
+      <div class="note warn">
+        <p>NMT стоит 5–10% производительности и немного памяти, поэтому его включают для расследования, а не постоянно. И NMT видит только память самой JVM. Если растёт память, которую через <code>malloc</code> берёт native-библиотека — JDBC-драйвер на C, компрессор, сертификаты через JNI, — NMT её не покажет. Тогда растёт RSS, а итог NMT стоит на месте.</p>
+      </div>
+    </section>
+
+    <section class="step" id="direct">
+      <h2>Direct-буфер — айсберг: маленький объект в heap и мегабайт вне его</h2>
+      <p><code>ByteBuffer.allocateDirect</code> выделяет память вне heap. Зачем? Сетевые и файловые операции ОС работают с native-памятью. Обычный массив в heap может переехать при сборке мусора, поэтому перед записью в сокет его пришлось бы копировать. Direct-буфер не двигается, и ОС читает из него напрямую. Поэтому на direct-буферах построены Netty, NIO, клиенты Kafka и gRPC.</p>
+      <p>Лимит direct-памяти задаёт <code>-XX:MaxDirectMemorySize</code>. Если он не задан, лимит равен <code>-Xmx</code> — то есть сверху к heap можно добавить ещё столько же:</p>
+      <pre><code class="language-java">import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
+
+public class DirectLimit {
+    public static void main(String[] args) {
+        List&lt;ByteBuffer&gt; buffers = new ArrayList&lt;&gt;();       // держим буферы, чтобы их не освободили
+        try {
+            while (true) {
+                buffers.add(ByteBuffer.allocateDirect(1024 * 1024));
+            }
+        } catch (OutOfMemoryError e) {
+            System.out.println(buffers.size() + " буферов, затем: " + e.getMessage());
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Xmx64m -cp out DirectLimit            # MaxDirectMemorySize не задан
+64 буферов, затем: Cannot reserve 1048576 bytes of direct buffer memory (allocated: 67108864, limit: 67108864)</code></pre>
+      <p>Самое неочевидное — когда эта память освобождается. Объект <code>DirectByteBuffer</code> в heap весит несколько десятков байт, а за ним стоит мегабайт native-памяти. Освободить её можно, только когда сборщик мусора найдёт объект недостижимым. Пролистай, что из этого выходит.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 244" role="img" aria-label="Слева heap с маленькими объектами DirectByteBuffer, справа direct-память на 16 ячеек по 1 МБ. Буферы становятся мусором, но их мегабайты остаются занятыми, пока heap почти пуст и GC не происходит. Когда лимит исчерпан, JDK вызывает System.gc(), полная пауза находит мусорные буферы, и Cleaner освобождает native-память.">
+            <defs>
+              <marker id="dm-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="30" y="20" class="dg-cap">HEAP</text>
+            <rect x="20" y="30" width="300" height="160" rx="10" class="dg-sep" fill="none"/>
+            <text x="370" y="20" class="dg-cap">DIRECT-ПАМЯТЬ, ЛИМИТ 16 МБ</text>
+            <rect x="360" y="30" width="346" height="160" rx="10" class="dg-sep" fill="none"/>
+
+            <!-- 16 ячеек по 1 МБ -->
+            <g>
+              <rect x="372" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="413" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="454" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="495" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="536" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="577" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="618" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="659" y="60" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="372" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="413" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="454" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="495" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="536" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="577" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+              <rect x="618" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/><rect x="659" y="104" width="38" height="36" rx="4" class="dg-sep" fill="none"/>
+            </g>
+            <text x="372" y="160" class="dg-n">одна ячейка — 1 МБ</text>
+
+            <!-- шаг 1–2: первый буфер -->
+            <rect data-s="1-2" x="372" y="60" width="38" height="36" rx="4" class="dg-cell hit"/>
+            <rect data-s="1" x="36" y="56" width="52" height="32" rx="4" class="dg-cell hit"/>
+            <rect data-s="2-4" x="36" y="56" width="52" height="32" rx="4" class="dg-cell miss"/>
+            <text data-s="1-4" x="62" y="77" class="dg-n" text-anchor="middle">buf</text>
+            <path data-s="1-2" d="M88 72 C 200 72, 300 60, 368 70" class="dg-line" marker-end="url(#dm-n)"/>
+
+            <!-- шаги 3–4: лимит исчерпан мусорными буферами -->
+            <g data-s="3-4">
+              <rect x="372" y="60" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="413" y="60" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="454" y="60" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="495" y="60" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="536" y="60" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="577" y="60" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="618" y="60" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="659" y="60" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="372" y="104" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="413" y="104" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="454" y="104" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="495" y="104" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="536" y="104" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="577" y="104" width="38" height="36" rx="4" class="dg-cell miss"/>
+              <rect x="618" y="104" width="38" height="36" rx="4" class="dg-cell miss"/><rect x="659" y="104" width="38" height="36" rx="4" class="dg-cell miss"/>
+            </g>
+            <g data-s="3-4">
+              <rect x="96" y="56" width="52" height="32" rx="4" class="dg-cell miss"/><rect x="156" y="56" width="52" height="32" rx="4" class="dg-cell miss"/>
+              <rect x="216" y="56" width="52" height="32" rx="4" class="dg-cell miss"/><text x="286" y="77" class="dg-n">…</text>
+              <text x="36" y="118" class="dg-s">16 мусорных объектов,</text>
+              <text x="36" y="136" class="dg-s">heap почти пуст: GC незачем</text>
+            </g>
+
+            <!-- шаг 4: вынужденный полный GC -->
+            <g data-s="4">
+              <text x="36" y="176" class="dg-bad">Pause Full (System.gc())</text>
+              <text x="694" y="180" class="dg-bad" text-anchor="end">нужен ещё 1 МБ — места нет</text>
+            </g>
+
+            <!-- шаг 5: Cleaner освободил память, новый буфер -->
+            <g data-s="5">
+              <rect x="372" y="60" width="38" height="36" rx="4" class="dg-cell hit"/>
+              <rect x="36" y="56" width="52" height="32" rx="4" class="dg-cell hit"/>
+              <text x="62" y="77" class="dg-n" text-anchor="middle">buf</text>
+              <path d="M88 72 C 200 72, 300 60, 368 70" class="dg-line" marker-end="url(#dm-n)"/>
+              <text x="36" y="136" class="dg-s">мусорные буферы собраны</text>
+              <text x="694" y="180" class="dg-ok" text-anchor="end">15 МБ снова свободны</text>
+            </g>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="232" class="dg-in">allocateDirect: 1 МБ вне heap и маленький объект в heap</text>
+            <text data-s="2" x="20" y="232" class="dg-in">буфер больше не нужен: объект — мусор, а мегабайт всё ещё занят</text>
+            <text data-s="3" x="20" y="232" class="dg-in">16 буферов спустя: лимит исчерпан мусором, heap почти пуст</text>
+            <text data-s="4" x="20" y="232" class="dg-bad">места нет: JDK сам вызывает System.gc() — полная пауза</text>
+            <text data-s="5" x="20" y="232" class="dg-ok">GC нашёл мусорные буферы, Cleaner вернул память, выделение прошло</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>allocateDirect</code> резервирует мегабайт вне heap. В heap появляется только маленький объект <code>DirectByteBuffer</code> с адресом этой памяти.</li>
+          <li>Буфер обработан и больше не нужен. Объект стал мусором, но native-память освободится, только когда сборщик мусора найдёт этот объект.</li>
+          <li>Так прошло 16 запросов. Лимит direct-памяти занят мусорными буферами, а в heap от них лишь несколько сотен байт. Heap почти пуст, и сборке мусора нет повода запуститься.</li>
+          <li>Новый <code>allocateDirect</code> не находит места. JDK подождёт обработки ссылок, а потом сам вызовет <code>System.gc()</code>. Это полная сборка мусора с остановкой всех потоков.</li>
+          <li>Сборка нашла мусорные буферы, их <code>Cleaner</code> вернул память ОС, и выделение прошло. Приложение за это заплатило паузой.</li>
+        </ol>
+      </figure>
+      <p>Проверим на программе, которая берёт и сразу бросает буферы, как обработчик запросов:</p>
+      <pre><code class="language-java">import java.nio.ByteBuffer;
+
+public class Churn {
+    public static void main(String[] args) {
+        long written = 0;
+        for (int i = 0; i &lt; 1_000; i++) {
+            ByteBuffer buffer = ByteBuffer.allocateDirect(1024 * 1024);   // 1 МБ вне heap
+            buffer.putLong(0, i);
+            written += buffer.getLong(0);                                  // после этой строки буфер не нужен
+        }
+        System.out.println("обработано 1000 буферов по 1 МБ, сумма " + written);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -XX:MaxDirectMemorySize=16m -Xlog:gc -cp out Churn
+[0.029s][info][gc] GC(0) Pause Full (System.gc()) 4M->2M(56M) 3.284ms     # сборку вызвал сам JDK
+[0.031s][info][gc] GC(1) Pause Full (System.gc()) 3M->2M(32M) 2.063ms
+...                                                                          # всего 62 полные паузы
+обработано 1000 буферов по 1 МБ, сумма 499500
+
+$ java -XX:MaxDirectMemorySize=16m -XX:+DisableExplicitGC -cp out Churn
+Exception in thread "main" java.lang.OutOfMemoryError: Cannot reserve 1048576 bytes of direct
+buffer memory (allocated: 16777216, limit: 16777216)                         # освободить нечем</code></pre>
+      <p>На тысячу буферов — 62 полных паузы, которые никто не заказывал. А с флагом <code>-XX:+DisableExplicitGC</code>, который иногда ставят, чтобы «запретить всем звать System.gc()», программа падает: JDK больше не может освободить буферы, хотя почти все они мусор.</p>
+      <div class="trap">
+        <p class="myth"><code>-XX:+DisableExplicitGC</code> безопасен: приличный код не вызывает <code>System.gc()</code>.</p>
+        <p class="fact">Его вызывает сам JDK, когда кончается direct-память. С этим флагом приложение на NIO или Netty может получить <code>Direct buffer memory</code>, хотя вся память — мусор. Правильное лечение — переиспользовать буферы через пул, как делает Netty, а не создавать их на каждый запрос.</p>
+      </div>
+    </section>
+
+    <section class="step" id="threads">
+      <h2>Каждый поток — это стек в native-памяти и ресурс ОС</h2>
+      <p>Платформенный поток Java — это поток ОС со своим стеком вне heap. Размер стека задаёт <code>-Xss</code>: 1 МБ на Linux x64, 2 МБ на macOS arm64, где запускались примеры. В замере NMT выше 226 потоков зарезервировали 455 МБ. Но стек занимает физическую память, только когда поток его использует, поэтому обычный поток пула с неглубоким стеком стоит в RSS десятки килобайт, а не мегабайты.</p>
+      <p>Тогда откуда берётся <code>OutOfMemoryError: unable to create native thread</code>? Эта ошибка не про heap. JVM попросила ОС создать поток, и ОС отказала. Причины бывают такие:</p>
+      <ul>
+        <li>лимит числа процессов и потоков пользователя: <code>ulimit -u</code>;</li>
+        <li>лимит PID в контейнере: <code>pids.max</code> у cgroup, в Kubernetes — <code>podPidsLimit</code>;</li>
+        <li>кончилась память или адресное пространство под новые стеки.</li>
+      </ul>
+      <p>Почти всегда за этим стоит утечка потоков: <code>Executors.newCachedThreadPool</code> без ограничения под всплеском нагрузки, <code>new Thread</code> на каждый запрос, пул, который создают и не закрывают. Смотри число потоков в <code>jcmd &lt;pid&gt; Thread.print</code> или в метрике <code>jvm_threads_live_threads</code>, а не размер heap.</p>
+      <p>Виртуальные потоки из Java 21 устроены иначе. Их стеки хранятся в heap как обычные объекты и растут по мере надобности, а исполняются они на небольшом пуле платформенных потоков. Миллион виртуальных потоков не создаёт миллион стеков ОС. Подробно — в теме Virtual Threads.</p>
+    </section>
+
+    <section class="step" id="container">
+      <h2>В контейнере heap — это доля лимита, а не весь лимит</h2>
+      <p>Теперь можно ответить на вопрос из первого шага: сколько heap давать поду. Лимит пода должен вместить heap и всё, что вне его. Обычно так:</p>
+      <table class="mx">
+        <thead><tr><th>Часть</th><th>Сколько закладывать</th><th>Чем ограничить</th></tr></thead>
+        <tbody>
+          <tr><td>heap</td><td>60–75% лимита пода</td><td><code>-XX:MaxRAMPercentage=75</code> или <code>-Xmx</code></td></tr>
+          <tr><td>Metaspace</td><td>100–300 МБ для Spring-сервиса</td><td><code>-XX:MaxMetaspaceSize</code></td></tr>
+          <tr><td>direct-буферы</td><td>по профилю сетевой библиотеки</td><td><code>-XX:MaxDirectMemorySize</code></td></tr>
+          <tr><td>стеки потоков</td><td>число потоков × реально используемая глубина</td><td>размер пулов, <code>-Xss</code></td></tr>
+          <tr><td>code cache, GC, прочее</td><td>десятки–сотни МБ</td><td>обычно не трогают</td></tr>
+        </tbody>
+      </table>
+      <p>Проценты удобнее жёсткого <code>-Xmx</code>: поменяли лимит пода — heap подстроился сам. Главное правило — никогда не ставить heap равным лимиту. Именно это произошло в первом шаге.</p>
+      <p>Что смотреть в мониторинге. Метрики JVM (<code>jvm_memory_used_bytes</code> в Micrometer) показывают heap и пулы, которые знает JVM. Контейнер убивают по <code>container_memory_working_set_bytes</code> — это ближе к RSS. Если рабочий набор контейнера растёт, а heap и non-heap в метриках JVM стоят, память уходит мимо JVM: direct-буферы, native-библиотеки, фрагментация <code>malloc</code>.</p>
+      <div class="note exp">
+        <p>На Linux с glibc память, которую потоки берут через <code>malloc</code>, раскладывается по нескольким «аренам», по умолчанию до 8 на ядро. У процесса с сотнями потоков это даёт заметную фрагментацию, и RSS растёт без утечки. Часто помогает переменная окружения <code>MALLOC_ARENA_MAX=2</code> или замена аллокатора на jemalloc. Сначала подтверди диагноз через NMT: если его итог стоит, а RSS растёт, дело вне JVM.</p>
+      </div>
+      <p>Где кончается эта тема? Если NMT показывает рост категории Java Heap или Class, это не native-проблема, а утечка объектов или классов: смотри Memory Areas и Diagnostics. А если растёт RSS, но NMT стоит на месте, нужны инструменты уровня ОС: <code>pmap</code>, профилирование аллокатора jemalloc, <code>perf</code>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>-Xmx</code> ограничивает только heap. Процесс занимает больше: GC-структуры, классы, code cache, стеки, direct-буферы, память native-библиотек.</li>
+        <li>Контейнер убивают по RSS, сигналом SIGKILL, без Java-ошибки и без shutdown hooks. Heap ставят на 60–75% лимита пода, а не на весь лимит.</li>
+        <li>Native Memory Tracking (<code>-XX:NativeMemoryTracking=summary</code> и <code>jcmd VM.native_memory</code>) показывает, какая часть JVM сколько взяла. Reserved — обещание, committed — выдано, RSS — тронуто.</li>
+        <li>Direct-буфер освобождается только после того, как GC соберёт его объект. JDK для этого сам вызывает <code>System.gc()</code>, поэтому <code>DisableExplicitGC</code> опасен, а буферы стоит переиспользовать.</li>
+        <li><code>unable to create native thread</code> — отказ ОС создать поток, обычно из-за утечки потоков, а не из-за heap.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="rss-vs-xmx" data-freq="2">
+      <h3>Почему Java-процесс занимает больше памяти, чем -Xmx?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>-Xmx</code> ограничивает только heap. Кроме него JVM держит в native-памяти Metaspace с классами, code cache с кодом JIT, стеки потоков, структуры сборщика мусора, direct-буферы NIO и Netty, а ещё память native-библиотек. В замере урока процесс с <code>-Xmx256m</code> занимал 410 МБ RSS.</p>
+          <p>Для контейнера это главное правило: heap ставят на 60–75% лимита пода. Если поставить heap равным лимиту, процесс переходит лимит за счёт памяти вне heap, и ядро убивает его как OOMKilled, без всякой Java-ошибки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>NMT различает reserved и committed, а ядро убивает по RSS — тронутым страницам. Стеки потоков обычно committed, но почти не тронуты.</li>
+            <li>Если растёт RSS, а итог NMT стоит, память берёт кто-то мимо JVM: native-библиотеки или фрагментация <code>malloc</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В deployment: limits.memory 2Gi и JAVA_OPTS="-Xms2g -Xmx2g". Что не так?</summary>
+          <p>Heap равен лимиту пода. Как только Metaspace, стеки, code cache и буферы займут хоть что-то сверх heap, процесс перейдёт лимит и получит OOMKilled. Нужно <code>-XX:MaxRAMPercentage=75</code> или <code>-Xmx1500m</code>, либо поднять лимит.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Под перезапускается с Exit Code 137. Какие логи смотреть?</summary>
+          <p>Логи приложения почти ничего не скажут: SIGKILL не даёт JVM записать ошибку. Смотри <code>kubectl describe pod</code> — Reason OOMKilled, метрику рабочего набора контейнера перед рестартом и метрики heap и non-heap JVM за то же время.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="direct-memory" data-freq="2">
+      <h3>Что такое direct memory и когда она освобождается?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это память вне heap, которую выделяет <code>ByteBuffer.allocateDirect</code>. Её используют для I/O: ОС читает её напрямую, без копирования из heap, поэтому на ней работают NIO, Netty, клиенты Kafka и gRPC. Лимит задаёт <code>MaxDirectMemorySize</code>, по умолчанию он равен <code>-Xmx</code>.</p>
+          <p>Освобождается она, только когда сборщик мусора находит недостижимым маленький объект буфера в heap. Если heap почти пуст, GC не запускается, и direct-память копится. Тогда JDK сам вызывает <code>System.gc()</code> — полную паузу. Поэтому буферы переиспользуют через пул, а не создают на каждый запрос.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С <code>-XX:+DisableExplicitGC</code> JDK не может вызвать сборку, и приложение падает с <code>Direct buffer memory</code>, хотя буферы — мусор.</li>
+            <li>В NMT direct-буферы видны в категории Other.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сколько direct-памяти может занять процесс с -Xmx4g без других флагов?</summary>
+          <p>До 4 ГБ: без <code>MaxDirectMemorySize</code> лимит direct-памяти равен максимальному heap. Вместе с heap это уже 8 ГБ, не считая остального.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="container-sizing" data-freq="2">
+      <h3>Как выбрать размер heap для сервиса в контейнере?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Heap — это доля лимита пода, обычно 60–75%, остальное уходит на память вне heap. Я задаю <code>-XX:MaxRAMPercentage=75</code> вместо жёсткого <code>-Xmx</code>: JVM видит лимит контейнера и считает heap от него. Для Spring-сервиса ещё ограничиваю <code>MaxMetaspaceSize</code>, чтобы утечка классов давала понятную ошибку, а не OOMKilled.</p>
+          <p>Потом проверяю на нагрузке: рабочий набор контейнера должен держаться с запасом ниже лимита, а heap после сборок — ниже своего максимума.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему не отдать heap всю память контейнера, раз больше в поде ничего нет?</summary>
+          <p>Потому что сама JVM — это не только heap. Metaspace, code cache, стеки, GC-структуры и буферы займут ещё сотни мегабайт, и процесс перейдёт лимит.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="nmt-q" data-freq="1">
+      <h3>Как найти, куда уходит память вне heap?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Включить Native Memory Tracking: <code>-XX:NativeMemoryTracking=summary</code> при старте. Потом <code>jcmd &lt;pid&gt; VM.native_memory baseline</code>, подождать роста и снять <code>summary.diff</code> — видно, какая категория растёт: Thread, Class, Code, GC, Other с direct-буферами.</p>
+          <p>Если итог NMT не растёт, а RSS растёт, память берёт не JVM: native-библиотеки или аллокатор. Тогда нужны <code>pmap</code>, профилирование jemalloc, <code>MALLOC_ARENA_MAX</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Можно ли держать NMT включённым в проде постоянно?</summary>
+          <p>Обычно нет: режим summary стоит несколько процентов производительности, detail — больше. Его включают на время расследования, например на одном поде из нескольких.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/vm/native-memory-tracking.html">JDK 21: Native Memory Tracking</a> — основа урока: категории, reserved и committed, baseline и diff.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/ByteBuffer.html">ByteBuffer, JDK 21</a> — direct и heap буферы, когда выбирать direct.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/troubleshooting-memory-leaks.html">JDK 21 Troubleshooting: Memory Leaks</a> — unable to create native thread, Direct buffer memory и native-утечки.</li>
+      <li><a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/">Kubernetes: Resource Management for Pods and Containers</a> — limits, OOMKilled и что считается памятью контейнера.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
