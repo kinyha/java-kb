@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: GC Basics · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="gc-basics">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: GC Basics</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="pause">
+      <h2>Раз в несколько секунд все запросы замирают одновременно</h2>
+      <p>На графике латентности платёжного API обычные запросы идут за 20 мс, но p99 время от времени прыгает до 200. Задержка бьёт по всем эндпоинтам сразу, независимо от того, ходят они в базу или нет. Так выглядит пауза, в которой стоит весь процесс, а не одна операция. Первым делом включают лог сборщика мусора:</p>
+      <p>Вот строка такого лога из реального запуска примера этого урока на JDK 21:</p>
+      <pre><code class="language-text">$ java -Xmx64m -Xlog:gc -cp out Cycles
+[0.020s][info][gc] GC(0) Pause Young (Normal) (G1 Evacuation Pause) 25M->2M(64M) 0.268ms
+#                   номер   что за пауза и почему                   heap до->после(всего)  длительность</code></pre>
+      <p>Каждая такая строка — момент, когда JVM остановила все потоки приложения, чтобы собрать мусор. Heap был занят на 25 МБ, после сборки осталось 2, и заняло это четверть миллисекунды. У сервиса с гигабайтами живых данных те же строки показывают десятки и сотни миллисекунд. Чтобы понимать, почему паузы бывают, от чего зависит их длина и что с ними делать, нужно разобраться, как сборщик вообще решает, что можно удалить.</p>
+    </section>
+
+    <section class="step" id="reachability">
+      <h2>Живой — не «нужный», а достижимый</h2>
+      <p>Сборщик мусора не знает, какие объекты программе ещё понадобятся. Он решает по формальному признаку: объект жив, если до него можно дойти по ссылкам от <b>корней</b> — мест, где программа точно держит ссылки прямо сейчас. Всё, до чего не дойти, программа уже никогда не прочитает, значит, это мусор.</p>
+      <p>Важное следствие: ссылки объектов друг на друга ничего не решают. Счёт идёт только от корней. Поэтому циклические ссылки, на которых ломается подсчёт ссылок в Python или Objective-C, для JVM не проблема.</p>
+      <pre><code class="language-java">public class Cycles {
+    static class Account { Transfer lastTransfer; }
+    static class Transfer { Account from; byte[] payload = new byte[1024]; }
+
+    public static void main(String[] args) {
+        for (int i = 0; i &lt; 10_000_000; i++) {
+            Account account = new Account();
+            Transfer transfer = new Transfer();
+            account.lastTransfer = transfer;       // счёт ссылается на перевод,
+            transfer.from = account;               // перевод — на счёт: цикл
+        }                                          // на следующей итерации до пары не дойти ни от одного корня
+        System.out.println("создано 10 млн пар Account ↔ Transfer, heap: "
+                + Runtime.getRuntime().maxMemory() / 1024 / 1024 + " МБ");
+    }
+}</code></pre>
+      <p>Запусти с heap в 16 МБ: <code>java -Xmx16m -cp out Cycles</code>.</p>
+      <pre class="out">создано 10 млн пар Account ↔ Transfer, heap: 16 МБ</pre>
+      <p>Через 16 МБ прошло около 10 ГБ объектов, связанных в циклы, и ни одного <code>OutOfMemoryError</code>. Каждая пара держит друг друга, но от корней до неё не дойти, и сборщик её убирает.</p>
+      <div class="trap">
+        <p class="myth">Чтобы объекты с циклическими ссылками собрались, связи нужно разорвать вручную, присвоив <code>null</code>.</p>
+        <p class="fact">В JVM нужно лишь, чтобы до цикла не было пути от корней. Обнулять ссылки имеет смысл в другом случае — когда долгоживущий объект держит ненужную ссылку, например элемент в самописном стеке на массиве.</p>
+      </div>
+    </section>
+
+    <section class="step" id="roots">
+      <h2>Обход начинается с корней: стеков потоков, static-полей и других</h2>
+      <p>Корни — ссылки, которые живы по определению, без всяких объектов вокруг:</p>
+      <ul>
+        <li><b>локальные переменные и параметры</b> во всех кадрах всех живых потоков;</li>
+        <li><b>static-поля</b> загруженных классов: они живут, пока жив класс, а класс — пока жив его загрузчик;</li>
+        <li>объекты, на которых потоки держат <b>мониторы</b> <code>synchronized</code>;</li>
+        <li><b>JNI-ссылки</b> из native-кода и внутренние ссылки самой JVM: системные классы, объекты исключений на случай OOM.</li>
+      </ul>
+      <p>Сборка начинается с <b>маркировки</b>: сборщик обходит граф от корней и помечает всё, до чего дошёл. Пролистай маркировку на маленьком heap.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Два корня: стек потока http-1 и static-поле cache. От стека достижимы Payment и Receipt, от static-поля — Tariff. OldDto и Draft ссылаются друг на друга, но от корней до них пути нет, поэтому сборщик их освобождает.">
+            <defs>
+              <marker id="gm-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">GC ROOTS</text>
+            <text x="220" y="24" class="dg-cap">HEAP</text>
+
+            <!-- корни -->
+            <rect x="20" y="40" width="130" height="34" rx="7" class="dg-box"/>
+            <text x="85" y="62" class="dg-t" text-anchor="middle">стек http-1</text>
+            <rect x="20" y="100" width="130" height="34" rx="7" class="dg-box"/>
+            <text x="85" y="122" class="dg-t" text-anchor="middle">static cache</text>
+
+            <!-- объекты: база; OldDto и Draft исчезают после сборки -->
+            <rect x="220" y="40" width="120" height="34" rx="6" class="dg-cell"/>
+            <rect x="400" y="40" width="120" height="34" rx="6" class="dg-cell"/>
+            <rect x="220" y="100" width="120" height="34" rx="6" class="dg-cell"/>
+            <rect data-s="1-3" x="400" y="150" width="120" height="34" rx="6" class="dg-cell"/>
+            <rect data-s="1-3" x="580" y="150" width="120" height="34" rx="6" class="dg-cell"/>
+
+            <!-- пометка: слой появляется и остаётся -->
+            <g data-s="2-"><rect x="220" y="40" width="120" height="34" rx="6" class="dg-cell hit"/><rect x="400" y="40" width="120" height="34" rx="6" class="dg-cell hit"/></g>
+            <rect data-s="3-" x="220" y="100" width="120" height="34" rx="6" class="dg-cell hit"/>
+            <g data-s="4"><rect x="400" y="150" width="120" height="34" rx="6" class="dg-cell miss"/><rect x="580" y="150" width="120" height="34" rx="6" class="dg-cell miss"/>
+              <text x="550" y="140" class="dg-bad" text-anchor="middle">пути от корней нет</text></g>
+            <g data-s="5"><rect x="400" y="150" width="120" height="34" rx="6" class="dg-sep" fill="none"/><rect x="580" y="150" width="120" height="34" rx="6" class="dg-sep" fill="none"/>
+              <text x="460" y="172" class="dg-s" text-anchor="middle">свободно</text><text x="640" y="172" class="dg-s" text-anchor="middle">свободно</text></g>
+
+            <!-- ссылки -->
+            <path d="M150 57 L 216 57" class="dg-line" marker-end="url(#gm-n)"/>
+            <path d="M340 57 L 396 57" class="dg-line" marker-end="url(#gm-n)"/>
+            <path d="M150 117 L 216 117" class="dg-line" marker-end="url(#gm-n)"/>
+            <g data-s="1-4"><path d="M520 160 L 576 160" class="dg-line" marker-end="url(#gm-n)"/><path d="M580 176 L 524 176" class="dg-line" marker-end="url(#gm-n)"/></g>
+
+            <!-- подписи объектов поверх заливки -->
+            <g text-anchor="middle">
+              <text x="280" y="62" class="dg-in">Payment</text><text x="460" y="62" class="dg-in">Receipt</text><text x="280" y="122" class="dg-in">Tariff</text>
+              <text data-s="1-4" x="460" y="172" class="dg-in">OldDto</text><text data-s="1-4" x="640" y="172" class="dg-in">Draft</text>
+            </g>
+
+            <!-- счётчик: отдельный слой на каждый шаг -->
+            <g data-s="1"><text x="20" y="172" class="dg-t">помечено: 0 из 5</text><text x="20" y="190" class="dg-s">обход ещё не начался</text></g>
+            <g data-s="2"><text x="20" y="172" class="dg-t">помечено: 2 из 5</text><text x="20" y="190" class="dg-s">от стека</text></g>
+            <g data-s="3"><text x="20" y="172" class="dg-t">помечено: 3 из 5</text><text x="20" y="190" class="dg-s">от static-поля</text></g>
+            <g data-s="4"><text x="20" y="172" class="dg-bad">мусор: 2 объекта</text><text x="20" y="190" class="dg-s">цикл не спасает</text></g>
+            <g data-s="5"><text x="20" y="172" class="dg-ok">живых: 3</text><text x="20" y="190" class="dg-s">место отдано под новые</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>В heap пять объектов. Сборщик ничего о них не знает и начинает с корней: стеков потоков и static-полей.</li>
+          <li>От кадра в стеке потока http-1 он доходит до Payment, от Payment — до Receipt. Оба помечены живыми.</li>
+          <li>От static-поля доходит до Tariff. Больше путей от корней нет.</li>
+          <li>OldDto и Draft ссылаются друг на друга, но от корней до них не дойти. Для сборщика это мусор: считается путь от корня, а не наличие ссылок.</li>
+          <li>Сборщик освобождает место непомеченных объектов. Три живых объекта остаются.</li>
+        </ol>
+      </figure>
+      <p>Главное свойство этой схемы — стоимость. Маркировка обходит только <b>живые</b> объекты: мусор сборщик даже не трогает, он просто считает его место свободным. Поэтому сборка тем дороже, чем больше живых данных, и почти не зависит от того, сколько мусора накопилось. Это основа всех современных сборщиков, и на ней держится идея поколений из следующей темы.</p>
+    </section>
+
+    <section class="step" id="leak">
+      <h2>Утечка в Java — достижимый объект, который больше не нужен</h2>
+      <p>Раз сборщик судит по достижимости, утечка в Java выглядит так: программа держит ссылку на объект, который ей больше не понадобится. Для сборщика такой объект живой, и он честно его хранит. Классический пример — static-коллекция, в которую добавляют и никогда не удаляют.</p>
+      <pre><code class="language-java">import java.lang.management.ManagementFactory;
+import java.util.HashMap;
+import java.util.Map;
+
+public class Leak {
+    // static-поле — корень: всё, что лежит в карте, достижимо всегда
+    static final Map&lt;String, byte[]&gt; SESSIONS = new HashMap&lt;&gt;();
+
+    public static void main(String[] args) {
+        for (int minute = 1; minute &lt;= 5; minute++) {
+            for (int i = 0; i &lt; 2_000; i++) {
+                SESSIONS.put("s-" + minute + "-" + i, new byte[1024]);   // сессии добавляют, но не удаляют
+            }
+            System.gc();                                                 // для наглядности: собрать всё, что можно
+            long live = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed();
+            System.out.println("минута " + minute + ": живых данных после GC " + live / 1024 / 1024 + " МБ");
+        }
+    }
+}</code></pre>
+      <p>Точные мегабайты зависят от запуска, поэтому ниже — реальный вывод на JDK 21:</p>
+      <pre><code class="language-text">минута 1: живых данных после GC 4 МБ
+минута 2: живых данных после GC 6 МБ
+минута 3: живых данных после GC 8 МБ      # после каждой полной сборки остаётся больше
+минута 4: живых данных после GC 11 МБ
+минута 5: живых данных после GC 13 МБ</code></pre>
+      <p>Это и есть признак утечки: растёт не просто занятый heap, он всегда пилообразный, а <b>живой объём после сборок</b> — нижние точки пилы. Если при той же нагрузке нижние точки ползут вверх, кто-то держит ссылки. Типичные источники в сервисах:</p>
+      <ul>
+        <li>кеш на <code>HashMap</code> без размера и срока жизни;</li>
+        <li>слушатели и колбэки, которые регистрируют и не снимают;</li>
+        <li><code>ThreadLocal</code> в пуле потоков: поток живёт вечно, и значение вместе с ним;</li>
+        <li>коллекция в singleton-бине Spring, куда складывают данные запросов.</li>
+      </ul>
+      <p>Кто именно держит объекты, показывает heap dump: путь от объекта до корня прямо называет виновника. Как его снять и прочитать — в теме Diagnostics.</p>
+    </section>
+
+    <section class="step" id="stop-the-world">
+      <h2>Чтобы обойти граф, сборщик останавливает все потоки в safepoint</h2>
+      <p>Почему нельзя маркировать, пока приложение работает? Потому что потоки меняют ссылки прямо во время обхода. Пусть сборщик уже прошёл объект A и пометил его. В этот момент поток переносит ссылку на ещё не помеченный объект C в поле A и удаляет старый путь к C. Сборщик в A больше не заглянет, до C не дойдёт и освободит живой объект. Программа получит ссылку на мусор.</p>
+      <p>Самое простое решение — на время работы остановить все потоки приложения. Это <b>stop-the-world пауза</b>. Современные сборщики делают большую часть маркировки параллельно с приложением, отслеживая изменения ссылок специальными барьерами, но короткие остановки нужны всем. Как устроены такие сборщики — в теме GC Algorithms.</p>
+      <p>Остановить поток в произвольной инструкции нельзя: в этот момент JVM может не знать, какие регистры содержат ссылки. Поэтому потоки останавливаются только в <b>safepoint</b> — точках, где состояние известно: на выходе из метода, на обратном переходе цикла, при вызове. Скомпилированный код периодически проверяет флаг «пора остановиться». Пауза начинается, когда в safepoint пришёл последний поток. Пролистай, что будет, если один поток сильно задержится.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 244" role="img" aria-label="Временная шкала трёх потоков приложения и потока сборщика. Сборщик запрашивает safepoint, потоки http-1 и http-2 останавливаются сразу, а поток batch в длинном цикле продолжает работать. Все ждут его. Только когда batch дошёл до safepoint, начинается сборка, а после неё потоки продолжают работу. Для запросов пауза — от их остановки до конца сборки.">
+            <defs>
+              <marker id="sp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="120" y="20" class="dg-cap">ВРЕМЯ →</text>
+
+            <!-- дорожки -->
+            <text x="20" y="56" class="dg-t">http-1</text>
+            <text x="20" y="96" class="dg-t">http-2</text>
+            <text x="20" y="136" class="dg-t">batch</text>
+            <text x="20" y="186" class="dg-t">GC</text>
+            <line x1="120" y1="164" x2="706" y2="164" class="dg-sep"/>
+
+            <!-- шаг 1+: до запроса все работают -->
+            <rect x="120" y="40" width="180" height="24" rx="4" class="dg-cell hit"/>
+            <rect x="120" y="80" width="180" height="24" rx="4" class="dg-cell hit"/>
+            <rect x="120" y="120" width="180" height="24" rx="4" class="dg-cell hit"/>
+
+            <!-- шаг 2+: запрос safepoint -->
+            <g data-s="2-"><line x1="300" y1="30" x2="300" y2="200" class="dg-line bad"/><text x="304" y="214" class="dg-bad">запрос</text></g>
+
+            <!-- шаг 3+: http-потоки стоят, batch ещё в цикле -->
+            <g data-s="3-"><rect x="310" y="40" width="210" height="24" rx="4" class="dg-cell miss"/><rect x="318" y="80" width="202" height="24" rx="4" class="dg-cell miss"/>
+              <rect x="300" y="120" width="220" height="24" rx="4" class="dg-cell hit"/><text x="410" y="137" class="dg-n" text-anchor="middle">длинный счётный цикл</text></g>
+            <g data-s="3"><path d="M300 222 L 516 222" class="dg-line bad" marker-end="url(#sp-bad)"/><text x="410" y="236" class="dg-bad" text-anchor="middle">time to safepoint растёт</text></g>
+
+            <!-- шаг 4+: все стоят, работает сборщик -->
+            <g data-s="4-"><rect x="520" y="40" width="100" height="24" rx="4" class="dg-cell miss"/><rect x="520" y="80" width="100" height="24" rx="4" class="dg-cell miss"/>
+              <rect x="520" y="120" width="100" height="24" rx="4" class="dg-cell miss"/>
+              <rect x="520" y="174" width="100" height="24" rx="4" class="dg-cell hit"/><text x="570" y="191" class="dg-n" text-anchor="middle">сборка</text></g>
+
+            <!-- шаг 5: потоки продолжают -->
+            <g data-s="5"><rect x="620" y="40" width="86" height="24" rx="4" class="dg-cell hit"/><rect x="620" y="80" width="86" height="24" rx="4" class="dg-cell hit"/>
+              <rect x="620" y="120" width="86" height="24" rx="4" class="dg-cell hit"/>
+              <path d="M310 222 L 616 222" class="dg-line bad" marker-end="url(#sp-bad)"/><path d="M620 222 L 314 222" class="dg-line bad" marker-end="url(#sp-bad)"/>
+              <text x="465" y="236" class="dg-bad" text-anchor="middle">пауза для http-1</text></g>
+
+            <!-- состояние -->
+            <text data-s="1" x="120" y="236" class="dg-in">все потоки работают</text>
+            <text data-s="2" x="120" y="236" class="dg-in">сборщику нужна остановка: поднят флаг safepoint</text>
+            <text data-s="4" x="120" y="236" class="dg-in">все в safepoint: сборщик работает один</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Три потока приложения обрабатывают запросы и считают отчёт. Сборщик ждёт своего часа.</li>
+          <li>Heap заполнился, сборщику нужна остановка. JVM поднимает флаг: каждый поток должен остановиться в ближайшем safepoint.</li>
+          <li>Потоки http-1 и http-2 проверяют флаг почти сразу и встают. Поток batch крутит длинный цикл без проверки флага и продолжает считать. Все остальные уже стоят и ждут его — это <b>time to safepoint</b>.</li>
+          <li>batch наконец дошёл до safepoint. Все потоки остановлены, сборщик делает свою работу.</li>
+          <li>Сборка закончилась, потоки продолжают. Для запроса в http-1 пауза длилась от его остановки до конца сборки — вместе с ожиданием чужого цикла.</li>
+        </ol>
+      </figure>
+      <p>Так бывает на самом деле. В JDK 21 проверка safepoint стоит даже внутри длинных счётных циклов, но её можно выключить диагностическим флагом и увидеть разницу. Поток в фоне крутит цикл до <code>Integer.MAX_VALUE</code>, а главный поток выделяет память, вызывая сборки.</p>
+      <pre><code class="language-java">public class Ttsp {
+    static volatile long sink;
+
+    public static void main(String[] args) throws Exception {
+        Thread batch = new Thread(() -&gt; {
+            for (int round = 0; round &lt; 50; round++) {
+                long sum = 0;
+                for (int i = 0; i &lt; Integer.MAX_VALUE; i++) {   // счётный цикл по int: миллиарды итераций
+                    sum += i % 7;
+                }
+                sink = sum;
+            }
+        });
+        batch.setDaemon(true);
+        batch.start();
+        Thread.sleep(500);                                      // даём циклу скомпилироваться
+        for (int i = 0; i &lt; 3; i++) {                          // выделяем память, чтобы вызвать сборки
+            byte[][] junk = new byte[200][];
+            for (int k = 0; k &lt; 200; k++) junk[k] = new byte[1024 * 1024];
+            Thread.sleep(200);
+        }
+    }
+}</code></pre>
+      <p>Реальные запуски на JDK 21, строки лога сокращены до нужных полей:</p>
+      <pre><code class="language-text">$ java -Xmx64m -Xlog:safepoint -cp out Ttsp
+Safepoint "G1TryInitiateConcMark", Reaching safepoint: 35125 ns       # 0,035 мс: все встали почти сразу
+Safepoint "G1CollectForAllocation", Reaching safepoint: 29042 ns
+
+$ java -XX:+UnlockDiagnosticVMOptions -XX:-UseCountedLoopSafepoints -Xmx64m -Xlog:safepoint -cp out Ttsp
+Safepoint "G1TryInitiateConcMark", Reaching safepoint: 588127208 ns, At safepoint: 478166 ns
+#                                  ждали цикл 588 мс                  сама работа 0,48 мс
+Safepoint "G1CollectForAllocation", Reaching safepoint: 51786995291 ns   # следующая остановка ждала 51,8 с</code></pre>
+      <p>Сама работа заняла полмиллисекунды, а приложение простояло 588 мс в ожидании одного потока. Следующая остановка в том же запуске ждала почти минуту — пока цикл не закончил очередной круг. Поэтому при разборе длинных пауз смотрят не только время сборки, но и <code>Reaching safepoint</code> в логе <code>-Xlog:safepoint</code>. Долгое достижение safepoint бывает из-за длинных циклов в старых JDK, больших копирований массивов, native-вызовов, а safepoint нужны не только сборщику: деоптимизации, снятию thread dump, отзыву классов.</p>
+    </section>
+
+    <section class="step" id="tradeoffs">
+      <h2>Паузы, пропускная способность, память — выбрать можно два</h2>
+      <p>У сборки мусора три цены, и уменьшить сразу все нельзя:</p>
+      <table class="mx">
+        <thead><tr><th>Цена</th><th>Что это</th><th>Кому важна</th></tr></thead>
+        <tbody>
+          <tr><td><b>Паузы</b> (latency)</td><td>сколько приложение стоит на одну сборку</td><td>платёжный API, p99 ответа</td></tr>
+          <tr><td><b>Пропускная способность</b> (throughput)</td><td>какая доля CPU уходит на приложение, а не на сборку</td><td>ночной батч, пересчёт выписок</td></tr>
+          <tr><td><b>Память</b> (footprint)</td><td>сколько heap и служебных структур нужно сверх живых данных</td><td>поды с тесным лимитом</td></tr>
+        </tbody>
+      </table>
+      <p>Короткие паузы достигаются тем, что сборщик работает параллельно с приложением, а это стоит CPU и памяти на барьеры и служебные структуры. Максимальная пропускная способность — когда сборщик останавливает всё и работает во все ядра, зато паузы длиннее. Маленький heap — чаще сборки. Каждый сборщик HotSpot — это выбранная точка в этом треугольнике, об этом тема Choosing a Collector.</p>
+      <p>Отсюда и ответ на вопрос «можно ли вызвать сборку вручную». <code>System.gc()</code> — просьба, а не приказ, но HotSpot по умолчанию её выполняет, причём полной сборкой с остановкой. Звать его из прикладного кода — значит добровольно платить паузой. Сама JVM вызывает его в одном случае, который стоит помнить: когда кончается direct-память, об этом — в теме Native Memory.</p>
+      <p>Где кончается эта тема? Мы разобрали, что сборщик ищет и почему останавливает приложение. Как именно он освобождает память — копирует живых, сдвигает или просто отмечает свободные места — и почему молодые объекты собирают отдельно, разбирают следующие темы: Generations и GC Algorithms.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Объект жив, если до него есть путь по ссылкам от корней: стеков потоков, static-полей, мониторов, JNI-ссылок. Циклы без пути от корней собираются.</li>
+        <li>Маркировка обходит только живые объекты, поэтому стоимость сборки растёт с объёмом живых данных, а не мусора.</li>
+        <li>Утечка в Java — достижимый, но ненужный объект. Признак — растёт живой объём после сборок, а не просто занятый heap.</li>
+        <li>Чтобы граф не менялся под ногами, сборщик останавливает потоки в safepoint. Пауза включает ожидание самого медленного потока — time to safepoint.</li>
+        <li>Паузы, пропускная способность и память конкурируют: каждый сборщик выбирает свой компромисс.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="gc-roots-q" data-freq="3">
+      <h3>Что такое GC roots?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это ссылки, с которых сборщик начинает обход графа и которые живы по определению. Основные: локальные переменные и параметры в кадрах живых потоков, static-поля загруженных классов, объекты под мониторами <code>synchronized</code>, JNI-ссылки из native-кода. Всё, до чего можно дойти от них, — живое, остальное — мусор.</p>
+          <p>На практике чаще всего корнем утечки оказывается static-поле: кеш или коллекция в singleton, которая только растёт. В heap dump путь от объекта до такого корня прямо показывает виновника.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Static-поля живут, пока жив класс, а класс — пока жив его загрузчик. Поэтому утечка загрузчика держит все его static-данные.</li>
+            <li>Живой поток — тоже корень вместе со всем стеком и своими <code>ThreadLocal</code>. Потоки пула не умирают, и значения в них живут вечно.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Метод создал объект и сохранил его только в локальную переменную. Когда объект станет недостижимым?</summary>
+          <p>Когда ссылка перестанет быть нужна кадру — формально после выхода из метода. JIT может считать переменную мёртвой даже раньше, после последнего использования: сборщик учитывает только живые в данной точке ссылки.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Найди, что держит объекты в памяти</summary>
+          <pre><code class="language-java">@Component
+class AuditService {
+    private final List&lt;PaymentEvent&gt; events = new ArrayList&lt;&gt;();
+
+    void onPayment(PaymentEvent event) {
+        events.add(event);
+        send(event);
+    }
+}</code></pre>
+          <p>Singleton-бин живёт всё время работы приложения, его поле достижимо от корней через контекст Spring. Список только растёт: каждое событие остаётся в памяти навсегда. Если события нужно только отправить, список не нужен. Если нужно хранить — с ограничением размера или во внешнем хранилище.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="reachability-q" data-freq="3">
+      <h3>Как сборщик понимает, что объект можно удалить? Что с циклическими ссылками?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По достижимости. Сборщик обходит граф от корней и помечает всё, до чего дошёл. Непомеченное недостижимо: программа никогда его не прочитает, значит, это мусор. Счётчиков ссылок в JVM нет.</p>
+          <p>Поэтому циклические ссылки не мешают сборке. Счёт и перевод, ссылающиеся друг на друга, соберутся, как только до них не будет пути от корней. В уроке миллионы таких пар прошли через heap в 16 МБ без ошибок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стоимость маркировки пропорциональна живым данным, а не мусору. Сборка heap с 10 ГБ мусора и 100 МБ живых данных дешёвая.</li>
+            <li>Подсчёт ссылок проще, но не собирает циклы и требует атомарных операций на каждое присваивание ссылки в многопоточной программе.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Нужно ли обнулять поля, чтобы помочь сборщику?</summary>
+          <p>Обычно нет: объект, до которого не дойти, соберётся с любыми полями. Обнуление нужно, когда долгоживущий объект держит ссылку на ненужное, например элемент в самописной очереди на массиве или поле в singleton.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="java-leak-q" data-freq="3">
+      <h3>Бывают ли утечки памяти в Java?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Бывают, но не в смысле C, где память забыли освободить. В Java утечка — это объект, до которого ещё есть путь от корней, хотя программе он больше не нужен. Сборщик честно считает его живым. Типичные случаи: кеш без размера и TTL, static-коллекции, слушатели, которые не снимают, <code>ThreadLocal</code> в пуле потоков.</p>
+          <p>Распознаю утечку по живому объёму после сборок: если нижние точки пилы heap растут при той же нагрузке, кто-то держит ссылки. Дальше heap dump и путь от растущих объектов до корня.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Бывают и утечки вне heap: загрузчики классов, direct-буферы, потоки, native-память библиотек.</li>
+            <li>Растущий занятый heap сам по себе не признак: сборщик может просто не спешить. Смотреть нужно после сборок.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот код течёт в веб-приложении?</summary>
+          <pre><code class="language-java">private static final ThreadLocal&lt;List&lt;String&gt;&gt; AUDIT =
+        ThreadLocal.withInitial(ArrayList::new);
+
+void handle(Request request) {
+    AUDIT.get().add(request.id());
+    process(request);
+}</code></pre>
+          <p>Потоки веб-сервера живут всё время работы и переиспользуются. Список в <code>ThreadLocal</code> потока никогда не очищается и растёт от запроса к запросу. Нужно <code>AUDIT.remove()</code> в <code>finally</code> или вообще не хранить состояние запроса в <code>ThreadLocal</code> потока пула.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stw-safepoint" data-freq="2">
+      <h3>Что такое stop-the-world и safepoint?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Stop-the-world — пауза, когда JVM останавливает все потоки приложения, чтобы сборщик мог работать с графом объектов, который никто не меняет. Останавливаются потоки не где попало, а в safepoint — точках, где JVM точно знает, где лежат ссылки: на вызовах, выходах из методов, обратных переходах циклов.</p>
+          <p>Пауза начинается, когда в safepoint пришёл последний поток. Если один поток долго туда идёт, ждут все. В логе <code>-Xlog:safepoint</code> это видно как большое <code>Reaching safepoint</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Safepoint нужны не только GC: деоптимизация, thread dump, отзыв кода.</li>
+            <li>Concurrent-сборщики сокращают паузы, делая большую часть работы параллельно с приложением, но короткие safepoint у них остаются.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>GC-лог показывает паузы по 2 мс, а мониторинг — простои по 300 мс. Где искать разницу?</summary>
+          <p>В time to safepoint. Лог <code>-Xlog:gc</code> показывает работу сборщика, а приложение стоит ещё и пока все потоки добираются до safepoint. Нужен <code>-Xlog:safepoint</code>: там видно и время достижения, и какая операция его запросила.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="system-gc-q" data-freq="2">
+      <h3>Что делает System.gc() и стоит ли его вызывать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Формально это просьба к JVM собрать мусор, и гарантий спецификация не даёт. В HotSpot по умолчанию она выполняется полной сборкой с остановкой всех потоков. Из прикладного кода вызывать не стоит: это добровольная пауза, которая не решает никакую проблему памяти.</p>
+          <p>Его вызывает сама JVM, когда кончается direct-память, поэтому запрещать его флагом <code>-XX:+DisableExplicitGC</code> опасно для сервисов на Netty и NIO.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В ночном джобе после каждой пачки стоит System.gc() «чтобы освободить память». Что скажешь?</summary>
+          <p>Каждый вызов — полная пауза, а память сборщик освободит и сам, когда она понадобится. Вызов только замедляет джоб. Если после пачки растёт живой объём, проблема в удержании ссылок, и <code>System.gc()</code> её не решит.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/garbage-collector-implementation.html">JDK 21 GC Tuning Guide: Garbage Collector Implementation</a> — основа урока: достижимость, поколения, паузы и пропускная способность.</li>
+      <li><a href="https://gchandbook.org/">The Garbage Collection Handbook (Jones, Hosking, Moss)</a> — главы о маркировке, корнях и сравнении tracing с подсчётом ссылок.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java, JDK 21</a> — флаги <code>-Xlog:gc</code>, <code>-Xlog:safepoint</code>, <code>DisableExplicitGC</code>.</li>
+      <li><a href="https://shipilev.net/jvm/anatomy-quarks/22-safepoint-polls/">Aleksey Shipilёv, JVM Anatomy Quark #22: Safepoint Polls</a> — как устроены проверки safepoint в скомпилированном коде.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

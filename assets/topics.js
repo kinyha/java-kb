@@ -445,7 +445,7 @@ window.KB_TREE = [
             scope: 'память процесса и heap, direct ByteBuffer, стеки потоков, Metaspace, Native Memory Tracking, RSS и лимит контейнера' },
         ] },
         { id: 'gc', title: 'Garbage Collection', source: 'HotSpot GC Tuning Guide (JDK 21); The Garbage Collection Handbook (Jones, Hosking, Moss); JEP 377, 439', items: [
-          { id: 'gc-basics', freq: 3, status: 'empty', title: 'GC Basics',
+          { id: 'gc-basics', freq: 3, status: 'draft', title: 'GC Basics',
             scope: 'достижимость, GC roots, утечка при живых ссылках, stop-the-world, safepoint, паузы и throughput' },
           { id: 'gc-generations', freq: 3, status: 'empty', title: 'Generations',
             scope: 'гипотеза поколений, Eden и Survivor, возраст и promotion, old generation, minor, major и full GC, card table' },
