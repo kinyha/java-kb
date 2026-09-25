@@ -457,7 +457,7 @@ window.KB_TREE = [
             scope: 'конкурентное перемещение, colored pointers, load barriers, generational ZGC, цена низких пауз' },
           { id: 'gc-choice', freq: 3, status: 'draft', title: 'Choosing a Collector',
             scope: 'Serial, Parallel, G1, ZGC, Shenandoah, выбор JVM по умолчанию, контейнер с одним CPU, latency или throughput' },
-          { id: 'gc-tuning', freq: 2, status: 'empty', title: 'GC Logs & Tuning',
+          { id: 'gc-tuning', freq: 2, status: 'draft', title: 'GC Logs & Tuning',
             scope: '-Xlog:gc, как читать лог, размер heap, allocation rate и live set, частые full GC, что не трогать' },
           { id: 'gc-references', freq: 2, status: 'empty', title: 'References',
             scope: 'strong, soft, weak, phantom, ReferenceQueue, WeakHashMap, Cleaner вместо finalize' },
