@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: JIT-компиляция · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script><script src="../assets/search.js"></script>
+</head><body data-page="topic" data-root="../" data-topic="jit">
+<main class="page">
+<header class="topic-head"><h1>JVM: JIT-компиляция</h1></header>
+<div class="lesson"><section class="step" id="warmup">
+<h2>Одинаковый код может работать быстрее после прогрева</h2>
+<p>После деплоя платёжный сервис сначала отвечает медленнее, а потом ускоряется без изменения нагрузки. Одно возможное объяснение — HotSpot успела собрать профиль горячих методов и скомпилировать их JIT. Но причиной также могут быть холодные соединения, кеши и загрузка классов; тайминг одного запроса ничего не доказывает.</p><pre><code class="language-java">public class JitDemo {
+    static long fee(long kopecks) { return kopecks * 15 / 1000; }
+    public static void main(String[] args) {
+        long total = 0;
+        for (int i = 0; i &lt; 1_000_000; i++) total += fee(10_000);
+        System.out.println(total);
+    }
+}</code></pre>
+<pre class="out">150000000</pre><p>Результат программы одинаков при обычном запуске и с <code>-Xint</code>, который отключает JIT и исполняет байткод интерпретатором. Скорость и сообщения <code>-XX:+PrintCompilation</code> зависят от JVM и окружения, поэтому их нельзя записывать как фиксированный вывод.</p>
+</section><section class="step" id="tiers">
+<h2>Tiered compilation меняет скорость и качество профиля</h2>
+<p>HotSpot обычно начинает с интерпретатора. Когда метод или цикл становится горячим, C1 быстро компилирует код и может собирать профиль дальше. C2 тратит больше времени на оптимизации и выпускает машинный код для устойчивого горячего пути. Не каждый метод проходит все стадии: пороги и решения динамические.</p><figure class="fig play"><div class="fig-box"><svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Как HotSpot меняет исполнение горячего fee"><g data-s="1-"><rect x="24" y="25" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="45" class="dg-t">интерпретатор: байткод fee</text></g><g data-s="2-"><rect x="24" y="61" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="81" class="dg-t">C1: быстрый код и профиль</text></g><g data-s="3-"><rect x="24" y="97" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="117" class="dg-t">C2: оптимизированный горячий путь</text></g><g data-s="4-"><rect x="24" y="133" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="153" class="dg-t">при нарушении предположения: deopt</text></g><g data-s="5-"><rect x="24" y="169" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="189" class="dg-t">новый профиль → повторная компиляция</text></g></svg></div><ol class="play-steps"><li>Сервис начинает обрабатывать запросы до полной оптимизации.</li><li>HotSpot получает более дешёвое исполнение и данные о типах и ветвях.</li><li>C2 использует профиль, чтобы убрать лишнюю работу на частом пути.</li><li>Если предположение перестало быть верным, JVM возвращается к безопасному состоянию.</li><li>Код может быть скомпилирован снова с обновлённым профилем.</li></ol></figure><p>Такая смена уровней объясняет, почему первые секунды синтетического теста не показывают устойчивую производительность сервиса.</p>
+</section><section class="step" id="optimizations">
+<h2>Inlining открывает дорогу другим оптимизациям</h2>
+<p>При <b>inlining</b> JIT вставляет тело маленького метода в место вызова. Это убирает стоимость вызова и даёт оптимизатору увидеть данные по обе стороны границы метода: свернуть константы или убрать промежуточные операции. Вызов через интерфейс тоже может быть заинлайнен, если профиль показывает подходящие классы.</p><p><b>Escape analysis</b> помогает понять, покидает ли объект область использования. Если объект не утекает, JIT иногда заменяет его поля скалярами и вообще не создаёт отдельный heap-объект. Это возможность оптимизации, а не обещание для каждого <code>new</code>.</p>
+</section><section class="step" id="deopt">
+<h2>Оптимизированный код опирается на проверяемые предположения</h2>
+<p>Допустим, на точку вызова <code>PaymentMethod.fee</code> долго приходил только <code>Card</code>. JIT может встроить его реализацию и проверять класс объекта. После подключения <code>Sbp</code> проверка не проходит: JVM деоптимизирует код и продолжает корректное исполнение, затем может собрать новый профиль.</p><div class="trap"><p class="myth">JIT «замораживает» поведение метода при первом вызове.</p><p class="fact">Оптимизации сохраняют семантику Java. Спекулятивные предположения проверяются, а при их нарушении JVM откатывается к безопасному коду.</p></div><p>Поэтому микробенчмарк, в котором всегда один тип, может отличаться от реального сервиса с десятками реализаций.</p>
+</section><section class="step" id="measurement">
+<h2>Прогрев и бенчмарк нужны только для измеренной горячей точки</h2>
+<p>Если p99 платежа определяется запросом к БД, тюнинг JIT ничего не даст. Сначала JFR или профилировщик покажет, где процесс тратит CPU; затем проверь warmup и стабильную нагрузку. Для микробенчмарка используй JMH: он учитывает прогрев, повторения и защиту от устранения бесполезной работы.</p><p>Флаги <code>-Xint</code> и <code>-XX:+PrintCompilation</code> полезны для изучения механизма, но не как обычная настройка продакшна. На стабильном сервисе измеряй сквозную задержку и throughput, а не только время одного метода.</p>
+</section><div class="summary"><ul><li><code>javac</code> создаёт байткод заранее; JIT компилирует выбранные горячие участки во время работы.</li><li>Tiered compilation сочетает быстрый старт, профилирование и более дорогие оптимизации C2.</li><li>Inlining и escape analysis могут убрать вызовы и часть выделений, но не гарантированы.</li><li>При нарушении предположений JVM деоптимизирует код, сохраняя корректность.</li><li>Сначала измеряй CPU-профиль и устойчивую нагрузку; прогрев не равен бизнес-ускорению.</li></ul></div></div>
+<section class="interview" id="interview"><h2>На собеседовании</h2><article class="q" id="javac-vs-jit" data-freq="3">
+<h3>Чем JIT отличается от javac?</h3>
+<div class="answer"><div data-level="middle"><p><code>javac</code> до запуска переводит Java-исходник в переносимый байткод. JIT внутри работающей JVM берёт горячие участки этого байткода и переводит их в машинный код текущего процессора, используя профиль реальных вызовов.</p><p>Для платёжного сервиса это значит, что горячий расчёт комиссии может ускориться после прогрева, а редкий административный метод останется интерпретируемым.</p></div><div data-level="senior"><ul><li>JIT не меняет наблюдаемую семантику; при ошибке предположения возможна deoptimization.</li><li><code>-Xint</code> полезен для сравнения поведения без JIT, но обычно резко снижает throughput.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>В class-файле лежит машинный код?</summary><p>Нет. В нём байткод, константы и ссылки. Машинный код JIT создаёт во время исполнения для текущей платформы.</p></details><details data-kind="уточнение"><summary>Почему не компилировать сразу всё?</summary><p>Компиляция требует времени и памяти; редкий код может не окупить её стоимость. Профиль также помогает выбрать полезные оптимизации.</p></details></div>
+</article><article class="q" id="jit-tiers" data-freq="2">
+<h3>Что делают C1 и C2?</h3>
+<div class="answer"><div data-level="middle"><p>При tiered compilation C1 быстро выдаёт машинный код и помогает собирать профиль. C2 оптимизирует горячие методы глубже, используя эти данные. JVM сама решает, какие методы и циклы когда переводить между уровнями.</p><p>Я учитываю прогрев при сравнении производительности после деплоя и не делаю вывод по первому запуску теста.</p></div><div data-level="senior"><ul><li>Компиляция может запускаться по счётчику вызовов метода или горячему циклу через OSR.</li><li>Code cache ограничен; его заполнение может остановить дальнейшую JIT-компиляцию.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Что такое OSR?</summary><p>On-stack replacement позволяет перейти на скомпилированную версию прямо внутри долго работающего цикла, не дожидаясь следующего вызова метода.</p></details><details data-kind="уточнение"><summary>Каждый метод получит код C2?</summary><p>Нет. Многие методы слишком редкие или невыгодные для такой компиляции; решения зависят от профиля.</p></details></div>
+</article><article class="q" id="jit-deopt" data-freq="2">
+<h3>Что такое деоптимизация и когда она случается?</h3>
+<div class="answer"><div data-level="middle"><p>JIT может оптимизировать горячий код под наблюдавшиеся типы и ветви. Если новый запрос нарушит предположение, JVM возвращается к корректному менее оптимизированному состоянию и при необходимости компилирует код снова.</p><p>Например, сначала приходили только оплаты картой, потом добавился СБП. Старый быстрый путь нельзя применять без проверки класса, но результат расчёта остаётся правильным.</p></div><div data-level="senior"><ul><li>Деоптимизация — часть нормальной работы адаптивной JVM, а не обязательно авария.</li><li>Профиль, собранный микробенчмарком с одним типом, может давать нехарактерный для прода код.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Можно ли наблюдать компиляции?</summary><p>Для изучения используй <code>-XX:+PrintCompilation</code> или JFR. Вывод зависит от JVM и нагрузки.</p></details><details data-kind="уточнение"><summary>Почему inlining не всегда полезен?</summary><p>Слишком крупный код увеличивает code cache и время компиляции. JIT выбирает баланс по профилю и бюджету.</p></details></div>
+</article></section>
+<div class="qa"></div>
+<div class="refs"><ul><li><a href="https://docs.oracle.com/en/java/javase/21/vm/java-virtual-machine-technology-overview.html">HotSpot VM Technology Overview</a> — основа урока: интерпретатор и адаптивный компилятор.</li><li><a href="https://docs.oracle.com/en/java/javase/21/vm/java-hotspot-virtual-machine-performance-enhancements.html">HotSpot Performance Enhancements</a> — tiered compilation и escape analysis.</li><li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java command, JDK 21</a> — флаги <code>-Xint</code> и диагностика компиляции.</li></ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body></html>
