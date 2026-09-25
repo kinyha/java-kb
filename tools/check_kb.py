@@ -74,9 +74,7 @@ def quality_warnings(source):
     figures = FIGURE.findall(source)
     diagrams = [(bool(play), body) for play, body in figures if "<svg" in body]
     if not diagrams:
-        found.append("нет ни одной схемы")
-    elif len(diagrams) < 2:
-        found.append("одна схема, нужно минимум две")
+        found.append("нет ни одной схемы: проверь, не объяснит ли механизм схема лучше текста")
     for number, (play, body) in enumerate(diagrams, 1):
         svg = SVG.search(body)
         drawing = DEFS.sub("", svg.group(0)) if svg else ""
