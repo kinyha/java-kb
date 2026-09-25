@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: загрузка классов · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script><script src="../assets/search.js"></script>
+</head><body data-page="topic" data-root="../" data-topic="classloading">
+<main class="page">
+<header class="topic-head"><h1>JVM: загрузка классов</h1></header>
+<div class="lesson"><section class="step" id="missing-class">
+<h2>Собранный сервис может не найти класс при запуске</h2>
+<p>Сервис платежей собрался, но на первом запросе упал с <code>NoClassDefFoundError</code>: библиотека была при компиляции, а в runtime classpath её нет. Компиляция проверила ссылки по доступным файлам; при работе JVM должна сама найти и загрузить нужный class-файл. Поэтому ошибка может появиться позже старта.</p><p>Чтобы разобрать такую аварию, разделяй три действия: <b>loading</b> находит определение класса, <b>linking</b> подготавливает его к исполнению, <b>initialization</b> выполняет static-инициализацию.</p>
+</section><section class="step" id="loaders">
+<h2>Класс определяется именем и загрузчиком</h2>
+<p>Загрузчик приложения ищет классы в classpath или module path. Перед собственной попыткой обычный <code>ClassLoader</code> делегирует запрос родителю: application → platform → bootstrap. Так приложение не подменяет стандартный <code>java.lang.String</code> своим файлом.</p><p>Для JVM идентичность класса — пара «бинарное имя + определивший загрузчик». Два плагина могут загрузить <code>bank.Payment</code> из разных JAR и получить два несовместимых класса. Поэтому при <code>ClassCastException</code> с одинаковыми именами проверь загрузчики обеих сторон.</p><details class="deep"><summary>Под капотом: initiating и defining loader</summary><p>Загрузчик, которому пришёл запрос, может передать его родителю. Первый инициирует загрузку, а тот, кто вызвал <code>defineClass</code>, определяет класс. Для identity важен defining loader.</p></details>
+</section><section class="step" id="linking">
+<h2>Linking проверяет и готовит класс до инициализации</h2>
+<p>После loading JVM проверяет формат байткода и правила типов (<b>verification</b>), выделяет статические поля с начальными значениями (<b>preparation</b>) и разрешает символические ссылки на классы, поля и методы (<b>resolution</b>). Разрешение отдельных ссылок может происходить лениво; нельзя считать, что весь граф зависимостей уже найден при старте.</p><figure class="fig play"><div class="fig-box"><svg class="dg" viewBox="0 0 720 184" role="img" aria-label="Последовательность подготовки класса Config"><g data-s="1-"><rect x="24" y="25" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="45" class="dg-t">loading: найден байткод Config</text></g><g data-s="2-"><rect x="24" y="61" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="81" class="dg-t">verification: байткод допустим</text></g><g data-s="3-"><rect x="24" y="97" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="117" class="dg-t">preparation: value = 0</text></g><g data-s="4-"><rect x="24" y="133" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="153" class="dg-t">initialization: value = 7</text></g></svg></div><ol class="play-steps"><li>Загрузчик находит представление класса и JVM создаёт его внутреннее описание.</li><li>Проверяются формат и ограничения байткода.</li><li>Статическое поле получает значение по умолчанию; вызов init ещё не выполнен.</li><li>При первом активном использовании запускаются инициализаторы в текстовом порядке.</li></ol></figure><p>Эти стадии объясняют разные ошибки: <code>ClassNotFoundException</code> — явный поиск не нашёл класс; <code>NoClassDefFoundError</code> — JVM не смогла получить определение, которое понадобилось программе; <code>ExceptionInInitializerError</code> — упал static-инициализатор.</p>
+</section><section class="step" id="initialization">
+<h2>Первое активное использование запускает static-код один раз</h2>
+<p>Чтение compile-time константы может не инициализировать класс: значение уже встроено в код вызывающего. Чтение обычного static-поля требует инициализации. JVM выполняет static-инициализаторы класса один раз при успешной инициализации, под синхронизацией, а повторное чтение использует готовое поле.</p><pre><code class="language-java">public class LoadDemo {
+    static class Config {
+        static final int LIMIT = 10;
+        static int value = init();
+        static { System.out.println(&quot;static block&quot;); }
+        static int init() {
+            System.out.println(&quot;init value&quot;);
+            return 7;
+        }
+    }
+    public static void main(String[] args) {
+        System.out.println(Config.LIMIT);
+        System.out.println(Config.value);
+        System.out.println(Config.value);
+    }
+}</code></pre>
+<pre class="out">10
+init value
+static block
+7
+7</pre><p>Здесь <code>LIMIT</code> не запускает <code>Config</code>. Обращение к <code>value</code> запускает <code>init()</code>, затем static-блок. Порядок взят из порядка объявлений в исходнике.</p>
+</section><section class="step" id="boundaries">
+<h2>Загрузчик решает изоляцию, но добавляет границы совместимости</h2>
+<p>Свой загрузчик полезен для плагинов и контейнеров приложений: разные версии библиотек могут жить отдельно. Цена — классы с одинаковым именем не становятся взаимозаменяемыми, а удержанный <code>ClassLoader</code> может удерживать все загруженные им классы и объекты через статические поля.</p><p>При обычном сервисе сначала проверь сборку JAR, classpath/module path и версии зависимостей. Собственный ClassLoader вводи только если нужна настоящая изоляция или загрузка кода из нового источника.</p>
+</section><div class="summary"><ul><li>Loading находит байткод, linking проверяет и подготавливает класс, initialization выполняет static-код.</li><li>Обычная делегация идёт к родителю; identity класса включает определивший загрузчик.</li><li>Preparation ставит статическим полям значения по умолчанию, пользовательские инициализаторы работают позже.</li><li>Чтение compile-time константы может не запускать инициализацию класса.</li><li>Ошибки загрузки, связывания и static-инициализации требуют разных проверок.</li></ul></div></div>
+<section class="interview" id="interview"><h2>На собеседовании</h2><article class="q" id="phases" data-freq="3">
+<h3>Чем отличаются loading, linking и initialization?</h3>
+<div class="answer"><div data-level="middle"><p>Loading находит class-файл и создаёт описание класса в JVM. Linking проверяет байткод, готовит статические поля и разрешает ссылки. Initialization выполняет static-инициализаторы и присваивания.</p><p>При сбое сервиса я сначала определяю стадию: отсутствующий JAR, несовместимый байткод и ошибка в static-блоке лечатся по-разному.</p></div><div data-level="senior"><ul><li>Resolution может быть ленивым; verification и preparation должны завершиться до initialization.</li><li>Повторная попытка использовать класс после неудачной initialization обычно даёт <code>NoClassDefFoundError</code>.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Когда value получит ноль?</summary><p>На стадии preparation статическое поле <code>int value</code> получает 0. Его объявленный инициализатор выполнится позже, при initialization.</p></details><details data-kind="уточнение"><summary>Загрузка всегда означает запуск static-блока?</summary><p>Нет. Класс может быть загружен и связан до первого активного использования, которое запускает инициализацию.</p></details></div>
+</article><article class="q" id="delegation" data-freq="3">
+<h3>Что такое parent delegation и зачем оно нужно?</h3>
+<div class="answer"><div data-level="middle"><p>Обычный загрузчик сначала просит родителя найти класс, а уже затем ищет его сам. Так стандартные классы платформы берутся из доверенного загрузчика и одна зависимость не определяется случайно разными загрузчиками.</p><p>В backend-плагинах я проверяю, кто определил класс: одинаковое имя не гарантирует совместимость, если defining loader разный.</p></div><div data-level="senior"><ul><li>Bootstrap loader не является обычным Java-объектом <code>ClassLoader</code>; <code>getClassLoader()</code> для его классов возвращает <code>null</code>.</li><li>Контейнеры и плагины могут нарушать обычный порядок делегации для изоляции зависимостей.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Почему два bank.Payment могут не приводиться друг к другу?</summary><p>JVM считает типом пару «имя + defining loader». При разных загрузчиках это разные типы даже при одинаковом байткоде.</p></details><details data-kind="уточнение"><summary>Кто грузит классы приложения?</summary><p>Обычно application class loader. Platform и bootstrap обслуживают платформенные классы, но точный маршрут зависит от модулей и конфигурации запуска.</p></details></div>
+</article><article class="q" id="static-init" data-freq="2">
+<h3>Когда выполняется static-инициализация?</h3>
+<div class="answer"><div data-level="middle"><p>Обычно при первом активном использовании класса: создании экземпляра, вызове static-метода или чтении обычного static-поля. JVM сначала инициализирует нужные родительские классы и выполняет инициализаторы данного класса в порядке объявления.</p><p>Я не кладу в static-блок сетевые вызовы: ошибка там может сделать класс непригодным для дальнейшего использования в процессе.</p></div><div data-level="senior"><ul><li>Чтение compile-time константы не обязательно запускает класс, потому что значение встраивается в вызывающий код.</li><li><code>Class.forName(name)</code> по умолчанию инициализирует класс; перегрузка с <code>initialize=false</code> позволяет это отложить.</li></ul></div></div>
+<div class="check"><details data-kind="задача"><summary>Что выведет LoadDemo из урока?</summary><p><code>10</code>, затем <code>init value</code>, <code>static block</code>, <code>7</code>, <code>7</code>. Константа встроена, а первое чтение value запускает инициализацию один раз.</p></details><details data-kind="уточнение"><summary>Что будет после исключения из static-блока?</summary><p>Первый вызов обычно получает <code>ExceptionInInitializerError</code>; последующие попытки использовать неуспешно инициализированный класс получают ошибку определения класса.</p></details></div>
+</article></section>
+<div class="qa"></div>
+<div class="refs"><ul><li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-5.html">JVMS 21, глава 5</a> — основа урока: loading, linking, initialization и ошибки.</li><li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ClassLoader.html">ClassLoader Javadoc</a> — модель делегации и загрузчики платформы.</li><li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-12.html">JLS 21, §12.4</a> — условия и порядок инициализации классов.</li></ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body></html>
