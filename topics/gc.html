@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Garbage Collection · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script><script src="../assets/search.js"></script>
+</head><body data-page="topic" data-root="../" data-topic="gc">
+<main class="page">
+<header class="topic-head"><h1>JVM: Garbage Collection</h1></header>
+<div class="lesson"><section class="step" id="pause">
+<h2>Платёж ждёт GC, хотя бизнес-код не изменился</h2>
+<p>Сервис проводит платежи за десятки миллисекунд, но иногда ответ задерживается на сотни. В этот момент JVM может останавливать Java-потоки ради части работы GC. По одной задержке нельзя объявить GC виновником: нужно сопоставить таймлайн запроса с GC-логом или JFR.</p><p>Сборщик возвращает место в heap для новых объектов. Его задача — найти объекты, до которых программа больше не может добраться; он не знает, нужен ли бизнесу объект «по смыслу».</p>
+</section><section class="step" id="roots">
+<h2>Достижимость от корней решает судьбу объекта</h2>
+<p>GC начинает с корней: ссылок в активных кадрах потоков, статических полей и других JVM-структур. Он проходит цепочки сильных ссылок. Объект, к которому путь остался, жив даже если приложение больше никогда его не прочитает: так выглядит утечка через неограниченный кеш.</p><pre><code class="language-java">import java.util.ArrayList;
+import java.util.List;
+public class ReachabilityDemo {
+    static final List&lt;byte[]&gt; cache = new ArrayList&lt;&gt;();
+    public static void main(String[] args) {
+        cache.add(new byte[1024]);
+        System.out.println(cache.size());
+        cache.clear();
+        System.out.println(cache.size());
+    }
+}</code></pre>
+<pre class="out">1
+0</pre><p>После <code>clear()</code> массив из примера может стать недостижимым, но вывод <code>0</code> говорит лишь о размере списка. Он не доказывает, что GC уже освободил память.</p>
+</section><section class="step" id="g1">
+<h2>G1 собирает регионы и копирует живые объекты</h2>
+<p>В JDK 21 HotSpot по умолчанию использует G1. Он делит heap на регионы и логически выделяет young и old. Большинство новых объектов быстро умирает, поэтому young-область собирают чаще; пережившие сборки объекты могут перейти в old.</p><figure class="fig play"><div class="fig-box"><svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Упрощённый цикл G1 для платежного сервиса"><g data-s="1-"><rect x="24" y="25" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="45" class="dg-t">новые объекты → eden-регионы</text></g><g data-s="2-"><rect x="24" y="61" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="81" class="dg-t">young GC: Java-потоки приостановлены</text></g><g data-s="3-"><rect x="24" y="97" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="117" class="dg-t">живые объекты → survivor или old</text></g><g data-s="4-"><rect x="24" y="133" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="153" class="dg-t">помечены живые old-регионы</text></g><g data-s="5-"><rect x="24" y="169" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="189" class="dg-t">mixed GC выбирает регионы с мусором</text></g></svg></div><ol class="play-steps"><li>Запросы создают короткоживущие DTO и массивы.</li><li>При young GC G1 останавливает mutator threads и выбирает живые объекты.</li><li>Живые объекты копируются; освободившиеся регионы готовы к новым выделениям.</li><li>Concurrent marking помогает оценить, какие old-регионы выгодно собирать.</li><li>Mixed collections собирают young и выбранные old-регионы постепенно.</li></ol></figure><p>Цель <code>-XX:MaxGCPauseMillis</code> — ориентир, а не жёсткая гарантия. Слишком маленькая цель может увеличить частоту сборок и снизить throughput.</p>
+</section><section class="step" id="zgc">
+<h2>ZGC выбирают по требованию к паузам, измеряя цену</h2>
+<p>ZGC выполняет большую часть дорогой работы конкурентно с приложением и рассчитан на низкие паузы. За это платят ресурсами CPU и запасом памяти. Для JDK 21 поколенческий вариант включается флагами <code>-XX:+UseZGC -XX:+ZGenerational</code>; на более новых JDK набор флагов может отличаться.</p><table class="mx"><thead><tr><th></th><th>G1</th><th>ZGC</th></tr></thead><tbody><tr><td>Приоритет</td><td>Баланс пауз и throughput</td><td>Минимальные паузы</td></tr><tr><td>Работа</td><td>Короткие stop-the-world этапы и concurrent marking</td><td>Большая часть работы concurrent</td></tr><tr><td>Решение</td><td>Начни с дефолта и измерь</td><td>Проверь, что выигрыш по p99 стоит ресурсов</td></tr></tbody></table><p>Переключение GC не исправит удержание объектов: live set продолжит расти при любом сборщике.</p>
+</section><section class="step" id="references">
+<h2>Слабые ссылки и флаги не заменяют политику памяти</h2>
+<p><code>WeakReference</code> не удерживает объект от сборки, поэтому подходит для вспомогательных соответствий, например канонизации. <code>SoftReference</code> JVM очищает под давлением памяти по своей политике; для бизнес-кеша с требованиями к TTL и размеру это слишком непредсказуемо.</p><div class="trap"><p class="myth">Вызов <code>System.gc()</code> гарантирует немедленную очистку памяти.</p><p class="fact">Это запрос к JVM, а не контракт на момент и объём сборки. Для сервиса сначала собирай GC-логи и измеряй allocation rate, live set и длительность пауз.</p></div><p>Сначала задай разумный <code>-Xmx</code> с запасом до лимита контейнера, включи <code>-Xlog:gc*</code> и измерь нагрузку. Тюнинг конкретных флагов делай только после наблюдаемой проблемы.</p>
+</section><div class="summary"><ul><li>GC сохраняет объекты, достижимые от корней; логическая утечка для него выглядит как живые данные.</li><li>G1 — сборщик HotSpot по умолчанию в JDK 21; он использует регионы и поколения.</li><li>Пауза GC видна в логах и JFR, но её нужно сопоставить с задержкой запроса.</li><li>ZGC снижает паузы ценой ресурсов; выбор проверяют на своей нагрузке.</li><li>Weak и soft ссылки не задают предсказуемый размер или TTL бизнес-кеша.</li></ul></div></div>
+<section class="interview" id="interview"><h2>На собеседовании</h2><article class="q" id="reachability" data-freq="3">
+<h3>Как GC понимает, что объект можно удалить?</h3>
+<div class="answer"><div data-level="middle"><p>Он проходит от GC roots по сильным ссылкам. Если до объекта не осталось пути, он может быть собран. Время освобождения не гарантировано.</p><p>В платёжном сервисе static-кеш чеков остаётся корнем цепочки. Пока чек в кеше, GC его сохраняет, даже если запрос давно завершился.</p></div><div data-level="senior"><ul><li>WeakReference и SoftReference вводят другие уровни достижимости; правила описаны в <code>java.lang.ref</code>.</li><li>Heap dump с путём к GC root показывает, кто удерживает объект.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Поможет ли GC убрать запись из живого HashMap?</summary><p>Нет, если HashMap и значение достижимы сильными ссылками. Нужна политика удаления, лимит или TTL.</p></details><details data-kind="уточнение"><summary>Что изменилось после cache.clear() в примере?</summary><p>Путь через список исчез. Это делает массив кандидатом на сборку при отсутствии других ссылок, но сборка не обязана произойти сразу.</p></details></div>
+</article><article class="q" id="g1-zgc" data-freq="3">
+<h3>Чем отличаются G1 и ZGC и как выбрать?</h3>
+<div class="answer"><div data-level="middle"><p>G1 — сбалансированный сборщик по умолчанию в HotSpot 21: делит heap на регионы, молодые объекты собирает часто, часть работы делает параллельно и конкурентно. ZGC ориентирован на низкие паузы, выполняя большую часть работы одновременно с приложением.</p><p>Я начну с G1, соберу GC-логи и p99 под типичной нагрузкой. Если именно паузы GC нарушают цель, проверю ZGC и цену в CPU и памяти.</p></div><div data-level="senior"><ul><li><code>MaxGCPauseMillis</code> у G1 — цель, а не SLA на каждую паузу.</li><li>В JDK 21 поколенческий ZGC включается дополнительно через <code>-XX:+ZGenerational</code>.</li><li>Недостаточный heap или высокий allocation rate могут вызвать частые сборки при любом алгоритме.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Почему G1 копирует живые объекты?</summary><p>Копирование освобождает исходный регион целиком и уплотняет живые данные, уменьшая фрагментацию.</p></details><details data-kind="уточнение"><summary>Уменьшит ли ZGC p99 HTTP-запроса всегда?</summary><p>Нет. Если задержка в сети, БД или блокировке, смена GC не устранит её; нужно сопоставить события по времени.</p></details></div>
+</article><article class="q" id="weak-soft" data-freq="2">
+<h3>Чем WeakReference отличается от SoftReference?</h3>
+<div class="answer"><div data-level="middle"><p>Weak-ссылка не мешает сборке объекта, когда сильных ссылок больше нет. Soft-ссылка тоже слабее сильной, но JVM может сохранять объект до давления на память. В обоих случаях нельзя строить корректность бизнеса на том, что объект останется доступен.</p><p>Для кеша тарифов я выбираю явный лимит и TTL, а слабые ссылки применяю для вспомогательных данных, которые легко восстановить.</p></div><div data-level="senior"><ul><li><code>WeakHashMap</code> ослабляет ключи, но сильная ссылка из значения обратно на ключ может помешать ожидаемой очистке.</li><li>SoftReference не задаёт детерминированную политику вытеснения между запросами.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Можно ли по System.gc() проверить WeakReference?</summary><p>Такой тест ненадёжен: момент сборки не гарантирован. Проверяй контракт через документацию, а не фиксированный вывод одного запуска.</p></details><details data-kind="уточнение"><summary>Что случится с объектом только под weak-ссылкой?</summary><p>Когда GC обнаружит его слабо достижимым, он очистит weak-ссылку; после этого объект может быть освобождён.</p></details></div>
+</article></section>
+<div class="qa"></div>
+<div class="refs"><ul><li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/garbage-first-g1-garbage-collector1.html">JDK 21 GC Tuning Guide, G1</a> — основа урока: регионы, паузы, young/mixed collection.</li><li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/z-garbage-collector2.html">JDK 21 GC Tuning Guide, ZGC</a> — конкурентная работа и выбор низких пауз.</li><li><a href="https://openjdk.org/jeps/439">JEP 439, Generational ZGC</a> — флаг поколенческого режима в JDK 21.</li><li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ref/package-summary.html">java.lang.ref Javadoc</a> — уровни достижимости и weak/soft ссылки.</li></ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body></html>
