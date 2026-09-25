@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Generations · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="gc-generations">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: Generations</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="full-gc">
+      <h2>Полные сборки идут одна за другой, хотя живых данных почти нет</h2>
+      <p>Антифрод платёжного сервиса держит в памяти последние 20 000 платежей, чтобы искать подозрительные серии. Новые платежи добавляются, самые старые вытесняются. Живых данных немного — 20 000 записей, около 5 МБ. Но в логе сборщика регулярно появляются полные сборки, и каждая освобождает почти весь heap.</p>
+      <pre><code class="language-java">import java.util.ArrayDeque;
+
+public class Recent {
+    record PaymentDto(long id, long amount, byte[] body) { }
+
+    // «Недавние платежи»: каждый живёт, пока его не вытеснят 20 000 следующих
+    static final ArrayDeque&lt;PaymentDto&gt; RECENT = new ArrayDeque&lt;&gt;();
+
+    public static void main(String[] args) {
+        int keep = Integer.parseInt(args[0]);                             // сколько платежей держать
+        long sum = 0;
+        for (long id = 0; id &lt; 5_000_000; id++) {
+            PaymentDto dto = new PaymentDto(id, id % 1000, new byte[200]);  // платёж из запроса
+            sum += dto.amount();
+            RECENT.addLast(dto);
+            if (RECENT.size() &gt; keep) {
+                RECENT.removeFirst();                                    // самый старый становится мусором
+            }
+        }
+        System.out.println(sum);
+    }
+}</code></pre>
+      <p>Запустим с классическим сборщиком Serial, у которого поколения видны лучше всего: heap 64 МБ, из них 16 МБ под молодое поколение. Реальный запуск на JDK 21:</p>
+      <pre><code class="language-text">$ java -XX:+UseSerialGC -Xmx64m -Xmn16m -Xlog:gc -cp out Recent 20000
+GC(9)  Pause Young (Allocation Failure) 45M-&gt;35M(62M) 0.558ms     # после молодой сборки занято 35 МБ?
+GC(15) Pause Full (Allocation Failure) 61M-&gt;7M(62M) 4.898ms       # полная сборка: из 61 МБ живы 7
+GC(29) Pause Full (Allocation Failure) 59M-&gt;7M(62M) 4.332ms
+...                                                                   # итого 92 молодые и 6 полных сборок</code></pre>
+      <p>Странная картина. Полная сборка находит лишь 7 МБ живых данных из 61 — значит, heap забит мусором. Но почему этот мусор не убрали быстрые молодые сборки, которых было 92? Чтобы ответить, нужно понять, как heap поделён на поколения и как объект переходит из одного в другое. В конце урока одна настройка уберёт все полные сборки.</p>
+    </section>
+
+    <section class="step" id="hypothesis">
+      <h2>Большинство объектов умирает молодыми, поэтому heap делят на поколения</h2>
+      <p>Посмотри на объекты платёжного сервиса. DTO запроса, JSON-строки, промежуточные коллекции живут миллисекунды — пока обрабатывается запрос. Кеш тарифов, пулы соединений, бины Spring живут всё время работы процесса. Середины почти нет. Это <b>слабая гипотеза поколений</b>: большинство объектов умирает вскоре после создания, а пережившие несколько сборок, скорее всего, проживут долго.</p>
+      <p>Из прошлой темы: маркировка обходит только живые объекты. Значит, если собирать отдельно область, где лежат одни новые объекты, почти всё там окажется мусором, и сборка будет очень дешёвой. Так heap и устроен:</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 176" role="img" aria-label="Heap 64 МБ в масштабе: молодое поколение 16 МБ из eden 12,8 МБ и двух survivor по 1,6 МБ, старое поколение 48 МБ. Новые объекты создаются в eden, пережившие сборку переходят в survivor, долгоживущие — в old.">
+            <text x="40" y="20" class="dg-cap">HEAP 64 МБ, -Xmn16m: МАСШТАБ 10 PX = 1 МБ</text>
+            <text x="40" y="44" class="dg-n">young 16 МБ</text>
+            <line x1="40" y1="50" x2="200" y2="50" class="dg-sep"/>
+            <text x="210" y="44" class="dg-n">old 48 МБ</text>
+
+            <rect x="40" y="56" width="128" height="52" rx="4" class="dg-cell hit"/>
+            <rect x="168" y="56" width="16" height="52" rx="2" class="dg-cell"/>
+            <rect x="184" y="56" width="16" height="52" rx="2" class="dg-cell"/>
+            <rect x="200" y="56" width="480" height="52" rx="4" class="dg-box"/>
+            <text x="104" y="87" class="dg-t" text-anchor="middle">eden</text>
+            <text x="440" y="87" class="dg-t" text-anchor="middle">old (tenured)</text>
+            <line x1="176" y1="108" x2="176" y2="122" class="dg-line"/>
+            <line x1="192" y1="108" x2="192" y2="122" class="dg-line"/>
+            <text x="184" y="136" class="dg-n" text-anchor="middle">S0 и S1 по 1,6 МБ</text>
+
+            <text x="40" y="160" class="dg-s">новые объекты</text>
+            <text x="168" y="160" class="dg-s">пережившие сборку</text>
+            <text x="440" y="160" class="dg-s" text-anchor="middle">пережившие много сборок</text>
+          </svg>
+        </div>
+        <figcaption>По умолчанию old вдвое больше young (<code>NewRatio=2</code>), а eden в восемь раз больше каждого survivor (<code>SurvivorRatio=8</code>). Здесь размер young задан явно флагом <code>-Xmn16m</code>.</figcaption>
+      </figure>
+      <ul>
+        <li><b>Eden</b> — здесь рождаются все объекты, по сдвигу указателя в TLAB (тема Object Layout &amp; Allocation).</li>
+        <li><b>Survivor S0 и S1</b> — две одинаковые маленькие области для тех, кто пережил сборку. В каждый момент одна из них пустая.</li>
+        <li><b>Old</b>, или tenured, — область для объектов, которые пережили достаточно сборок.</li>
+      </ul>
+      <p>Сборка только молодого поколения называется <b>minor GC</b> или young GC. В логе выше это <code>Pause Young</code>: доли миллисекунды, хотя через eden прошли десятки мегабайт.</p>
+    </section>
+
+    <section class="step" id="minor-gc">
+      <h2>Minor GC копирует выживших между survivor и считает их возраст</h2>
+      <p>Когда eden заполнен, происходит minor GC. Сборщик находит живые объекты eden и одного survivor и <b>копирует</b> их во второй, пустой survivor. Всё остальное в eden и старом survivor — мусор, и обе области просто объявляются пустыми. Каждое копирование увеличивает возраст объекта на единицу. Пролистай несколько сборок подряд.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 256" role="img" aria-label="Eden, два survivor и old. Живые объекты eden при сборке копируются в пустой survivor с возрастом 1, при следующей сборке живые из eden и survivor переезжают в другой survivor, возраст растёт. Объект с возрастом 15 переходит в old. Если живых больше, чем помещается в survivor, лишние сразу уходят в old с возрастом 1.">
+            <defs>
+              <marker id="mg-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="mg-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">EDEN</text>
+            <text x="340" y="20" class="dg-cap">S0</text>
+            <text x="470" y="20" class="dg-cap">S1</text>
+            <text x="600" y="20" class="dg-cap">OLD</text>
+            <rect x="20" y="30" width="300" height="104" rx="8" class="dg-box"/>
+            <rect x="340" y="30" width="110" height="104" rx="8" class="dg-box"/>
+            <rect x="470" y="30" width="110" height="104" rx="8" class="dg-box"/>
+            <rect x="600" y="30" width="106" height="104" rx="8" class="dg-box"/>
+
+            <!-- шаг 1: eden заполнен -->
+            <g data-s="1">
+              <rect x="36" y="48" width="48" height="30" rx="4" class="dg-cell hit"/><rect x="96" y="48" width="48" height="30" rx="4" class="dg-cell"/>
+              <rect x="156" y="48" width="48" height="30" rx="4" class="dg-cell"/><rect x="216" y="48" width="48" height="30" rx="4" class="dg-cell"/>
+              <rect x="36" y="92" width="48" height="30" rx="4" class="dg-cell"/><rect x="96" y="92" width="48" height="30" rx="4" class="dg-cell"/>
+              <rect x="156" y="92" width="48" height="30" rx="4" class="dg-cell hit"/><rect x="216" y="92" width="48" height="30" rx="4" class="dg-cell"/>
+              <text x="60" y="68" class="dg-in" text-anchor="middle">0</text><text x="180" y="112" class="dg-in" text-anchor="middle">0</text>
+            </g>
+            <!-- шаг 2: первая сборка -->
+            <g data-s="2"><text x="170" y="88" class="dg-s" text-anchor="middle">пусто</text></g>
+            <g data-s="2-3">
+              <rect x="350" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><text x="372" y="68" class="dg-in" text-anchor="middle">1</text>
+            </g>
+            <g data-s="2"><rect x="398" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><text x="420" y="68" class="dg-in" text-anchor="middle">1</text>
+              <path d="M84 63 C 200 20, 300 20, 346 60" class="dg-line ok" marker-end="url(#mg-ok)"/></g>
+            <!-- шаг 3: eden снова полон, один объект в S0 умер -->
+            <g data-s="3">
+              <rect x="36" y="48" width="48" height="30" rx="4" class="dg-cell"/><rect x="96" y="48" width="48" height="30" rx="4" class="dg-cell hit"/>
+              <rect x="156" y="48" width="48" height="30" rx="4" class="dg-cell"/><rect x="216" y="48" width="48" height="30" rx="4" class="dg-cell hit"/>
+              <rect x="36" y="92" width="48" height="30" rx="4" class="dg-cell hit"/><rect x="96" y="92" width="48" height="30" rx="4" class="dg-cell"/>
+              <rect x="156" y="92" width="48" height="30" rx="4" class="dg-cell"/><rect x="216" y="92" width="48" height="30" rx="4" class="dg-cell"/>
+              <text x="120" y="68" class="dg-in" text-anchor="middle">0</text><text x="240" y="68" class="dg-in" text-anchor="middle">0</text><text x="60" y="112" class="dg-in" text-anchor="middle">0</text>
+              <rect x="398" y="48" width="44" height="30" rx="4" class="dg-cell miss"/><text x="420" y="68" class="dg-n" text-anchor="middle">умер</text>
+            </g>
+            <!-- шаг 4: вторая сборка, всё переезжает в S1 -->
+            <g data-s="4"><text x="170" y="88" class="dg-s" text-anchor="middle">пусто</text><text x="395" y="88" class="dg-s" text-anchor="middle">пусто</text>
+              <rect x="480" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><rect x="528" y="48" width="44" height="30" rx="4" class="dg-cell hit"/>
+              <rect x="480" y="92" width="44" height="30" rx="4" class="dg-cell hit"/><rect x="528" y="92" width="44" height="30" rx="4" class="dg-cell hit"/>
+              <text x="502" y="68" class="dg-in" text-anchor="middle">1</text><text x="550" y="68" class="dg-in" text-anchor="middle">1</text>
+              <text x="502" y="112" class="dg-in" text-anchor="middle">1</text><text x="550" y="112" class="dg-in" text-anchor="middle">2</text></g>
+            <!-- шаг 5: возраст 15 — переезд в old -->
+            <g data-s="5"><text x="170" y="88" class="dg-s" text-anchor="middle">…много сборок…</text>
+              <rect x="480" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><text x="502" y="68" class="dg-in" text-anchor="middle">3</text>
+              <rect x="528" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><text x="550" y="68" class="dg-in" text-anchor="middle">7</text>
+              <rect x="528" y="92" width="44" height="30" rx="4" class="dg-sep" fill="none"/>
+              <path d="M572 107 C 590 107, 590 63, 604 63" class="dg-line ok" marker-end="url(#mg-ok)"/></g>
+            <g data-s="5-"><rect x="608" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><text x="630" y="68" class="dg-in" text-anchor="middle">15</text></g>
+            <!-- шаг 6: переполнение survivor -->
+            <g data-s="6"><text x="170" y="88" class="dg-s" text-anchor="middle">пусто</text>
+              <rect x="350" y="48" width="44" height="30" rx="4" class="dg-cell hit"/><rect x="398" y="48" width="44" height="30" rx="4" class="dg-cell hit"/>
+              <rect x="350" y="92" width="44" height="30" rx="4" class="dg-cell hit"/><rect x="398" y="92" width="44" height="30" rx="4" class="dg-cell hit"/>
+              <text x="372" y="68" class="dg-in" text-anchor="middle">1</text><text x="420" y="68" class="dg-in" text-anchor="middle">1</text>
+              <text x="372" y="112" class="dg-in" text-anchor="middle">1</text><text x="420" y="112" class="dg-in" text-anchor="middle">1</text>
+              <rect x="608" y="92" width="44" height="30" rx="4" class="dg-cell miss"/><rect x="656" y="92" width="44" height="30" rx="4" class="dg-cell miss"/>
+              <text x="630" y="112" class="dg-in" text-anchor="middle">1</text><text x="678" y="112" class="dg-in" text-anchor="middle">1</text>
+              <path d="M270 128 C 400 160, 560 160, 628 126" class="dg-line bad" marker-end="url(#mg-bad)"/>
+              <text x="450" y="166" class="dg-bad" text-anchor="middle">не влезли в survivor</text></g>
+
+            <!-- подписи -->
+            <text x="20" y="190" class="dg-n">число в объекте — возраст: сколько сборок он пережил</text>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="240" class="dg-in">eden заполнен: из 8 объектов живы 2, остальные — отработавшие запросы</text>
+            <text data-s="2" x="20" y="240" class="dg-in">minor GC 1: 2 живых скопированы в S0 с возрастом 1, eden пуст</text>
+            <text data-s="3" x="20" y="240" class="dg-in">eden снова полон; один объект в S0 тем временем умер</text>
+            <text data-s="4" x="20" y="240" class="dg-in">minor GC 2: живые из eden и S0 — в S1, возраст +1, eden и S0 пусты</text>
+            <text data-s="5" x="20" y="240" class="dg-ok">объект пережил 15 сборок: переезжает в old (promotion)</text>
+            <text data-s="6" x="20" y="240" class="dg-bad">живых больше, чем влезает в survivor: лишние сразу в old</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Eden заполнен восемью объектами. Шесть из них — отработавшие запросы, два ещё нужны. Сборщик находит живые обходом от корней.</li>
+          <li>Minor GC копирует два живых объекта в пустой survivor S0 и ставит им возраст 1. Eden объявляется пустым целиком: шесть мёртвых объектов никто даже не трогал.</li>
+          <li>Приложение снова заполнило eden. Тем временем один объект из S0 умер — ссылок на него больше нет.</li>
+          <li>Minor GC 2: живые из eden и живые из S0 копируются в пустой S1, возраст каждого растёт на единицу. Теперь пусты eden и S0 — survivor поменялись ролями.</li>
+          <li>Так повторяется сборка за сборкой. Объект, переживший 15 сборок, считается долгожителем и переезжает в old. Это <b>promotion</b>.</li>
+          <li>Если живых в молодом поколении больше, чем помещается в survivor, лишним места нет. Они уходят в old сразу, с возрастом 1. Это <b>преждевременное повышение</b> — premature promotion.</li>
+        </ol>
+      </figure>
+      <p>Два survivor нужны из-за копирования: живые объекты переносятся из занятого survivor и eden в пустой. После этого старая область пуста целиком, без дыр, и в ней снова можно выделять память сдвигом указателя. Цена — один survivor всегда пустует.</p>
+      <p>Копирование обходится дёшево, потому что живых мало: на каждой сборке сборщик трогает только их. Сборка молодого поколения размером в гигабайт, где живы 20 МБ, стоит как копирование 20 МБ.</p>
+    </section>
+
+    <section class="step" id="promotion">
+      <h2>Порог возраста подвижен, и переполненный survivor отправляет всех в old</h2>
+      <p>Возраст хранится в 4 битах заголовка объекта (тема Object Layout &amp; Allocation), поэтому максимум — 15. Это и есть <code>MaxTenuringThreshold</code>. Но реальный порог JVM подбирает на каждой сборке сама: если выжившие не помещаются в целевую половину survivor (<code>TargetSurvivorRatio=50</code>), порог снижается. Это видно в логе возрастов. Реальный запуск того же примера:</p>
+      <pre><code class="language-text">$ java -XX:+UseSerialGC -Xmx64m -Xmn16m -Xlog:gc+age=trace,gc -cp out Recent 20000
+GC(0) Desired survivor size 819200 bytes, new threshold 1 (max threshold 15)   # порог упал до 1
+GC(0) - age   1:    1638400 bytes,    1638400 total                            # survivor 1,6 МБ забит целиком
+GC(0) Pause Young (Allocation Failure) 15M-&gt;7M(62M) 1.102ms
+GC(1) - age   1:    1638384 bytes,    1638384 total
+GC(1) Pause Young (Allocation Failure) 19M-&gt;10M(62M) 0.968ms                    # после сборки занято больше:
+GC(2) Pause Young (Allocation Failure) 23M-&gt;13M(62M) 0.981ms                    # old растёт на 3 МБ каждый раз</code></pre>
+      <p>Вот ответ на загадку из первого шага. Недавних платежей 20 000, около 5 МБ, а survivor вмещает 1,6. Всё, что пережило сборку и не влезло, уходит в old — и там умирает через несколько секунд, когда платёж вытесняют из очереди. Minor GC old не собирает. Мёртвые платежи копятся в old, пока он не заполнится, и тогда приходится делать полную сборку всего heap. Живых в нём снова 7 МБ.</p>
+      <p>Лечение — дать молодому поколению вместить объекты средней жизни, чтобы они умирали, не доезжая до old. Увеличим heap и молодое поколение:</p>
+      <pre><code class="language-text">$ java -XX:+UseSerialGC -Xmx128m -Xmn96m -Xlog:gc+age=trace,gc -cp out Recent 20000
+GC(1) Desired survivor size 5013504 bytes, new threshold 15 (max threshold 15)  # порог держится на 15
+GC(9) Pause Young (Allocation Failure) 83M-&gt;7M(118M) 0.359ms                     # после сборки те же 7 МБ
+...                                                                              # итого 15 молодых и 0 полных</code></pre>
+      <p>Шесть полных сборок исчезли. Живых данных столько же, но теперь они умирают в молодом поколении, где мусор бесплатный. Отсюда правило настройки: <b>объекты средней жизни должны умирать в young</b>. Признаки проблемы — порог возраста в логе постоянно низкий, а old растёт после каждой молодой сборки.</p>
+      <div class="trap">
+        <p class="myth">Если полных сборок много, нужно увеличить heap.</p>
+        <p class="fact">Здесь помогло не увеличение heap само по себе, а размер молодого поколения. Больший old с тем же маленьким young только реже бы заполнялся мёртвыми платежами, но полные сборки остались бы и стали бы длиннее.</p>
+      </div>
+    </section>
+
+    <section class="step" id="card-table">
+      <h2>Ссылки из old в young минор находит по card table, не обходя old</h2>
+      <p>У minor GC есть проблема. Корни — это стеки и static-поля, но живой молодой объект может быть достижим и из old: кеш тарифов в old получил ссылку на новый объект курса. Если minor GC не увидит эту ссылку, он соберёт живой объект. А обходить весь old на каждой молодой сборке — значит потерять всю выгоду поколений.</p>
+      <p>Решение — <b>card table</b>. Old разбит на карты по 512 байт, и для каждой карты есть байт-отметка. Каждый раз, когда программа записывает ссылку в поле объекта, JIT добавляет пару инструкций — <b>барьер записи</b> — и помечает карту этого объекта грязной. На minor GC сборщик сканирует как дополнительные корни только грязные карты.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 216" role="img" aria-label="Old разбит на карты по 512 байт. Объект tariffs в карте 3 получил ссылку на молодой объект Rate. Барьер записи пометил карту 3 грязной в таблице карт. Minor GC сканирует как корни только грязные карты, а не весь old.">
+            <defs>
+              <marker id="ct-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ct-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">OLD: КАРТЫ ПО 512 БАЙТ</text>
+            <text x="590" y="20" class="dg-cap">YOUNG</text>
+
+            <!-- карты old -->
+            <g>
+              <rect x="20" y="34" width="48" height="44" rx="3" class="dg-cell"/><rect x="72" y="34" width="48" height="44" rx="3" class="dg-cell"/>
+              <rect x="124" y="34" width="48" height="44" rx="3" class="dg-cell"/><rect x="176" y="34" width="48" height="44" rx="3" class="dg-cell miss"/>
+              <rect x="228" y="34" width="48" height="44" rx="3" class="dg-cell"/><rect x="280" y="34" width="48" height="44" rx="3" class="dg-cell"/>
+              <rect x="332" y="34" width="48" height="44" rx="3" class="dg-cell"/><rect x="384" y="34" width="48" height="44" rx="3" class="dg-cell"/>
+              <rect x="436" y="34" width="48" height="44" rx="3" class="dg-cell"/><rect x="488" y="34" width="48" height="44" rx="3" class="dg-cell"/>
+            </g>
+            <rect x="180" y="42" width="88" height="28" rx="5" class="dg-box"/>
+            <text x="224" y="61" class="dg-in" text-anchor="middle">tariffs</text>
+
+            <!-- young -->
+            <rect x="580" y="34" width="126" height="44" rx="8" class="dg-box"/>
+            <rect x="596" y="42" width="94" height="28" rx="5" class="dg-cell hit"/>
+            <text x="643" y="61" class="dg-in" text-anchor="middle">Rate</text>
+            <path d="M268 56 C 400 20, 500 20, 592 50" class="dg-line" marker-end="url(#ct-n)"/>
+
+            <!-- таблица карт -->
+            <text x="548" y="122" class="dg-n">таблица карт:</text><text x="548" y="136" class="dg-n">байт на карту</text>
+            <g text-anchor="middle">
+              <rect x="20" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="44" y="130" class="dg-in">0</text>
+              <rect x="72" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="96" y="130" class="dg-in">0</text>
+              <rect x="124" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="148" y="130" class="dg-in">0</text>
+              <rect x="176" y="112" width="48" height="26" rx="3" class="dg-cell miss"/><text x="200" y="130" class="dg-bad">1</text>
+              <rect x="228" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="252" y="130" class="dg-in">0</text>
+              <rect x="280" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="304" y="130" class="dg-in">0</text>
+              <rect x="332" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="356" y="130" class="dg-in">0</text>
+              <rect x="384" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="408" y="130" class="dg-in">0</text>
+              <rect x="436" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="460" y="130" class="dg-in">0</text>
+              <rect x="488" y="112" width="48" height="26" rx="3" class="dg-cell"/><text x="512" y="130" class="dg-in">0</text>
+            </g>
+            <path d="M200 78 L 200 108" class="dg-line bad" marker-end="url(#ct-bad)"/>
+
+            <text x="20" y="170" class="dg-s">1. запись ссылки в поле старого объекта: барьер записи ставит карте отметку</text>
+            <text x="20" y="190" class="dg-s">2. minor GC сканирует как корни только отмеченные карты — 512 байт, а не весь old</text>
+          </svg>
+        </div>
+        <figcaption>Отметки пишет сам скомпилированный код приложения, поэтому у поколений есть постоянная цена — лишние инструкции на каждую запись ссылки.</figcaption>
+      </figure>
+      <p>Поэтому write barrier — плата за поколения, которую приложение платит всё время, а не только во время сборки. G1 устроен сложнее: у каждого его региона есть remembered set — список мест, откуда на регион ссылаются. Но идея та же, об этом тема G1.</p>
+    </section>
+
+    <section class="step" id="major-full">
+      <h2>Minor, major и full — это разный объём работы</h2>
+      <p>Названия сборок в разговорах используют вольно, поэтому договоримся:</p>
+      <table class="mx">
+        <thead><tr><th>Сборка</th><th>Что собирает</th><th>Как выглядит в логе</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td><b>minor</b>, young</td><td>только молодое поколение</td><td><code>Pause Young</code></td><td>пропорциональна живым в young, обычно миллисекунды</td></tr>
+          <tr><td><b>major</b>, old</td><td>старое поколение, часто параллельно с приложением</td><td>у G1: <code>Concurrent Mark</code> и <code>Pause Young (Mixed)</code></td><td>зависит от сборщика</td></tr>
+          <tr><td><b>full</b></td><td>весь heap целиком, с остановкой</td><td><code>Pause Full</code></td><td>пропорциональна всем живым данным: на больших heap — секунды</td></tr>
+        </tbody>
+      </table>
+      <p>Full GC в сервисе — почти всегда сигнал проблемы, а не нормальный режим. Причины в логе пишутся в скобках:</p>
+      <ul>
+        <li><code>Allocation Failure</code> — old заполнен и места нет. Часто это преждевременное повышение, как в этом уроке, или утечка.</li>
+        <li><code>G1 Compaction Pause</code> у G1 — не хватило свободных регионов, чтобы скопировать живые объекты.</li>
+        <li><code>System.gc()</code> — его вызвал код или сама JVM из-за direct-памяти.</li>
+        <li><code>Metadata GC Threshold</code> — вырос Metaspace, нужна выгрузка классов.</li>
+      </ul>
+      <p>Где кончается гипотеза поколений? Она верна для типичного сервиса, но бывают нагрузки иначе: большие кеши с вытеснением по LRU, где объекты живут минуты и умирают уже в old; сессии пользователей со временем жизни в полчаса. Для них настройкой young не обойтись, и выбирают сборщик, который собирает old эффективно или конкурентно: G1 со смешанными сборками, generational ZGC. Об этом темы G1, ZGC &amp; Shenandoah и Choosing a Collector.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Большинство объектов умирает молодыми, поэтому heap делят на young (eden и два survivor) и old. Minor GC трогает только живых в young и стоит миллисекунды.</li>
+        <li>Minor GC копирует живых из eden и одного survivor в другой survivor. Каждое копирование — плюс один к возрасту. Два survivor нужны, чтобы после копирования область оставалась сплошной.</li>
+        <li>После 15 сборок объект переезжает в old. Если survivor переполнен, выжившие уходят в old сразу — premature promotion — и там копятся мёртвыми до full GC.</li>
+        <li>Объекты средней жизни должны умирать в young: признак беды — низкий порог в логе <code>gc+age</code> и рост old после каждой молодой сборки.</li>
+        <li>Ссылки из old в young minor GC находит через card table, которую помечает барьер записи — постоянная цена поколений.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="generations-why" data-freq="3">
+      <h3>Зачем heap делят на поколения?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Из-за слабой гипотезы поколений: большинство объектов умирает вскоре после создания. Сборка обходит только живые объекты, поэтому область, где лежат одни новые объекты, собирается очень дёшево: почти всё там мусор. Heap делят на young — eden и два survivor — и old для долгожителей, и молодое поколение собирают часто и отдельно.</p>
+          <p>В сервисе это DTO запросов, JSON и промежуточные коллекции: они умирают за миллисекунды и почти не стоят сборщику. А кеши и бины живут в old, куда сборщик заглядывает редко.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Цена поколений — барьер записи на каждое присваивание ссылки и card table, чтобы находить ссылки из old в young.</li>
+            <li>Гипотеза ломается на объектах средней жизни: LRU-кешах, сессиях. Они доживают до old и умирают там.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему сборка молодого поколения размером 1 ГБ может идти миллисекунды?</summary>
+          <p>Потому что стоимость зависит от живых объектов, а не от размера области. Если из гигабайта живы 20 МБ, сборщик скопирует 20 МБ, а остальное просто объявит свободным.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="minor-gc-q" data-freq="3">
+      <h3>Как проходит minor GC? Зачем два survivor?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда eden заполнен, сборщик останавливает приложение, находит живые объекты в eden и в занятом survivor и копирует их в пустой survivor, увеличивая возраст на единицу. После этого eden и старый survivor объявляются пустыми целиком. Объекты, пережившие порог сборок, по умолчанию до 15, переезжают в old.</p>
+          <p>Два survivor нужны, потому что это копирующая сборка: живые переносятся в пустую область, а исходная освобождается целиком, без дыр. Поэтому один survivor всегда пустует.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Максимум 15, потому что под возраст в mark word отведено 4 бита.</li>
+            <li>Реальный порог JVM снижает сама, если выжившие не помещаются в survivor, — это видно в логе <code>-Xlog:gc+age=trace</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>В eden 100 объектов, в занятом survivor 10. Живы 5 в eden и 3 в survivor. Что будет после minor GC?</summary>
+          <p>Восемь живых объектов окажутся в другом survivor: пять с возрастом 1 и три с возрастом на единицу больше прежнего, если никто из трёх не достиг порога — тогда он переедет в old. Eden и прежний survivor станут пустыми, 102 мёртвых объекта сборщик даже не трогал.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="promotion-q" data-freq="2">
+      <h3>Когда объект попадает в old? Что такое premature promotion?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Объект переезжает в old, когда переживёт порог молодых сборок, по умолчанию до 15. Ещё в old сразу уходят выжившие, которым не хватило места в survivor, и очень большие объекты. Преждевременное повышение — когда в old попадают объекты средней жизни, которые умерли бы через пару сборок. Они копятся в old мёртвыми и в итоге вызывают full GC.</p>
+          <p>В уроке очередь недавних платежей на 5 МБ не помещалась в survivor на 1,6 МБ, и это давало шесть полных сборок. Увеличение молодого поколения убрало их все.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В логе gc+age постоянно new threshold 1, а old растёт после каждой молодой сборки. Что предложишь?</summary>
+          <p>Survivor переполнен, объекты средней жизни уезжают в old раньше времени. Нужно больше места в молодом поколении: увеличить <code>-Xmn</code> или долю young. Для G1 — не мешать ему подстраивать young, убрав жёсткий <code>-Xmn</code>, и проверить цель по паузам. Параллельно стоит проверить, не держит ли код объекты дольше необходимого.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="minor-major-full" data-freq="3">
+      <h3>Чем minor, major и full GC отличаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Minor GC собирает только молодое поколение, обычно за миллисекунды. Major — сборка старого поколения, у современных сборщиков её большая часть идёт параллельно с приложением. Full GC собирает весь heap целиком с остановкой, и её длина пропорциональна всем живым данным: на больших heap это секунды.</p>
+          <p>Full GC в сервисе я считаю симптомом. Смотрю причину в скобках в логе: <code>Allocation Failure</code>, <code>System.gc()</code>, <code>Metadata GC Threshold</code>, у G1 — нехватка регионов для копирования.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что означает Pause Young (Mixed) в логе G1?</summary>
+          <p>Смешанную сборку: G1 собирает все молодые регионы и заодно часть старых, где больше всего мусора. Так G1 чистит old постепенно, без полной сборки. Подробно — в теме G1.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="card-table-q" data-freq="2">
+      <h3>Как minor GC находит ссылки из old в young?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через card table. Old разбит на карты по 512 байт, и у каждой есть отметка. При каждой записи ссылки в поле объекта скомпилированный код выполняет барьер записи и помечает карту грязной. На minor GC сборщик сканирует как дополнительные корни только грязные карты, а не весь old.</p>
+          <p>Это постоянная плата за поколения: несколько лишних инструкций на каждое присваивание ссылки в работающем приложении.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что будет, если minor GC не учтёт ссылку из old в young?</summary>
+          <p>Он посчитает молодой объект мёртвым и освободит его место, а старый объект останется со ссылкой на мусор. Это повреждение памяти, поэтому барьер записи обязателен.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/garbage-collector-implementation.html">JDK 21 GC Tuning Guide: Generations</a> — основа урока: гипотеза поколений, eden, survivor, old, сборки.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/factors-affecting-garbage-collection-performance.html">JDK 21 GC Tuning Guide: Factors Affecting GC Performance</a> — размер молодого поколения, SurvivorRatio, пороги возраста.</li>
+      <li><a href="https://gchandbook.org/">The Garbage Collection Handbook</a> — главы о поколениях и барьерах записи.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java, JDK 21</a> — флаги <code>-Xmn</code>, <code>MaxTenuringThreshold</code>, <code>-Xlog:gc+age</code>.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
