@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Полиморфизм · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="polymorphism">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Полиморфизм</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="problem">
+      <h2>Код, который знает обо всех</h2>
+      <p>Платёжный сервис банка принимает оплату картой: считает комиссию, проверяет лимит, печатает строку в чеке. Потом добавили СБП, ещё через полгода — оплату из кошелька. Самый прямой способ поддержать новый вариант — ветвиться по типу:</p>
+      <pre><code class="language-java">long fee(Payment p) {
+    return switch (p.type()) {
+        case "CARD"   -&gt; p.amount() * 15 / 1000;              // 1,5%
+        case "SBP"    -&gt; 0;
+        case "WALLET" -&gt; Math.min(p.amount() / 100, 5_000);   // 1%, не больше 50 ₽
+        default -&gt; throw new IllegalArgumentException("unknown type " + p.type());
+    };
+}
+
+long limit(Payment p)        { /* такой же switch */ }
+String receiptLine(Payment p) { /* и ещё один */ }</code></pre>
+      <p>Пока вариантов три, это читается. С ростом начинаются проблемы:</p>
+      <ul>
+        <li>Новый способ оплаты — правка в каждом таком switch. А они не только здесь: в отчётах, антифроде, возвратах.</li>
+        <li>Забытую ветку компилятор не заметит. Тип «QR» уйдёт в default и упадёт уже в проде.</li>
+        <li>Сервис платежей импортирует клиентов всех провайдеров. Обновился SDK эквайера — пересобирается и заново тестируется ядро, хотя бизнес-правила не менялись.</li>
+      </ul>
+      <p>Корень у всех трёх проблем один: код, который принимает решение, знает про все варианты. Полиморфизм переносит это знание внутрь самих вариантов.</p>
+    </section>
+
+    <section class="step" id="idea">
+      <h2>Общий контракт, разное поведение</h2>
+      <p class="idea">Розетка одна, а приборы разные. Розетка не знает, что в неё включили, чайник или зарядку: она выдаёт ток по общему стандарту, а что с ним делать, решает прибор. Интерфейс в Java — стандарт вилки, реализация — прибор.</p>
+      <p>Контракт описывают интерфейсом, а каждый вариант реализует его по-своему:</p>
+      <pre><code class="language-java">interface PaymentMethod {
+    long fee(long amount);                 // комиссия в копейках
+    long limit();                          // лимит одного платежа
+}
+
+class Card implements PaymentMethod {
+    public long fee(long amount) { return amount * 15 / 1000; }   // 1,5%
+    public long limit() { return 10_000_000; }                    // 100 000 ₽
+}
+
+class Sbp implements PaymentMethod {
+    public long fee(long amount) { return 0; }
+    public long limit() { return 100_000_000; }                   // 1 000 000 ₽
+}
+
+long total(PaymentMethod m, long amount) {   // не знает ни про Card, ни про Sbp
+    if (amount &gt; m.limit()) throw new IllegalStateException("limit exceeded");
+    return amount + m.fee(amount);
+}
+
+System.out.println(total(new Card(), 10_000));
+System.out.println(total(new Sbp(), 10_000));</code></pre>
+      <pre class="out">10150
+10000</pre>
+      <p>Метод <code>total</code> написан один раз и работает с любым способом оплаты, в том числе с тем, которого ещё нет. Это и есть полиморфизм: один и тот же вызов <code>m.fee(amount)</code> выполняет разный код в зависимости от того, какой объект лежит в <code>m</code>.</p>
+      <p>Новый способ оплаты теперь — новый класс, а существующий код не меняется. Забыть метод тоже не получится: класс, который реализует интерфейс не полностью, не скомпилируется. Это принцип открытости-закрытости из SOLID: код открыт для расширения и закрыт для изменения.</p>
+      <h3>Три вида полиморфизма</h3>
+      <p>Строго говоря, этим словом называют три механизма. Всё, что выше, — первый, и на собесе почти всегда спрашивают про него.</p>
+      <table class="mx">
+        <thead><tr><th>Вид</th><th>Как в Java</th><th>Когда выбирается код</th></tr></thead>
+        <tbody>
+          <tr><td>Подтипов</td><td>interface, extends, переопределение</td><td>Во время выполнения, по классу объекта</td></tr>
+          <tr><td>Ad-hoc</td><td>Перегрузка: <code>print(int)</code>, <code>print(String)</code></td><td>При компиляции, по типам аргументов</td></tr>
+          <tr><td>Параметрический</td><td>Generics: <code>List&lt;T&gt;</code></td><td>При компиляции, один код для всех T</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="dispatch">
+      <h2>Как JVM выбирает метод</h2>
+      <p>Вызов <code>m.fee(amount)</code> проходит два решения, и принимают их в разное время разные участники.</p>
+      <ol>
+        <li><b>Компилятор</b> смотрит на объявленный тип переменной <code>m</code> — PaymentMethod. Проверяет, что там есть метод <code>fee(long)</code>, и записывает в байткод его сигнатуру.</li>
+        <li><b>JVM</b> при выполнении смотрит на объект, который реально лежит в <code>m</code>, берёт его класс и ищет реализацию этой сигнатуры в нём, поднимаясь по иерархии вверх.</li>
+      </ol>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Слева: компилятор по типу ссылки PaymentMethod записывает в байткод invokeinterface PaymentMethod.fee. Справа: при выполнении для объекта Card вызывается Card.fee с комиссией 150, для объекта Sbp — Sbp.fee с комиссией 0.">
+            <defs>
+              <marker id="pd-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="pd-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+
+            <text x="20" y="22" class="dg-cap">КОМПИЛЯЦИЯ: ТИП ССЫЛКИ</text>
+            <rect x="14" y="36" width="300" height="124" rx="8" class="dg-box"/>
+            <text x="26" y="60" class="dg-t">PaymentMethod m = …;</text>
+            <text x="26" y="80" class="dg-t">m.fee(10_000);</text>
+            <text x="26" y="110" class="dg-s">в байткоде записано:</text>
+            <text x="26" y="128" class="dg-in">invokeinterface</text>
+            <text x="26" y="146" class="dg-in">PaymentMethod.fee:(J)J</text>
+
+            <text x="350" y="22" class="dg-cap">ВЫПОЛНЕНИЕ: КЛАСС ОБЪЕКТА</text>
+            <rect x="350" y="36" width="170" height="46" rx="8" class="dg-box"/>
+            <text x="360" y="55" class="dg-t">объект Card</text>
+            <text x="360" y="72" class="dg-s">m = new Card()</text>
+            <rect x="350" y="114" width="170" height="46" rx="8" class="dg-box"/>
+            <text x="360" y="133" class="dg-t">объект Sbp</text>
+            <text x="360" y="150" class="dg-s">m = new Sbp()</text>
+
+            <rect x="548" y="36" width="160" height="46" rx="8" class="dg-cell hit"/>
+            <text x="558" y="55" class="dg-t">Card.fee</text>
+            <text x="558" y="72" class="dg-s">комиссия 150</text>
+            <rect x="548" y="114" width="160" height="46" rx="8" class="dg-cell hit"/>
+            <text x="558" y="133" class="dg-t">Sbp.fee</text>
+            <text x="558" y="150" class="dg-s">комиссия 0</text>
+
+            <path d="M314 72 C 330 72, 330 59, 346 59" class="dg-line" marker-end="url(#pd-n)"/>
+            <path d="M314 124 C 330 124, 330 137, 346 137" class="dg-line" marker-end="url(#pd-n)"/>
+            <path d="M520 59 L 544 59" class="dg-line ok" marker-end="url(#pd-ok)"/>
+            <path d="M520 137 L 544 137" class="dg-line ok" marker-end="url(#pd-ok)"/>
+
+            <text x="14" y="188" class="dg-s">Сигнатуру выбирает компилятор по типу ссылки, реализацию — JVM по классу объекта</text>
+          </svg>
+        </div>
+        <figcaption><code>(J)J</code> — дескриптор метода в байткоде: принимает long, возвращает long.</figcaption>
+      </figure>
+      <p>Из этого правила следуют ответы почти на все задачи «что выведет». Тип переменной решает, какие методы можно вызвать и с какой сигнатурой. Класс объекта решает, чья реализация выполнится. Проверь на примере, где работают оба решения:</p>
+      <pre><code class="language-java">class Printer {
+    void print(Object o) { System.out.println("Printer.Object"); }
+    void print(String s) { System.out.println("Printer.String"); }
+}
+class LoudPrinter extends Printer {
+    @Override void print(Object o) { System.out.println("Loud.Object"); }
+}
+
+Printer p = new LoudPrinter();
+Object text = "hi";
+p.print(text);
+p.print("hi");</code></pre>
+      <pre class="out">Loud.Object
+Printer.String</pre>
+      <p>В первом вызове компилятор по типу <code>Object</code> выбрал <code>print(Object)</code>, а JVM нашла его версию в LoudPrinter. Во втором компилятор выбрал <code>print(String)</code>. LoudPrinter его не переопределяет, поэтому выполняется версия Printer.</p>
+      <h3>Что решается заранее</h3>
+      <p>Выбор по классу объекта касается только методов экземпляра, которые можно переопределить. Остальное компилятор фиксирует по типам, известным при компиляции:</p>
+      <table class="mx">
+        <thead><tr><th>Что</th><th>Выбирается по</th></tr></thead>
+        <tbody>
+          <tr><td>Реализация метода экземпляра</td><td>Классу объекта, во время выполнения</td></tr>
+          <tr><td>Какой из перегруженных методов</td><td>Объявленным типам аргументов</td></tr>
+          <tr><td>static-метод</td><td>Типу ссылки: объект не нужен вовсе</td></tr>
+          <tr><td>Поле</td><td>Типу ссылки: поле с тем же именем в подклассе — второе поле, а не замена</td></tr>
+          <tr><td>private-метод</td><td>Классу, в котором написан вызов: он не наследуется</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Тип переменной определяет, какой метод выполнится.</p>
+        <p class="fact">Он определяет, какие методы можно вызвать и какую сигнатуру выберет компилятор. Выполнится реализация из класса объекта. Приведение <code>(Printer) p</code> тоже меняет только тип ссылки, но не объект.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: vtable, itable и JIT</summary>
+        <p>У каждого класса HotSpot хранит таблицу виртуальных методов, vtable. Унаследованный метод лежит в той же ячейке, что у родителя, а переопределение подменяет адрес в ней. Поэтому <code>invokevirtual</code> — это чтение класса из заголовка объекта и переход по известному индексу. У интерфейсных методов индекс в разных классах разный, и <code>invokeinterface</code> ищет по отдельной таблице, itable, — чуть дороже.</p>
+        <p>На практике обе таблицы почти всегда обходит JIT. Он профилирует, какие классы приходят в точку вызова. Если один-два, вставляет проверку класса и тело метода прямо в место вызова. Если позже придёт новый класс, проверка не пройдёт, код откатится в интерпретатор (деоптимизация) и перекомпилируется с новым профилем. Дорогим вызов остаётся только там, где встречается много классов без явного лидера, — megamorphic call site.</p>
+      </details>
+    </section>
+
+    <section class="step" id="dependencies">
+      <h2>Главное: зависимость можно развернуть</h2>
+      <p>Самое ценное в полиморфизме видно не внутри одного метода, а в устройстве всего приложения. Смотри не на то, кто кого вызывает, а на то, кто кого импортирует.</p>
+      <p>Без интерфейса вызов и зависимость идут в одну сторону. PaymentService вызывает CardGatewayClient и поэтому импортирует его. Бизнес-правила зависят от HTTP-клиента эквайера, его DTO и версии SDK.</p>
+      <p>С интерфейсом вызов идёт так же — из сервиса в шлюз. А зависимость в исходниках разворачивается: интерфейс PaymentMethod лежит рядом с бизнес-логикой, а класс CardGateway в модуле интеграций импортирует его и реализует. Ядро не знает, что шлюз вообще существует.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 258" role="img" aria-label="Слева, без интерфейса: PaymentService импортирует и вызывает CardGatewayClient, обе стрелки вниз. Справа, с интерфейсом: PaymentService в модуле core использует интерфейс PaymentMethod, CardGateway в модуле integrations импортирует PaymentMethod, стрелка зависимости вверх, а вызов по-прежнему идёт из PaymentService в CardGateway.">
+            <defs>
+              <marker id="dp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              <marker id="dp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+
+            <!-- слева: без интерфейса -->
+            <text x="20" y="20" class="dg-cap bad">БЕЗ ИНТЕРФЕЙСА</text>
+            <rect x="40" y="44" width="260" height="46" rx="8" class="dg-box"/>
+            <text x="50" y="63" class="dg-t">PaymentService</text>
+            <text x="50" y="80" class="dg-s">бизнес-правила</text>
+            <rect x="40" y="164" width="260" height="46" rx="8" class="dg-box"/>
+            <text x="50" y="183" class="dg-t">CardGatewayClient</text>
+            <text x="50" y="200" class="dg-s">HTTP-клиент и DTO эквайера</text>
+            <path d="M130 90 L 130 158" class="dg-line bad" marker-end="url(#dp-bad)"/>
+            <text x="138" y="130" class="dg-s">import</text>
+            <path d="M220 90 L 220 158" class="dg-line" stroke-dasharray="5 4" marker-end="url(#dp-n)"/>
+            <text x="228" y="130" class="dg-s">вызов</text>
+            <text x="20" y="248" class="dg-bad">import и вызов — в одну сторону</text>
+
+            <line x1="356" y1="10" x2="356" y2="250" class="dg-sep"/>
+
+            <!-- справа: с интерфейсом -->
+            <text x="386" y="20" class="dg-cap">С ИНТЕРФЕЙСОМ</text>
+            <rect x="384" y="30" width="324" height="80" rx="10" class="dg-sep" fill="none"/>
+            <text x="392" y="104" class="dg-n">core</text>
+            <rect x="392" y="44" width="140" height="46" rx="8" class="dg-box"/>
+            <text x="402" y="63" class="dg-t">PaymentService</text>
+            <text x="402" y="80" class="dg-s">бизнес-правила</text>
+            <rect x="556" y="44" width="144" height="46" rx="8" class="dg-box"/>
+            <text x="566" y="63" class="dg-t">PaymentMethod</text>
+            <text x="566" y="80" class="dg-s">interface</text>
+            <path d="M532 67 L 552 67" class="dg-line" marker-end="url(#dp-n)"/>
+
+            <rect x="546" y="154" width="162" height="66" rx="10" class="dg-sep" fill="none"/>
+            <text x="540" y="214" class="dg-n" text-anchor="end">integrations</text>
+            <rect x="556" y="164" width="144" height="46" rx="8" class="dg-box"/>
+            <text x="566" y="183" class="dg-t">CardGateway</text>
+            <text x="566" y="200" class="dg-s">implements</text>
+            <path d="M628 164 L 628 96" class="dg-line ok" marker-end="url(#dp-ok)"/>
+            <text x="636" y="134" class="dg-s">import</text>
+            <path d="M462 90 C 462 150, 500 187, 550 187" class="dg-line" stroke-dasharray="5 4" marker-end="url(#dp-n)"/>
+            <text x="416" y="150" class="dg-s">вызов</text>
+            <text x="386" y="248" class="dg-ok">import вверх, вызов вниз</text>
+          </svg>
+        </div>
+        <figcaption>Сплошная стрелка — зависимость в исходниках (кто кого импортирует), пунктир — направление вызова во время работы.</figcaption>
+      </figure>
+      <p>Что это даёт на практике:</p>
+      <ul>
+        <li>Ядро собирается и тестируется без инфраструктуры: в тесте вместо шлюза — фейковая реализация на три строки.</li>
+        <li>Провайдера меняют, не трогая бизнес-правила: пишут новый класс в модуле интеграций.</li>
+        <li>Границу закрепляет сборка. Модуль core в Maven или Gradle не зависит от integrations, и случайный импорт шлюза в бизнес-логику просто не скомпилируется.</li>
+      </ul>
+      <pre><code class="language-text">bank.payments.core           PaymentService, PaymentMethod   ← ничего не знает об интеграциях
+bank.payments.integrations   CardGateway implements PaymentMethod</code></pre>
+      <p>Это принцип инверсии зависимостей (DIP) из SOLID, и работает он только благодаря полиморфизму. Spring здесь — механизм сборки: при старте он находит реализации интерфейса и подставляет их туда, где их ждут.</p>
+      <details class="deep">
+        <summary>История: полиморфизм до ООП</summary>
+        <p>Идея старше Java. В UNIX каждый драйвер устройства ввода-вывода обязан предоставить одинаковый набор функций: open, close, read, write, seek. Структура файла в C хранит указатели на функции своего драйвера, а <code>getchar</code> просто вызывает функцию read того файла, что стоит за стандартным вводом. Поэтому программа, которая копирует ввод в вывод, работает с клавиатурой, файлом и сетью, и её не нужно переписывать под новое устройство.</p>
+        <p>Цена — дисциплина. Таблицы указателей собирали руками, и нарушенное соглашение всплывало только во время выполнения. ООП-языки сделали то же самое безопасным: таблицу методов строит компилятор, а класс, который не реализовал метод, не соберётся. Роберт Мартин в «Чистой архитектуре» (глава 5) считает именно это главным вкладом ООП: полный контроль над направлением зависимостей в исходниках.</p>
+      </details>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Когда полиморфизм не спасает</h2>
+      <h3>Реализация нарушает контракт</h3>
+      <p>Подстановка работает, только если каждая реализация ведёт себя так, как обещает интерфейс. Иначе вызывающий код снова начинает проверять тип.</p>
+      <pre><code class="language-java">class DepositAccount implements Account {   // вклад: снимать нельзя
+    public void withdraw(long amount) {
+        throw new UnsupportedOperationException("deposit");
+    }
+}</code></pre>
+      <p>Код, написанный для Account, теперь падает на вкладах, и в нём появляется <code>if (acc instanceof DepositAccount)</code>. Это нарушение принципа подстановки Лисков (LSP). Лечится моделью, а не проверками: если снимать можно не со всех счетов, withdraw не должен входить в общий контракт. Его выносят в отдельный интерфейс, например WithdrawableAccount.</p>
+      <h3>Цепочка instanceof вместо метода</h3>
+      <p><code>if (p instanceof Card) … else if (p instanceof Sbp) …</code> возвращает проблему из первого шага: новый тип молча проскочит мимо всех веток. Если ветки выбирают поведение, это поведение должно быть методом типа.</p>
+      <h3>Набор типов закрыт, а операций много</h3>
+      <p>Бывает обратная ситуация. Типы известны заранее и описывают данные: события, команды, ответы API. А операций над ними много, и живут они в разных модулях: сериализация, валидация, отчёты. Добавлять метод во все классы ради каждой операции неудобно. В Java 21 для этого есть sealed-иерархия и switch по типу:</p>
+      <pre><code class="language-java">sealed interface Payment permits CardPayment, SbpPayment {}
+record CardPayment(long amount, String pan) implements Payment {}
+record SbpPayment(long amount, String phone) implements Payment {}
+
+static long fee(Payment p) {
+    return switch (p) {                 // без default: компилятор проверит полноту
+        case CardPayment c -&gt; c.amount() * 15 / 1000;
+        case SbpPayment s -&gt; 0;
+    };
+}</code></pre>
+      <p>Добавишь WalletPayment в permits — этот switch перестанет компилироваться с ошибкой <code>the switch expression does not cover all possible input values</code>, пока не допишешь ветку. От switch из первого шага он отличается именно этим: компилятор знает все варианты.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Интерфейс и реализации</th><th>sealed и switch</th></tr></thead>
+        <tbody>
+          <tr><td>Добавить тип</td><td>Новый класс, старый код не трогаешь</td><td>Правка каждого switch, компилятор покажет где</td></tr>
+          <tr><td>Добавить операцию</td><td>Метод в каждом классе</td><td>Новый switch в одном месте</td></tr>
+          <tr><td>Подходит для</td><td>Поведения, интеграций, плагинов</td><td>Данных: событий, команд, ответов</td></tr>
+        </tbody>
+      </table>
+      <p>Этот компромисс называют expression problem. Выбирай по тому, что будет меняться чаще: набор типов или набор операций.</p>
+      <h3>Интерфейс ради интерфейса</h3>
+      <p>Интерфейс с единственной реализацией внутри одного модуля — лишний файл и лишний переход при чтении кода. Spring проксирует и классы, Mockito мокает класс. Интерфейс нужен, когда вариантов больше одного или когда он разворачивает зависимость между модулями, как в прошлом шаге.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Полиморфизм — один вызов выполняет разный код в зависимости от объекта.</li>
+        <li>Компилятор выбирает сигнатуру по типу ссылки, JVM — реализацию по классу объекта. Перегрузка, поля, static и private выбираются при компиляции.</li>
+        <li>Главная польза — управление зависимостями: ядро объявляет интерфейс, детали его реализуют.</li>
+        <li>Реализации обязаны выполнять контракт, иначе в код возвращаются проверки типов.</li>
+        <li>Закрытый набор типов, над которым много операций, — повод для sealed и switch.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-is" data-freq="3">
+      <h3>Что такое полиморфизм?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Полиморфизм — это когда один и тот же вызов выполняет разный код в зависимости от объекта. В Java это прежде всего полиморфизм подтипов: я работаю через интерфейс или базовый класс, а какая реализация выполнится, JVM решает во время выполнения по классу объекта. Это позднее связывание. Сигнатуру метода при этом выбирает компилятор по типу ссылки.</p>
+          <p>Практический смысл — вызывающему коду не нужно знать о вариантах. Например, расчёт платежа работает через интерфейс PaymentMethod, и новый способ оплаты — это новый класс, а не правка всех switch по типу. А на уровне архитектуры полиморфизм позволяет развернуть зависимость: бизнес-логика объявляет интерфейс, интеграции его реализуют, и ядро не зависит от инфраструктуры.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Кроме полиморфизма подтипов есть ad-hoc (перегрузка) и параметрический (generics), но оба выбираются при компиляции.</li>
+            <li>Если набор типов закрыт, а операций много, вместо полиморфизма беру sealed-иерархию и switch по типу: компилятор проверяет полноту. Это другая сторона expression problem.</li>
+            <li>Полиморфизм работает, пока реализации выполняют контракт. Реализация, которая бросает UnsupportedOperationException, нарушает LSP и возвращает в код проверки типов.</li>
+            <li>По скорости: JIT инлайнит вызов, если в точку вызова приходят один-два класса. Дорого только в megamorphic-точках горячего кода.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-java">class A {
+    String who() { return "A"; }
+    String hello() { return "hello from " + who(); }
+}
+class B extends A {
+    String who() { return "B"; }
+}
+
+A a = new B();
+System.out.println(a.hello());
+System.out.println(((A) a).who());</code></pre>
+          <pre class="out">hello from B
+B</pre>
+          <p><code>hello</code> объявлен в A, но <code>who()</code> внутри него — это <code>this.who()</code>, а <code>this</code> указывает на объект B. Приведение к A меняет только тип ссылки, класс объекта остаётся B.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Что такое раннее и позднее связывание?</summary>
+          <p>Раннее связывание — метод известен уже при компиляции: static- и private-методы, конструкторы, вызовы через <code>super</code>. Позднее — реализация выбирается во время выполнения по классу объекта: так вызываются все остальные методы экземпляра. final-метод формально вызывается как виртуальный, но переопределить его нельзя, поэтому результат тот же, что при раннем связывании.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Приведи пример полиморфизма из своего проекта.</summary>
+          <p>Хороший ответ строится так: задача, как выглядел бы код без полиморфизма, что сделал, что это дало. Например: «Уведомления уходили по email и SMS, потом добавили push. Сделали интерфейс NotificationSender с реализацией на канал, Spring собирает их в Map по имени канала. Новый канал — новый класс, сервис уведомлений не меняли, а в тестах подменяли отправку фейком». Подойдут расчёт комиссий, обработчики событий по типу, адаптеры внешних систем.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="overload-override" data-freq="3">
+      <h3>Чем перегрузка отличается от переопределения?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Перегрузка — несколько методов с одним именем и разными параметрами. Какой вызвать, решает компилятор по объявленным типам аргументов. Переопределение — подкласс заменяет реализацию метода с той же сигнатурой, и выбирает её JVM во время выполнения по классу объекта.</p>
+          <p>У переопределения есть правила: та же сигнатура, тип возврата тот же или подтип, доступ не уже, checked-исключения не шире. static-, private- и final-методы не переопределяются. На каждое переопределение ставлю <code>@Override</code>: иначе опечатка вроде <code>equals(Money)</code> вместо <code>equals(Object)</code> тихо превращает его в перегрузку.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Перегрузка ищется в три фазы: без упаковки и varargs, потом с упаковкой, потом с varargs. Поэтому <code>f(1)</code> при <code>f(long)</code> и <code>f(Integer)</code> уйдёт в long, а <code>list.remove(1)</code> на <code>List&lt;Integer&gt;</code> удалит элемент по индексу.</li>
+            <li>С лямбдами перегрузка коварна: <code>executor.submit(() -&gt; work())</code> выбирает между Runnable и Callable по тому, возвращает ли <code>work</code> значение. Поменял void на int — вызывается другой метод.</li>
+            <li>Ковариантный возврат и generics компилятор поддерживает bridge-методами: синтетический метод со старой сигнатурой вызывает новый. Их видно в <code>javap</code> и в stack trace.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-java">static void f(long x)     { System.out.println("long"); }
+static void f(Integer x)  { System.out.println("Integer"); }
+static void f(Object x)   { System.out.println("Object"); }
+static void f(int... x)   { System.out.println("varargs"); }
+
+f(1);
+f(Integer.valueOf(1));
+Object o = 1;
+f(o);</code></pre>
+          <pre class="out">long
+Integer
+Object</pre>
+          <p>Расширение int до long возможно в первой фазе поиска, а упаковка в Integer — только во второй, поэтому выигрывает long. Второй вызов — точное совпадение. В третьем тип переменной Object, и реальный Integer внутри ни на что не влияет.</p>
+        </details>
+        <details data-kind="задача">
+          <summary>Что останется в списке?</summary>
+          <pre><code class="language-java">List&lt;Integer&gt; ids = new ArrayList&lt;&gt;(List.of(10, 20, 1));
+ids.remove(1);
+System.out.println(ids);
+ids.remove(Integer.valueOf(1));
+System.out.println(ids);</code></pre>
+          <pre class="out">[10, 1]
+[10]</pre>
+          <p><code>remove(1)</code> — это <code>remove(int index)</code>: он подходит без упаковки и выигрывает у <code>remove(Object)</code>. Удалился элемент с индексом 1, то есть 20. Чтобы удалить значение, нужен объект.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему переопределяющий метод не может сузить доступ или бросить более широкое исключение?</summary>
+          <p>Код, который держит ссылку на родителя, рассчитывает на его контракт: метод доступен и бросает только объявленные checked-исключения. Если бы подкласс сузил доступ или добавил исключение, этот код ломался бы при подстановке подкласса, хотя компилятор его пропустил. Подтип может обещать больше, но не меньше — это LSP на уровне языка.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Можно ли перегрузить метод только по типу возврата?</summary>
+          <p>Нет. По вызову <code>f()</code> компилятор не поймёт, какой из методов нужен, поэтому второй такой метод — ошибка «method f() is already defined». При этом в байткоде тип возврата входит в дескриптор метода, и такие пары там встречаются: это bridge-методы, которые генерирует сам компилятор.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="not-polymorphic" data-freq="2">
+      <h3>Что в Java не полиморфно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Полиморфны только методы экземпляра, которые можно переопределить. Поля, static- и private-методы выбираются при компиляции по типу ссылки. Поле с тем же именем в подклассе не переопределяет, а скрывает родительское: в объекте лежат оба.</p>
+          <p>Отдельная ловушка — вызов переопределяемого метода из конструктора. Выполнится версия подкласса, но его поля ещё не инициализированы: там null и 0. Поэтому в конструкторе вызываю только private- и final-методы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Прокси Spring на CGLIB — подкласс бина. Он не может переопределить private- и final-методы, поэтому <code>@Transactional</code> на них не работает, и ошибки нет. final-метод вообще выполнится на самом прокси, у которого пустые поля, и внедрённый репозиторий окажется null.</li>
+            <li>Вызов через <code>this</code> внутри бина идёт мимо прокси, поэтому <code>@Transactional</code> на методе, вызванном из соседнего метода того же класса, не сработает.</li>
+            <li>Ленивые прокси Hibernate — тоже подклассы. Поэтому сущности не делают final, а в Kotlin, где всё final по умолчанию, подключают плагины all-open и no-arg.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-java">class A {
+    int x = 10;
+    A() { print(); }
+    void print() { System.out.println("A " + x); }
+}
+class B extends A {
+    int x = 20;
+    B() { print(); }
+    @Override void print() { System.out.println("B " + x); }
+}
+
+A a = new B();
+System.out.println(a.x);</code></pre>
+          <pre class="out">B 0
+B 20
+10</pre>
+          <p>Конструктор A вызывает <code>print()</code>, и выполняется версия B, но поле <code>B.x</code> ещё не инициализировано — 0. Инициализаторы полей B выполняются после <code>super()</code>, в начале конструктора B, поэтому второй вызов печатает 20. <code>a.x</code> — поле, выбранное по типу ссылки A, в нём 10.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему @Transactional не срабатывает при вызове из того же класса и что с этим делать?</summary>
+          <p>Транзакцию открывает прокси, а вызов <code>this.method()</code> идёт в сам объект, минуя прокси. Лучший выход — вынести метод в отдельный бин, тогда вызов естественно пойдёт через прокси. Другие варианты: <code>TransactionTemplate</code> для транзакции прямо в коде или внедрение бина в самого себя через <code>@Lazy</code>. Последнее работает, но маскирует проблему дизайна.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Что не так с этим базовым классом?</summary>
+          <pre><code class="language-java">public abstract class BaseHandler {
+    protected final String name;
+
+    protected BaseHandler() {
+        this.name = handlerName();
+        Registry.register(this);          // публикуем себя
+    }
+    protected abstract String handlerName();
+}
+
+public class PaymentHandler extends BaseHandler {
+    private final String prefix;
+
+    public PaymentHandler(String prefix) {
+        this.prefix = prefix;
+    }
+    @Override
+    protected String handlerName() { return prefix + "-payment"; }
+}</code></pre>
+          <ul>
+            <li><code>handlerName()</code> вызывается из конструктора BaseHandler, когда <code>prefix</code> ещё null. Имя станет <code>"null-payment"</code>, и никакой ошибки не будет.</li>
+            <li><code>this</code> уходит в Registry до конца конструирования. Другой поток может взять из реестра недостроенный объект.</li>
+            <li>Исправление: передать имя в конструктор базового класса — <code>super(prefix + "-payment")</code>, а регистрировать объект снаружи после создания: в фабрике или в <code>@PostConstruct</code>.</li>
+          </ul>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="dip" data-freq="2">
+      <h3>Как полиморфизм связан с инверсией зависимостей?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обычно зависимость в коде идёт туда же, куда вызов: сервис вызывает клиент банка и потому его импортирует. Полиморфизм позволяет это развернуть. Интерфейс объявляется рядом с бизнес-логикой, а реализация в модуле интеграций импортирует его. Вызов по-прежнему идёт из сервиса в клиент, а зависимость в исходниках — в обратную сторону.</p>
+          <p>В результате ядро не знает про HTTP, SDK и базу. Его можно тестировать с фейковыми реализациями, а провайдера менять, не трогая бизнес-правила. Spring при старте находит реализации и внедряет их.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Границу закрепляю сборкой: модуль core не зависит от integrations, и неправильный импорт не компилируется. Внутри одного модуля — тестами ArchUnit.</li>
+            <li>Это же лежит в основе гексагональной архитектуры: порт — интерфейс, который объявляет ядро, адаптер — его реализация снаружи.</li>
+            <li>Интерфейс принадлежит тому, кто его использует, а не тому, кто реализует. Если интерфейс лежит в модуле интеграций рядом с реализацией, зависимость не развёрнута.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Зачем интерфейс, если реализация одна?</summary>
+          <p>Если он разворачивает зависимость между модулями — например, ядро и интеграция с банком, — он нужен даже с одной реализацией: без него ядро будет импортировать клиент банка. Если и интерфейс, и реализация живут в одном модуле и других реализаций не предвидится, интерфейс обычно лишний: Spring проксирует классы, Mockito мокает класс.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Что не так с зависимостями в этом сервисе?</summary>
+          <pre><code class="language-java">package bank.payments.core;
+
+import org.springframework.web.client.RestClient;
+import bank.payments.integrations.acquirer.AcquirerPaymentRequest;
+
+@Service
+public class PaymentService {
+    private final RestClient acquirer;
+
+    public PaymentService(RestClient acquirer) { this.acquirer = acquirer; }
+
+    public PaymentResult pay(Payment payment) {
+        checkLimits(payment);
+        var request = new AcquirerPaymentRequest(payment.pan(), payment.amount());
+        return acquirer.post().uri("/payments").body(request)
+                .retrieve().body(PaymentResult.class);
+    }
+}</code></pre>
+          <ul>
+            <li>Бизнес-логика из core импортирует HTTP-клиент и DTO эквайера из integrations: зависимость идёт от ядра к деталям.</li>
+            <li>Проверить <code>checkLimits</code> и сценарий оплаты в тесте без HTTP нельзя, а смена эквайера или его API — правка ядра.</li>
+            <li>Исправление: интерфейс <code>PaymentGateway</code> в core с методом <code>pay(Payment)</code>, класс <code>AcquirerGateway</code> в integrations реализует его и сам строит запрос. PaymentService получает PaymentGateway в конструкторе.</li>
+          </ul>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li>Роберт Мартин, «Чистая архитектура», глава 5 «Объектно-ориентированное программирование» и глава 11 о принципе инверсии зависимостей.</li>
+      <li>Joshua Bloch, Effective Java, 3-е изд., items 19, 23, 40 и 52: наследование и конструкторы, иерархии вместо switch по типу, <code>@Override</code>, перегрузка.</li>
+      <li>JLS §15.12 «Method Invocation Expressions»: что решается при компиляции и что при выполнении.</li>
+      <li>Алексей Шипилёв, «The Black Magic of (Java) Method Dispatch»: как JIT инлайнит вызовы и когда они становятся megamorphic.</li>
+      <li>JEP 409 «Sealed Classes» и JEP 441 «Pattern Matching for switch».</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

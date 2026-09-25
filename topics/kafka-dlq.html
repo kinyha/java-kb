@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kafka: повторы и DLQ · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kafka-dlq">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Kafka: повторы и DLQ</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="poison">
+      <h2>Одно сообщение останавливает партицию</h2>
+      <p>Сервис кешбэка читает топик <code>payments</code>. Продюсер выкатил баг, и в одном событии не оказалось суммы: обработчик бросает NullPointerException. Что дальше?</p>
+      <p>Kafka не подтверждает сообщения по одному — консьюмер двигает позицию в партиции. Пока сообщение 42 не обработано, позиция стоит на нём, и всё, что за ним, ждёт. Посмотри, что происходит по умолчанию в Spring Kafka и что меняет DLQ:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Партиция с записями 40–47. Запись 42 падает, обработчик повторяет её, остальные записи ждут. По умолчанию запись после 10 попыток пропускается и теряется. С DLQ она уходит в топик payments-dlt, партиция едет дальше, а после исправления запись возвращают в конец топика.">
+            <defs>
+              <marker id="dq-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dq-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="dq-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">ПАРТИЦИЯ payments-0</text>
+            <!-- места под записи -->
+            <g>
+              <rect x="20" y="50" width="48" height="44" rx="6" class="dg-cell hit"/><rect x="74" y="50" width="48" height="44" rx="6" class="dg-cell hit"/>
+              <rect x="128" y="50" width="48" height="44" rx="6" class="dg-cell"/><rect x="182" y="50" width="48" height="44" rx="6" class="dg-cell"/>
+              <rect x="236" y="50" width="48" height="44" rx="6" class="dg-cell"/><rect x="290" y="50" width="48" height="44" rx="6" class="dg-cell"/>
+              <rect x="344" y="50" width="48" height="44" rx="6" class="dg-sep" fill="none"/><rect x="398" y="50" width="48" height="44" rx="6" class="dg-sep" fill="none"/>
+              <rect x="452" y="50" width="48" height="44" rx="6" class="dg-sep" fill="none"/>
+            </g>
+            <g data-s="2-"><rect x="344" y="50" width="48" height="44" rx="6" class="dg-cell"/><rect x="398" y="50" width="48" height="44" rx="6" class="dg-cell"/></g>
+            <!-- 42: ошибка, пропуск или DLT -->
+            <rect data-s="1-2" x="128" y="50" width="48" height="44" rx="6" class="dg-cell miss"/>
+            <rect data-s="3-" x="128" y="50" width="48" height="44" rx="6" class="dg-sep" fill="none"/>
+            <!-- 43–47 обработаны -->
+            <g data-s="3-"><rect x="182" y="50" width="48" height="44" rx="6" class="dg-cell hit"/><rect x="236" y="50" width="48" height="44" rx="6" class="dg-cell hit"/>
+              <rect x="290" y="50" width="48" height="44" rx="6" class="dg-cell hit"/><rect x="344" y="50" width="48" height="44" rx="6" class="dg-cell hit"/><rect x="398" y="50" width="48" height="44" rx="6" class="dg-cell hit"/></g>
+            <!-- 48: возвращённая запись -->
+            <rect data-s="5" x="452" y="50" width="48" height="44" rx="6" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="44" y="77" class="dg-in">40</text><text x="98" y="77" class="dg-in">41</text><text x="152" y="77" class="dg-in">42</text>
+              <text x="206" y="77" class="dg-in">43</text><text x="260" y="77" class="dg-in">44</text><text x="314" y="77" class="dg-in">45</text>
+              <text data-s="2-" x="368" y="77" class="dg-in">46</text><text data-s="2-" x="422" y="77" class="dg-in">47</text><text data-s="5" x="476" y="77" class="dg-in">48</text>
+            </g>
+            <text data-s="2" x="287" y="40" class="dg-s" text-anchor="middle">ждут</text>
+            <!-- консьюмер: на какой записи стоит -->
+            <g data-s="1-2"><path d="M152 140 L 152 100" class="dg-line bad" marker-end="url(#dq-bad)"/><text x="152" y="158" class="dg-t" text-anchor="middle">кешбэк</text></g>
+            <g data-s="3-4"><path d="M476 140 L 476 100" class="dg-line" marker-end="url(#dq-n)"/><text x="476" y="158" class="dg-t" text-anchor="middle">кешбэк</text></g>
+            <!-- DLT -->
+            <g data-s="4-"><rect x="20" y="180" width="270" height="40" rx="8" class="dg-box"/>
+              <text x="32" y="205" class="dg-in">payments-dlt</text>
+              <rect x="140" y="188" width="36" height="24" rx="5" class="dg-cell miss"/><text x="158" y="205" class="dg-in" text-anchor="middle">42</text>
+              <text x="186" y="205" class="dg-s">+ причина</text></g>
+            <path data-s="4" d="M152 96 L 152 176" class="dg-line bad" marker-end="url(#dq-bad)"/>
+            <path data-s="5" d="M290 200 C 400 200, 476 170, 476 100" class="dg-line ok" marker-end="url(#dq-ok)"/>
+            <!-- справа: что происходит -->
+            <g data-s="1"><text x="524" y="66" class="dg-bad">42: исключение</text><text x="524" y="86" class="dg-s">в событии нет суммы</text></g>
+            <g data-s="2"><text x="524" y="66" class="dg-bad">попытка 10 из 10</text><text x="524" y="86" class="dg-s">lag растёт: 6</text></g>
+            <g data-s="3"><text x="524" y="66" class="dg-bad">42 пропущено</text><text x="524" y="86" class="dg-s">осталась строка в логе</text></g>
+            <g data-s="4"><text x="524" y="66" class="dg-ok">42 → DLT</text><text x="524" y="86" class="dg-s">партиция едет дальше</text></g>
+            <g data-s="5"><text x="524" y="66" class="dg-ok">исправили, вернули</text><text x="524" y="86" class="dg-s">42 теперь offset 48</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>40 и 41 обработаны. На 42 обработчик падает: в событии нет суммы. Позиция консьюмера остаётся на 42.</li>
+          <li>Spring Kafka по умолчанию повторяет запись на месте: 10 попыток подряд без пауз. Всё это время 43, 44 и дальше ждут, а новые записи копятся — растёт lag. Для бага в данных повторы бесполезны: десятая попытка упадёт так же, как первая.</li>
+          <li>Попытки кончились. Обработчик по умолчанию пишет запись в лог с уровнем ERROR и идёт дальше. Партиция поехала, но событие 42 фактически потеряно: кешбэк не начислен, а в логе его никто не ищет.</li>
+          <li>С DLQ после неудачных попыток запись копируется в отдельный топик — dead letter topic, <code>payments-dlt</code>, вместе с причиной ошибки и координатами оригинала. Основная партиция едет дальше, а запись сохранена и ждёт разбора.</li>
+          <li>Баг продюсера исправили, недостающую сумму восстановили, и запись отправили обратно в <code>payments</code>. Она ляжет в конец партиции с новым offset 48 — уже после 43–47. Консьюмер должен выдержать и повтор, и такой порядок.</li>
+        </ol>
+      </figure>
+      <p>Два плохих исхода без настройки — партиция стоит или сообщение теряется. DLQ (dead letter queue, в Kafka — dead letter topic, DLT) даёт третий: отложить сообщение, которое не получается обработать, и не держать из-за него остальные.</p>
+    </section>
+
+    <section class="step" id="errors">
+      <h2>Повторять стоит не всё</h2>
+      <p>Прежде чем настраивать повторы, раздели ошибки на два вида. От этого зависит, помогут ли повторы вообще.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Временная</th><th>Постоянная</th></tr></thead>
+        <tbody>
+          <tr><td>Примеры</td><td>Таймаут HTTP, 503 от соседнего сервиса, deadlock в БД, база перезапускается</td><td>Сообщение не десериализуется, нет обязательного поля, нарушено бизнес-правило, баг в коде</td></tr>
+          <tr><td>Поможет повтор</td><td>Да, если подождать</td><td>Нет, упадёт так же</td></tr>
+          <tr><td>Что делать</td><td>Повторить с растущей паузой</td><td>Сразу в DLT, без повторов</td></tr>
+        </tbody>
+      </table>
+      <p>Spring Kafka часть постоянных ошибок распознаёт сам. DeserializationException, MessageConversionException, ConversionException, MethodArgumentResolutionException, NoSuchMethodException и ClassCastException он не повторяет, а сразу отдаёт в DLT. Свои постоянные ошибки, например ошибку валидации, добавляют в этот список сами.</p>
+      <div class="trap">
+        <p class="myth">Чем больше повторов, тем надёжнее.</p>
+        <p class="fact">Для постоянной ошибки каждый повтор — время, пока партиция стоит. А частые повторы к упавшему соседнему сервису добивают его и мешают ему подняться. Повторы нужны с паузой, ограничением и только для временных ошибок.</p>
+      </div>
+    </section>
+
+    <section class="step" id="blocking">
+      <h2>Повтор на месте и DLT</h2>
+      <p>Самая частая настройка: несколько повторов на месте с растущей паузой, потом DLT. В Spring Boot достаточно объявить бин обработчика ошибок, и он подключится ко всем <code>@KafkaListener</code>:</p>
+      <pre><code class="language-java">@Bean
+DefaultErrorHandler kafkaErrorHandler(KafkaTemplate&lt;Object, Object&gt; template) {
+    // после неудачных попыток — в топик payments-dlt, в ту же партицию
+    var recoverer = new DeadLetterPublishingRecoverer(template);
+
+    var backOff = new ExponentialBackOffWithMaxRetries(3);   // три повтора: через 1 с, 2 с, 4 с
+    backOff.setInitialInterval(1_000);
+    backOff.setMultiplier(2.0);
+
+    var handler = new DefaultErrorHandler(recoverer, backOff);
+    handler.addNotRetryableExceptions(ValidationException.class);   // сразу в DLT
+    return handler;
+}</code></pre>
+      <p>Что важно в этой схеме:</p>
+      <ul>
+        <li><b>Порядок сохраняется.</b> Пока запись повторяется, следующие записи партиции ждут. Для событий одного счёта, где порядок важен, это правильное поведение.</li>
+        <li><b>Паузы должны быть короткими.</b> Всё время повторов партиция стоит. Если паузы длиннее <code>max.poll.interval.ms</code> (по умолчанию 5 минут), брокер решит, что консьюмер завис, и запустит rebalance. Для длинных пауз в Spring Kafka есть <code>ContainerPausingBackOffHandler</code>: он ставит контейнер на паузу, но продолжает общаться с брокером.</li>
+        <li><b>DLT по умолчанию называется <code>&lt;топик&gt;-dlt</code></b> и получает запись в ту же партицию, что у оригинала. Значит, партиций в DLT должно быть не меньше, чем в основном топике, — создай его заранее.</li>
+        <li><b>В заголовках записи — вся история.</b> Класс и текст исключения, стектрейс, исходные топик, партиция, offset и группа: <code>kafka_dlt-exception-message</code>, <code>kafka_dlt-original-offset</code> и другие константы <code>KafkaHeaders.DLT_*</code>.</li>
+      </ul>
+      <div class="trap">
+        <p class="myth">DefaultErrorHandler без настроек защищает от потери сообщений.</p>
+        <p class="fact">Он повторяет запись 10 раз без пауз, а потом только логирует её и коммитит offset дальше. Без <code>DeadLetterPublishingRecoverer</code> запись после этого нигде не хранится.</p>
+      </div>
+    </section>
+
+    <section class="step" id="non-blocking">
+      <h2>Повторы без остановки: retry-топики</h2>
+      <p>Если соседний сервис лежит минут десять, повторять на месте нельзя: партиция встанет на всё это время. Тогда запись после ошибки перекладывают в отдельный топик с задержкой и читают её оттуда позже, а основная партиция продолжает работу.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 150" role="img" aria-label="Запись после ошибки переходит из payments в payments-retry-1000, затем в payments-retry-2000, затем в payments-dlt. Основной топик в это время обрабатывает следующие записи.">
+            <defs>
+              <marker id="rt-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              <marker id="rt-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="16" y="36" width="160" height="50" rx="8" class="dg-box"/><text x="26" y="57" class="dg-in">payments</text><text x="26" y="75" class="dg-s">1-я попытка</text>
+            <rect x="188" y="36" width="160" height="50" rx="8" class="dg-box"/><text x="198" y="57" class="dg-s">payments-retry-1000</text><text x="198" y="75" class="dg-s">2-я через 1 с</text>
+            <rect x="360" y="36" width="160" height="50" rx="8" class="dg-box"/><text x="370" y="57" class="dg-s">payments-retry-2000</text><text x="370" y="75" class="dg-s">3-я через 2 с</text>
+            <rect x="532" y="36" width="160" height="50" rx="8" class="dg-cell miss"/><text x="542" y="57" class="dg-in">payments-dlt</text><text x="542" y="75" class="dg-s">на разбор</text>
+            <path d="M176 61 L 186 61" class="dg-line bad" marker-end="url(#rt-bad)"/>
+            <path d="M348 61 L 358 61" class="dg-line bad" marker-end="url(#rt-bad)"/>
+            <path d="M520 61 L 530 61" class="dg-line bad" marker-end="url(#rt-bad)"/>
+            <text x="188" y="24" class="dg-bad">ошибка → дальше по цепочке</text>
+            <path d="M96 86 L 96 118" class="dg-line ok" marker-end="url(#rt-ok)"/>
+            <text x="110" y="112" class="dg-ok">следующие записи не ждут</text>
+            <text x="110" y="134" class="dg-s">но и порядок уже не гарантирован</text>
+          </svg>
+        </div>
+        <figcaption>Консьюмер retry-топика видит время, когда запись пора повторить, и до этого момента ставит свою партицию на паузу. Имена с задержкой в конце Spring Kafka даёт при экспоненциальной паузе.</figcaption>
+      </figure>
+      <pre><code class="language-java">@RetryableTopic(attempts = "3")               // попытка в основном топике и две в retry-топиках
+@KafkaListener(topics = "payments", groupId = "cashback")
+public void onPayment(PaymentEvent event) {
+    cashback.accrue(event);
+}
+
+@DltHandler
+public void onDeadLetter(PaymentEvent event) {
+    alerts.cashbackFailed(event.paymentId());   // попытки кончились — сообщить людям
+}</code></pre>
+      <p>Задержки настраиваются в той же аннотации или через <code>RetryTopicConfigurationBuilder</code>. Главная цена — порядок. Возврат, который пришёл после списания, может обработаться раньше него, если списание ушло в retry-топик. Поэтому retry-топики подходят, когда события независимы: уведомления, начисление кешбэка, выгрузки.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Повтор на месте</th><th>Retry-топики</th></tr></thead>
+        <tbody>
+          <tr><td>Порядок в партиции</td><td>Сохраняется</td><td>Ломается</td></tr>
+          <tr><td>Пока идут повторы</td><td>Партиция стоит</td><td>Партиция работает</td></tr>
+          <tr><td>Паузы</td><td>Секунды</td><td>Хоть минуты</td></tr>
+          <tr><td>Цена</td><td>Растёт lag</td><td>Лишние топики, сложнее отладка</td></tr>
+          <tr><td>Когда брать</td><td>Порядок важен: события одного счёта</td><td>События независимы, внешний сервис бывает недоступен</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="handle-dlq">
+      <h2>DLQ — не корзина</h2>
+      <p>Сообщение в DLT — не решённая проблема, а отложенная. Если туда никто не смотрит, это та же потеря, только дороже: топик растёт, а клиенты ждут кешбэк. Нужен процесс:</p>
+      <ol>
+        <li><b>Алерт</b> на появление записей в DLT или на их количество за период. Один случай — баг в данных, сотни — баг в коде или упавшая зависимость.</li>
+        <li><b>Разбор.</b> Заголовки DLT-записи говорят, что упало и где лежит оригинал. Читать их можно отдельным консьюмером или утилитой.</li>
+        <li><b>Исправление.</b> Чинят код или данные. Иногда запись правильно выбросить — тогда это решение, и его стоит записать.</li>
+        <li><b>Повторная отправка.</b> Запись публикуют обратно в основной топик — утилитой, админкой или отдельным консьюмером DLT, который включают по команде.</li>
+      </ol>
+      <pre><code class="language-java">@KafkaListener(topics = "payments-dlt", groupId = "payments-dlt-monitor")
+public void onDeadLetter(ConsumerRecord&lt;String, String&gt; rec) {
+    Header error = rec.headers().lastHeader(KafkaHeaders.DLT_EXCEPTION_MESSAGE);
+    log.warn("DLT key={} error={}", rec.key(),
+            error == null ? "?" : new String(error.value(), StandardCharsets.UTF_8));
+    metrics.counter("payments.dlt").increment();
+}</code></pre>
+      <p>Повторная отправка — это та же запись второй раз, и в конце партиции. Поэтому консьюмер должен быть идемпотентным: хранить id обработанных платежей или делать операции, которые не страшно повторить. Без этого исправление ошибки легко превращается в двойное начисление.</p>
+      <h3>Если сообщение даже не читается</h3>
+      <p>Когда запись не десериализуется, исключение возникает при чтении, ещё до вызова обработчика, и обработчик ошибок её не видит. Чтобы такие записи тоже попадали в DLT, десериализатор оборачивают в <code>ErrorHandlingDeserializer</code>: он ловит ошибку и передаёт её дальше как DeserializationException, которую обработчик сразу отправит в DLT.</p>
+      <details class="deep">
+        <summary>Под капотом: как DefaultErrorHandler повторяет запись</summary>
+        <p>Консьюмер получает из <code>poll()</code> пачку записей. Если обработчик падает, например, на четвёртой, Spring Kafka коммитит offset трёх обработанных и делает <code>seek</code> на упавшую запись в её партиции и на первые необработанные — в остальных. Следующий <code>poll()</code> вернёт их снова, и упавшая запись придёт на повтор. Счётчик попыток хранится в памяти обработчика, поэтому после рестарта или rebalance отсчёт начнётся заново.</p>
+        <p>С версии 2.9 можно отключить seek (<code>seekAfterError = false</code>): контейнер сам держит необработанные записи и повторно отдаёт их обработчику без нового запроса к брокеру.</p>
+      </details>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Kafka двигает позицию, а не подтверждает сообщения по одному: необработанная запись держит всю партицию.</li>
+        <li>Spring Kafka по умолчанию повторяет 10 раз без пауз, потом логирует и пропускает — это потеря.</li>
+        <li>Временные ошибки повторяй с паузой, постоянные — сразу в DLT.</li>
+        <li>Повтор на месте сохраняет порядок, но останавливает партицию. Retry-топики не останавливают, но ломают порядок.</li>
+        <li>DLT нужен процесс: алерт, разбор, исправление, повторная отправка. А консьюмер должен выдерживать повторы.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-is-dlq" data-freq="3">
+      <h3>Что такое DLQ и зачем она нужна?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>DLQ, dead letter queue, — отдельная очередь, а в Kafka отдельный топик, куда откладывают сообщения, которые не получилось обработать. В Kafka это особенно важно: консьюмер двигает позицию в партиции, а не подтверждает сообщения по одному, поэтому одно ядовитое сообщение останавливает всю партицию, либо его приходится пропустить и потерять.</p>
+          <p>Обычно делают так: временные ошибки повторяют несколько раз с растущей паузой, постоянные — не повторяют. Если не помогло, запись с причиной ошибки уходит в DLT, а партиция едет дальше. На DLT ставят алерт, разбирают причину и после исправления отправляют записи обратно в основной топик.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Spring Kafka это <code>DefaultErrorHandler</code> с <code>DeadLetterPublishingRecoverer</code>. По умолчанию без recoverer он повторяет 10 раз без пауз, потом логирует и пропускает запись — фактически теряет её.</li>
+            <li>DLT создают заранее с числом партиций не меньше, чем у основного топика: recoverer по умолчанию пишет в ту же партицию.</li>
+            <li>Повторная отправка кладёт запись в конец партиции, так что консьюмер должен быть идемпотентным и терпеть изменённый порядок.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Обработчик всегда падает на одной записи. Spring Kafka, DefaultErrorHandler без настроек. Сколько раз вызовется обработчик и что будет потом?</summary>
+          <p>10 раз: первая попытка и 9 повторов (<code>FixedBackOff(0, 9)</code>), подряд, без пауз. Потом recoverer по умолчанию запишет запись в лог с уровнем ERROR, offset закоммитится, и консьюмер пойдёт дальше. Сообщение останется только в логе.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Что делать с сообщением, которое не десериализуется?</summary>
+          <p>Обернуть десериализатор в <code>ErrorHandlingDeserializer</code>. Без него исключение возникает при чтении, до обработчика, и запись не может ни обработаться, ни попасть в DLT. С ним ошибка превращается в DeserializationException, которую DefaultErrorHandler не повторяет и сразу отдаёт recoverer.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="retry-order" data-freq="2">
+      <h3>Как повторять обработку и не нарушить порядок сообщений?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Повторять на месте: DefaultErrorHandler с короткой растущей паузой и DLT в конце. Пока запись повторяется, следующие записи партиции ждут, поэтому порядок сохраняется, но растёт lag. Это подходит, когда события одного ключа зависят друг от друга, например списание и возврат по одному счёту.</p>
+          <p>Если внешний сервис может лежать долго, повторы на месте остановят партицию на всё это время. Тогда используют retry-топики — <code>@RetryableTopic</code>: запись уходит в отдельный топик с задержкой, а партиция продолжает работу. Порядок при этом ломается, поэтому так делают только для независимых событий.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Сумма пауз на месте должна укладываться в <code>max.poll.interval.ms</code>, иначе консьюмера выкинут из группы. Для длинных пауз есть <code>ContainerPausingBackOffHandler</code>.</li>
+            <li>Компромисс для упорядоченных событий: при ошибке откладывать не одну запись, а все последующие записи того же ключа. Встроенного решения нет, это пишут сами — например, храня «заблокированные» ключи в БД.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему нельзя просто поставить 30 повторов с паузой по минуте?</summary>
+          <p>Партиция будет стоять до получаса, а лимит <code>max.poll.interval.ms</code> по умолчанию — 5 минут: брокер решит, что консьюмер завис, и отдаст партицию другому. Тот начнёт повторы заново, и так по кругу. Длинное ожидание — это retry-топики или пауза контейнера, а не длинный backoff в потоке консьюмера.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="replay" data-freq="2">
+      <h3>Как вернуть сообщения из DLQ в обработку?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала понять причину: заголовки DLT-записи содержат исключение и координаты оригинала. Потом исправить код или данные и опубликовать записи обратно в основной топик — утилитой, админкой или консьюмером DLT, который включают по команде. Возвращённая запись ляжет в конец партиции с новым offset.</p>
+          <p>Главное условие — идемпотентный консьюмер. Запись может обработаться второй раз, если часть работы была сделана до ошибки, и уже не в исходном порядке. Поэтому консьюмер хранит id обработанных сообщений или делает операции, которые безопасно повторить.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой повторной отправкой?</summary>
+          <pre><code class="language-java">@KafkaListener(topics = "payments-dlt", groupId = "dlt-replayer")
+public void replay(ConsumerRecord&lt;String, String&gt; rec) {
+    kafkaTemplate.send("payments", rec.value());
+}</code></pre>
+          <ul>
+            <li>Работает всегда, а не по команде: запись, которая падает из-за бага, по кругу летит payments → DLT → payments.</li>
+            <li>Потерян ключ: <code>send</code> без ключа кладёт запись в случайную партицию, и порядок по счёту ломается окончательно. Нужно <code>send("payments", rec.key(), rec.value())</code>.</li>
+            <li>Не перенесены заголовки: трассировка и метаданные пропадут.</li>
+            <li>Нет учёта: неизвестно, какие записи вернули, сколько раз и кто это решил.</li>
+          </ul>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li>Spring for Apache Kafka Reference, разделы «Handling Exceptions» (DefaultErrorHandler, DeadLetterPublishingRecoverer) и «Non-Blocking Retries».</li>
+      <li>Confluent, «Error Handling Patterns in Kafka»: повторы на месте, retry-топики, DLQ.</li>
+      <li>Uber Engineering, «Building Reliable Reprocessing and Dead Letter Queues with Apache Kafka» — откуда пошла схема с retry-топиками.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
