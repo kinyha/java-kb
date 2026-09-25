@@ -437,7 +437,7 @@ window.KB_TREE = [
         { id: 'classloading', freq: 2, status: 'draft', title: 'Class Loading',
           scope: 'загрузчики классов, parent delegation, loading, linking и initialization, static-инициализация' },
         { id: 'memory', title: 'Memory', source: 'JVMS 21, §2.5 Run-Time Data Areas; Java Performance (Oaks), гл. 7–8', items: [
-          { id: 'jvm-memory', freq: 3, status: 'empty', title: 'Memory Areas',
+          { id: 'jvm-memory', freq: 3, status: 'draft', title: 'Memory Areas',
             scope: 'heap, стеки потоков и кадры, -Xss и StackOverflowError, Metaspace и PermGen, code cache, String pool, -Xms и -Xmx, виды OutOfMemoryError' },
           { id: 'object-layout', freq: 2, status: 'empty', title: 'Object Layout & Allocation',
             scope: 'заголовок объекта, mark word и class pointer, compressed oops, выравнивание, размер массивов и обёрток, TLAB, escape analysis' },

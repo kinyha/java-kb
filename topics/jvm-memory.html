@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Memory Areas · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jvm-memory">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: Memory Areas</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="two-ooms">
+      <h2>Два падения за неделю, и -Xmx помог только от одного</h2>
+      <p>В понедельник платёжный сервис упал с <code>OutOfMemoryError</code>. Heap стоял 512 МБ, а отчёт по выпискам за квартал грузил в память больше. Подняли <code>-Xmx</code> до 2 ГБ, и всё заработало. В пятницу сервис упал снова, опять с <code>OutOfMemoryError</code>, хотя heap был заполнен на треть. Подняли <code>-Xmx</code> ещё раз — не помогло.</p>
+      <pre><code class="language-text">понедельник:  java.lang.OutOfMemoryError: Java heap space
+пятница:      java.lang.OutOfMemoryError: Metaspace</code></pre>
+      <p>Имя исключения одно, а после двоеточия — разные области памяти. Память JVM не один большой кусок, а несколько областей. У каждой своё содержимое, свой лимит и свой флаг, и переполнение одной ничего не говорит о другой. <code>-Xmx</code> ограничивает только heap. В пятницу кончилось место под классы, и размер heap к этому не относится.</p>
+      <p>Чтобы по тексту ошибки сразу понимать, куда смотреть, нужна карта: какие области есть, что в каждой лежит и когда она кончается.</p>
+    </section>
+
+    <section class="step" id="map">
+      <h2>Память JVM — несколько областей со своими лимитами</h2>
+      <p>Главное деление — на общие области и области потока. Общие создаются при старте JVM и доступны всем потокам. Область потока появляется вместе с потоком и исчезает вместе с ним.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Слева области, общие для всех потоков: heap с объектами, String pool и static-полями, ограничен -Xmx; Metaspace с классами и методами, ограничен MaxMetaspaceSize; code cache с кодом от JIT, ограничен ReservedCodeCacheSize. Справа области каждого потока: стек с кадрами, ограничен -Xss, и pc-регистр.">
+            <text x="24" y="20" class="dg-cap">ОБЩИЕ ДЛЯ ВСЕХ ПОТОКОВ</text>
+            <rect x="14" y="28" width="452" height="212" rx="12" class="dg-sep" fill="none"/>
+
+            <!-- heap -->
+            <rect x="28" y="42" width="424" height="92" rx="8" class="dg-box"/>
+            <text x="40" y="64" class="dg-t">heap</text>
+            <text x="440" y="64" class="dg-n" text-anchor="end">-Xms, -Xmx</text>
+            <rect x="40" y="80" width="126" height="40" rx="6" class="dg-cell"/>
+            <text x="103" y="105" class="dg-in" text-anchor="middle">объекты</text>
+            <rect x="174" y="80" width="126" height="40" rx="6" class="dg-cell"/>
+            <text x="237" y="105" class="dg-in" text-anchor="middle">String pool</text>
+            <rect x="308" y="80" width="132" height="40" rx="6" class="dg-cell"/>
+            <text x="374" y="105" class="dg-in" text-anchor="middle">static-поля</text>
+
+            <!-- вне heap -->
+            <rect x="28" y="146" width="206" height="82" rx="8" class="dg-box"/>
+            <text x="40" y="168" class="dg-t">Metaspace</text>
+            <text x="40" y="188" class="dg-s">классы и методы</text>
+            <text x="40" y="214" class="dg-n">-XX:MaxMetaspaceSize</text>
+            <rect x="246" y="146" width="206" height="82" rx="8" class="dg-box"/>
+            <text x="258" y="168" class="dg-t">code cache</text>
+            <text x="258" y="188" class="dg-s">машинный код от JIT</text>
+            <text x="258" y="214" class="dg-n">-XX:ReservedCodeCacheSize</text>
+
+            <!-- области потоков -->
+            <text x="496" y="20" class="dg-cap">У КАЖДОГО ПОТОКА</text>
+            <rect x="486" y="28" width="220" height="212" rx="12" class="dg-sep" fill="none"/>
+            <rect x="500" y="42" width="192" height="88" rx="8" class="dg-box"/>
+            <text x="512" y="62" class="dg-t">поток http-1</text>
+            <rect x="512" y="72" width="112" height="46" rx="6" class="dg-cell hit"/>
+            <text x="524" y="93" class="dg-in">стек</text>
+            <text x="524" y="110" class="dg-n">-Xss</text>
+            <rect x="632" y="72" width="48" height="46" rx="6" class="dg-cell hit"/>
+            <text x="656" y="100" class="dg-in" text-anchor="middle">pc</text>
+            <rect x="500" y="142" width="192" height="86" rx="8" class="dg-box"/>
+            <text x="512" y="162" class="dg-t">поток http-2</text>
+            <rect x="512" y="172" width="112" height="46" rx="6" class="dg-cell hit"/>
+            <text x="524" y="193" class="dg-in">стек</text>
+            <text x="524" y="210" class="dg-n">-Xss</text>
+            <rect x="632" y="172" width="48" height="46" rx="6" class="dg-cell hit"/>
+            <text x="656" y="200" class="dg-in" text-anchor="middle">pc</text>
+          </svg>
+        </div>
+        <figcaption>У каждой области свой флаг. <code>-Xmx</code> касается только верхнего блока слева.</figcaption>
+      </figure>
+      <ul>
+        <li><b>Heap</b> — все объекты и массивы. Здесь же String pool и static-поля классов: с Java 8 они хранятся вместе с объектом <code>Class</code>. Heap чистит сборщик мусора, размер задают <code>-Xms</code> и <code>-Xmx</code>.</li>
+        <li><b>Metaspace</b> — описания классов: поля, методы, байткод, пул констант. Живёт вне heap, в native-памяти процесса.</li>
+        <li><b>Code cache</b> — машинный код, который сгенерировал JIT.</li>
+        <li><b>Стек потока</b> — кадры вызовов: локальные переменные и стек операндов. Размер стека задаёт <code>-Xss</code>.</li>
+        <li><b>pc-регистр</b> — адрес текущей инструкции потока.</li>
+      </ul>
+      <p>На собеседовании области часто называют терминами спецификации JVMS, а в логах и флагах видны названия HotSpot. Соответствие такое:</p>
+      <table class="mx">
+        <thead><tr><th>JVMS</th><th>HotSpot</th><th>Чья</th></tr></thead>
+        <tbody>
+          <tr><td>heap</td><td>Java heap, поделён сборщиком на поколения и регионы</td><td>общая</td></tr>
+          <tr><td>method area, run-time constant pool</td><td>Metaspace; до Java 8 — PermGen</td><td>общая</td></tr>
+          <tr><td>JVM stack, native method stack</td><td>один стек потока для Java- и native-кадров</td><td>потока</td></tr>
+          <tr><td>pc register</td><td>pc потока</td><td>потока</td></tr>
+          <tr><td>—</td><td>code cache: в спецификации его нет, это деталь JIT</td><td>общая</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="stack-heap">
+      <h2>В кадре лежат примитивы и ссылки, а сами объекты — в heap</h2>
+      <p>Вопрос «что где лежит» лучше всего видно на одном вызове. Метод <code>pay</code> создаёт платёж и чек и записывает чек в журнал — static-список. Пролистай, что происходит со стеком и heap.</p>
+      <pre><code class="language-java">static final List&lt;Receipt&gt; JOURNAL = new ArrayList&lt;&gt;();   // static-поле: список в heap
+
+static void pay(long amount) {              // amount — примитив, лежит прямо в кадре
+    Payment p = new Payment(amount);        // объект в heap, в кадре только ссылка p
+    Receipt r = new Receipt(p);             // чек ссылается на платёж
+    JOURNAL.add(r);                         // второй путь к чеку — из static-поля
+}                                           // кадр pay снят: amount, p и r исчезли</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Слева стек потока с кадром main, над ним появляется кадр pay с примитивом amount и ссылками p и r. Справа heap со списком JOURNAL. pay создаёт Payment и Receipt, Receipt ссылается на Payment, JOURNAL — на Receipt. После выхода из pay кадр исчезает, а Payment и Receipt остаются живыми через JOURNAL.">
+            <defs>
+              <marker id="sh-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sh-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="24" y="20" class="dg-cap">СТЕК ПОТОКА http-1</text>
+            <rect x="14" y="28" width="270" height="206" rx="12" class="dg-sep" fill="none"/>
+            <text x="310" y="20" class="dg-cap">HEAP</text>
+            <rect x="300" y="28" width="406" height="206" rx="12" class="dg-sep" fill="none"/>
+
+            <!-- кадр main: виден всегда -->
+            <rect x="28" y="178" width="242" height="46" rx="8" class="dg-box"/>
+            <text x="40" y="198" class="dg-t">кадр main</text>
+            <text x="40" y="216" class="dg-s">вызывает pay(250_000)</text>
+
+            <!-- кадр pay: живёт на шагах 2–5 -->
+            <g data-s="2-5">
+              <rect x="28" y="40" width="242" height="130" rx="8" class="dg-box"/>
+              <text x="40" y="60" class="dg-t">кадр pay</text>
+              <rect x="40" y="70" width="218" height="28" rx="6" class="dg-cell"/>
+              <text x="50" y="89" class="dg-in">amount = 250000</text>
+            </g>
+            <g data-s="3-5"><rect x="40" y="104" width="218" height="28" rx="6" class="dg-cell"/><text x="50" y="123" class="dg-in">p</text></g>
+            <g data-s="4-5"><rect x="40" y="138" width="218" height="28" rx="6" class="dg-cell"/><text x="50" y="157" class="dg-in">r</text></g>
+            <g data-s="6"><rect x="28" y="40" width="242" height="130" rx="8" class="dg-sep" fill="none"/><text x="149" y="110" class="dg-s" text-anchor="middle">кадр pay снят</text></g>
+
+            <!-- heap: список журнала виден всегда -->
+            <rect x="314" y="178" width="170" height="46" rx="8" class="dg-box"/>
+            <text x="326" y="198" class="dg-t">JOURNAL</text>
+            <text x="326" y="216" class="dg-s">static List</text>
+
+            <!-- объекты -->
+            <rect data-s="3-" x="540" y="56" width="150" height="40" rx="6" class="dg-cell"/>
+            <rect data-s="4-" x="540" y="140" width="150" height="40" rx="6" class="dg-cell"/>
+            <rect data-s="6" x="540" y="56" width="150" height="40" rx="6" class="dg-cell hit"/>
+            <rect data-s="6" x="540" y="140" width="150" height="40" rx="6" class="dg-cell hit"/>
+            <text data-s="3-" x="615" y="81" class="dg-in" text-anchor="middle">Payment</text>
+            <text data-s="4-" x="615" y="165" class="dg-in" text-anchor="middle">Receipt</text>
+
+            <!-- ссылки -->
+            <path data-s="3-5" d="M258 118 C 400 118, 400 76, 536 76" class="dg-line" marker-end="url(#sh-n)"/>
+            <path data-s="4-5" d="M258 152 C 400 152, 400 160, 536 160" class="dg-line" marker-end="url(#sh-n)"/>
+            <path data-s="4-" d="M615 140 L 615 100" class="dg-line" marker-end="url(#sh-n)"/>
+            <path data-s="5" d="M484 201 C 512 201, 512 170, 536 170" class="dg-line" marker-end="url(#sh-n)"/>
+            <path data-s="6" d="M484 201 C 512 201, 512 170, 536 170" class="dg-line ok" marker-end="url(#sh-ok)"/>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="254" class="dg-in">в стеке один кадр main, в heap пустой JOURNAL</text>
+            <text data-s="2" x="20" y="254" class="dg-in">вызов pay: новый кадр, amount лежит прямо в нём</text>
+            <text data-s="3" x="20" y="254" class="dg-in">new Payment: объект в heap, в кадре только ссылка p</text>
+            <text data-s="4" x="20" y="254" class="dg-in">new Receipt(p): чек ссылается на платёж</text>
+            <text data-s="5" x="20" y="254" class="dg-in">JOURNAL.add(r): второй путь к чеку — из static-поля</text>
+            <text data-s="6" x="20" y="254" class="dg-ok">return: кадр снят, а объекты живы через JOURNAL</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Поток выполняет <code>main</code>: в его стеке один кадр. В heap уже есть пустой список <code>JOURNAL</code> — static-поле создалось при инициализации класса.</li>
+          <li>Вызов <code>pay</code> кладёт на стек новый кадр. Примитив <code>amount</code> лежит прямо в кадре: у него нет объекта в heap.</li>
+          <li><code>new Payment</code> выделяет объект в heap. В кадре появляется только ссылка <code>p</code> — адрес объекта, а не сам объект.</li>
+          <li><code>new Receipt(p)</code> создаёт чек, который хранит ссылку на платёж. Теперь до платежа можно дойти двумя путями.</li>
+          <li><code>JOURNAL.add(r)</code> добавляет ещё один путь к чеку — из static-поля, которое живёт, пока жив класс.</li>
+          <li>Метод вернулся, кадр снят вместе с <code>amount</code>, <code>p</code> и <code>r</code>. Но объекты живы: до них можно дойти от <code>JOURNAL</code>. Если журнал никогда не чистить, это утечка памяти.</li>
+        </ol>
+      </figure>
+      <p>Отсюда три правила, которые проверяют на собеседовании. Примитивы и ссылки локальных переменных живут в кадре и исчезают вместе с ним — без участия GC. Объекты живут в heap, пока до них можно дойти от корней: стеков, static-полей и других. А «локальная переменная потокобезопасна» верно только для самой переменной: объект, на который она ссылается, может быть доступен другим потокам.</p>
+      <div class="trap">
+        <p class="myth">Объекты, созданные в методе, удаляются, когда метод заканчивается.</p>
+        <p class="fact">Удаляется только кадр со ссылками. Объект остаётся в heap, пока на него есть путь от корней, и освобождается сборщиком мусора позже. Бывает и наоборот: JIT может вообще не создавать в heap объект, который не выходит за пределы метода. Это escape analysis, о нём — в теме Object Layout &amp; Allocation.</p>
+      </div>
+    </section>
+
+    <section class="step" id="stack-size">
+      <h2>Стек потока конечен, и глубокая рекурсия его исчерпывает</h2>
+      <p>Каждый вызов занимает кадр, а размер стека фиксируется при создании потока. По умолчанию он 1 МБ на Linux x64. На macOS arm64, где запускались примеры урока, — 2 МБ. Когда кадры не помещаются, JVM бросает <code>StackOverflowError</code>.</p>
+      <pre><code class="language-java">public class Depth {
+    static int depth = 0;
+
+    // Каждый вызов кладёт в стек потока новый кадр
+    static void validate() {
+        depth++;
+        validate();                  // рекурсия без выхода: кадры копятся, пока стек не кончится
+    }
+
+    public static void main(String[] args) {
+        try {
+            validate();
+        } catch (StackOverflowError e) {
+            // Ошибку можно поймать: стек уже размотался, и места снова хватает
+            System.out.println("глубина: " + depth);
+        }
+    }
+}</code></pre>
+      <p>Глубина зависит от размера кадров, а их меняет JIT, поэтому ниже — реальные запуски, а не вывод для предсказания:</p>
+      <pre><code class="language-text">$ java -cp out Depth              # стек по умолчанию, 2 МБ на этой машине
+глубина: 44661                    # от запуска к запуску 44–47 тысяч
+$ java -Xss256k -cp out Depth
+глубина: 1479                     # в 8 раз меньше стек — в 30 раз меньше глубина
+$ java -Xss4m -cp out Depth
+глубина: 151851</code></pre>
+      <p>Почему не пропорционально? Первые вызовы идут в интерпретаторе, и его кадры крупнее. На маленьком стеке рекурсия кончается раньше, чем JIT успевает скомпилировать <code>validate</code> с компактными кадрами. На большом стеке основная часть глубины приходится на скомпилированный код.</p>
+      <p>В сервисе <code>StackOverflowError</code> почти всегда означает бесконечную рекурсию: <code>toString</code> или <code>equals</code> двух сущностей, которые ссылаются друг на друга, циклический вызов бинов, Jackson на двунаправленной связи JPA. Лечится исправлением цикла, а не ростом <code>-Xss</code>. Есть и обратная сторона: стек выделяется каждому потоку. Тысяча потоков с <code>-Xss2m</code> резервирует 2 ГБ адресного пространства вне heap. Поэтому <code>-Xss</code> иногда уменьшают, а не увеличивают.</p>
+    </section>
+
+    <section class="step" id="heap">
+      <h2>Heap — общая область объектов с верхней границей -Xmx</h2>
+      <p>Размер heap задают два флага. <code>-Xms</code> — сколько занять на старте, <code>-Xmx</code> — сколько можно занять максимум. Если флаги не заданы, JVM смотрит на доступную память: максимум — 25% (<code>MaxRAMPercentage</code>), старт — 1/64. В контейнере JVM видит лимит контейнера, а не память машины: под с лимитом 4 ГБ получит heap в 1 ГБ.</p>
+      <pre><code class="language-java">import java.util.ArrayList;
+import java.util.List;
+
+public class HeapLimits {
+    public static void main(String[] args) {
+        // maxMemory — это и есть -Xmx: сколько heap JVM разрешено занять
+        System.out.println("max heap: " + Runtime.getRuntime().maxMemory() / 1024 / 1024 + " МБ");
+
+        List&lt;byte[]&gt; receipts = new ArrayList&lt;&gt;();
+        try {
+            while (true) {
+                receipts.add(new byte[64 * 1024]);   // список держит все чеки — GC их не отдаст
+            }
+        } catch (OutOfMemoryError e) {
+            receipts.clear();                        // отпускаем память, чтобы было чем печатать
+            System.out.println("1: " + e.getMessage());
+        }
+
+        try {
+            long[] ledger = new long[Integer.MAX_VALUE];   // массив больше предела JVM
+        } catch (OutOfMemoryError e) {
+            System.out.println("2: " + e.getMessage());
+        }
+    }
+}</code></pre>
+      <p>Запусти с маленьким heap: <code>java -Xmx16m -cp out HeapLimits</code>.</p>
+      <pre class="out">max heap: 16 МБ
+1: Java heap space
+2: Requested array size exceeds VM limit</pre>
+      <p>Первая ошибка — heap кончился честно: живых объектов больше, чем помещается. Вторая — массив запрошен длиннее, чем JVM вообще умеет выделить, и дело тут не в размере heap. А так ведут себя проценты без <code>-Xmx</code> (флаг <code>-XX:MaxRAM</code> имитирует машину с 4 ГБ):</p>
+      <pre><code class="language-text">$ java -XX:MaxRAM=4g -cp out HeapLimits | head -1
+max heap: 1024 МБ                         # 25% по умолчанию
+$ java -XX:MaxRAM=4g -XX:MaxRAMPercentage=75 -cp out HeapLimits | head -1
+max heap: 3072 МБ                         # так обычно настраивают сервис в контейнере</code></pre>
+      <div class="note exp">
+        <p>Для сервиса в контейнере часто задают <code>-XX:MaxRAMPercentage=75</code> вместо жёсткого <code>-Xmx</code>. Heap подстраивается под лимит пода, а оставшиеся 25% идут на Metaspace, стеки, code cache и native-буферы. Ставить heap равным лимиту контейнера нельзя: процесс превысит лимит за счёт памяти вне heap, и его убьёт OOM killer. Подробно — в теме Native Memory.</p>
+      </div>
+
+      <h3>String pool тоже в heap</h3>
+      <p>Одинаковые строковые литералы в JVM — один объект из <b>String pool</b>, таблицы уникальных строк. До Java 7 пул жил в PermGen и мог его переполнить, с Java 7 он в heap, и неиспользуемые строки из него собирает GC.</p>
+      <pre><code class="language-java">public class Pool {
+    public static void main(String[] args) {
+        String a = "RUB";                  // литерал: берётся из String pool
+        String b = "RUB";                  // тот же литерал — тот же объект из пула
+        String c = new String("RUB");      // new всегда создаёт новый объект в heap
+        String d = c.intern();             // intern: вернуть объект из пула с тем же текстом
+        String e = "RU" + "B";             // обе части — константы, javac склеил на этапе компиляции
+        String part = "RU";
+        String f = part + "B";             // склейка во время работы: новый объект
+
+        System.out.println(a == b);
+        System.out.println(a == c);
+        System.out.println(a == d);
+        System.out.println(a == e);
+        System.out.println(a == f);
+        System.out.println(a.equals(f));   // сравнение текста, а не ссылок
+    }
+}</code></pre>
+      <pre class="out">true
+false
+true
+true
+false
+true</pre>
+      <p>Отсюда правило, которое ломает код ревью чаще, чем кажется: строки сравнивают через <code>equals</code>. <code>==</code> иногда случайно работает на литералах и перестаёт работать, как только строка пришла из JSON, базы или склейки.</p>
+    </section>
+
+    <section class="step" id="metaspace">
+      <h2>Классы живут в Metaspace, вне heap</h2>
+      <p>Описания классов — поля, методы, байткод, пул констант — лежат в <b>Metaspace</b>. Так было не всегда, и вопрос «чем Metaspace отличается от PermGen» задают до сих пор.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Слева, до Java 8: внутри heap есть поколения young и old и PermGen фиксированного размера, заданного MaxPermSize; при переполнении OutOfMemoryError: PermGen space. Справа, Java 8 и новее: в heap только young и old, а метаданные классов в Metaspace в native-памяти, которая растёт по необходимости и ограничена только если задан MaxMetaspaceSize.">
+            <!-- слева: до Java 8 -->
+            <text x="20" y="20" class="dg-cap bad">ДО JAVA 8</text>
+            <rect x="20" y="32" width="320" height="130" rx="12" class="dg-sep" fill="none"/>
+            <text x="30" y="50" class="dg-n">процесс JVM</text>
+            <rect x="32" y="60" width="296" height="80" rx="8" class="dg-box"/>
+            <text x="44" y="80" class="dg-t">heap</text>
+            <rect x="44" y="90" width="84" height="38" rx="6" class="dg-cell"/>
+            <text x="86" y="114" class="dg-in" text-anchor="middle">young</text>
+            <rect x="136" y="90" width="84" height="38" rx="6" class="dg-cell"/>
+            <text x="178" y="114" class="dg-in" text-anchor="middle">old</text>
+            <rect x="228" y="90" width="88" height="38" rx="6" class="dg-cell miss"/>
+            <text x="272" y="114" class="dg-in" text-anchor="middle">PermGen</text>
+            <text x="20" y="186" class="dg-s">классы в фиксированной области рядом с heap</text>
+            <text x="20" y="210" class="dg-bad">OutOfMemoryError: PermGen space</text>
+            <text x="20" y="228" class="dg-s">лимит: -XX:MaxPermSize</text>
+
+            <line x1="360" y1="8" x2="360" y2="232" class="dg-sep"/>
+
+            <!-- справа: Java 8+ -->
+            <text x="380" y="20" class="dg-cap">JAVA 8 И НОВЕЕ</text>
+            <rect x="380" y="32" width="326" height="130" rx="12" class="dg-sep" fill="none"/>
+            <text x="390" y="50" class="dg-n">процесс JVM</text>
+            <rect x="392" y="60" width="180" height="80" rx="8" class="dg-box"/>
+            <text x="404" y="80" class="dg-t">heap</text>
+            <rect x="404" y="90" width="74" height="38" rx="6" class="dg-cell"/>
+            <text x="441" y="114" class="dg-in" text-anchor="middle">young</text>
+            <rect x="486" y="90" width="74" height="38" rx="6" class="dg-cell"/>
+            <text x="523" y="114" class="dg-in" text-anchor="middle">old</text>
+            <rect x="584" y="60" width="110" height="80" rx="8" class="dg-cell hit"/>
+            <text x="639" y="96" class="dg-t" text-anchor="middle">Metaspace</text>
+            <text x="639" y="116" class="dg-s" text-anchor="middle">native</text>
+            <text x="380" y="186" class="dg-s">классы вне heap, область растёт по нужде</text>
+            <text x="380" y="210" class="dg-ok">лимит — только если задан</text>
+            <text x="380" y="228" class="dg-s">-XX:MaxMetaspaceSize</text>
+          </svg>
+        </div>
+        <figcaption>В Java 7 из PermGen уже вынесли String pool и static-поля, в Java 8 убрали саму область. Флаг <code>MaxPermSize</code> в Java 8 игнорировался с предупреждением, а Java 21 с ним не запустится.</figcaption>
+      </figure>
+      <p>PermGen был частью heap с фиксированным размером. Его приходилось угадывать заранее: сервер приложений после нескольких редеплоев упирался в <code>PermGen space</code>. Metaspace живёт в native-памяти и по умолчанию не ограничен (<code>MaxMetaspaceSize</code> не задан). Метаданные освобождаются, когда выгружается загрузчик классов, который их определил.</p>
+      <p>«Не ограничен» не значит «не кончится». Проверим: создаём классы новыми загрузчиками и держим загрузчики в списке, как делает приложение с утечкой.</p>
+      <pre><code class="language-java">import java.util.ArrayList;
+import java.util.List;
+
+public class MetaOom {
+    public static class Rules { public int limit() { return 42; } }
+
+    public static void main(String[] args) throws Exception {
+        byte[] bytes = MetaOom.class.getResourceAsStream("MetaOom$Rules.class").readAllBytes();
+        List&lt;ClassLoader&gt; loaders = new ArrayList&lt;&gt;();   // держим загрузчики — их классы не выгрузятся
+        try {
+            while (true) {
+                // Новый загрузчик + те же байты = новый класс и новые метаданные в Metaspace
+                ClassLoader loader = new ClassLoader(null) {
+                    @Override protected Class&lt;?&gt; findClass(String name) {
+                        return defineClass(name, bytes, 0, bytes.length);
+                    }
+                };
+                loader.loadClass("MetaOom$Rules");
+                loaders.add(loader);
+            }
+        } catch (OutOfMemoryError e) {
+            int count = loaders.size();
+            loaders.clear();
+            System.out.println(e.getMessage() + " после " + (count / 1000) + " тыс. классов");
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -XX:MaxMetaspaceSize=32m -cp out MetaOom
+Metaspace после 5 тыс. классов
+
+$ java -cp out MetaOom                    # без лимита Metaspace
+Compressed class space после 524 тыс. классов</code></pre>
+      <p>Без лимита программа всё равно упала, но с другим текстом. Часть метаданных — описания самих классов — лежит в <b>compressed class space</b>. Это отдельный кусок Metaspace фиксированного размера, по умолчанию 1 ГБ (<code>CompressedClassSpaceSize</code>). Он нужен, чтобы ссылка из объекта на его класс занимала 4 байта вместо 8. Настоящая причина обоих падений одна — утечка загрузчиков, как в теме Class Loading.</p>
+      <div class="note tip">
+        <p>В проде <code>MaxMetaspaceSize</code> часто задают, например 256–512 МБ. Без лимита утечка классов медленно съест память контейнера, и процесс убьёт OOM killer без понятной ошибки. С лимитом будет <code>OutOfMemoryError: Metaspace</code> с heap dump.</p>
+      </div>
+
+      <h3>Code cache: переполнение не роняет процесс</h3>
+      <p>Code cache хранит машинный код от JIT, по умолчанию до 240 МБ. Когда он заполнен, исключения нет, а в лог падает предупреждение:</p>
+      <pre><code class="language-text">$ java -XX:ReservedCodeCacheSize=2600k -cp out Busy    # искусственно маленький code cache
+[warning][codecache] CodeCache is full. Compiler has been disabled.
+[warning][codecache] Try increasing the code cache size using -XX:ReservedCodeCacheSize=</code></pre>
+      <p>Сервис продолжает работать, но новые горячие методы больше не компилируются и остаются в интерпретаторе. Симптом — постепенная деградация латентности без ошибок. Поэтому это предупреждение стоит ловить в алертах по логам.</p>
+    </section>
+
+    <section class="step" id="oom-kinds">
+      <h2>Текст OutOfMemoryError говорит, какая область кончилась</h2>
+      <p>Теперь карта из шага 2 превращается в инструмент. Прочитай текст после двоеточия и найди строку в таблице.</p>
+      <table class="mx">
+        <thead><tr><th>Текст ошибки</th><th>Область</th><th>Типичная причина</th><th>Куда смотреть</th></tr></thead>
+        <tbody>
+          <tr><td><code>Java heap space</code></td><td>heap</td><td>утечка или живых данных больше <code>-Xmx</code></td><td>heap dump, путь к GC roots, потом размер</td></tr>
+          <tr><td><code>GC overhead limit exceeded</code></td><td>heap</td><td>у Parallel GC: 98% времени на сборку, освобождено меньше 2%</td><td>как для heap space</td></tr>
+          <tr><td><code>Requested array size exceeds VM limit</code></td><td>heap</td><td>массив длиной около <code>Integer.MAX_VALUE</code></td><td>ошибка в расчёте размера</td></tr>
+          <tr><td><code>Metaspace</code></td><td>Metaspace</td><td>утечка загрузчиков, генерация классов</td><td>число классов и загрузчиков, <code>jcmd VM.classloader_stats</code></td></tr>
+          <tr><td><code>Compressed class space</code></td><td>Metaspace</td><td>очень много классов, лимит 1 ГБ</td><td>как для Metaspace</td></tr>
+          <tr><td><code>unable to create native thread</code></td><td>native</td><td>лимит потоков ОС или памяти под стеки</td><td>число потоков, пулы; тема Native Memory</td></tr>
+          <tr><td><code>Direct buffer memory</code></td><td>native</td><td>direct <code>ByteBuffer</code> сверх лимита</td><td>тема Native Memory</td></tr>
+        </tbody>
+      </table>
+      <p>Для heap сразу включи три флага. Без них расследование начинается с «воспроизведи на проде».</p>
+      <pre><code class="language-text">-XX:+HeapDumpOnOutOfMemoryError        # при OOM сохранить heap dump
+-XX:HeapDumpPath=/dumps/               # в том, который переживёт перезапуск пода
+-XX:+ExitOnOutOfMemoryError            # после OOM завершить процесс, а не жить полумёртвым</code></pre>
+      <p>Последний флаг важен в Kubernetes. После <code>OutOfMemoryError</code> часть потоков могла умереть посреди работы, и процесс в таком состоянии хуже упавшего: health может быть зелёным, а платежи не проводятся. Лучше завершиться и дать оркестратору поднять чистый под.</p>
+      <p>Где кончается эта карта? Бывает, что heap заполнен наполовину, Metaspace в норме, а контейнер всё равно убивают за превышение памяти. Значит, растёт то, что вне этих областей: direct-буферы, стеки тысяч потоков, память native-библиотек. Это тема Native Memory. А если heap действительно растёт, следующий вопрос — кто держит объекты, и это тема Garbage Collection и Diagnostics.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Память JVM — это heap, Metaspace, code cache и стеки потоков. У каждой области свой лимит, <code>-Xmx</code> касается только heap.</li>
+        <li>В кадре лежат примитивы и ссылки, объекты — в heap. Объект живёт, пока до него можно дойти от корней, а не пока жив метод.</li>
+        <li><code>StackOverflowError</code> почти всегда означает бесконечную рекурсию. Стек выделяется каждому потоку, поэтому <code>-Xss</code> умножается на число потоков.</li>
+        <li>С Java 8 классы живут в Metaspace вне heap, по умолчанию без лимита, но в пределах compressed class space в 1 ГБ. String pool и static-поля — в heap.</li>
+        <li>Текст <code>OutOfMemoryError</code> называет область. В проде нужны <code>HeapDumpOnOutOfMemoryError</code> и <code>ExitOnOutOfMemoryError</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="heap-vs-stack" data-freq="3">
+      <h3>Что хранится в heap, а что в стеке?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В стеке потока лежат кадры вызовов: локальные переменные примитивных типов, ссылки на объекты и стек операндов. У каждого потока свой стек, и кадр исчезает, когда метод возвращается. В heap лежат все объекты и массивы. Heap общий для всех потоков, и объект живёт там, пока до него можно дойти по ссылкам от корней, а не пока жив метод, который его создал.</p>
+          <p>Отсюда практика. Если метод положил объект в static-коллекцию, объект переживёт метод, и это частая причина утечки. А локальная переменная безопасна между потоками только сама по себе: объект, на который она ссылается, может быть общим.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JIT с escape analysis может вообще не выделять в heap объект, который не выходит за метод, и разложить его поля по регистрам.</li>
+            <li>Static-поля с Java 8 хранятся в heap вместе с объектом <code>Class</code>, а не в Metaspace.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Где окажутся amount, p и объект Payment в методе pay из урока?</summary>
+          <p><code>amount</code> и ссылка <code>p</code> — в кадре <code>pay</code> в стеке потока. Объект <code>Payment</code> — в heap. После выхода из метода <code>amount</code> и <code>p</code> исчезнут сразу, а объект — когда до него не останется путей от корней.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>«Метод потокобезопасен: он работает только с локальными переменными». Всегда ли?</summary>
+          <pre><code class="language-java">void apply(Account account, long amount) {
+    long balance = account.getBalance();
+    account.setBalance(balance - amount);
+}</code></pre>
+          <p>Нет. <code>balance</code> и ссылка <code>account</code> локальные, но сам объект <code>Account</code> в heap может менять другой поток. Между чтением и записью баланса второй поток успеет списать деньги, и одно списание потеряется. Нужна синхронизация или атомарная операция на уровне базы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="permgen-metaspace" data-freq="3">
+      <h3>Чем Metaspace отличается от PermGen?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обе области хранят метаданные классов. PermGen до Java 8 был частью heap с фиксированным размером <code>MaxPermSize</code>. Его приходилось угадывать, и серверы приложений падали с <code>PermGen space</code> после редеплоев. В Java 8 PermGen убрали, метаданные переехали в Metaspace в native-памяти. Она растёт по необходимости и по умолчанию не ограничена.</p>
+          <p>Но утечка классов от этого не исчезла, она стала менее заметной. Поэтому в проде я задаю <code>MaxMetaspaceSize</code>, чтобы получить понятный <code>OutOfMemoryError: Metaspace</code>, а не убийство контейнера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>String pool и static-поля ушли из PermGen в heap ещё в Java 7.</li>
+            <li>Внутри Metaspace есть compressed class space, по умолчанию 1 ГБ: он ограничивает число классов даже без <code>MaxMetaspaceSize</code>.</li>
+            <li>Метаданные освобождаются только при выгрузке загрузчика классов целиком.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что в сервисе может заполнять Metaspace?</summary>
+          <p>Классы приложения и библиотек, а ещё сгенерированные на лету: прокси Spring и Hibernate, лямбды, классы от шаблонизаторов и скриптовых движков. Опасна генерация в цикле с новым загрузчиком, который потом не выгружается.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Сервис переводят на Java 21, а в скрипте запуска осталось -XX:MaxPermSize=256m. Что будет?</summary>
+          <p>JVM не запустится: <code>Unrecognized VM option 'MaxPermSize=256m'</code> — проверено на JDK 21. PermGen нет с Java 8; там флаг ещё игнорировался с предупреждением, в современных версиях его просто не существует. Если нужен лимит на метаданные, это <code>-XX:MaxMetaspaceSize</code>. Такие остатки старых флагов стоит вычищать при каждом переходе на новую Java.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="oom-kinds-q" data-freq="3">
+      <h3>Какие бывают OutOfMemoryError и что делать с каждым?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Текст после двоеточия называет область. <code>Java heap space</code> — кончился heap: либо утечка, либо живых данных больше <code>-Xmx</code>. <code>Metaspace</code> — слишком много классов, обычно утечка загрузчиков. <code>unable to create native thread</code> — упёрлись в лимит потоков или памяти под стеки. <code>Direct buffer memory</code> — direct-буферы сверх лимита.</p>
+          <p>Для heap я сначала смотрю heap dump, который снят флагом <code>HeapDumpOnOutOfMemoryError</code>, и ищу, кто держит объекты. Увеличивать <code>-Xmx</code> имеет смысл, только когда ясно, что это нормальный объём данных, а не утечка.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>После OOM процесс может остаться в полусломанном состоянии. В контейнере лучше <code>ExitOnOutOfMemoryError</code> и перезапуск.</li>
+            <li>Если контейнер убит OOM killer без Java-ошибки, heap тут ни при чём: растёт память вне heap.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Под с лимитом 4 ГБ падает с Java heap space. Предлагают поставить -Xmx4g. Что скажешь?</summary>
+          <p>Это сломает по-другому: heap займёт весь лимит, а Metaspace, стеки, code cache и буферы вытолкнут процесс за границу, и его убьёт OOM killer без понятной ошибки. Сначала heap dump и поиск утечки. Если объём честный — поднимать лимит пода и держать heap около 75% от него.</p>
+        </details>
+        <details data-kind="задача">
+          <summary>Какую ошибку даст new long[Integer.MAX_VALUE] на heap в 16 ГБ?</summary>
+          <p><code>Requested array size exceeds VM limit</code>. Массив такой длины JVM не выделяет в принципе, размер heap тут ни при чём.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stack-overflow" data-freq="2">
+      <h3>Что такое StackOverflowError и как на него влияет -Xss?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>У каждого потока стек фиксированного размера, по умолчанию 1 МБ на Linux x64. Каждый вызов кладёт в него кадр. Когда кадры не помещаются, JVM бросает <code>StackOverflowError</code>. <code>-Xss</code> меняет размер стека каждого потока.</p>
+          <p>В сервисе это почти всегда бесконечная рекурсия: <code>toString</code> или <code>equals</code> у сущностей, которые ссылаются друг на друга, сериализация двунаправленной связи JPA в JSON. Я чиню цикл, а не увеличиваю стек.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стек выделяется каждому потоку вне heap: тысяча потоков с <code>-Xss2m</code> резервирует 2 ГБ адресного пространства.</li>
+            <li>Глубина при одном <code>-Xss</code> плавает: кадры интерпретатора крупнее, чем у скомпилированного JIT кода.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди причину StackOverflowError при логировании платежа</summary>
+          <pre><code class="language-java">class Payment {
+    Account account;
+    public String toString() { return "Payment{account=" + account + "}"; }
+}
+class Account {
+    List&lt;Payment&gt; payments;
+    public String toString() { return "Account{payments=" + payments + "}"; }
+}</code></pre>
+          <p><code>Payment.toString</code> печатает счёт, счёт печатает список платежей, каждый платёж снова печатает счёт — бесконечная рекурсия. Исправить: в <code>toString</code> одной из сторон выводить только идентификатор. Тот же цикл ломает <code>equals</code>, <code>hashCode</code> и сериализацию в JSON.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="string-pool" data-freq="2">
+      <h3>Где хранится String pool и зачем intern?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>String pool — таблица уникальных строк, куда попадают все строковые литералы. Одинаковые литералы в программе — один и тот же объект. С Java 7 пул лежит в heap, раньше был в PermGen. <code>intern()</code> возвращает объект из пула с тем же текстом, добавляя его туда при необходимости.</p>
+          <p>Поэтому <code>==</code> на литералах иногда совпадает случайно, но строки из JSON, базы или склейки — новые объекты. Сравнивать строки нужно через <code>equals</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-java">String currency = "USD";
+String fromApi = new StringBuilder("US").append("D").toString();
+System.out.println(currency == fromApi);
+System.out.println(currency == fromApi.intern());
+System.out.println(currency == "US" + "D");</code></pre>
+          <pre class="out">false
+true
+true</pre>
+          <p><code>fromApi</code> собран во время работы — новый объект. <code>intern</code> вернул объект из пула, тот же, что у литерала. <code>"US" + "D"</code> — константное выражение, javac склеил его сам, и получился тот же литерал.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="xms-xmx" data-freq="2">
+      <h3>Что такое -Xms и -Xmx и какие значения по умолчанию?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>-Xms</code> — начальный размер heap, <code>-Xmx</code> — максимальный. Без флагов JVM берёт 1/64 доступной памяти на старт и 25% как максимум. В контейнере это проценты от лимита пода, поэтому под на 4 ГБ по умолчанию получит всего гигабайт heap.</p>
+          <p>Для сервиса в контейнере я задаю <code>-XX:MaxRAMPercentage=75</code>: heap следует за лимитом пода, а остальное остаётся на память вне heap. Часто ставят <code>-Xms</code> равным максимуму, чтобы heap не рос рывками под нагрузкой.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сколько heap получит JVM в поде с лимитом 2 ГБ без флагов? А с -XX:MaxRAMPercentage=75?</summary>
+          <p>512 МБ по умолчанию — 25% от лимита — и 1536 МБ с 75%. Проверить можно так: <code>java -XX:+PrintFlagsFinal -version | grep MaxHeapSize</code> внутри контейнера.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html#jvms-2.5">JVMS 21, §2.5 Run-Time Data Areas</a> — основа урока: области памяти по спецификации и их ошибки.</li>
+      <li><a href="https://openjdk.org/jeps/122">JEP 122: Remove the Permanent Generation</a> — почему убрали PermGen и что пришло взамен.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/other-considerations.html">JDK 21 GC Tuning Guide: Other Considerations</a> — Metaspace, compressed class space, их флаги.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/troubleshooting-memory-leaks.html">JDK 21 Troubleshooting: Understand the OutOfMemoryError Exception</a> — все тексты OOM и что делать с каждым.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java, JDK 21</a> — <code>-Xss</code>, <code>MaxRAMPercentage</code>, <code>HeapDumpOnOutOfMemoryError</code>, <code>ExitOnOutOfMemoryError</code>.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
