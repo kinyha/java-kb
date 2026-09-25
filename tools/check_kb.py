@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверяет связи между реестром, страницами тем и поисковым индексом."""
+"""Проверяет связи между реестром, страницами тем и поисковым индексом и предупреждает о признаках слабых страниц."""
 
 import contextlib
 from collections import Counter
@@ -50,6 +50,60 @@ class TopicPage(HTMLParser):
             self.steps.append(element_id)
         if tag == "article" and "q" in classes:
             self.cards.append(element_id)
+
+
+FIGURE = re.compile(r'<figure class="fig( play)?"[^>]*>(.*?)</figure>', re.S)
+SVG = re.compile(r"<svg\b.*?</svg>", re.S)
+DEFS = re.compile(r"<defs>.*?</defs>", re.S)
+RECT = re.compile(r"<rect\b[^>]*>")
+WIDTH = re.compile(r'\bwidth="([\d.]+)"')
+CONNECTOR = re.compile(r"<(?:path|line|polyline|polygon|circle|ellipse)\b")
+LAYER = re.compile(r'data-s="(\d+)(?:-(\d*))?"')
+STEP_CAPTION = re.compile(r"<li\b")
+KIND = re.compile(r'data-kind="([^"]+)"')
+TASK_CARD = re.compile(r'<article class="q"[^>]*data-type="task"')
+CARD = re.compile(r'<article class="q"')
+TAG = re.compile(r"<[^>]+>")
+MIN_WORDS = 1500
+MAX_LINE = 1000
+
+
+def quality_warnings(source):
+    """Признаки поверхностной страницы. Не ошибки: сигнал, что тему стоит перечитать по docs/authoring/quality.md."""
+    found = []
+    figures = FIGURE.findall(source)
+    diagrams = [(bool(play), body) for play, body in figures if "<svg" in body]
+    if not diagrams:
+        found.append("нет ни одной схемы")
+    elif len(diagrams) < 2:
+        found.append("одна схема, нужно минимум две")
+    for number, (play, body) in enumerate(diagrams, 1):
+        svg = SVG.search(body)
+        drawing = DEFS.sub("", svg.group(0)) if svg else ""
+        widths = {WIDTH.search(rect).group(1) for rect in RECT.findall(drawing) if WIDTH.search(rect)}
+        rects = len(RECT.findall(drawing))
+        if rects >= 3 and len(widths) <= 1 and not CONNECTOR.search(drawing):
+            found.append(f"схема {number} похожа на список текста: одинаковые прямоугольники без связей")
+        if play:
+            captions = len(STEP_CAPTION.findall(body.split("play-steps", 1)[-1]))
+            last = 0
+            for start, end in LAYER.findall(drawing):
+                last = max(last, int(start), int(end) if end else 0)
+            if last > captions:
+                found.append(f"схема {number}: слой для шага {last}, а подписей шагов {captions}")
+    cards = len(CARD.findall(source))
+    if cards and len(TASK_CARD.findall(source)) < cards:
+        kinds = set(KIND.findall(source))
+        if kinds and kinds <= {"уточнение"}:
+            found.append("в проверках одни «уточнения»: нужны задача и ревью")
+    visible = SVG.sub(" ", source.split("<main", 1)[-1])
+    words = len(TAG.sub(" ", visible).split())
+    if words < MIN_WORDS:
+        found.append(f"страница короткая: {words} слов, у эталонов 2000–3400")
+    long_lines = sum(1 for line in source.splitlines() if len(line) > MAX_LINE)
+    if long_lines:
+        found.append(f"HTML сжат: {long_lines} строк длиннее {MAX_LINE} символов")
+    return found
 
 
 def read_tree():
@@ -120,8 +174,11 @@ def main():
             if not page.is_file():
                 errors.append(f"{where}: нет файла {page.relative_to(ROOT)}")
                 continue
+            source = page.read_text(encoding="utf-8")
             parsed = TopicPage()
-            parsed.feed(page.read_text(encoding="utf-8"))
+            parsed.feed(source)
+            for problem in quality_warnings(source):
+                warnings.append(f"{page.relative_to(ROOT)}: качество: {problem}")
             if parsed.topic_id != name:
                 errors.append(f"{page.relative_to(ROOT)}: data-topic должен быть {name}")
             if parsed.h1 != 1:
