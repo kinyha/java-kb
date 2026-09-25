@@ -583,16 +583,29 @@ window.KB_TREE = [
   },
   {
     id: 'interview', title: 'Interview',
+    source: 'Tech Interview Handbook',
     items: [
-      { id: 'talk', title: 'Разговор', items: [
-        { id: 'project-story', freq: 3, status: 'empty', title: 'Рассказ о проекте',
+      { id: 'talk', title: 'Behavioral', items: [
+        { id: 'self-intro', freq: 3, status: 'empty', title: 'Self-Introduction',
+          scope: 'рассказ о себе за две минуты, опыт, стек, чем хочешь заниматься' },
+        { id: 'project-story', freq: 3, status: 'empty', title: 'Project Story',
           scope: 'архитектура своего проекта, твоя роль, сложные задачи, цифры' },
-        { id: 'behavioral', freq: 3, status: 'empty', title: 'Поведенческие вопросы',
+        { id: 'behavioral', freq: 3, status: 'empty', title: 'Behavioral Questions',
           scope: 'STAR, конфликты, ошибки, решения без данных, почему уходишь' },
       ] },
-      { id: 'domain', title: 'Домен', items: [
-        { id: 'banking', freq: 2, status: 'empty', title: 'Банковский домен',
-          scope: 'платежи и проводки, двойная запись, деньги в коде, сверка, аудит' },
+      { id: 'process', title: 'Job Search', items: [
+        { id: 'resume', freq: 2, status: 'empty', title: 'Resume',
+          scope: 'структура, достижения с цифрами, стек, что убрать' },
+        { id: 'questions-to-ask', freq: 2, status: 'empty', title: 'Questions to Ask',
+          scope: 'вопросы о команде, процессах, продукте и техдолге' },
+        { id: 'negotiation', freq: 2, status: 'empty', title: 'Offer & Negotiation',
+          scope: 'вилка, несколько офферов, как называть цифру, что кроме зарплаты' },
+      ] },
+      { id: 'domain', title: 'Banking Domain', items: [
+        { id: 'banking', freq: 2, status: 'empty', title: 'Banking Basics',
+          scope: 'счета и проводки, двойная запись, деньги в коде, сверка, аудит' },
+        { id: 'payments-domain', freq: 2, status: 'empty', title: 'Payments',
+          scope: 'карточный платёж, эквайринг и эмиссия, авторизация и клиринг, СБП и SWIFT, статусы платежа' },
       ] },
     ],
   },
