@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: G1 · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="g1">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: G1</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="why-g1">
+      <h2>Большой heap нельзя собирать целиком — G1 собирает его по кускам</h2>
+      <p>Сервис выписок держит в памяти 6 ГБ живых данных: справочники, кеши, агрегаты за день. Со сборщиком Parallel молодые сборки короткие, но раз в несколько минут old заполняется, и полная сборка с уплотнением всего old останавливает сервис на несколько секунд. Время полной сборки растёт с объёмом живых данных, и никакая настройка его не сократит: чтобы уплотнить 6 ГБ, их надо обойти и переместить.</p>
+      <p>G1 (Garbage-First) решает это иначе: он никогда не собирает old целиком без крайней нужды. Heap поделён на одинаковые <b>регионы</b>, и за одну паузу G1 собирает только часть из них — столько, сколько успеет за целевое время. G1 — сборщик по умолчанию в HotSpot начиная с Java 9, если машина не совсем маленькая. Разберём, как он устроен, как понимает, какие регионы собирать, и где у этого подхода слабые места.</p>
+    </section>
+
+    <section class="step" id="regions">
+      <h2>Heap G1 — сетка одинаковых регионов, поколение — это роль региона</h2>
+      <p>У классических сборщиков young и old — две сплошные области. У G1 heap — сетка из примерно двух тысяч регионов одного размера, от 1 до 32 МБ. У каждого региона есть роль: eden, survivor, old, humongous или свободный. Роль меняется: свободный регион становится eden, пережившие сборку объекты переезжают в регион, который становится survivor или old.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Heap G1 как сетка 8 на 4 регионов. Регионы eden, survivor и old перемешаны по всему heap, есть свободные регионы и два humongous-объекта: один занимает три соседних региона, другой два.">
+            <text x="20" y="24" class="dg-cap">HEAP G1: 32 РЕГИОНА ОДНОГО РАЗМЕРА</text>
+            <!-- ряд 0 -->
+            <rect x="20" y="36" width="76" height="40" rx="5" class="dg-cell hit"/><rect x="102" y="36" width="76" height="40" rx="5" class="dg-cell hit"/>
+            <rect x="184" y="36" width="76" height="40" rx="5" class="dg-box"/><rect x="266" y="36" width="76" height="40" rx="5" class="dg-box"/>
+            <rect x="348" y="36" width="76" height="40" rx="5" class="dg-sep" fill="none"/><rect x="430" y="36" width="76" height="40" rx="5" class="dg-box"/>
+            <rect x="512" y="36" width="76" height="40" rx="5" class="dg-cell hit"/><rect x="594" y="36" width="76" height="40" rx="5" class="dg-sep" fill="none"/>
+            <!-- ряд 1 -->
+            <rect x="20" y="84" width="76" height="40" rx="5" class="dg-box"/><rect x="102" y="84" width="76" height="40" rx="5" class="dg-cell"/>
+            <rect x="184" y="84" width="76" height="40" rx="5" class="dg-sep" fill="none"/><rect x="266" y="84" width="240" height="40" rx="5" class="dg-cell miss"/>
+            <rect x="512" y="84" width="76" height="40" rx="5" class="dg-box"/><rect x="594" y="84" width="76" height="40" rx="5" class="dg-cell hit"/>
+            <!-- ряд 2 -->
+            <rect x="20" y="132" width="76" height="40" rx="5" class="dg-cell hit"/><rect x="102" y="132" width="76" height="40" rx="5" class="dg-box"/>
+            <rect x="184" y="132" width="76" height="40" rx="5" class="dg-sep" fill="none"/><rect x="266" y="132" width="76" height="40" rx="5" class="dg-box"/>
+            <rect x="348" y="132" width="76" height="40" rx="5" class="dg-cell hit"/><rect x="430" y="132" width="76" height="40" rx="5" class="dg-sep" fill="none"/>
+            <rect x="512" y="132" width="76" height="40" rx="5" class="dg-box"/><rect x="594" y="132" width="76" height="40" rx="5" class="dg-box"/>
+            <!-- ряд 3 -->
+            <rect x="20" y="180" width="76" height="40" rx="5" class="dg-sep" fill="none"/><rect x="102" y="180" width="76" height="40" rx="5" class="dg-cell hit"/>
+            <rect x="184" y="180" width="76" height="40" rx="5" class="dg-box"/><rect x="266" y="180" width="158" height="40" rx="5" class="dg-cell miss"/>
+            <rect x="430" y="180" width="76" height="40" rx="5" class="dg-sep" fill="none"/><rect x="512" y="180" width="76" height="40" rx="5" class="dg-cell hit"/>
+            <rect x="594" y="180" width="76" height="40" rx="5" class="dg-sep" fill="none"/>
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="58" y="61" class="dg-in">E</text><text x="140" y="61" class="dg-in">E</text><text x="222" y="61" class="dg-in">O</text><text x="304" y="61" class="dg-in">O</text>
+              <text x="468" y="61" class="dg-in">O</text><text x="550" y="61" class="dg-in">E</text>
+              <text x="58" y="109" class="dg-in">O</text><text x="140" y="109" class="dg-in">S</text><text x="386" y="109" class="dg-in">H: массив на 3 региона</text>
+              <text x="550" y="109" class="dg-in">O</text><text x="632" y="109" class="dg-in">E</text>
+              <text x="58" y="157" class="dg-in">E</text><text x="140" y="157" class="dg-in">O</text><text x="304" y="157" class="dg-in">O</text><text x="386" y="157" class="dg-in">E</text>
+              <text x="550" y="157" class="dg-in">O</text><text x="632" y="157" class="dg-in">O</text>
+              <text x="140" y="205" class="dg-in">E</text><text x="222" y="205" class="dg-in">O</text><text x="345" y="205" class="dg-in">H: на 2</text><text x="550" y="205" class="dg-in">E</text>
+            </g>
+            <!-- легенда -->
+            <text x="20" y="250" class="dg-n">E — eden, S — survivor, O — old, H — humongous, пунктир — свободный регион</text>
+          </svg>
+        </div>
+        <figcaption>Молодое поколение — не область, а просто набор регионов с ролью eden и survivor. Поэтому G1 может менять его размер от сборки к сборке.</figcaption>
+      </figure>
+      <p>Размер региона JVM выбирает по размеру heap, так чтобы регионов было около 2048. Проверено на JDK 21 флагом <code>-Xlog:gc+init</code>:</p>
+      <table class="mx">
+        <thead><tr><th><code>-Xmx</code></th><th>256 МБ</th><th>2 ГБ</th><th>8 ГБ</th><th>32 ГБ</th></tr></thead>
+        <tbody><tr><td>регион</td><td>1 МБ</td><td>1 МБ</td><td>4 МБ</td><td>16 МБ</td></tr></tbody>
+      </table>
+      <p>Регионы дают G1 главное — свободу выбора. Собрать можно любой набор регионов, не трогая остальные. Молодые сборки у G1 устроены так же, как в теме Generations: живые из регионов eden и survivor копируются в свободные регионы, и старые регионы целиком освобождаются. Новое — то, как G1 чистит old.</p>
+    </section>
+
+    <section class="step" id="young-mixed">
+      <h2>Garbage-First: собирать в первую очередь регионы, где больше мусора</h2>
+      <p>Чтобы чистить old по частям, G1 надо знать, в каком регионе сколько живых. Это знание даёт конкурентная маркировка из темы GC Algorithms. Когда заполнение heap переходит порог (<code>InitiatingHeapOccupancyPercent</code>, 45% по умолчанию, дальше G1 подстраивает его сам), G1 запускает маркировку параллельно с приложением. По её итогам у каждого old-региона есть процент живых данных. Дальше пролистай.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Шестнадцать регионов. Молодая сборка копирует живых из eden и survivor в новые регионы и освобождает eden. Конкурентная маркировка подписывает у каждого old-региона долю живых. Смешанная сборка выбирает old-регионы с наименьшей долей живых — 10, 15 и 30 процентов — копирует их живых в один свободный регион и освобождает три региона.">
+            <defs>
+              <marker id="gm-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">16 РЕГИОНОВ</text>
+            <!-- сетка: пустые места -->
+            <g>
+              <rect x="20" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="106" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="192" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="278" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="364" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="450" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="536" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="622" y="40" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="20" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="106" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="192" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="278" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="364" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="450" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+              <rect x="536" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/><rect x="622" y="100" width="80" height="48" rx="5" class="dg-sep" fill="none"/>
+            </g>
+
+            <!-- шаг 1: eden и survivor заполнены -->
+            <g data-s="1">
+              <rect x="20" y="40" width="80" height="48" rx="5" class="dg-cell hit"/><rect x="106" y="40" width="80" height="48" rx="5" class="dg-cell hit"/>
+              <rect x="192" y="40" width="80" height="48" rx="5" class="dg-cell hit"/><rect x="278" y="40" width="80" height="48" rx="5" class="dg-cell hit"/>
+              <rect x="364" y="40" width="80" height="48" rx="5" class="dg-cell"/>
+              <g text-anchor="middle"><text x="60" y="69" class="dg-in">E</text><text x="146" y="69" class="dg-in">E</text><text x="232" y="69" class="dg-in">E</text><text x="318" y="69" class="dg-in">E</text><text x="404" y="69" class="dg-in">S</text></g>
+            </g>
+            <!-- old-регионы, которые есть с начала -->
+            <g>
+              <rect x="450" y="40" width="80" height="48" rx="5" class="dg-box"/>
+              <rect x="20" y="100" width="80" height="48" rx="5" class="dg-box"/>
+              <rect x="364" y="100" width="80" height="48" rx="5" class="dg-box"/>
+            </g>
+            <rect data-s="1-4" x="536" y="40" width="80" height="48" rx="5" class="dg-box"/>
+            <rect data-s="1-4" x="106" y="100" width="80" height="48" rx="5" class="dg-box"/>
+            <rect data-s="1-4" x="450" y="100" width="80" height="48" rx="5" class="dg-box"/>
+            <g text-anchor="middle">
+              <text data-s="1-2" x="490" y="69" class="dg-in">O</text><text data-s="1-2" x="576" y="69" class="dg-in">O</text>
+              <text data-s="1-2" x="60" y="129" class="dg-in">O</text><text data-s="1-2" x="146" y="129" class="dg-in">O</text>
+              <text data-s="1-2" x="404" y="129" class="dg-in">O</text><text data-s="1-2" x="490" y="129" class="dg-in">O</text>
+            </g>
+            <!-- шаг 2+: после молодой сборки новые survivor и old -->
+            <g data-s="2-">
+              <rect x="192" y="100" width="80" height="48" rx="5" class="dg-cell"/><text x="232" y="129" class="dg-in" text-anchor="middle">S</text>
+              <rect x="278" y="100" width="80" height="48" rx="5" class="dg-box"/>
+            </g>
+            <text data-s="2" x="318" y="129" class="dg-in" text-anchor="middle">O</text>
+            <!-- шаг 2: куда скопированы живые -->
+            <g data-s="2">
+              <path d="M146 88 C 170 94, 200 94, 226 98" class="dg-line ok" marker-end="url(#gm-ok)"/>
+              <path d="M404 88 C 380 94, 350 94, 324 98" class="dg-line ok" marker-end="url(#gm-ok)"/>
+            </g>
+
+            <!-- шаг 3+: доля живых по итогам маркировки -->
+            <g data-s="3-" text-anchor="middle">
+              <text x="490" y="69" class="dg-in">90%</text><text x="60" y="129" class="dg-in">60%</text><text x="318" y="129" class="dg-in">95%</text><text x="404" y="129" class="dg-in">85%</text>
+            </g>
+            <g data-s="3-4" text-anchor="middle">
+              <text x="576" y="69" class="dg-in">15%</text><text x="146" y="129" class="dg-in">10%</text><text x="490" y="129" class="dg-in">30%</text>
+            </g>
+
+            <!-- шаг 4: выбраны регионы с наименьшей долей живых -->
+            <g data-s="4">
+              <rect x="536" y="40" width="80" height="48" rx="5" class="dg-cell miss"/><rect x="106" y="100" width="80" height="48" rx="5" class="dg-cell miss"/>
+              <rect x="450" y="100" width="80" height="48" rx="5" class="dg-cell miss"/>
+              <g text-anchor="middle"><text x="576" y="69" class="dg-in">15%</text><text x="146" y="129" class="dg-in">10%</text><text x="490" y="129" class="dg-in">30%</text></g>
+            </g>
+            <!-- шаг 5: их живые в одном регионе, три региона свободны -->
+            <g data-s="5">
+              <rect x="622" y="100" width="80" height="48" rx="5" class="dg-cell hit"/><text x="662" y="129" class="dg-in" text-anchor="middle">55%</text>
+              <path d="M576 88 C 610 94, 640 94, 656 98" class="dg-line ok" marker-end="url(#gm-ok)"/>
+              <path d="M146 148 C 300 172, 520 172, 650 150" class="dg-line ok" marker-end="url(#gm-ok)"/>
+              <path d="M490 148 C 540 164, 610 164, 654 150" class="dg-line ok" marker-end="url(#gm-ok)"/>
+            </g>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="186" class="dg-in">eden заполнен: 4 региона eden, 1 survivor, 6 old</text>
+            <text data-s="2" x="20" y="186" class="dg-in">young GC: живые скопированы в новый S и в O, 5 регионов свободны</text>
+            <text data-s="3" x="20" y="186" class="dg-in">конкурентная маркировка: у каждого old известна доля живых</text>
+            <text data-s="4" x="20" y="186" class="dg-bad">mixed GC выбирает old, где мусора больше всего: 10%, 15%, 30%</text>
+            <text data-s="5" x="20" y="186" class="dg-ok">скопировано 55% одного региона — освобождено три</text>
+            <text x="20" y="220" class="dg-n">зелёный — eden, серый — survivor, рамка — old, пунктир — свободный</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Eden заполнен. В heap четыре региона eden, один survivor и шесть old-регионов, заполненных в разное время.</li>
+          <li>Молодая сборка копирует живых из eden и survivor: молодых — в новый survivor, повзрослевших — в old. Пять регионов освободились целиком.</li>
+          <li>Heap перешёл порог, и конкурентная маркировка посчитала живых в каждом old-регионе: от 10% до 95%.</li>
+          <li><b>Смешанная сборка</b> (mixed GC) собирает молодое поколение и несколько old-регионов. G1 выбирает регионы, где мусора больше всего, — отсюда название Garbage-First.</li>
+          <li>Живые из трёх выбранных регионов — 10%, 15% и 30% — скопированы в один свободный регион. Скопировать пришлось чуть больше половины региона, а освободилось три. Регионы с 90% живых G1 не трогает: копировать их дорого, а выгоды мало.</li>
+        </ol>
+      </figure>
+      <p>Смешанных сборок после одной маркировки обычно несколько: по умолчанию G1 стремится разобрать выбранные регионы за 8 пауз (<code>G1MixedGCCountTarget</code>) и не трогает регионы, где живых больше 85%. В логе это цепочка <code>Pause Young (Prepare Mixed)</code>, затем <code>Pause Young (Mixed)</code> — такие строки показаны в теме GC Algorithms.</p>
+      <p>Выгода в том, что old чистится маленькими порциями, каждая — внутри целевой паузы. Цена — копирование: даже в mixed GC живые объекты перемещаются, пока приложение стоит, поэтому пауза зависит от объёма живых в выбранных регионах.</p>
+    </section>
+
+    <section class="step" id="pause-goal">
+      <h2>MaxGCPauseMillis — цель, под которую G1 подгоняет размер young</h2>
+      <p>Главная настройка G1 — <code>-XX:MaxGCPauseMillis</code>, по умолчанию 200 мс. Это не гарантия, а цель. G1 ведёт статистику, сколько времени стоит копирование одного региона, и перед каждой сборкой подбирает, сколько регионов в неё взять. Прежде всего он меняет размер молодого поколения: меньше eden — меньше живых к копированию — короче пауза, но сборки чаще.</p>
+      <p>Проверим на нагрузке с большим объёмом живых: очередь из 3 миллионов недавних платежей.</p>
+      <pre><code class="language-java">import java.util.ArrayDeque;
+
+public class Churn {
+    record PaymentDto(long id, long amount, byte[] body) { }
+
+    static final ArrayDeque&lt;PaymentDto&gt; RECENT = new ArrayDeque&lt;&gt;();
+
+    public static void main(String[] args) {
+        int keep = Integer.parseInt(args[0]);             // сколько недавних платежей держать живыми
+        long sum = 0;
+        long end = System.nanoTime() + 5_000_000_000L;     // работаем 5 секунд
+        long id = 0;
+        while (System.nanoTime() &lt; end) {
+            PaymentDto dto = new PaymentDto(id, id % 1000, new byte[200]);
+            sum += dto.amount();
+            RECENT.addLast(dto);                           // держим, пока не вытеснят
+            if (RECENT.size() &gt; keep) RECENT.removeFirst();
+            id++;
+        }
+        System.out.println(sum);
+    }
+}</code></pre>
+      <p>Реальные запуски на JDK 21 с разной целью, <code>java -Xmx3g -XX:MaxGCPauseMillis=… -Xlog:gc -cp out Churn 3000000</code>:</p>
+      <table class="mx">
+        <thead><tr><th>Цель</th><th>Молодых сборок за 5 с</th><th>Медиана паузы</th><th>90-й перцентиль</th><th>Максимум</th></tr></thead>
+        <tbody>
+          <tr><td>200 мс (по умолчанию)</td><td>137</td><td>7,2 мс</td><td>11,5 мс</td><td>19,6 мс</td></tr>
+          <tr><td>20 мс</td><td>150</td><td>7,2 мс</td><td>11,2 мс</td><td>14,3 мс</td></tr>
+          <tr><td>5 мс</td><td>213</td><td>5,1 мс</td><td>6,6 мс</td><td>11,8 мс</td></tr>
+          <tr><td>2 мс</td><td>306</td><td>3,6 мс</td><td>4,1 мс</td><td>10,4 мс</td></tr>
+        </tbody>
+      </table>
+      <p>Три вывода. Первый: цели 200 и 20 мс дали одно и то же — паузы и так укладывались, и G1 ничего не менял. Настройка, которая ни во что не упирается, ничего не делает. Второй: при цели 5 мс G1 уменьшил young, сборок стало в полтора раза больше, а паузы — короче. Третий: цель 2 мс недостижима. У паузы есть пол — время на копирование живых молодых объектов и обход корней. Сборок стало больше вдвое, а медиана остановилась на 3,6 мс. Чересчур жёсткая цель только съедает пропускную способность.</p>
+      <div class="trap">
+        <p class="myth">Чтобы G1 соблюдал цель, надо зафиксировать размер молодого поколения через <code>-Xmn</code>.</p>
+        <p class="fact">Наоборот: <code>-Xmn</code> или <code>NewRatio</code> лишают G1 главного рычага, и цель по паузе он игнорирует. Для G1 размер young оставляют ему самому и управляют только целью.</p>
+      </div>
+    </section>
+
+    <section class="step" id="rsets">
+      <h2>Remembered set позволяет собрать регион, не обходя остальные</h2>
+      <p>Чтобы собрать регион, нужно найти все ссылки на его объекты извне: при копировании их надо переписать на новые адреса. Обходить ради этого весь heap нельзя. Поэтому у каждого региона есть <b>remembered set</b> — список карт в других регионах, откуда на него ссылаются. Это развитие card table из темы Generations: там одна таблица на весь old, здесь — у каждого региона своя запись о входящих ссылках.</p>
+      <p>Поддерживает их барьер записи: при записи ссылки из одного региона в другой карта попадает в очередь, а фоновые потоки уточнения (refinement) разносят её по remembered set целевого региона. При сборке remembered set выбранных регионов служат дополнительными корнями.</p>
+      <p>Цена — память и CPU. В замере темы Native Memory у процесса с heap 256 МБ категория GC в Native Memory Tracking занимала 66 МБ: это remembered sets, card table и битовые карты маркировки. Для heap в десятки гигабайт это сотни мегабайт вне heap, и их надо закладывать в лимит пода.</p>
+    </section>
+
+    <section class="step" id="humongous">
+      <h2>Объект больше половины региона — humongous, и он дорог</h2>
+      <p>Объект размером от половины региона G1 называет <b>humongous</b>. Его не копируют: слишком дорого. Под него сразу выделяются подряд идущие свободные регионы в old, и хвост последнего региона пропадает. Вернёмся к загадке из темы Memory Areas, где в heap на 16 МБ поместилось всего шесть массивов по мегабайту:</p>
+      <pre><code class="language-java">import java.util.ArrayList;
+import java.util.List;
+
+public class Humongous {
+    public static void main(String[] args) {
+        int size = Integer.parseInt(args[0]) * 1024;     // размер массива в КБ из аргумента
+        List&lt;byte[]&gt; kept = new ArrayList&lt;&gt;();
+        try {
+            while (true) kept.add(new byte[size]);      // держим все массивы, пока heap не кончится
+        } catch (OutOfMemoryError e) {
+            int n = kept.size();
+            kept.clear();
+            System.out.println("массивов по " + size / 1024 + " КБ: " + n
+                    + " = " + (long) n * size / 1024 / 1024 + " МБ из 16");
+        }
+    }
+}</code></pre>
+      <p>Heap 16 МБ, регион 1 МБ, реальные запуски <code>java -Xmx16m -cp out Humongous …</code>:</p>
+      <pre><code class="language-text">массивов по 400 КБ: 28 = 10 МБ из 16      # меньше половины региона: обычные объекты
+массивов по 520 КБ: 13 = 6 МБ из 16       # больше половины: каждый занял целый регион
+массивов по 1024 КБ: 6 = 6 МБ из 16       # мегабайт + заголовок: каждый занял два региона</code></pre>
+      <p>Массив на 520 КБ занял регион на 1 МБ, а массив ровно на мегабайт из-за 16 байт заголовка — два региона. Почти половина heap пропала впустую. В логе это видно по причине сборки:</p>
+      <pre><code class="language-text">$ java -Xmx16m -Xlog:gc,gc+heap -cp out Humongous 1024
+GC(0) Humongous regions: 4-&gt;4
+GC(0) Pause Young (Concurrent Start) (G1 Humongous Allocation) 6M-&gt;6M(16M) 0.265ms
+GC(4) Pause Young (Normal) (G1 Humongous Allocation) (Evacuation Failure) 14M-&gt;14M(16M) 0.158ms</code></pre>
+      <p>Humongous-объекты опасны не только расходом памяти. Каждое такое выделение может запустить сборку и старт маркировки — видно по <code>G1 Humongous Allocation</code>. А если не найдётся нужного числа свободных регионов подряд, G1 уходит в полную сборку. Короткоживущие humongous-массивы, у которых нет ссылок из других объектов, G1 умеет освобождать на молодой сборке, но в целом это дорогой путь.</p>
+      <p>Что делать, если в логах много <code>Humongous Allocation</code>: не держать гигантские массивы — делить большие ответы и буферы на куски, стримить вместо чтения целиком. Если без больших объектов никак, увеличить регион флагом <code>-XX:G1HeapRegionSize</code>, чтобы объекты перестали считаться humongous.</p>
+    </section>
+
+    <section class="step" id="full-gc">
+      <h2>Full GC у G1 — признак, что он не успел</h2>
+      <p>Полная сборка у G1 есть: параллельный mark-compact всего heap. Но в нормальной работе её не должно быть, и каждая — повод разбираться. Причины три:</p>
+      <ul>
+        <li><b>Evacuation failure</b> — при копировании живых не нашлось свободных регионов. В логе <code>(Evacuation Failure)</code> или <code>To-space exhausted</code>, за которыми часто следует полная сборка.</li>
+        <li><b>Маркировка проиграла гонку</b> — heap заполнился до конца конкурентного цикла. Этот случай с <code>Pause Full (G1 Compaction Pause)</code> разобран в теме GC Algorithms.</li>
+        <li><b>Humongous-выделение</b> не нашло свободных регионов подряд.</li>
+      </ul>
+      <p>Лечение почти всегда одно — запас: больше heap, чтобы копированию было куда класть живых, раньше старт маркировки, запасные регионы (<code>G1ReservePercent</code>, 10% по умолчанию). И проверка, что живых данных не стало больше, чем помещается: при утечке G1 будет честно пытаться, пока не упадёт.</p>
+      <p>Где G1 — не лучший выбор? Если нужна пауза меньше миллисекунды при heap в десятки гигабайт, G1 её не даст: копирование живых в паузе ставит пол, как показал замер. Тогда смотрят на ZGC. А в поде с одним CPU JVM сама выберет Serial вместо G1, об этом тема Choosing a Collector.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>G1 делит heap на ~2048 одинаковых регионов. Eden, survivor и old — роли регионов, а не сплошные области.</li>
+        <li>После конкурентной маркировки G1 знает долю живых в каждом old-регионе. Смешанные сборки забирают регионы, где мусора больше всего, — отсюда Garbage-First.</li>
+        <li><code>MaxGCPauseMillis</code> — цель, под которую G1 подгоняет размер young. Ниже пола, заданного живыми данными, её не опустить, а <code>-Xmn</code> лишает G1 этого рычага.</li>
+        <li>Remembered sets позволяют собирать регион, не обходя heap, но стоят памяти вне heap и работы барьера записи.</li>
+        <li>Объекты от половины региона — humongous: занимают регионы целиком и могут вызвать полную сборку. Full GC у G1 — признак нехватки запаса.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="g1-how" data-freq="3">
+      <h3>Как работает G1?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>G1 делит heap на примерно две тысячи одинаковых регионов, и у каждого есть роль: eden, survivor, old или humongous. Молодые сборки копируют живых из eden и survivor в свободные регионы. Когда heap заполняется выше порога, G1 параллельно с приложением маркирует объекты и узнаёт долю живых в каждом old-регионе. Потом смешанные сборки забирают вместе с young несколько old-регионов, где мусора больше всего.</p>
+          <p>Так old чистится маленькими порциями, каждая в пределах целевой паузы <code>MaxGCPauseMillis</code>, и полной сборки всего heap в нормальной работе нет. Для сервиса с большим heap это разница между паузами в десятки миллисекунд и в секунды.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Копирование в G1 всегда в паузе, поэтому пауза зависит от объёма живых в выбранных регионах. Меньше миллисекунды G1 не даёт.</li>
+            <li>Цена — remembered sets и барьер записи: память вне heap и CPU приложения.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Как G1 выбирает размер региона?</summary>
+          <p>Так, чтобы регионов было около 2048, в пределах от 1 до 32 МБ степенью двойки. На JDK 21 heap в 2 ГБ дал регион 1 МБ, 8 ГБ — 4 МБ, 32 ГБ — 16 МБ. Задать вручную можно флагом <code>-XX:G1HeapRegionSize</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mixed-gc" data-freq="2">
+      <h3>Что такое mixed GC и почему G1 называется Garbage-First?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Mixed GC — сборка, которая берёт все молодые регионы и часть старых. Какие старые — решает конкурентная маркировка: G1 знает долю живых в каждом регионе и выбирает те, где мусора больше всего. Копировать там почти нечего, а освобождается целый регион. Отсюда Garbage-First: сначала собирать самое замусоренное.</p>
+          <p>Регионы, где живых больше 85%, G1 вообще не трогает: копировать дорого, выгоды мало.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>После маркировки у old-регионов доля живых 95%, 60%, 30%, 10%. Какие соберёт mixed GC в первую очередь и что получится?</summary>
+          <p>10% и 30%: их живые, вместе 40% региона, поместятся в один свободный регион, а освободятся два. Регион с 95% G1 пропустит, 60% — возможно, в следующих смешанных сборках, если укладывается в паузу.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="max-pause" data-freq="3">
+      <h3>Что делает MaxGCPauseMillis? Можно ли поставить 1 мс?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это цель по длительности паузы, по умолчанию 200 мс. G1 ведёт статистику стоимости копирования и подгоняет под цель, сколько регионов взять в сборку, — прежде всего размер молодого поколения. Меньше цель — меньше young, паузы короче, но сборки чаще.</p>
+          <p>1 мс поставить можно, но G1 её не выдержит: у паузы есть пол — копирование живых и обход корней. В замере урока цель 2 мс дала вдвое больше сборок, а медиана остановилась на 3,6 мс. Если нужны паузы меньше миллисекунды, нужен ZGC.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Жёсткий <code>-Xmn</code> отключает адаптацию young, и цель перестаёт работать.</li>
+            <li>Если паузы уже ниже цели, изменение цели ничего не даёт: 200 и 20 мс в замере дали одинаковый результат.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В JAVA_OPTS стоит -XX:+UseG1GC -Xmn2g -XX:MaxGCPauseMillis=50, а паузы по 150 мс. Что не так?</summary>
+          <p><code>-Xmn2g</code> фиксирует молодое поколение, и G1 не может уменьшить его, чтобы уложиться в 50 мс. Нужно убрать <code>-Xmn</code> и дать G1 подбирать young самому. <code>-XX:+UseG1GC</code> тоже лишний: G1 и так по умолчанию, кроме совсем маленьких машин.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="humongous-q" data-freq="2">
+      <h3>Что такое humongous-объекты и чем они опасны?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это объекты размером от половины региона. G1 их не копирует, а сразу выделяет под них подряд идущие регионы в old. Хвост последнего региона пропадает: в уроке массив на мегабайт с заголовком занял два региона по мегабайту, и в heap на 16 МБ поместилось лишь шесть таких массивов.</p>
+          <p>Кроме потерь памяти, humongous-выделения запускают сборки и маркировку, а при нехватке регионов подряд — полную сборку. Лечится отказом от гигантских массивов — делить буферы, стримить — или увеличением региона.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Регион 4 МБ. Каким будет массив на 3 МБ и сколько он займёт?</summary>
+          <p>Humongous, раз он больше половины региона. Займёт один регион целиком: 4 МБ, из них 1 МБ пропадёт.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="g1-full" data-freq="2">
+      <h3>Когда у G1 бывает full GC?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда G1 не успел по-хорошему. Три причины: при копировании не нашлось свободных регионов (evacuation failure), heap заполнился до конца конкурентной маркировки, humongous-объекту не нашлось регионов подряд. Тогда G1 делает параллельный mark-compact всего heap с остановкой.</p>
+          <p>Лечение — запас: больше heap, раньше старт маркировки, резерв регионов. И проверка, нет ли утечки: при растущем живом объёме G1 будет падать в full GC всё чаще.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Как в логе отличить эти причины?</summary>
+          <p>По скобкам: <code>(Evacuation Failure)</code> или <code>To-space exhausted</code> у молодой сборки перед полной, <code>Pause Full (G1 Compaction Pause)</code> при незавершённом <code>Concurrent Mark Cycle</code>, <code>(G1 Humongous Allocation)</code> у сборок перед полной.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rset-q" data-freq="2">
+      <h3>Что такое remembered set?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это список мест в других регионах, откуда есть ссылки на объекты данного региона. Он нужен, чтобы собрать регион, не обходя весь heap: при копировании ссылки на перенесённые объекты надо переписать, и remembered set говорит, где их искать. Поддерживает его барьер записи вместе с фоновыми потоками уточнения.</p>
+          <p>Стоят remembered sets памяти вне heap: в замере темы Native Memory категория GC заняла 66 МБ при heap в 256 МБ.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем remembered set отличается от card table?</summary>
+          <p>Card table — одна таблица карт на heap: какие карты менялись. Remembered set есть у каждого региона и хранит входящие ссылки: какие карты других регионов ссылаются сюда. G1 использует оба: карты отмечает барьер, а потоки уточнения переносят их в remembered sets.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/garbage-first-g1-garbage-collector1.html">JDK 21 GC Tuning Guide: Garbage-First Garbage Collector</a> — основа урока: регионы, цикл young и mixed, humongous, full GC.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/garbage-first-garbage-collector-tuning.html">JDK 21 GC Tuning Guide: G1 Tuning</a> — цель по паузе, IHOP, что делать при evacuation failure и humongous.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java, JDK 21</a> — <code>MaxGCPauseMillis</code>, <code>G1HeapRegionSize</code>, <code>InitiatingHeapOccupancyPercent</code>, <code>G1ReservePercent</code>.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
