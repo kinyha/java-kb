@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How JVM Runs Code · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jvm-arch">
+
+<main class="page">
+  <header class="topic-head"><h1>How JVM Runs Code</h1></header>
+
+  <div class="lesson">
+    <section class="step" id="version-mismatch">
+      <h2>Платёжный сервис может собраться и не запуститься</h2>
+      <p>Ты собрал платёжный сервис на JDK 21, а в контейнере оставил Java 17. Сборка прошла, но сервис не дошёл до <code>main</code>: Java 17 не понимает class-файл версии 65. Это не ошибка бизнес-кода. Между исходником и работающим процессом есть отдельный контракт — формат class-файла.</p>
+      <p><b>JDK</b> даёт инструменты разработки, включая <code>javac</code>, <code>javap</code> и runtime. <b>JVM</b> — виртуальная машина, которая исполняет class-файлы. <b>JRE</b> называют среду для запуска: JVM вместе со стандартной библиотекой и нужными файлами runtime. Для современных Java это полезное понятие, но отдельный JRE-дистрибутив не обязан поставляться рядом с JDK; runtime-образ можно собрать через <code>jlink</code>.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 218" role="img" aria-label="В JDK входят компилятор javac и инструменты, а также среда запуска. В среде запуска находятся JVM и стандартные модули Java. Исходник компилируется в class-файл, JVM загружает его и вызывает библиотеку и код ОС.">
+            <defs><marker id="ja-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="16" y="20" class="dg-cap">СБОРКА</text>
+            <rect x="16" y="42" width="136" height="40" rx="7" class="dg-cell"/>
+            <text x="84" y="67" class="dg-s" text-anchor="middle">PaymentMath.java</text>
+            <rect x="166" y="42" width="74" height="40" rx="7" class="dg-box"/>
+            <text x="203" y="67" class="dg-t" text-anchor="middle">javac</text>
+            <rect x="256" y="42" width="138" height="40" rx="7" class="dg-cell hit"/>
+            <text x="325" y="67" class="dg-s" text-anchor="middle">PaymentMath.class</text>
+            <path d="M152 62 L162 62" class="dg-line" marker-end="url(#ja-n)"/>
+            <path d="M240 62 L252 62" class="dg-line" marker-end="url(#ja-n)"/>
+            <text x="470" y="20" class="dg-cap">ЗАПУСК: JDK / RUNTIME</text>
+            <rect x="414" y="36" width="292" height="132" rx="10" class="dg-box"/>
+            <text x="428" y="59" class="dg-t">runtime (JRE как понятие)</text>
+            <rect x="430" y="72" width="122" height="52" rx="7" class="dg-cell hit"/>
+            <text x="491" y="96" class="dg-t" text-anchor="middle">JVM</text>
+            <text x="491" y="113" class="dg-s" text-anchor="middle">байткод</text>
+            <rect x="568" y="72" width="122" height="52" rx="7" class="dg-cell"/>
+            <text x="629" y="95" class="dg-t" text-anchor="middle">java.base</text>
+            <text x="629" y="112" class="dg-s" text-anchor="middle">библиотека</text>
+            <path d="M394 62 C 406 62, 402 98, 426 98" class="dg-line" marker-end="url(#ja-n)"/>
+            <path d="M552 98 L564 98" class="dg-line" marker-end="url(#ja-n)"/>
+            <rect x="480" y="176" width="154" height="36" rx="6" class="dg-sep" fill="none"/>
+            <text x="557" y="199" class="dg-s" text-anchor="middle">ОС и процессор</text>
+            <path d="M491 124 L491 172" class="dg-line" marker-end="url(#ja-n)"/>
+            <text x="16" y="152" class="dg-s">Один class-файл можно передать другой ОС.</text>
+            <text x="16" y="170" class="dg-s">Там нужен совместимый runtime и зависимости.</text>
+          </svg>
+        </div>
+        <figcaption>«Написано один раз» относится к байткоду и API. Нативный runtime для Linux и macOS разный, а несовместимая версия class-файла остановит запуск раньше бизнес-логики.</figcaption>
+      </figure>
+      <p>Проверяй обе стороны: версию компилятора в CI и версию runtime в образе. На установленном JDK 21 <code>javap -verbose</code> показывает <code>major version: 65</code>. Компиляция того же файла с <code>javac --release 17</code> даёт версию 61 и запрещает API, отсутствующие в Java 17.</p>
+      <div class="trap">
+        <p class="myth">Достаточно поставить <code>-source 17 -target 17</code>, чтобы программа работала на Java 17.</p>
+        <p class="fact">Эти флаги задают синтаксис и формат class-файла, но не ограничивают ссылки на новые стандартные API. Для совместимости с Java 17 используй <code>--release 17</code> и отдельно проверяй сторонние зависимости и нативные библиотеки.</p>
+      </div>
+    </section>
+
+    <section class="step" id="class-file">
+      <h2>Компилятор сохраняет инструкции, а не исходный Java-код</h2>
+      <p><code>javac</code> разбирает типы и преобразует исходник в class-файл. В нём лежат версия формата, constant pool со ссылками и литералами, описания полей и методов, а у исполняемых методов — атрибут <code>Code</code> с байткодом. JVM не обязана знать, как были написаны отступы, локальные имена или выражение <code>2 + 3</code>.</p>
+      <p>В примере фиксированное выражение компилятор сворачивает до <code>iconst_5</code>. Вызов <code>total(Integer.MAX_VALUE, 1)</code> остаётся вызовом метода, а в его теле видна инструкция <code>iadd</code>. Она складывает два <code>int</code> с переполнением по правилам JVM, поэтому получается отрицательное число.</p>
+      <pre><code class="language-java">public class PaymentMath {
+    static int total(int amount, int fee) {
+        return amount + fee;
+    }
+    public static void main(String[] args) {
+        int fixed = 2 + 3;
+        int overflow = total(Integer.MAX_VALUE, 1);
+        System.out.println(fixed + ":" + overflow);
+    }
+}</code></pre>
+      <pre class="out">5:-2147483648</pre>
+      <p>Запусти <code>javac PaymentMath.java</code>, затем <code>javap -c -p PaymentMath</code>. Это не декомпиляция в Java: <code>javap</code> печатает инструкции из class-файла. Ниже — проверенный фрагмент на JDK 21.0.11.</p>
+      <pre><code class="language-text">static int total(int, int);
+  Code:
+     0: iload_0
+     1: iload_1
+     2: iadd
+     3: ireturn
+
+public static void main(java.lang.String[]);
+  Code:
+     0: iconst_5
+     1: istore_1
+     2: ldc           #9   // int 2147483647
+     4: iconst_1
+     5: invokestatic  #10  // Method total:(II)I</code></pre>
+      <p><code>invokestatic #10</code> ссылается на запись constant pool с именем и сигнатурой метода. При исполнении JVM разрешит эту символическую ссылку в конкретный метод. Индексы pool и номера строк могут отличаться после изменения кода или версии компилятора; смысл инструкций остаётся.</p>
+      <details class="deep">
+        <summary>Под капотом: что хранится в class-файле</summary>
+        <p>Class-файл начинается с magic <code>0xCAFEBABE</code> и пары minor/major version. Инструкции метода находятся в атрибуте <code>Code</code>, где есть также <code>max_stack</code>, <code>max_locals</code> и таблица обработчиков исключений. Ссылки на методы и поля обычно идут через constant pool, а не через адреса памяти из машины разработчика. Формат описан в JVMS §4.</p>
+      </details>
+    </section>
+
+    <section class="step" id="operand-stack">
+      <h2>Метод вычисляет результат через локальные слоты и стек операндов</h2>
+      <p>У каждого вызова метода есть кадр: локальные переменные и стек операндов. Для <code>static total(int amount, int fee)</code> два аргумента занимают слоты 0 и 1. <code>iload_0</code> и <code>iload_1</code> кладут значения на стек, <code>iadd</code> снимает оба и кладёт сумму, <code>ireturn</code> возвращает верхнее значение вызывающему методу.</p>
+      <p>Пройди четыре инструкции для <code>total(2147483647, 1)</code>. Это позволяет предсказать результат даже без исходного Java: в байткоде нет проверки переполнения, <code>iadd</code> оставляет младшие 32 бита.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Кадр метода total: локальные слоты 0 и 1 содержат 2147483647 и 1. iload_0 и iload_1 кладут их на стек операндов; iadd заменяет их на -2147483648; ireturn передаёт результат вызывающему методу.">
+            <text x="20" y="22" class="dg-cap">КАДР total(2147483647, 1)</text>
+            <!-- локальные слоты и стек — разные области кадра -->
+            <rect x="20" y="42" width="284" height="148" rx="9" class="dg-box"/>
+            <text x="34" y="64" class="dg-t">локальные слоты</text>
+            <rect x="34" y="78" width="256" height="40" rx="6" class="dg-cell"/>
+            <text x="46" y="104" class="dg-in">0 · amount = 2147483647</text>
+            <rect x="34" y="132" width="256" height="40" rx="6" class="dg-cell"/>
+            <text x="46" y="158" class="dg-in">1 · fee = 1</text>
+            <rect x="410" y="42" width="214" height="148" rx="9" class="dg-box"/>
+            <text x="424" y="64" class="dg-t">стек операндов</text>
+            <rect x="424" y="78" width="186" height="40" rx="6" class="dg-sep" fill="none"/>
+            <rect x="424" y="132" width="186" height="40" rx="6" class="dg-sep" fill="none"/>
+            <!-- состояние слотов стека меняется после инструкции -->
+            <g data-s="1"><rect x="424" y="132" width="186" height="40" rx="6" class="dg-cell hit"/><text x="436" y="158" class="dg-in">2147483647</text></g>
+            <g data-s="2"><rect x="424" y="132" width="186" height="40" rx="6" class="dg-cell hit"/><text x="436" y="158" class="dg-in">2147483647</text><rect x="424" y="78" width="186" height="40" rx="6" class="dg-cell hit"/><text x="436" y="104" class="dg-in">1</text></g>
+            <g data-s="3"><rect x="424" y="132" width="186" height="40" rx="6" class="dg-cell hit"/><text x="436" y="158" class="dg-in">-2147483648</text></g>
+            <g data-s="4"><text x="438" y="158" class="dg-s">пусто после return</text></g>
+            <!-- текущая инструкция и результат -->
+            <g data-s="1"><text x="20" y="219" class="dg-t">iload_0 → push amount</text></g>
+            <g data-s="2"><text x="20" y="219" class="dg-t">iload_1 → push fee</text></g>
+            <g data-s="3"><text x="20" y="219" class="dg-t">iadd → pop 2, push сумму</text></g>
+            <g data-s="4"><text x="20" y="219" class="dg-t">ireturn → вызывающему: -2147483648</text></g>
+            <path data-s="1-2" d="M304 105 C 356 105, 360 150, 420 150" class="dg-line"/>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>iload_0</code> читает slot 0 и кладёт 2147483647 на стек операндов. Значение в локальном слоте остаётся.</li>
+          <li><code>iload_1</code> кладёт 1 поверх первого числа. Стек содержит два операнда.</li>
+          <li><code>iadd</code> снимает оба числа и кладёт результат сложения <code>int</code>. После переполнения это −2147483648.</li>
+          <li><code>ireturn</code> снимает результат и передаёт его в <code>main</code>. Кадр <code>total</code> больше не нужен.</li>
+        </ol>
+      </figure>
+      <p>Кадр принадлежит вызову, а не классу. Если <code>total</code> вызовут два потока, у каждого будет свой кадр и свой стек операндов. Где физически лежат кадры, объекты и метаданные, подробно разобрано в «Memory Areas».</p>
+    </section>
+
+    <section class="step" id="runtime-path">
+      <h2>Перед <code>main</code> JVM должна подготовить класс</h2>
+      <p>Команда <code>java PaymentMath</code> запускает процесс и передаёт имя стартового класса launcher'у. JVM находит его через classpath или module path, загружает байты, проверяет формат и допустимость байткода, подготавливает статические поля и выполняет инициализацию класса. После этого вызывает <code>main(String[])</code>.</p>
+      <p>Это отдельные фазы, поэтому ошибки выглядят по-разному. <code>ClassNotFoundException</code> или сообщение launcher'а «Could not find or load main class» указывает на поиск класса; <code>UnsupportedClassVersionError</code> — на слишком новую версию class-файла; <code>ExceptionInInitializerError</code> — на исключение во время static-инициализации. Разбор parent delegation, linking и порядка инициализации — в соседнем уроке «Class Loading».</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 214" role="img" aria-label="Путь запуска PaymentMath: launcher находит класс, JVM проверяет class-файл, разрешает ссылки и инициализирует класс, вызывает main и затем total. Подсветка показывает текущую фазу, ошибки до main не относятся к коду main.">
+            <defs><marker id="jr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="18" y="24" class="dg-cap">ЗАПУСК ПРОЦЕССА</text>
+            <rect x="18" y="50" width="120" height="48" rx="7" class="dg-cell"/>
+            <rect x="158" y="50" width="120" height="48" rx="7" class="dg-cell"/>
+            <rect x="298" y="50" width="120" height="48" rx="7" class="dg-cell"/>
+            <rect x="438" y="50" width="120" height="48" rx="7" class="dg-cell"/>
+            <rect x="578" y="50" width="120" height="48" rx="7" class="dg-cell"/>
+            <g data-s="1"><rect x="18" y="50" width="120" height="48" rx="7" class="dg-cell hit"/></g>
+            <g data-s="2"><rect x="158" y="50" width="120" height="48" rx="7" class="dg-cell hit"/></g>
+            <g data-s="3"><rect x="298" y="50" width="120" height="48" rx="7" class="dg-cell hit"/></g>
+            <g data-s="4"><rect x="438" y="50" width="120" height="48" rx="7" class="dg-cell hit"/></g>
+            <g data-s="5"><rect x="578" y="50" width="120" height="48" rx="7" class="dg-cell hit"/></g>
+            <path d="M138 74 L154 74 M278 74 L294 74 M418 74 L434 74 M558 74 L574 74" class="dg-line" marker-end="url(#jr-n)"/>
+            <text x="78" y="70" class="dg-t" text-anchor="middle">launcher</text><text x="78" y="87" class="dg-s" text-anchor="middle">java ...</text>
+            <text x="218" y="70" class="dg-t" text-anchor="middle">loading</text><text x="218" y="87" class="dg-s" text-anchor="middle">class path</text>
+            <text x="358" y="70" class="dg-t" text-anchor="middle">linking</text><text x="358" y="87" class="dg-s" text-anchor="middle">проверка</text>
+            <text x="498" y="70" class="dg-t" text-anchor="middle">init</text><text x="498" y="87" class="dg-s" text-anchor="middle">static-поля</text>
+            <text x="638" y="70" class="dg-t" text-anchor="middle">main</text><text x="638" y="87" class="dg-s" text-anchor="middle">вызов total</text>
+            <g data-s="1"><text x="18" y="142" class="dg-t">Создан процесс JVM.</text></g>
+            <g data-s="2"><text x="18" y="142" class="dg-t">Ищем PaymentMath.class по путям запуска.</text></g>
+            <g data-s="3"><text x="18" y="142" class="dg-t">Проверяем версию и байткод; готовим класс.</text></g>
+            <g data-s="4"><text x="18" y="142" class="dg-t">Выполняем class initialization.</text></g>
+            <g data-s="5"><text x="18" y="142" class="dg-t">main печатает результат; total создаёт свой кадр.</text></g>
+            <text x="18" y="187" class="dg-s">Ошибка на шагах 2–4 появляется до вызова main.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>java PaymentMath</code> создаёт процесс с JVM. Launcher определяет стартовый класс из команды.</li>
+          <li>Загрузчик ищет class-файл по classpath или module path. Неверный путь останавливает запуск до <code>main</code>.</li>
+          <li>JVM проверяет class-файл, связывает символические ссылки по мере необходимости и готовит статические поля. Class-файл версии 65 требует runtime, который её поддерживает.</li>
+          <li>Выполняется class initialization: static-инициализаторы и присваивания. Исключение здесь сорвёт запуск ещё до <code>main</code>.</li>
+          <li>JVM вызывает <code>main</code>; он вызывает <code>total</code>, и для метода создаётся отдельный кадр.</li>
+        </ol>
+      </figure>
+      <p>JVM не загружает сразу все классы приложения. Зависимый класс может понадобиться позже, поэтому часть ошибок обнаруживается только при достижении определённого пути исполнения. В <code>PaymentMath</code> основной путь короткий, но в сервисе с условными интеграциями это различие важно.</p>
+    </section>
+
+    <section class="step" id="hot-code">
+      <h2>HotSpot ускоряет горячий код, сохраняя результат байткода</h2>
+      <p>Сначала HotSpot может исполнять метод интерпретатором и собирать профиль вызовов. Для часто выполняемого кода JIT создаёт машинные инструкции; они хранятся в code cache и исполняются на текущем процессоре. Это способ ускорить работу, а не изменить смысл программы: <code>PaymentMath</code> печатает одинаково в обычном режиме и с <code>-Xint</code>, где JIT отключён.</p>
+      <pre><code class="language-text">$ java -cp . PaymentMath
+5:-2147483648
+$ java -Xint -cp . PaymentMath
+5:-2147483648</code></pre>
+      <p>На JDK 21 <code>-XX:+PrintCompilation</code> показывает компиляции методов, но какие именно методы станут горячими и когда — зависит от нагрузки и профиля. Один короткий запуск <code>PaymentMath</code> может завершиться до компиляции его <code>total</code>. Фиксированного «после N вызовов JIT всегда включается» для приложения нет.</p>
+      <p>JIT может встроить тело <code>total</code> в вызывающий код и убрать сам вызов, но обязан сохранить наблюдаемый результат, включая переполнение <code>int</code> и исключения. Если оптимизация опиралась на профиль, который перестал быть верным, HotSpot может деоптимизировать код. Tiered compilation, C1/C2, OSR и деоптимизация подробно идут в отдельной теме «JIT».</p>
+      <div class="trap"><p class="myth">Java всегда интерпретируется и потому медленная.</p><p class="fact">Байткод — входной формат JVM. HotSpot умеет и интерпретировать его, и компилировать горячие участки в машинный код. Скорость конкретного сервиса зависит от прогрева, аллокаций, I/O и алгоритма; наличие JIT само по себе не делает запрос быстрым.</p></div>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Граница JVM проходит по runtime, зависимостям и ОС</h2>
+      <p>Class-файл переносим между совместимыми реализациями JVM, но процесс опирается на стандартную библиотеку, сторонние JAR, системные библиотеки и ОС. Если в образе нет нужной зависимости, можно получить <code>NoClassDefFoundError</code> или <code>ClassNotFoundException</code>. Если вызов уходит в JNI или сторонний нативный драйвер, одного байткода уже недостаточно для переносимости.</p>
+      <p>Для деплоя фиксируй версию сборки и runtime. Сначала проверь <code>java -version</code> внутри контейнера, затем <code>javap -verbose PaymentMath | grep 'major version'</code> для class-файла. Если версия подходит, проверяй classpath/module path и зависимости, затем журналы загрузки <code>-Xlog:class+load=info</code>. Эта последовательность быстрее гадания о «сломавшемся JIT».</p>
+      <p>Команда <code>java PaymentMath.java</code> на JDK 21 компилирует исходник в памяти и запускает его; она удобна для одного файла, но не заменяет сборку сервиса. <code>java -jar app.jar</code> запускает JAR по его manifest, <code>java -cp ... Main</code> ищет класс по classpath. В каждом случае исполняет JVM, но способ найти стартовый класс и зависимости разный.</p>
+      <p>Если сервис уже работает и жалоба — паузы, рост памяти или медленный метод, схема запуска не объяснит проблему целиком. Для этого нужны темы «Memory Areas», «Garbage Collection», «JIT» и «Diagnostics»: они разбирают соответствующие механизмы и инструменты.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>JDK собирает class-файл, runtime с JVM исполняет его; версия class-файла должна поддерживаться runtime.</li>
+      <li>Class-файл хранит байткод и символические ссылки. <code>javap -c</code> показывает, что реально получил исполнитель.</li>
+      <li>Метод работает с кадром, локальными слотами и стеком операндов; <code>iadd</code> в примере переполняет <code>int</code> по правилам JVM.</li>
+      <li>Загрузка, проверка и инициализация класса происходят до вызова <code>main</code>; на этих этапах запуск может оборваться.</li>
+      <li>Интерпретатор и JIT — два пути исполнения с одинаковой наблюдаемой семантикой.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview"><h2>На собеседовании</h2>
+    <article class="q" id="jdk-jre-jvm" data-freq="3">
+      <h3>Чем отличаются JDK, JRE и JVM?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JVM — машина, которая загружает class-файлы и исполняет байткод. JRE — среда запуска: JVM, стандартные модули и необходимые файлы. JDK включает runtime и инструменты разработки, например <code>javac</code> и <code>javap</code>. В современных поставках Java отдельный JRE-пакет не обязателен.</p>
+          <p>Если платёжный сервис собирается в CI, а в контейнере не стартует, я сравню версии JDK при сборке и runtime в образе. Ошибка может появиться ещё до <code>main</code>, если class-файл слишком новый.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li><code>jlink</code> собирает runtime-образ с выбранными модулями; размер меньше полного JDK, но отсутствие нужного модуля обнаружится при запуске.</li>
+          <li>JVM как спецификация и HotSpot как реализация — разные уровни: контракт байткода общий, JIT и GC зависят от реализации.</li>
+        </ul></div>
+      </div>
+      <div class="check">
+        <details data-kind="задача"><summary>В контейнере только runtime без javac. Можно ли запустить PaymentMath.class?</summary><p>Да, если runtime поддерживает версию class-файла и содержит нужные модули. <code>javac</code> нужен для компиляции, а запуск class-файла делает JVM. Для <code>java PaymentMath.java</code> нужен source-file launcher с компиляцией, поэтому этот сценарий не равен запуску готового class-файла.</p></details>
+        <details data-kind="уточнение"><summary>JVM — это то же самое, что HotSpot?</summary><p>Нет. JVM задаёт виртуальную машину и правила исполнения class-файлов. HotSpot — одна из реализаций JVM в OpenJDK: у неё свои JIT, GC и диагностические флаги.</p></details>
+      </div>
+    </article>
+
+    <article class="q" id="class-file-compatibility" data-freq="3">
+      <h3>Что такое байткод и почему class-файл от Java 21 не запускается на Java 17?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Байткод — инструкции JVM внутри class-файла. <code>javac</code> пишет вместе с ними версию формата; у Java 21 это major 65, у Java 17 — major 61. Java 17 не обязана понимать будущий формат и останавливает загрузку с <code>UnsupportedClassVersionError</code>.</p>
+          <p>Для сервиса, который должен работать на Java 17, я соберу его с <code>javac --release 17</code> и проверю зависимости. Этот флаг ограничивает не только формат class-файла, но и доступные стандартные API.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li><code>-source</code> и <code>-target</code> без <code>--release</code> могут пропустить вызов API, которого нет в старом runtime.</li>
+          <li>Новые class-файлы понимает новая JVM; обратное направление не работает автоматически, даже если исходный код выглядит старым.</li>
+        </ul></div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью"><summary>В CI стоит javac -source 17 -target 17, а деплой на Java 17. Где риск?</summary><p>Сборка на JDK 21 может сослаться на стандартный API, добавленный после Java 17. Формат class-файла будет 61, но при выполнении нужного API не окажется. Замени пару флагов на <code>--release 17</code> и проверь версии сторонних JAR.</p></details>
+        <details data-kind="задача"><summary>javap -verbose показывает major version 65. Какая минимальная версия Java SE нужна?</summary><p>Java 21. Для сравнения, <code>javac --release 17</code> создаёт major 61. Это проверено на JDK 21.0.11 на одном и том же примере <code>PaymentMath</code>.</p></details>
+      </div>
+    </article>
+
+    <article class="q" id="bytecode-execution" data-freq="2">
+      <h3>Как JVM исполняет вызов метода и зачем ей стек операндов?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для вызова создаётся кадр с локальными слотами и стеком операндов. В <code>total(int, int)</code> аргументы лежат в слотах 0 и 1. Инструкции <code>iload</code> кладут их на стек, <code>iadd</code> снимает оба и кладёт сумму, <code>ireturn</code> отдаёт её вызывающему методу.</p>
+          <p>Поэтому я могу взять <code>javap -c</code> и проверить, что реально исполняется. Это полезно, когда компилятор свернул константу, добавил вызов или поведение кода кажется неожиданным.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Символические ссылки на методы и поля хранятся в constant pool; JVM разрешает их при linking или использовании.</li>
+          <li>Верификатор проверяет корректность типов и переходов байткода перед исполнением; это граница для повреждённого или вручную созданного class-файла.</li>
+        </ul></div>
+      </div>
+      <div class="check">
+        <details data-kind="задача"><summary>Что покажет javap для int fixed = 2 + 3: iadd или iconst_5?</summary><p><code>iconst_5</code>. Константное выражение свернул <code>javac</code>. У метода <code>total(amount, fee)</code> остаётся <code>iadd</code>, потому что он складывает параметры вызова.</p></details>
+        <details data-kind="уточнение"><summary>Где лежит возвращаемое значение после ireturn?</summary><p><code>ireturn</code> снимает значение со стека текущего кадра и передаёт его вызывающему кадру как результат вызова. Кадр завершённого метода удаляется. Детальное расположение кадров в памяти разбирается в «Memory Areas».</p></details>
+      </div>
+    </article>
+
+    <article class="q" id="interpreter-jit" data-freq="2">
+      <h3>Java интерпретируется или компилируется?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала <code>javac</code> компилирует Java в байткод. Во время работы HotSpot может интерпретировать байткод и компилировать горячие методы в машинный код через JIT. Поэтому это не выбор одного из двух: оба пути работают в одном процессе.</p>
+          <p>Для короткой программы JIT может не успеть скомпилировать её методы, а для долгоживущего платёжного сервиса прогрев влияет на задержки. Я сравню поведение с <code>-Xint</code> только как диагностический эксперимент, потому что он заметно меняет скорость.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>HotSpot профилирует типы и частоты; JIT может встроить вызов, а потом деоптимизировать код, если предположение о типах перестало выполняться.</li>
+          <li><code>-XX:+PrintCompilation</code> показывает события компиляции, но не обещает фиксированное число вызовов до JIT.</li>
+        </ul></div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью"><summary>В отчёте сказано: «С -Xint переполнение исчезнет, ведь JIT отключён». Верно?</summary><p>Нет. Переполнение <code>int</code> — семантика инструкции <code>iadd</code>, а не оптимизация JIT. Пример печатает <code>5:-2147483648</code> и с JIT, и с <code>-Xint</code>. Меняется путь исполнения и скорость, не результат.</p></details>
+        <details data-kind="уточнение"><summary>Почему не стоит мерить производительность коротким java PaymentMath?</summary><p>Программа заканчивается до устойчивого прогрева, а время запуска и загрузки классов сравнимо со временем работы метода. Для оценки горячего кода нужен корректный benchmark, например JMH, с прогревом, несколькими итерациями и контролем оптимизаций.</p></details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://dev.java/learn/jvm/">dev.java, Getting to know the JVM</a> — основа урока: путь от Java-кода к class-файлу и выполнению в JVM.</li>
+    <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html">JVMS 21, глава 4</a> — формат class-файла, constant pool и Code attribute.</li>
+    <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html">JVMS 21, глава 2</a> — кадры, стек операндов и модель исполнения.</li>
+    <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html">JVMS 21, глава 6</a> — точная семантика iload, iadd и ireturn.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/javac.html">javac в JDK 21</a> — <code>--release</code>, <code>-source</code> и <code>-target</code>.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
