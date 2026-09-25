@@ -436,7 +436,7 @@ window.KB_TREE = [
           scope: 'JDK, JRE и JVM, байткод, class-файл, интерпретатор и JIT, жизненный цикл программы' },
         { id: 'classloading', freq: 2, status: 'draft', title: 'Class Loading',
           scope: 'загрузчики классов, parent delegation, loading, linking и initialization, static-инициализация' },
-        { id: 'jvm-memory', freq: 3, status: 'empty', title: 'Memory Areas',
+        { id: 'jvm-memory', freq: 3, status: 'draft', title: 'Memory Areas',
           scope: 'heap, stack, metaspace, раскладка объекта, escape analysis, виды OutOfMemoryError' },
         { id: 'gc', freq: 3, status: 'empty', title: 'Garbage Collection',
           scope: 'достижимость, поколения, G1, ZGC, паузы, weak и soft ссылки, настройка' },
