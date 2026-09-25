@@ -453,7 +453,7 @@ window.KB_TREE = [
             scope: 'mark-sweep, copying, mark-compact, фрагментация, concurrent marking, tri-color, барьеры' },
           { id: 'g1', freq: 3, status: 'draft', title: 'G1',
             scope: 'регионы, young и mixed GC, remembered sets, concurrent marking, humongous-объекты, MaxGCPauseMillis, full GC у G1' },
-          { id: 'zgc', freq: 2, status: 'empty', title: 'ZGC & Shenandoah',
+          { id: 'zgc', freq: 2, status: 'draft', title: 'ZGC & Shenandoah',
             scope: 'конкурентное перемещение, colored pointers, load barriers, generational ZGC, цена низких пауз' },
           { id: 'gc-choice', freq: 3, status: 'empty', title: 'Choosing a Collector',
             scope: 'Serial, Parallel, G1, ZGC, Shenandoah, выбор JVM по умолчанию, контейнер с одним CPU, latency или throughput' },

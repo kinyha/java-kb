@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: ZGC &amp; Shenandoah · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="zgc">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: ZGC &amp; Shenandoah</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="need">
+      <h2>Паузе G1 есть пол — копирование живых, пока приложение стоит</h2>
+      <p>Сервис авторизации платежей обязан ответить банку-эквайеру за 50 мс, иначе транзакция отклоняется. В heap 24 ГБ живут кеши лимитов и антифрод-профили. G1 работает честно, но его паузы — десятки миллисекунд, иногда за сотню: за время паузы он копирует живые объекты выбранных регионов, и чем больше живых, тем дольше. Из темы G1 мы знаем, что у этой паузы есть пол, и никакая цель <code>MaxGCPauseMillis</code> его не опустит.</p>
+      <p>Чтобы пауза перестала зависеть от объёма данных, копировать объекты нужно <b>параллельно с работой приложения</b>. Так устроены ZGC и Shenandoah: маркировка, перемещение и исправление ссылок идут конкурентно, а в паузах остаётся только работа, не зависящая от размера heap, — прежде всего снять корни со стеков потоков. Разберём, как можно двигать объект, который в это время читает приложение, и сколько это стоит на самом деле.</p>
+    </section>
+
+    <section class="step" id="load-barrier">
+      <h2>Барьер на чтение ссылки чинит её, если объект переехал</h2>
+      <p>Главная трудность: сборщик скопировал объект на новое место, а у приложения в полях других объектов ещё лежат старые адреса. G1 переписывает такие ссылки в паузе. ZGC переписывает их лениво — в момент, когда приложение ссылку читает. Для этого JIT вставляет после каждой загрузки ссылки из поля несколько инструкций — <b>load barrier</b>. Его логика, упрощённо:</p>
+      <pre><code class="language-java">// Псевдокод барьера: выполняется при каждом чтении ссылки из поля, например a.rules
+Object loadReference(Object holder, Field field) {
+    Object ref = field.get(holder);
+    if (isGood(ref)) {                          // быстрый путь: одна проверка битов указателя
+        return ref;
+    }
+    Object fixed = forwardingTable.lookup(ref); // объект переехал? взять новый адрес
+    if (fixed == null) fixed = relocateNow(ref);// ещё не переехал — перенести прямо сейчас
+    field.compareAndSet(holder, ref, fixed);    // «самолечение»: записать исправленную ссылку обратно
+    return fixed;
+}</code></pre>
+      <p>Проверка «хорош ли указатель» — одна инструкция сравнения, и почти всегда она проходит. Медленный путь срабатывает на первом чтении ссылки после переезда объекта и заодно чинит поле, чтобы следующие чтения шли быстро. Пролистай, как это выглядит.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Объект Limits лежит на старой странице. ZGC копирует его на новую страницу и записывает переадресацию. Поток приложения читает поле account.limits со старым адресом, барьер видит устаревший указатель, находит новый адрес в таблице переадресации и записывает его в поле. Следующее чтение идёт по быстрому пути. Старая страница освобождается.">
+            <defs>
+              <marker id="lb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="lb-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="lb-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">ОБЪЕКТ account</text>
+            <text x="290" y="20" class="dg-cap">СТАРАЯ СТРАНИЦА</text>
+            <text x="520" y="20" class="dg-cap">НОВАЯ СТРАНИЦА</text>
+
+            <!-- объект с полем -->
+            <rect x="20" y="34" width="220" height="70" rx="8" class="dg-box"/>
+            <text x="32" y="56" class="dg-t">account</text>
+            <rect x="32" y="66" width="196" height="28" rx="5" class="dg-cell"/>
+            <text data-s="1-3" x="42" y="85" class="dg-in">limits → 0x1000 (старый)</text>
+            <rect data-s="4-" x="32" y="66" width="196" height="28" rx="5" class="dg-cell hit"/>
+            <text data-s="4-" x="42" y="85" class="dg-in">limits → 0x9000 (новый)</text>
+
+            <!-- страницы -->
+            <rect x="290" y="34" width="190" height="70" rx="8" class="dg-box"/>
+            <rect x="520" y="34" width="186" height="70" rx="8" class="dg-box"/>
+            <g data-s="1-4"><rect x="306" y="50" width="120" height="36" rx="5" class="dg-cell"/><text x="366" y="73" class="dg-in" text-anchor="middle">Limits</text></g>
+            <text data-s="1-4" x="438" y="73" class="dg-n">0x1000</text>
+            <g data-s="2-"><rect x="536" y="50" width="120" height="36" rx="5" class="dg-cell hit"/><text x="596" y="73" class="dg-in" text-anchor="middle">Limits</text><text x="662" y="73" class="dg-n">0x9000</text></g>
+            <g data-s="5"><rect x="290" y="34" width="190" height="70" rx="8" class="dg-sep" fill="none"/><text x="385" y="73" class="dg-s" text-anchor="middle">страница свободна</text></g>
+
+            <!-- копирование и таблица переадресации -->
+            <path data-s="2" d="M426 68 L 532 68" class="dg-line ok" marker-end="url(#lb-ok)"/>
+            <g data-s="2-4"><rect x="290" y="120" width="190" height="30" rx="5" class="dg-cell"/><text x="385" y="140" class="dg-in" text-anchor="middle">переадресация 0x1000→0x9000</text></g>
+
+            <!-- поток приложения читает -->
+            <rect x="20" y="170" width="220" height="40" rx="7" class="dg-box"/>
+            <text x="130" y="195" class="dg-t" text-anchor="middle">поток приложения</text>
+            <g data-s="3"><path d="M130 170 L 130 98" class="dg-line bad" marker-end="url(#lb-bad)"/><text x="140" y="140" class="dg-bad">указатель устарел</text>
+              <path d="M240 190 C 270 190, 285 172, 300 154" class="dg-line" marker-end="url(#lb-n)"/></g>
+            <g data-s="4"><path d="M130 170 L 130 98" class="dg-line ok" marker-end="url(#lb-ok)"/><text x="140" y="140" class="dg-ok">поле исправлено</text></g>
+            <g data-s="5"><path d="M130 170 L 130 98" class="dg-line ok" marker-end="url(#lb-ok)"/><text x="140" y="140" class="dg-ok">быстрый путь</text></g>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="232" class="dg-in">сборщик выбрал страницу с мусором для переезда живых</text>
+            <text data-s="2" x="20" y="232" class="dg-in">GC скопировал Limits, приложение работает дальше</text>
+            <text data-s="3" x="20" y="232" class="dg-bad">поток читает account.limits: барьер видит старый адрес</text>
+            <text data-s="4" x="20" y="232" class="dg-ok">медленный путь: новый адрес из таблицы, записан в поле</text>
+            <text data-s="5" x="20" y="232" class="dg-ok">ссылки исправлены, старая страница отдана под новые объекты</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>После конкурентной маркировки ZGC выбрал страницу, где мало живых. Объект <code>Limits</code> надо перенести, а поле <code>account.limits</code> указывает на старый адрес.</li>
+          <li>Поток сборщика копирует <code>Limits</code> на новую страницу и записывает в таблицу переадресации: старый адрес → новый. Приложение в это время работает.</li>
+          <li>Поток приложения читает <code>account.limits</code>. Барьер после загрузки видит, что указатель устаревший, и уходит на медленный путь.</li>
+          <li>Барьер находит новый адрес в таблице и записывает его обратно в поле. Приложение получает правильный объект, а поле «вылечено».</li>
+          <li>Следующие чтения идут по быстрому пути. Когда все ссылки исправлены — барьерами или следующей маркировкой, — старая страница освобождается.</li>
+        </ol>
+      </figure>
+      <p>Если поток приложения дочитался до объекта раньше сборщика, барьер перенесёт объект сам. Поэтому переезд никогда не ждёт паузы: его может закончить любой поток, который первым коснулся объекта.</p>
+    </section>
+
+    <section class="step" id="colored-pointers">
+      <h2>Состояние ссылки ZGC хранит прямо в битах указателя</h2>
+      <p>Как барьер за одну инструкцию понимает, что указатель устарел? ZGC держит служебные биты прямо в 64-битном указателе — это <b>окрашенные указатели</b> (colored pointers). Адрес занимает младшие биты, а несколько битов над ним — «цвет»: был ли объект помечен в текущем цикле и исправлена ли ссылка после переезда. Барьер сравнивает цвет с текущим «хорошим» — вот и вся проверка.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 180" role="img" aria-label="64-битный указатель в классическом ZGC: младшие 42 бита — адрес объекта до 4 ТБ, выше 4 бита цвета: finalizable, remapped, marked1, marked0, старшие 18 битов не используются. Барьер сравнивает биты цвета с текущим хорошим цветом.">
+            <text x="40" y="20" class="dg-cap">УКАЗАТЕЛЬ ZGC, 64 БИТА (КЛАССИЧЕСКИЙ РЕЖИМ)</text>
+            <g text-anchor="middle">
+              <text x="40" y="44" class="dg-n">63</text><text x="220" y="44" class="dg-n">46</text><text x="260" y="44" class="dg-n">42</text><text x="680" y="44" class="dg-n">0</text>
+            </g>
+            <rect x="40" y="52" width="180" height="44" rx="4" class="dg-sep" fill="none"/>
+            <rect x="220" y="52" width="10" height="44" class="dg-cell hit"/><rect x="230" y="52" width="10" height="44" class="dg-cell hit"/>
+            <rect x="240" y="52" width="10" height="44" class="dg-cell hit"/><rect x="250" y="52" width="10" height="44" class="dg-cell hit"/>
+            <rect x="260" y="52" width="420" height="44" rx="4" class="dg-cell"/>
+            <text x="130" y="79" class="dg-n" text-anchor="middle">не используются, 18</text>
+            <text x="470" y="79" class="dg-in" text-anchor="middle">адрес объекта, 42 бита = до 4 ТБ</text>
+            <line x1="240" y1="96" x2="240" y2="116" class="dg-line"/>
+            <text x="240" y="132" class="dg-t" text-anchor="middle">цвет: 4 бита</text>
+            <text x="240" y="150" class="dg-s" text-anchor="middle">marked0, marked1, remapped, finalizable</text>
+            <text x="40" y="172" class="dg-s">барьер: «цвет указателя совпадает с текущим хорошим?» — одна инструкция</text>
+          </svg>
+        </div>
+        <figcaption>Раскладка упрощена. В каждый момент хорошим считается один цвет, и после каждой фазы сборщик его меняет — все старые указатели разом становятся «плохими».</figcaption>
+      </figure>
+      <p>Но процессор не умеет обращаться к памяти по адресу с лишними битами. Классический ZGC решал это хитро: отображал одну и ту же физическую память по трём виртуальным адресам, по одному на цвет. Это видно в его логе при старте — адресное пространство умножено на три:</p>
+      <pre><code class="language-text">$ java -XX:+UseZGC -Xlog:gc+init -version
+Using legacy single-generation mode
+Address Space Size: 196608M x 3 = 589824M                  # одна и та же память в трёх «видах»
+
+$ java -XX:+UseZGC -XX:+ZGenerational -Xlog:gc+init -version
+Address Space Size: 196608M                                # поколенческий режим обходится без этого</code></pre>
+      <p>Из-за тройного отображения классический ZGC пугал мониторинг: RSS процесса мог показывать втрое больше реального. Поколенческий ZGC устроен иначе: барьер сам снимает цветные биты перед обращением к памяти, и отображение одно. Детали реализации меняются от версии к версии, а суть остаётся: состояние ссылки проверяется одной инструкцией при каждом чтении.</p>
+    </section>
+
+    <section class="step" id="shenandoah">
+      <h2>Shenandoah решает ту же задачу с другой стороны</h2>
+      <p>Shenandoah появился в Red Hat почти одновременно с ZGC и тоже перемещает объекты конкурентно. Отличия в деталях реализации:</p>
+      <table class="mx">
+        <thead><tr><th></th><th>ZGC</th><th>Shenandoah</th></tr></thead>
+        <tbody>
+          <tr><td>где хранится «объект переехал»</td><td>в цвете указателя и таблице переадресации</td><td>в заголовке старой копии объекта: адрес новой</td></tr>
+          <tr><td>барьеры</td><td>на чтение ссылки; в поколенческом режиме — и на запись</td><td>на чтение ссылки (load reference barrier) и SATB на запись</td></tr>
+          <tr><td>когда памяти не хватает</td><td>allocation stall: поток ждёт освобождения памяти</td><td>pacing: потоки притормаживают при выделении, дальше degenerated GC в паузе</td></tr>
+          <tr><td>поколения</td><td>с JDK 21 опционально, с JDK 23 по умолчанию, с JDK 24 единственный режим</td><td>поколенческий режим экспериментальный</td></tr>
+          <tr><td>доступность</td><td>во всех сборках OpenJDK</td><td>нет в сборках Oracle JDK, есть в OpenJDK от Red Hat, Temurin, Corretto и других</td></tr>
+        </tbody>
+      </table>
+      <p>Ранний Shenandoah хранил в каждом объекте дополнительное слово с адресом переадресации (Brooks pointer). С JDK 13 от него отказались: адрес пишется в заголовок старой копии, а объекты стали на слово меньше. На практике выбор между ZGC и Shenandoah решают доступность в твоём дистрибутиве JDK и замер на своей нагрузке.</p>
+    </section>
+
+    <section class="step" id="measure">
+      <h2>Паузы по десятым миллисекунды, если памяти с запасом</h2>
+      <p>Проверим на одной нагрузке все сборщики. Программа 10 секунд обрабатывает платежи и держит живыми последние N из них — как очередь антифрода из темы Generations.</p>
+      <pre><code class="language-java">import java.util.ArrayDeque;
+
+public class Bench {
+    record PaymentDto(long id, long amount, byte[] body) { }
+
+    static final ArrayDeque&lt;PaymentDto&gt; RECENT = new ArrayDeque&lt;&gt;();
+
+    public static void main(String[] args) {
+        int keep = Integer.parseInt(args[0]);                  // сколько платежей держать живыми
+        long end = System.nanoTime() + 10_000_000_000L;         // 10 секунд работы
+        long processed = 0, sum = 0;
+        while (System.nanoTime() &lt; end) {
+            for (int i = 0; i &lt; 1000; i++) {
+                PaymentDto dto = new PaymentDto(processed, processed % 1000, new byte[200]);
+                sum += dto.amount();
+                RECENT.addLast(dto);
+                if (RECENT.size() &gt; keep) RECENT.removeFirst();  // старый платёж становится мусором
+                processed++;
+            }
+        }
+        System.out.println("обработано " + processed / 1_000_000 + " млн платежей, sum=" + sum % 7);
+    }
+}</code></pre>
+      <p>Замер на JDK 21, macOS, 18 ядер, один поток приложения. Паузы взяты из <code>-Xlog:safepoint</code>, одинаково для всех сборщиков. CPU — время процесса по <code>/usr/bin/time</code>. Сначала heap с запасом: 4 ГБ при 720 МБ живых данных (N = 3 000 000):</p>
+      <table class="mx">
+        <thead><tr><th>Сборщик</th><th>Обработано за 10 с</th><th>CPU</th><th>Паузы, сумма</th><th>Пауза, максимум</th></tr></thead>
+        <tbody>
+          <tr><td>Parallel</td><td>384 млн</td><td>89 с</td><td>6 820 мс</td><td>109 мс</td></tr>
+          <tr><td>G1</td><td>624 млн</td><td>61 с</td><td>3 185 мс</td><td>29 мс</td></tr>
+          <tr><td>ZGC</td><td>982 млн</td><td>21 с</td><td>9 мс</td><td>0,08 мс</td></tr>
+          <tr><td>ZGC generational</td><td>714 млн</td><td>25 с</td><td>10 мс</td><td>0,05 мс</td></tr>
+          <tr><td>Shenandoah</td><td>1 022 млн</td><td>20 с</td><td>18 мс</td><td>0,15 мс</td></tr>
+        </tbody>
+      </table>
+      <p>Паузы у конкурентных сборщиков — десятые и сотые доли миллисекунды, в сотни раз короче, чем у G1. И на этой нагрузке они не проиграли в пропускной способности, а выиграли: миллионы платежей средней жизни ломают гипотезу поколений, и G1 с Parallel тратят много работы на их перекладывание из young в old. Отсюда урок, который важнее любых цифр: <b>результат зависит от нагрузки, мерь на своей</b>. На типичной нагрузке с маленьким живым набором (N = 20 000) все сборщики обработали 970–1200 млн, а паузы остались того же порядка: около 2 мс у G1 и Parallel и 0,05–0,16 мс у конкурентных.</p>
+      <div class="note warn">
+        <p>Однопоточная нагрузка на 18 ядрах — лучший случай для конкурентного сборщика: его потокам есть где работать. В сервисе, который загружает все ядра, потоки ZGC отнимают CPU у запросов, и пропускная способность падает. Проверяй под реальной нагрузкой и с реальным числом ядер пода.</p>
+      </div>
+    </section>
+
+    <section class="step" id="headroom">
+      <h2>Цена низких пауз — запас памяти, иначе пауза прячется в allocation stall</h2>
+      <p>Конкурентный сборщик освобождает память, пока приложение продолжает выделять новую. Если выделять быстрее, чем он успевает собирать, свободная память кончится. Проверим на той же нагрузке, но с тесным heap: 1,2 ГБ при 720 МБ живых данных.</p>
+      <table class="mx">
+        <thead><tr><th>Сборщик</th><th>Обработано</th><th>CPU</th><th>Паузы safepoint</th><th>Что ещё случилось</th></tr></thead>
+        <tbody>
+          <tr><td>G1</td><td>300 млн</td><td>92 с</td><td>6 515 мс</td><td>162 полные сборки</td></tr>
+          <tr><td>ZGC</td><td>432 млн</td><td>32 с</td><td>16 мс</td><td>272 allocation stall, всего 5 216 мс, максимум 37 мс</td></tr>
+          <tr><td>ZGC generational</td><td>108 млн</td><td>39 с</td><td>93 мс</td><td>130 allocation stall, всего 7 978 мс, максимум 227 мс</td></tr>
+          <tr><td>Shenandoah</td><td>353 млн</td><td>23 с</td><td>43 мс</td><td>торможение выделения (pacing)</td></tr>
+        </tbody>
+      </table>
+      <p>По паузам safepoint ZGC всё ещё выглядит идеально — 16 мс за 10 секунд. Но в его логе другое:</p>
+      <pre><code class="language-text">$ java -XX:+UseZGC -Xmx1200m -Xlog:gc -cp out Bench 3000000
+[0.155s][info][gc] Allocation Stall (main) 14.328ms           # поток приложения ждал память 14 мс
+[0.206s][info][gc] Allocation Stall (main) 36.898ms
+[0.207s][info][gc] GC(1) Garbage Collection (Allocation Stall) 1200M(100%)-&gt;790M(66%)</code></pre>
+      <p><b>Allocation stall</b> — поток приложения хотел выделить объект, свободной памяти нет, и он ждёт, пока сборщик её освободит. Для запроса это та же пауза, только её нет в логе safepoint и в метриках пауз GC. За 10 секунд таких ожиданий набралось 5,2 секунды — почти столько же, сколько у G1 ушло на полные сборки. Поколенческий ZGC на этой нагрузке пострадал ещё сильнее.</p>
+      <p>Отсюда два практических правила. Первое: конкурентному сборщику нужен запас heap над живыми данными, часто на десятки процентов больше, чем G1. Второе: мерить нужно задержку запросов целиком, а не паузы сборщика. Если ограничиться графиком пауз GC, allocation stall останется невидимым.</p>
+      <div class="trap">
+        <p class="myth">ZGC даёт паузы меньше миллисекунды всегда.</p>
+        <p class="fact">Только пока у него есть запас памяти. При тесном heap поток приложения ждёт в allocation stall — десятки и сотни миллисекунд, которых не видно в паузах сборщика.</p>
+      </div>
+    </section>
+
+    <section class="step" id="generational">
+      <h2>Generational ZGC: поколения вернулись, чтобы реже обходить весь heap</h2>
+      <p>Классический ZGC маркирует весь heap в каждом цикле. Для сервиса, где большинство объектов умирает молодыми, это лишняя работа: живые долгожители в old маркируются снова и снова. Generational ZGC (JEP 439, JDK 21) делит heap на young и old, как в теме Generations, и собирает young чаще: в логе появляются <code>Minor Collection</code> и <code>Major Collection</code>. Паузы остаются такими же короткими, потому что все фазы конкурентные.</p>
+      <p>Статус по версиям: в JDK 21 режим включается флагом <code>-XX:+ZGenerational</code>, в JDK 23 он стал режимом по умолчанию, а в JDK 24 классический режим удалили. Обычно поколенческий режим снижает затраты CPU и нужный запас памяти на типичных нагрузках. В нашем замере со средней жизнью объектов он уступил классическому, и это ещё один повод мерить, а не верить таблицам.</p>
+      <p>Где кончается эта тема? ZGC и Shenandoah решают одну проблему — длину пауз при большом heap и строгом SLA. Если SLA мягкий, а важнее пропускная способность при тесной памяти, G1 или даже Parallel могут оказаться лучше. Как выбирать — в теме Choosing a Collector, как читать логи — в GC Logs &amp; Tuning.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>ZGC и Shenandoah перемещают объекты параллельно с приложением, поэтому их паузы не зависят от размера heap и объёма живых данных.</li>
+        <li>Load barrier проверяет каждую прочитанную ссылку. Если объект переехал, барьер берёт новый адрес и чинит поле — самолечение.</li>
+        <li>ZGC хранит состояние ссылки в битах указателя. Shenandoah хранит адрес переадресации в заголовке старой копии объекта.</li>
+        <li>Цена низких пауз — запас памяти и CPU. При тесном heap пауза прячется в allocation stall, которого нет в логе safepoint.</li>
+        <li>Generational ZGC — режим по умолчанию с JDK 23. Но результат любого сборщика зависит от нагрузки: мерь на своей.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="zgc-how" data-freq="2">
+      <h3>Как ZGC добивается пауз меньше миллисекунды?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Он делает конкурентно всю работу, которая зависит от размера heap: маркировку, перемещение объектов и исправление ссылок. В паузах остаются только операции, не зависящие от объёма данных, — в первую очередь снять корни со стеков потоков. Перемещать объекты во время работы приложения позволяет load barrier: после каждого чтения ссылки он проверяет, не переехал ли объект, и при необходимости берёт новый адрес и чинит поле.</p>
+          <p>В замере урока паузы ZGC были по 0,05–0,15 мс против десятков миллисекунд у G1 на той же нагрузке.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Паузы остаются короткими, пока есть запас памяти. При тесном heap потоки ждут в allocation stall, и это не видно в метриках пауз.</li>
+            <li>Цена — барьер на каждое чтение ссылки и CPU для конкурентных потоков сборщика.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему G1 не может так же?</summary>
+          <p>G1 копирует объекты только в паузе, когда приложение стоит, поэтому ему не нужен барьер на чтение. Зато пауза растёт с объёмом живых данных в выбранных регионах.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="load-barrier-q" data-freq="2">
+      <h3>Что такое load barrier и colored pointers?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Load barrier — несколько инструкций, которые JIT вставляет после каждого чтения ссылки из поля. Они проверяют, актуален ли указатель. Если объект переехал, барьер берёт новый адрес из таблицы переадресации и записывает его обратно в поле, чтобы следующие чтения шли по быстрому пути.</p>
+          <p>Colored pointers — способ сделать эту проверку одной инструкцией: ZGC хранит служебные биты — цвет — прямо в указателе. Барьер сравнивает цвет с текущим хорошим, и если совпало, ничего не делает.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Классический ZGC отображал одну память по трём виртуальным адресам, по одному на цвет, и RSS в мониторинге мог выглядеть втрое больше реального. В поколенческом режиме этого нет.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Кто переносит объект, если поток приложения прочитал ссылку раньше сборщика?</summary>
+          <p>Сам поток приложения, внутри барьера: он копирует объект, записывает переадресацию и возвращает новый адрес. Поэтому перемещение никогда не ждёт паузы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="zgc-cost" data-freq="2">
+      <h3>Какую цену платят за низкие паузы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Запасом памяти и CPU. Конкурентный сборщик освобождает память параллельно с тем, как приложение её занимает, поэтому heap нужен с запасом над живыми данными. Если запаса нет, поток приложения ждёт памяти — allocation stall. В замере урока при тесном heap ZGC набрал 5 секунд таких ожиданий за 10 секунд работы, хотя его паузы в логе safepoint были по долям миллисекунды.</p>
+          <p>Ещё барьер на каждое чтение ссылки и потоки сборщика, которые делят CPU с приложением. На машине с запасом ядер это почти незаметно, на полностью загруженном поде — заметно.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Команда перешла на ZGC и смотрит только метрику пауз GC: «всё отлично, 0,1 мс». Но p99 запросов вырос. Что проверить?</summary>
+          <p>Allocation stall в логе <code>-Xlog:gc</code>: при нехватке heap потоки ждут памяти, и это не попадает в метрику пауз. Если stall есть — увеличить heap или снизить скорость выделения. И вообще смотреть на задержку запросов, а не только на паузы сборщика.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="shenandoah-vs-zgc" data-freq="1">
+      <h3>Чем Shenandoah отличается от ZGC?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Задача та же — конкурентное перемещение объектов, — отличаются детали. ZGC хранит состояние ссылки в битах указателя, Shenandoah — адрес переадресации в заголовке старой копии объекта. При нехватке памяти ZGC останавливает выделяющий поток в allocation stall, а Shenandoah сначала притормаживает выделение (pacing), а затем может сделать degenerated GC в паузе.</p>
+          <p>Практическая разница — доступность: Shenandoah нет в сборках Oracle JDK, но он есть в OpenJDK от Red Hat, Temurin, Corretto. Выбор между ними решает замер на своей нагрузке.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="generational-zgc" data-freq="1">
+      <h3>Что такое generational ZGC и зачем он?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это ZGC с поколениями: heap делится на young и old, молодое поколение собирается чаще. Классический ZGC маркировал весь heap в каждом цикле, повторяя работу над долгоживущими объектами. Поколенческий режим снижает затраты CPU и нужный запас памяти на типичных нагрузках, паузы остаются такими же короткими.</p>
+          <p>В JDK 21 он включается флагом <code>-XX:+ZGenerational</code>, в JDK 23 стал режимом по умолчанию, в JDK 24 классический режим удалён.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сервис на JDK 21 запускают с -XX:+UseZGC. В каком режиме работает ZGC и как это проверить?</summary>
+          <p>В классическом, одноуровневом: в JDK 21 поколения нужно включать отдельным флагом. В логе <code>-Xlog:gc+init</code> будет строка <code>Using legacy single-generation mode</code>.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://wiki.openjdk.org/display/zgc/Main">OpenJDK Wiki: ZGC</a> — основа урока: окрашенные указатели, барьеры, фазы, настройка.</li>
+      <li><a href="https://openjdk.org/jeps/439">JEP 439: Generational ZGC</a> — зачем поколения и как изменились барьеры.</li>
+      <li><a href="https://openjdk.org/jeps/474">JEP 474</a> и <a href="https://openjdk.org/jeps/490">JEP 490</a> — поколенческий режим по умолчанию в JDK 23 и удаление классического в JDK 24.</li>
+      <li><a href="https://wiki.openjdk.org/display/shenandoah/Main">OpenJDK Wiki: Shenandoah</a> — load reference barriers, pacing, degenerated GC.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/z-garbage-collector.html">JDK 21 GC Tuning Guide: ZGC</a> — размер heap и allocation stall.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
