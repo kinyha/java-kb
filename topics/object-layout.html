@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Object Layout &amp; Allocation · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="object-layout">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: Object Layout &amp; Allocation</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="cost">
+      <h2>Кеш на миллион платежей занял в пять раз больше, чем данные</h2>
+      <p>Сервис держит в памяти кеш платежей: <code>HashMap&lt;Long, Payment&gt;</code>. У платежа четыре поля: сумма <code>long</code>, код валюты <code>int</code>, флаг возврата <code>boolean</code> и ссылка на счёт. Если сложить размеры полей, получится 17 байт, миллион платежей — 16 МБ. Под это и рассчитали heap. Замер показывает другое.</p>
+      <pre><code class="language-java">import java.util.HashMap;
+import java.util.Map;
+
+public class Cache {
+    static class Payment {
+        long amount;
+        int currency;
+        boolean refunded;
+        Object account;
+    }
+
+    static long usedHeap() {
+        System.gc();                          // только для замера: убрать мусор, оставить живое
+        Runtime rt = Runtime.getRuntime();
+        return rt.totalMemory() - rt.freeMemory();
+    }
+
+    public static void main(String[] args) {
+        int count = 1_000_000;
+        long before = usedHeap();
+        Map&lt;Long, Payment&gt; byId = new HashMap&lt;&gt;();
+        for (long id = 0; id &lt; count; id++) {
+            byId.put(id, new Payment());       // ключ Long, значение Payment
+        }
+        long after = usedHeap();
+        System.out.println("полезных данных: " + 17L * count / 1024 / 1024 + " МБ");
+        System.out.println("занято в heap: " + (after - before) / 1024 / 1024 + " МБ");
+        System.out.println("на один платёж: " + (after - before) / count + " байт");
+        System.out.println(byId.size());       // держим карту живой до конца замера
+    }
+}</code></pre>
+      <p>Замер через <code>System.gc()</code> даёт стабильный, но не гарантированный результат, поэтому ниже — реальный запуск на JDK 21:</p>
+      <pre><code class="language-text">$ java -Xmx2g -cp out Cache
+полезных данных: 16 МБ
+занято в heap: 92 МБ
+на один платёж: 97 байт           # вместо 17</code></pre>
+      <p>97 байт вместо 17 — это не утечка и не ошибка замера. Так устроены объекты в JVM. К концу урока ты разложишь эти 97 байт по полочкам и будешь понимать, откуда берётся каждый: заголовки, выравнивание, ссылки, обёртки и служебные структуры коллекции.</p>
+    </section>
+
+    <section class="step" id="header">
+      <h2>У каждого объекта есть заголовок, даже у пустого</h2>
+      <p>В 64-битной HotSpot объект начинается с заголовка из двух частей. <b>Mark word</b>, 8 байт, хранит служебное состояние: identity hash code, возраст для сборщика мусора, состояние блокировки. <b>Class pointer</b>, 4 байта, указывает на описание класса в Metaspace. У массива сверху ещё 4 байта длины. И весь объект выравнивается до кратного 8 байтам.</p>
+      <p>Размер объекта в Java из кода напрямую не узнать, но это умеет <code>Instrumentation.getObjectSize</code>. Он доступен из java-агента — маленького JAR, который JVM загружает до <code>main</code>:</p>
+      <pre><code class="language-java">import java.lang.instrument.Instrumentation;
+
+// Агент: JVM вызовет premain до main и передаст Instrumentation
+public class SizeAgent {
+    private static Instrumentation inst;
+
+    public static void premain(String args, Instrumentation instrumentation) {
+        inst = instrumentation;
+    }
+
+    // Размер самого объекта в байтах, без объектов, на которые он ссылается
+    public static long sizeOf(Object o) {
+        return inst.getObjectSize(o);
+    }
+}</code></pre>
+      <pre><code class="language-java">public class Sizes {
+    public static void main(String[] args) {
+        System.out.println("Object       " + SizeAgent.sizeOf(new Object()));
+        System.out.println("Integer      " + SizeAgent.sizeOf(Integer.valueOf(1000)));
+        System.out.println("Long         " + SizeAgent.sizeOf(Long.valueOf(1000)));
+        System.out.println("byte[0]      " + SizeAgent.sizeOf(new byte[0]));
+        System.out.println("byte[3]      " + SizeAgent.sizeOf(new byte[3]));
+        System.out.println("long[3]      " + SizeAgent.sizeOf(new long[3]));
+        System.out.println("String RUB   " + SizeAgent.sizeOf("RUB"));   // только сам String, без массива с буквами
+    }
+}</code></pre>
+      <pre><code class="language-text">javac -d agent SizeAgent.java
+printf "Premain-Class: SizeAgent\n" &gt; manifest.txt
+jar cfm size-agent.jar manifest.txt -C agent .                  # JAR с агентом
+javac -cp size-agent.jar -d out Sizes.java
+java -javaagent:size-agent.jar -cp out:size-agent.jar Sizes    # агент подключается флагом</code></pre>
+      <pre class="out">Object       16
+Integer      16
+Long         24
+byte[0]      16
+byte[3]      24
+long[3]      40
+String RUB   24</pre>
+      <p>Каждая строка раскладывается одинаково: заголовок, данные, добивка до кратного 8.</p>
+      <table class="mx">
+        <thead><tr><th>Объект</th><th>Заголовок</th><th>Данные</th><th>Выравнивание</th><th>Итого</th></tr></thead>
+        <tbody>
+          <tr><td><code>new Object()</code></td><td>12</td><td>0</td><td>+4</td><td>16</td></tr>
+          <tr><td><code>Integer</code></td><td>12</td><td>int 4</td><td>0</td><td>16</td></tr>
+          <tr><td><code>Long</code></td><td>12</td><td>long 8, начиная с 16-го байта</td><td>+4 перед полем</td><td>24</td></tr>
+          <tr><td><code>byte[3]</code></td><td>12 + длина 4</td><td>3</td><td>+5</td><td>24</td></tr>
+          <tr><td><code>long[3]</code></td><td>12 + длина 4</td><td>24</td><td>0</td><td>40</td></tr>
+          <tr><td><code>String "RUB"</code></td><td>12</td><td>hash, coder, ссылка на массив</td><td>+2</td><td>24 + массив 24 = 48</td></tr>
+        </tbody>
+      </table>
+      <p>Обёртка <code>Long</code> весит 24 байта ради 8 байт числа — втрое больше. Строка из трёх букв весит 48 байт, хотя вывод показал 24: <code>getObjectSize</code> меряет только сам объект <code>String</code>, а буквы лежат в отдельном массиве <code>byte[]</code> ещё на 24 байта.</p>
+      <div class="note tip">
+        <p>В реальной работе для таких замеров берут библиотеку JOL (Java Object Layout) из OpenJDK: она печатает раскладку любого объекта и умеет считать весь граф. Агент в уроке — тот же механизм без зависимостей.</p>
+      </div>
+    </section>
+
+    <section class="step" id="layout">
+      <h2>JVM сама решает порядок полей, и в объекте остаются дыры</h2>
+      <p>Поля лежат не в том порядке, в каком объявлены. JVM переставляет их, чтобы каждое было выровнено по своему размеру: <code>long</code> — по 8 байтам, <code>int</code> — по 4. Где выравнивание не сходится, остаются пустые байты. Посмотрим, куда HotSpot положил поля <code>Payment</code>.</p>
+      <pre><code class="language-java">import java.lang.reflect.Field;
+import sun.misc.Unsafe;
+
+public class Layout {
+    // Платёж: 8 + 4 + 1 + 4 = 17 байт полезных данных
+    static class Payment {
+        long amount;          // 8 байт
+        int currency;         // 4 байта: числовой код валюты ISO 4217
+        boolean refunded;     // 1 байт
+        Object account;       // ссылка: 4 байта при compressed oops
+    }
+
+    public static void main(String[] args) throws Exception {
+        // Unsafe умеет сказать, по какому смещению JVM положила поле
+        Field field = Unsafe.class.getDeclaredField("theUnsafe");
+        field.setAccessible(true);
+        Unsafe unsafe = (Unsafe) field.get(null);
+
+        for (String name : new String[] {"amount", "currency", "refunded", "account"}) {
+            long offset = unsafe.objectFieldOffset(Payment.class.getDeclaredField(name));
+            System.out.println(name + " @ " + offset);
+        }
+        System.out.println("размер: " + SizeAgent.sizeOf(new Payment()));
+    }
+}</code></pre>
+      <pre class="out">amount @ 16
+currency @ 12
+refunded @ 24
+account @ 28
+размер: 32</pre>
+      <p><code>currency</code> объявлен вторым, а лежит первым: он занял четыре байта сразу за заголовком, куда <code>long</code> не помещается. Вот эти 32 байта целиком.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 256" role="img" aria-label="Байты объекта Payment: с 0 по 7 mark word, с 8 по 11 указатель на класс, с 12 по 15 поле currency, с 16 по 23 amount, 24 — refunded, с 25 по 27 пустые байты, с 28 по 31 ссылка account. Всего 32 байта, из них заголовок 12, поля 17, пустых 3. Ниже mark word по битам: 25 неиспользуемых, 31 бит identity hash code, 4 бита возраста для GC, 2 бита состояния блокировки.">
+            <text x="40" y="20" class="dg-cap">Payment: 32 БАЙТА</text>
+
+            <!-- смещения -->
+            <g text-anchor="middle">
+              <text x="40" y="56" class="dg-n">0</text><text x="200" y="56" class="dg-n">8</text><text x="280" y="56" class="dg-n">12</text>
+              <text x="360" y="56" class="dg-n">16</text><text x="520" y="56" class="dg-n">24</text><text x="600" y="56" class="dg-n">28</text><text x="680" y="56" class="dg-n">32</text>
+            </g>
+
+            <!-- байты: 20 px на байт -->
+            <rect x="40" y="64" width="160" height="44" rx="4" class="dg-cell"/>
+            <rect x="200" y="64" width="80" height="44" rx="4" class="dg-cell"/>
+            <rect x="280" y="64" width="80" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="360" y="64" width="160" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="520" y="64" width="20" height="44" rx="3" class="dg-cell hit"/>
+            <rect x="540" y="64" width="60" height="44" rx="4" class="dg-sep" fill="none"/>
+            <rect x="600" y="64" width="80" height="44" rx="4" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="120" y="84" class="dg-t">mark word</text><text x="120" y="100" class="dg-n">8 байт</text>
+              <text x="240" y="84" class="dg-t">class</text><text x="240" y="100" class="dg-n">4 байта</text>
+              <text x="320" y="84" class="dg-in">currency</text><text x="320" y="100" class="dg-n">int</text>
+              <text x="440" y="84" class="dg-in">amount</text><text x="440" y="100" class="dg-n">long</text>
+              <text x="570" y="91" class="dg-n">пусто</text>
+              <text x="640" y="84" class="dg-in">account</text><text x="640" y="100" class="dg-n">ссылка</text>
+            </g>
+            <line x1="530" y1="108" x2="530" y2="116" class="dg-line"/>
+            <text x="530" y="126" class="dg-n" text-anchor="middle">refunded</text>
+
+            <!-- итоги по частям -->
+            <text x="46" y="144" class="dg-s">заголовок: 12 байт</text>
+            <text x="282" y="144" class="dg-ok">поля: 17 байт</text>
+            <text x="570" y="144" class="dg-bad" text-anchor="middle">3 байта впустую</text>
+
+            <!-- mark word по битам: 10 px на бит -->
+            <line x1="40" y1="108" x2="40" y2="182" class="dg-sep"/>
+            <line x1="200" y1="108" x2="680" y2="182" class="dg-sep"/>
+            <text x="46" y="176" class="dg-cap">MARK WORD: 64 БИТА</text>
+            <rect x="40" y="182" width="250" height="30" rx="3" class="dg-sep" fill="none"/>
+            <rect x="290" y="182" width="310" height="30" rx="3" class="dg-cell"/>
+            <rect x="600" y="182" width="10" height="30" class="dg-sep" fill="none"/>
+            <rect x="610" y="182" width="40" height="30" rx="3" class="dg-cell hit"/>
+            <rect x="650" y="182" width="10" height="30" class="dg-sep" fill="none"/>
+            <rect x="660" y="182" width="20" height="30" rx="3" class="dg-cell hit"/>
+            <text x="165" y="201" class="dg-n" text-anchor="middle">не используется, 25</text>
+            <text x="445" y="202" class="dg-in" text-anchor="middle">identity hashCode, 31 бит</text>
+            <text x="630" y="201" class="dg-n" text-anchor="middle">age</text>
+            <text x="690" y="232" class="dg-n" text-anchor="end">age — 4 бита: возраст для GC, максимум 15</text>
+            <text x="690" y="248" class="dg-n" text-anchor="end">последние 2 бита — состояние блокировки</text>
+          </svg>
+        </div>
+        <figcaption>Масштаб честный: один байт — одинаковая ширина. Зелёное — полезные данные, всё остальное — плата за то, что это объект.</figcaption>
+      </figure>
+      <p>Из 32 байт полезных — 17. Отсюда два практических вывода. Первый: маленькие объекты дороги. Заголовок в 12 байт одинаков для объекта с одним полем и с десятью, поэтому миллион мелких объектов тратит память в основном на заголовки. Второй: <b>возраст объекта занимает 4 бита</b>, поэтому сборщик может считать переживания только до 15. Отсюда верхняя граница флага <code>MaxTenuringThreshold</code>, о ней — в теме Generations.</p>
+      <p>Mark word ещё и меняется во время жизни объекта. Когда поток берёт <code>synchronized</code> на объекте, биты блокировки меняются, и в mark word временно лежит ссылка на запись о блокировке. Когда первый раз вызывают <code>hashCode()</code> по умолчанию, в mark word записывается identity hash: так он остаётся одинаковым, даже если GC переместит объект.</p>
+    </section>
+
+    <section class="step" id="compressed-oops">
+      <h2>Ссылки весят 4 байта, пока heap меньше 32 ГБ</h2>
+      <p>На 64-битной машине адрес занимает 8 байт. Но в выводе выше ссылка <code>account</code> заняла 4. Это <b>compressed oops</b> (ordinary object pointers): JVM хранит ссылку как 32-битное число, а при обращении умножает его на 8 и прибавляет адрес начала heap. Умножение на 8 бесплатно — это сдвиг на 3 бита. А раз все объекты выровнены по 8 байтам, младшие три бита адреса всегда нули, и хранить их незачем.</p>
+      <p>32 бита дают 2<sup>32</sup> разных значений, умноженных на 8, — 32 ГБ адресов. Если heap больше, 4 байт не хватает, и JVM молча переходит на полные 8-байтные ссылки.</p>
+      <pre><code class="language-text">$ java -Xmx31g -XX:+PrintFlagsFinal -version | grep UseCompressedOops
+     bool UseCompressedOops    = true        # heap 31 ГБ: ссылки по 4 байта
+$ java -Xmx32g -XX:+PrintFlagsFinal -version | grep UseCompressedOops
+     bool UseCompressedOops    = false       # heap 32 ГБ: ссылки по 8 байт
+
+$ java -XX:-UseCompressedOops -javaagent:size-agent.jar -cp out:size-agent.jar Layout
+amount @ 16
+currency @ 12
+refunded @ 24
+account @ 32                                  # ссылка сдвинулась и выросла
+размер: 40                                    # платёж на 25% тяжелее</code></pre>
+      <p>Кеш из первого шага без compressed oops занял 116 МБ вместо 92: ссылки есть в каждом платеже, в каждом узле <code>HashMap</code> и в таблице. Отсюда парадокс, который любят на собеседованиях: <b>heap в 32 ГБ вмещает меньше живых данных, чем heap в 31 ГБ</b>, потому что все ссылки разом подорожали вдвое. Если нужно больше 32 ГБ, прыгать имеет смысл сразу заметно выше, на 40–48 ГБ.</p>
+      <p>Теперь можно разложить 97 байт из первого шага:</p>
+      <table class="mx">
+        <thead><tr><th>Что</th><th>Байт на платёж</th><th>Откуда</th></tr></thead>
+        <tbody>
+          <tr><td>объект <code>Payment</code></td><td>32</td><td>заголовок 12 + поля 17 + 3 пустых</td></tr>
+          <tr><td>ключ <code>Long</code></td><td>24</td><td>обёртка над <code>long</code></td></tr>
+          <tr><td>узел <code>HashMap.Node</code></td><td>32</td><td>заголовок + hash, key, value, next</td></tr>
+          <tr><td>слот в таблице <code>HashMap</code></td><td>≈8</td><td>таблица на 2 млн ссылок по 4 байта: запас под load factor</td></tr>
+          <tr><td>итого</td><td>≈96</td><td>замер показал 97</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Чтобы сэкономить память, достаточно выбрать поля поменьше: <code>int</code> вместо <code>long</code>, <code>byte</code> вместо <code>int</code>.</p>
+        <p class="fact">Поля платежа — 17 байт из 97. Основной расход — заголовки и обёртки. Экономят числом объектов: примитивные ключи вместо <code>Long</code> (специальные коллекции вроде fastutil или Eclipse Collections), массивы примитивов вместо списков объектов.</p>
+      </div>
+    </section>
+
+    <section class="step" id="tlab">
+      <h2>new почти ничего не стоит: у каждого потока свой кусок eden</h2>
+      <p>Раз объектов так много, их создание должно быть дешёвым. Если бы каждый <code>new</code> брал общую блокировку на heap, сотни потоков стояли бы в очереди. Поэтому HotSpot выдаёт каждому потоку <b>TLAB</b> (thread-local allocation buffer) — свой участок в eden, области молодых объектов. Внутри TLAB выделение — это сдвиг указателя: объект кладут по адресу <code>top</code>, и <code>top</code> увеличивают на размер объекта.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 256" role="img" aria-label="Eden поделён на TLAB потоков http-1 и http-2. Каждый поток кладёт новые объекты в свой TLAB, сдвигая указатель top, без блокировок и одновременно с другими. Когда TLAB кончается, поток берёт из eden новый. Большой массив не помещается в TLAB и выделяется в обход него.">
+            <defs>
+              <marker id="tl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">EDEN</text>
+            <rect x="20" y="30" width="686" height="124" rx="10" class="dg-box"/>
+
+            <!-- TLAB потоков -->
+            <text data-s="1-3" x="36" y="54" class="dg-n">TLAB потока http-1</text>
+            <text data-s="4-" x="36" y="54" class="dg-n">старый TLAB http-1: заполнен</text>
+            <rect x="36" y="62" width="240" height="48" rx="6" class="dg-sep" fill="none"/>
+            <text x="300" y="54" class="dg-n">TLAB потока http-2</text>
+            <rect x="300" y="62" width="180" height="48" rx="6" class="dg-sep" fill="none"/>
+            <text data-s="1-3" x="504" y="54" class="dg-n">свободная часть eden</text>
+            <text data-s="4-" x="504" y="54" class="dg-n">новый TLAB http-1</text>
+            <rect data-s="4-" x="504" y="62" width="186" height="48" rx="6" class="dg-sep" fill="none"/>
+
+            <!-- объекты: 2 px на байт -->
+            <g data-s="2-"><rect x="36" y="62" width="64" height="48" rx="4" class="dg-cell hit"/><text x="68" y="90" class="dg-n" text-anchor="middle">Payment</text></g>
+            <g data-s="3-"><rect x="100" y="62" width="48" height="48" rx="4" class="dg-cell hit"/><text x="124" y="90" class="dg-n" text-anchor="middle">Money</text>
+              <rect x="300" y="62" width="48" height="48" rx="4" class="dg-cell hit"/><text x="324" y="90" class="dg-n" text-anchor="middle">Receipt</text></g>
+            <g data-s="4-"><rect x="148" y="62" width="128" height="48" rx="4" class="dg-cell"/><text x="212" y="90" class="dg-n" text-anchor="middle">ещё объекты</text>
+              <rect x="504" y="62" width="64" height="48" rx="4" class="dg-cell hit"/><text x="536" y="90" class="dg-n" text-anchor="middle">Payment</text></g>
+            <g data-s="5"><rect x="36" y="118" width="320" height="28" rx="4" class="dg-cell miss"/><text x="196" y="137" class="dg-in" text-anchor="middle">byte[2 МБ]: больше TLAB, выделен в обход</text></g>
+
+            <!-- потоки и их указатель top -->
+            <rect x="36" y="180" width="160" height="40" rx="7" class="dg-box"/>
+            <text x="116" y="205" class="dg-t" text-anchor="middle">поток http-1</text>
+            <rect x="300" y="180" width="160" height="40" rx="7" class="dg-box"/>
+            <text x="380" y="205" class="dg-t" text-anchor="middle">поток http-2</text>
+            <path data-s="1" d="M116 180 L 38 114" class="dg-line" marker-end="url(#tl-n)"/>
+            <path data-s="2" d="M116 180 L 100 114" class="dg-line" marker-end="url(#tl-n)"/>
+            <path data-s="3" d="M116 180 L 148 114" class="dg-line" marker-end="url(#tl-n)"/>
+            <path data-s="4-" d="M116 180 C 300 170, 520 150, 568 114" class="dg-line" marker-end="url(#tl-n)"/>
+            <path data-s="1-2" d="M380 180 L 302 114" class="dg-line" marker-end="url(#tl-n)"/>
+            <path data-s="3-" d="M380 180 L 348 114" class="dg-line" marker-end="url(#tl-n)"/>
+            <text x="480" y="205" class="dg-n">стрелка — top потока</text>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="248" class="dg-in">каждому потоку выдан свой участок eden</text>
+            <text data-s="2" x="20" y="248" class="dg-in">new Payment: положить по top, top += 32 — без блокировок</text>
+            <text data-s="3" x="20" y="248" class="dg-in">потоки выделяют одновременно и не мешают друг другу</text>
+            <text data-s="4" x="20" y="248" class="dg-in">TLAB кончился: поток берёт новый из eden — редкий медленный путь</text>
+            <text data-s="5" x="20" y="248" class="dg-bad">объект больше TLAB: общий путь с синхронизацией</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Каждый поток получил из eden свой TLAB. Указатель <code>top</code> стоит в начале: здесь появится следующий объект.</li>
+          <li>Поток http-1 выполняет <code>new Payment()</code>: объект кладётся по адресу <code>top</code>, и <code>top</code> сдвигается на 32 байта. Ни блокировок, ни поиска свободного места.</li>
+          <li>Оба потока выделяют объекты одновременно. Каждый двигает только свой указатель, поэтому они не конкурируют.</li>
+          <li>В TLAB потока http-1 не осталось места. Поток берёт из eden новый TLAB — это медленнее, но случается редко, раз на тысячи объектов.</li>
+          <li>Массив на 2 МБ не поместится ни в какой TLAB. Такие объекты выделяются в обход, общим путём с синхронизацией. Поэтому большие временные массивы дороже, чем кажется.</li>
+        </ol>
+      </figure>
+      <p>Размеры на схеме условные: реальный TLAB — десятки и сотни килобайт, и JVM подстраивает его под скорость выделения потока. Главное — стоимость. Создать объект в TLAB — несколько машинных инструкций, дешевле, чем <code>malloc</code> в C. Платить приходится позже: объекты надо убрать, и цена <code>new</code> на самом деле — это цена сборки мусора. Об этом папка Garbage Collection.</p>
+      <p>Выделение по сдвигу указателя возможно потому, что eden после сборки мусора всегда пустой и сплошной. Живые объекты сборщик копирует из eden в другие области, поэтому искать дыры между занятыми кусками не нужно.</p>
+    </section>
+
+    <section class="step" id="escape">
+      <h2>Объект, который не выходит из метода, JIT может не создавать вовсе</h2>
+      <p>Самый дешёвый объект — тот, которого нет. JIT-компилятор C2 делает <b>escape analysis</b>: проверяет, может ли ссылка на объект выйти за пределы метода — вернуться из него, попасть в поле, в другой поток. Если не может, объект в heap не выделяется: его поля превращаются в обычные локальные переменные и живут в регистрах. Это <b>scalar replacement</b>.</p>
+      <pre><code class="language-java">import java.lang.management.ManagementFactory;
+
+public class Escape {
+    record Money(long kopecks, String currency) { }
+
+    static Money last;                                   // static-поле: всё, что сюда попало, «сбежало»
+
+    // Money живёт только внутри метода
+    static long feeLocal(long amount) {
+        Money money = new Money(amount, "RUB");
+        return money.kopecks() * 15 / 1000;
+    }
+
+    // Тот же объект, но ссылка уходит в static-поле
+    static long feeEscaping(long amount) {
+        Money money = new Money(amount, "RUB");
+        last = money;
+        return money.kopecks() * 15 / 1000;
+    }
+
+    public static void main(String[] args) {
+        // счётчик байтов, которые текущий поток выделил в heap
+        var threads = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        for (int round = 1; round &lt;= 4; round++) {
+            long start = threads.getCurrentThreadAllocatedBytes();
+            long sum = 0;
+            for (int i = 0; i &lt; 1_000_000; i++) sum += feeLocal(i);
+            long local = threads.getCurrentThreadAllocatedBytes() - start;
+
+            start = threads.getCurrentThreadAllocatedBytes();
+            for (int i = 0; i &lt; 1_000_000; i++) sum += feeEscaping(i);
+            long escaping = threads.getCurrentThreadAllocatedBytes() - start;
+
+            System.out.printf("раунд %d: локальный %,d КБ, сбежавший %,d КБ%n", round, local / 1024, escaping / 1024);
+        }
+    }
+}</code></pre>
+      <p>Результат зависит от того, когда отработает JIT, поэтому ниже — реальные запуски:</p>
+      <pre><code class="language-text">$ java -cp out Escape
+раунд 1: локальный 477 КБ, сбежавший 23,437 КБ     # пока работает интерпретатор, объекты создаются
+раунд 2: локальный 0 КБ, сбежавший 23,437 КБ       # C2 убрал Money из feeLocal полностью
+раунд 3: локальный 0 КБ, сбежавший 23,437 КБ
+раунд 4: локальный 0 КБ, сбежавший 23,437 КБ
+
+$ java -XX:-DoEscapeAnalysis -cp out Escape         # escape analysis выключен
+раунд 1: локальный 23,442 КБ, сбежавший 23,437 КБ
+раунд 2: локальный 23,437 КБ, сбежавший 23,437 КБ   # теперь оба метода выделяют одинаково</code></pre>
+      <p>23 437 КБ на миллион вызовов — ровно 24 байта на объект <code>Money</code>: заголовок 12, ссылка на строку 4, <code>long</code> 8. В методе, где объект не сбегает, после прогрева выделений ноль. Код тот же, разница — только в том, куда уходит ссылка.</p>
+      <p>Escape analysis работает не всегда. Объект должен оставаться внутри одной скомпилированной единицы. Если метод, которому его передают, не заинлайнен, потому что слишком большой или вызывается через полиморфный вызов, анализ считает объект сбежавшим. Ещё он не помогает в интерпретаторе и не работает для больших массивов. Поэтому писать код в расчёте на escape analysis не стоит, но понимать, почему короткоживущие объекты в горячем коде часто бесплатны, полезно.</p>
+      <p>Где кончается эта модель? Раскладка — деталь HotSpot, спецификация её не фиксирует, и она меняется. В JDK 24 появились компактные заголовки (<code>-XX:+UseCompactObjectHeaders</code>, JEP 450): заголовок 8 байт вместо 12, пустой объект тоже 8. На JDK 21 урок описывает именно то, что работает сейчас.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Объект в 64-битной HotSpot — заголовок 12 байт (mark word 8 и class pointer 4), поля и выравнивание до кратного 8. <code>new Object()</code> — 16 байт, <code>Long</code> — 24.</li>
+        <li>JVM сама переставляет поля по выравниванию и оставляет дыры. На миллионах мелких объектов память уходит в основном на заголовки и обёртки.</li>
+        <li>В mark word на возраст отведено 4 бита, поэтому объект может пережить не больше 15 сборок в молодом поколении.</li>
+        <li>Compressed oops сжимают ссылки до 4 байт, пока heap меньше 32 ГБ. Heap в 32 ГБ вмещает меньше данных, чем в 31.</li>
+        <li><code>new</code> в TLAB — сдвиг указателя без блокировок. Объекты, которые не сбегают из метода, C2 может не создавать вовсе.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="object-size" data-freq="2">
+      <h3>Сколько памяти занимает new Object() и Integer?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В 64-битной HotSpot у объекта заголовок 12 байт: mark word на 8 байт и сжатый указатель на класс на 4. Размер выравнивается до кратного 8. Поэтому <code>new Object()</code> — 16 байт, <code>Integer</code> — тоже 16: 12 заголовка и 4 числа. <code>Long</code> — 24, у массива ещё 4 байта на длину.</p>
+          <p>На практике это значит, что коллекции обёрток дорогие. <code>List&lt;Long&gt;</code> из миллиона чисел — это 24 байта на объект плюс 4 на ссылку, а <code>long[]</code> — 8 байт на число.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без compressed class pointers заголовок 16 байт. В JDK 24 появились компактные заголовки на 8 байт (JEP 450).</li>
+            <li>Точный размер показывает JOL или <code>Instrumentation.getObjectSize</code>. Спецификация размеры не фиксирует, это деталь реализации.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сколько байт займёт объект с полями long id, byte status, Object owner при настройках по умолчанию?</summary>
+          <p>32. Поля — 13 байт, заголовок — 12, но выровнять их плотнее не выйдет. Замер через <code>Layout</code> из урока на JDK 21 показывает: <code>status</code> лёг на смещение 12, сразу за заголовком, и оставил после себя три пустых байта. Дальше <code>id</code> на 16, <code>owner</code> на 24, всего 28 и выравнивание до 32. Порядок полей JVM выбирает сама, поэтому такие подсчёты проверяют замером, а не в уме.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Кеш курсов хранит Map&lt;String, Double&gt; на 10 миллионов записей и не помещается в heap. Что предложишь?</summary>
+          <p>Посчитать, куда уходит память: каждая запись — это <code>Double</code> на 16 байт, узел <code>HashMap</code> на 32, строка-ключ от 48 байт и слот таблицы. Сами числа — 8 байт из сотни. Варианты: хранить ключи как числовые идентификаторы, взять коллекцию с примитивными значениями, держать данные в массивах, а не в объектах.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="compressed-oops-q" data-freq="2">
+      <h3>Что такое compressed oops и почему heap в 32 ГБ хуже, чем в 31?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Compressed oops — сжатые ссылки на объекты. JVM хранит ссылку как 32-битное число, а при обращении сдвигает его на 3 бита и прибавляет базу heap. Сдвиг возможен, потому что все объекты выровнены по 8 байтам. 2<sup>32</sup> × 8 — это 32 ГБ, и пока heap меньше, каждая ссылка весит 4 байта вместо 8.</p>
+          <p>При heap от 32 ГБ JVM молча переходит на 8-байтные ссылки. Все объекты со ссылками разом тяжелеют, и живых данных помещается меньше, чем в 31 ГБ. Поэтому heap либо держат ниже 32 ГБ, либо увеличивают сразу заметно выше.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Проверить можно так: <code>java -Xmx32g -XX:+PrintFlagsFinal -version | grep UseCompressedOops</code>.</li>
+            <li>С <code>-XX:ObjectAlignmentInBytes=16</code> граница сдвигается до 64 ГБ ценой большего выравнивания каждого объекта.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Под перевели с -Xmx30g на -Xmx34g «с запасом», и частота GC выросла. Почему?</summary>
+          <p>На 34 ГБ выключились compressed oops, ссылки стали по 8 байт. Живые данные заняли больше места, и свободного heap для новых объектов стало меньше, чем было на 30 ГБ. Нужно вернуться ниже 32 ГБ или брать существенно больше.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="tlab-q" data-freq="2">
+      <h3>Почему выделение объекта в Java дешёвое? Что такое TLAB?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждый поток получает свой участок eden — TLAB, thread-local allocation buffer. Выделение внутри него — сдвиг указателя <code>top</code> на размер объекта, без блокировок и поиска свободного места. Это несколько машинных инструкций, дешевле, чем <code>malloc</code>. Когда TLAB кончается, поток берёт новый из eden, это редкий медленный путь.</p>
+          <p>Настоящая цена <code>new</code> — сборка мусора потом. Поэтому оптимизируют не саму аллокацию, а её объём в горячем коде: меньше временных объектов — реже сборки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Выделение сдвигом указателя возможно, потому что после сборки eden пустой и сплошной: живые объекты скопированы.</li>
+            <li>Объекты больше TLAB выделяются в обход него. В G1 объекты от половины региона становятся humongous и сразу попадают в old.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Видны ли объекты из TLAB одного потока другим потокам?</summary>
+          <p>Да. TLAB — только способ выделения, а не отдельная память. Объект лежит в общем heap, и ссылку на него можно передать куда угодно. Потоку принадлежит лишь право выделять в этом участке.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="escape-analysis-q" data-freq="2">
+      <h3>Что такое escape analysis?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это анализ, который делает JIT-компилятор C2: может ли ссылка на объект выйти за пределы метода — вернуться, попасть в поле, в другой поток. Если не может, объект не выделяется в heap, а его поля становятся локальными переменными в регистрах. Это scalar replacement.</p>
+          <p>В уроке метод с локальным <code>Money</code> после прогрева не выделял ни байта, а тот же метод, сохранявший объект в static-поле, выделял по 24 байта на вызов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Работает только в скомпилированном коде и в пределах инлайнинга. Передача объекта в незаинлайненный метод считается побегом.</li>
+            <li>Может убрать и блокировки на объекте, который не сбегает (lock elision).</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сбегает ли объект в методе, который создаёт StringBuilder, склеивает строку и возвращает builder.toString()?</summary>
+          <p>Сам <code>StringBuilder</code> не сбегает: наружу уходит новая строка. Если <code>append</code> и <code>toString</code> заинлайнены, C2 может убрать объект builder, но строка и её массив всё равно выделятся — они возвращаются из метода.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://shipilev.net/jvm/objects-inside-out/">Aleksey Shipilёv, Java Objects Inside Out</a> — основа урока: заголовки, выравнивание, раскладка полей, compressed oops, с замерами JOL.</li>
+      <li><a href="https://github.com/openjdk/jol">OpenJDK JOL</a> — инструмент, которым смотрят раскладку объектов в реальной работе.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/vm/java-hotspot-virtual-machine-performance-enhancements.html">HotSpot Performance Enhancements, JDK 21</a> — compressed oops и escape analysis.</li>
+      <li><a href="https://openjdk.org/jeps/450">JEP 450: Compact Object Headers</a> — заголовок на 8 байт в JDK 24.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.instrument/java/lang/instrument/Instrumentation.html#getObjectSize(java.lang.Object)">Instrumentation.getObjectSize</a> — что именно меряет агент из урока.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
