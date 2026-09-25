@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Choosing a Collector · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="gc-choice">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: Choosing a Collector</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="surprise">
+      <h2>Под урезали до одного CPU — и JVM молча сменила сборщик</h2>
+      <p>Чтобы сэкономить, команда уменьшила поды платёжного шлюза: <code>limits.cpu: 1</code>, памяти 4 ГБ, как было. Через день p99 вырос с 40 до 300 мс. Код не менялся, флаги JVM тоже. Если посмотреть в лог сборщика при старте, в первой строке будет ответ:</p>
+      <pre><code class="language-text">[0.004s][info][gc] Using Serial</code></pre>
+      <p>Раньше там было <code>Using G1</code>. Никто не выбирал Serial: JVM сама решила, что машина маленькая, и взяла простейший однопоточный сборщик с остановкой на всё время сборки. Проверим, как на выбор влияют лимиты. Реальные запуски официального образа <code>eclipse-temurin:21-jdk-jammy</code> в Docker с разными лимитами:</p>
+      <pre><code class="language-text">$ docker run --rm --cpus=1 --memory=4g eclipse-temurin:21-jdk-jammy java -Xlog:gc -version
+[0.002s][info][gc     ] Using Serial                     # один CPU — Serial
+[0.002s][info][gc,init] CPUs: 18 total, 1 available       # JVM видит лимит контейнера, а не машину
+[0.002s][info][gc,init] Memory: 4096M
+
+--cpus=2 --memory=1g   →  Using Serial                     # два CPU, но мало памяти — всё равно Serial
+--cpus=2 --memory=2g   →  Using G1
+--cpus=4 --memory=4g   →  Using G1</code></pre>
+      <p>Выбор сборщика — это решение, которое JVM принимает за тебя при каждом старте, если ты его не принял. В этой теме разберём, по каким правилам она выбирает, чем сборщики отличаются на практике и как выбрать осознанно.</p>
+    </section>
+
+    <section class="step" id="ergonomics">
+      <h2>JVM выводит сборщик, heap и потоки GC из лимитов контейнера</h2>
+      <p>Механизм называется <b>эргономикой</b>. При старте JVM узнаёт число доступных CPU и объём памяти — в контейнере это лимиты cgroup, а не параметры машины — и по ним выбирает настройки по умолчанию.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Лимиты пода cpu 1 и memory 4 гигабайта передаются JVM, она видит 1 CPU и 4096 мегабайт. Проверка server-class: не меньше двух CPU и около 1,8 гигабайта памяти. Если да — G1, если нет — Serial. Из тех же данных JVM берёт heap по умолчанию 25 процентов памяти и число потоков сборщика по числу CPU.">
+            <defs>
+              <marker id="er-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="er-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="er-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">ЛИМИТЫ ПОДА</text>
+            <text x="240" y="20" class="dg-cap">ЧТО ВИДИТ JVM</text>
+            <text x="460" y="20" class="dg-cap">ВЫБОР СБОРЩИКА</text>
+
+            <rect x="20" y="32" width="180" height="76" rx="8" class="dg-box"/>
+            <text x="32" y="56" class="dg-in">cpu: 1</text>
+            <text x="32" y="78" class="dg-in">memory: 4Gi</text>
+            <text x="32" y="98" class="dg-n">cgroup контейнера</text>
+            <path d="M200 70 L 236 70" class="dg-line" marker-end="url(#er-n)"/>
+
+            <rect x="240" y="32" width="180" height="76" rx="8" class="dg-box"/>
+            <text x="252" y="56" class="dg-in">1 CPU</text>
+            <text x="252" y="78" class="dg-in">4096 МБ</text>
+            <text x="252" y="98" class="dg-n">из лимитов, не из машины</text>
+            <path d="M420 70 L 456 70" class="dg-line" marker-end="url(#er-n)"/>
+
+            <rect x="460" y="32" width="246" height="76" rx="8" class="dg-cell"/>
+            <text x="583" y="56" class="dg-t" text-anchor="middle">server-class?</text>
+            <text x="583" y="76" class="dg-s" text-anchor="middle">не меньше 2 CPU</text>
+            <text x="583" y="94" class="dg-s" text-anchor="middle">и около 1,8 ГБ памяти</text>
+
+            <path d="M520 108 L 520 144" class="dg-line ok" marker-end="url(#er-ok)"/>
+            <text x="528" y="132" class="dg-ok">да</text>
+            <path d="M646 108 L 646 144" class="dg-line bad" marker-end="url(#er-bad)"/>
+            <text x="654" y="132" class="dg-bad">нет</text>
+            <rect x="460" y="148" width="120" height="44" rx="8" class="dg-cell hit"/>
+            <text x="520" y="175" class="dg-t" text-anchor="middle">G1</text>
+            <rect x="590" y="148" width="116" height="44" rx="8" class="dg-cell miss"/>
+            <text x="648" y="175" class="dg-t" text-anchor="middle">Serial</text>
+
+            <!-- другие настройки из тех же данных -->
+            <path d="M330 108 L 330 144" class="dg-line" marker-end="url(#er-n)"/>
+            <rect x="20" y="148" width="400" height="80" rx="8" class="dg-box"/>
+            <text x="32" y="172" class="dg-t">тот же расчёт задаёт</text>
+            <text x="32" y="194" class="dg-s">heap: 25% памяти (MaxRAMPercentage)</text>
+            <text x="32" y="214" class="dg-s">потоки GC: по числу CPU (Parallel/ConcGCThreads)</text>
+          </svg>
+        </div>
+        <figcaption>Правило server-class зашито в HotSpot. Оно срабатывает, только если сборщик не задан флагом явно.</figcaption>
+      </figure>
+      <p>Из тех же данных JVM выводит число потоков сборщика. Проверено на JDK 21 флагом <code>-XX:ActiveProcessorCount</code>, который имитирует число CPU:</p>
+      <table class="mx">
+        <thead><tr><th>CPU</th><th>Сборщик</th><th>ParallelGCThreads</th><th>ConcGCThreads</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Serial</td><td>—</td><td>—</td></tr>
+          <tr><td>2</td><td>G1</td><td>2</td><td>1</td></tr>
+          <tr><td>4</td><td>G1</td><td>4</td><td>1</td></tr>
+          <tr><td>8</td><td>G1</td><td>8</td><td>2</td></tr>
+          <tr><td>18</td><td>G1</td><td>14</td><td>4</td></tr>
+        </tbody>
+      </table>
+      <p>Отсюда объяснение истории с подом. На одном CPU JVM решила, что многопоточный G1 бессмыслен, и взяла Serial. Serial останавливает приложение на всю сборку и работает одним потоком, поэтому паузы с heap в гигабайт выросли в разы. Если в таком поде нужен G1, его задают явно: <code>-XX:+UseG1GC</code>. Но лучше дать поду хотя бы два CPU. Конкурентным фазам G1 нужно где-то работать, иначе они отнимают процессор у запросов.</p>
+      <div class="note warn">
+        <p><code>limits.cpu</code> с дробным значением округляется вверх: при <code>1.5</code> JVM увидит 2 CPU и выберет G1 — проверено в контейнере с <code>--cpus=1.5</code>, в логе <code>CPUs: 18 total, 2 available</code>. А Kubernetes будет урезать процесс до полутора ядер через CFS-квоту, и потоки сборщика попадут под это урезание. Под троттлингом паузы растягиваются, хотя в логе GC всё выглядит прилично.</p>
+      </div>
+    </section>
+
+    <section class="step" id="landscape">
+      <h2>Пять сборщиков — пять компромиссов между паузой, скоростью и памятью</h2>
+      <p>Из темы GC Basics: паузы, пропускная способность и память конкурируют. Каждый сборщик HotSpot выбирает свою точку:</p>
+      <table class="mx">
+        <thead><tr><th>Сборщик</th><th>Как собирает</th><th>Паузы</th><th>Сильная сторона</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td><b>Serial</b></td><td>один поток, всё в паузе</td><td>растут с heap, на гигабайтах — сотни мс</td><td>минимум памяти и накладных расходов</td><td>паузы на больших heap</td></tr>
+          <tr><td><b>Parallel</b></td><td>много потоков, всё в паузе</td><td>короче Serial, но full GC всего old</td><td>максимум пропускной способности</td><td>длинные паузы full GC</td></tr>
+          <tr><td><b>G1</b></td><td>регионы, конкурентная маркировка, копирование в паузе</td><td>цель 200 мс, обычно десятки</td><td>баланс, работает «из коробки»</td><td>remembered sets, пол паузы по живым данным</td></tr>
+          <tr><td><b>ZGC</b></td><td>всё конкурентно, барьер на чтение</td><td>доли миллисекунды</td><td>паузы не зависят от heap</td><td>запас памяти и CPU, allocation stall при нехватке</td></tr>
+          <tr><td><b>Shenandoah</b></td><td>всё конкурентно, барьеры на чтение и запись</td><td>доли миллисекунды</td><td>как ZGC</td><td>как ZGC; нет в Oracle JDK</td></tr>
+        </tbody>
+      </table>
+      <p>Есть и шестой, особый: <b>Epsilon</b> (<code>-XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC</code>) не собирает мусор вовсе и падает с <code>OutOfMemoryError</code>, когда heap кончился. Его используют в тестах производительности, чтобы отделить стоимость сборщика от стоимости кода, и для очень коротких задач.</p>
+    </section>
+
+    <section class="step" id="measure">
+      <h2>Какой быстрее — зависит от нагрузки, поэтому выбирают по замеру</h2>
+      <p>Таблица выше — ориентир, а не ответ. Вот замер из темы ZGC &amp; Shenandoah: одна программа обрабатывает платежи 10 секунд и держит живыми последние N. JDK 21, 18 ядер, heap 4 ГБ. Два варианта нагрузки: мало живых данных (N = 20 000, как у типичного сервиса) и много живых со средней жизнью (N = 3 000 000, как у кешей и очередей антифрода).</p>
+      <table class="mx">
+        <thead><tr><th rowspan="2">Сборщик</th><th colspan="2">Мало живых</th><th colspan="2">Много живых</th></tr>
+          <tr><th>обработано</th><th>макс. пауза</th><th>обработано</th><th>макс. пауза</th></tr></thead>
+        <tbody>
+          <tr><td>Parallel</td><td><b>1 179 млн</b></td><td>1,95 мс</td><td>384 млн</td><td>109 мс</td></tr>
+          <tr><td>G1</td><td>971 млн</td><td>1,59 мс</td><td>624 млн</td><td>29 мс</td></tr>
+          <tr><td>ZGC</td><td>1 176 млн</td><td>0,06 мс</td><td>982 млн</td><td>0,08 мс</td></tr>
+          <tr><td>ZGC generational</td><td>1 155 млн</td><td>0,06 мс</td><td>714 млн</td><td>0,05 мс</td></tr>
+          <tr><td>Shenandoah</td><td>1 200 млн</td><td>0,16 мс</td><td><b>1 022 млн</b></td><td>0,15 мс</td></tr>
+        </tbody>
+      </table>
+      <p>Что из этого следует:</p>
+      <ul>
+        <li><b>Паузы G1 и Parallel растут с объёмом живых данных</b>: с 2 мс до 29 и 109 мс. У конкурентных сборщиков паузы на обеих нагрузках — десятые и сотые доли миллисекунды. Это главное, что они покупают.</li>
+        <li><b>Лидер по пропускной способности меняется с нагрузкой.</b> На маленьком живом наборе Parallel обогнал G1 на 21%. На большом — отстал от всех втрое.</li>
+        <li>Конкурентные сборщики выглядят лучше всех, но эта машина — лучший для них случай: 18 ядер и один поток приложения. Потокам сборщика есть где работать, а heap с запасом. В теме ZGC &amp; Shenandoah при тесном heap та же картина сломалась: потоки ждали памяти секундами.</li>
+      </ul>
+      <p>Поэтому методика выбора такая:</p>
+      <ol>
+        <li>Назови метрику, которая важна бизнесу: p99 ответа, число операций в час, память пода.</li>
+        <li>Прогони ту же нагрузку с разными сборщиками на тех же лимитах пода — не на ноутбуке с 18 ядрами.</li>
+        <li>Смотри задержку запросов целиком, пропускную способность и RSS, а не только паузы в логе GC.</li>
+      </ol>
+      <div class="trap">
+        <p class="myth">ZGC лучше G1, потому что паузы короче.</p>
+        <p class="fact">Короче паузы — да. Но цена — запас памяти и CPU. Для сервиса с SLA в 500 мс и тесным подом G1 может дать тот же p99 при меньших ресурсах. Лучше тот сборщик, который выигрывает на твоей метрике и твоих лимитах.</p>
+      </div>
+    </section>
+
+    <section class="step" id="decision">
+      <h2>Правило по умолчанию — G1, и менять его стоит по конкретной причине</h2>
+      <p>Практические правила, которые покрывают большинство случаев:</p>
+      <table class="mx">
+        <thead><tr><th>Ситуация</th><th>Выбор</th><th>Почему</th></tr></thead>
+        <tbody>
+          <tr><td>обычный сервис, SLA в сотни мс</td><td>G1, ничего не задавать</td><td>хороший баланс без настройки</td></tr>
+          <tr><td>строгий SLA, p99 в единицы мс, heap от нескольких ГБ, есть запас памяти</td><td>ZGC (в JDK 21 с <code>-XX:+ZGenerational</code>) или Shenandoah</td><td>паузы не зависят от heap</td></tr>
+          <tr><td>ночной батч, отчёты, ETL — паузы не важны</td><td>Parallel</td><td>максимум работы на ядро</td></tr>
+          <tr><td>маленький под, 1 CPU, heap в сотни МБ, CLI-утилита</td><td>Serial — JVM выберет сама</td><td>меньше всего накладных расходов</td></tr>
+          <tr><td>под с 1 CPU, но нужен G1</td><td>дать поду 2 CPU или явно <code>-XX:+UseG1GC</code></td><td>иначе эргономика выберет Serial</td></tr>
+        </tbody>
+      </table>
+      <p>Главное правило обратное: не менять сборщик без измеренной проблемы. Если p99 устраивает, паузы в логе в пределах цели и full GC нет, смена сборщика — это риск без выгоды. А если проблема есть, сначала проверь её причину: утечку, преждевременное повышение, humongous-объекты, нехватку heap. Часто лечится настройкой текущего сборщика, а не заменой. Как читать логи и что настраивать — тема GC Logs &amp; Tuning.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Если сборщик не задан, JVM выбирает его сама: G1 на машине от 2 CPU и около 1,8 ГБ памяти, иначе Serial. В контейнере считаются лимиты пода.</li>
+        <li>Из тех же данных выводятся heap по умолчанию (25% памяти) и число потоков GC. Под с <code>limits.cpu: 1</code> получит Serial.</li>
+        <li>Serial — минимум накладных расходов, Parallel — максимум пропускной способности, G1 — баланс, ZGC и Shenandoah — паузы меньше миллисекунды ценой памяти и CPU.</li>
+        <li>Паузы G1 и Parallel растут с живыми данными, у конкурентных сборщиков — нет. Лидер по пропускной способности зависит от нагрузки.</li>
+        <li>Выбирают по замеру своей метрики на своих лимитах, а без измеренной проблемы оставляют G1.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="default-gc" data-freq="3">
+      <h3>Какой сборщик мусора используется по умолчанию?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>С Java 9 — G1, но с оговоркой: только на машине, которую JVM считает серверной, то есть от двух CPU и примерно 1,8 ГБ памяти. Иначе JVM выбирает Serial. В контейнере она смотрит на лимиты пода, поэтому под с <code>limits.cpu: 1</code> получит Serial, даже если нода большая.</p>
+          <p>Проверить можно по первой строке <code>-Xlog:gc</code> — <code>Using G1</code> или <code>Using Serial</code> — или через <code>java -XX:+PrintFlagsFinal -version | grep Use.*GC</code> внутри контейнера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>До Java 9 по умолчанию был Parallel.</li>
+            <li>Дробный <code>limits.cpu</code> округляется вверх при подсчёте CPU, а CFS-квота всё равно урезает процесс — потоки GC попадают под троттлинг.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Под: limits.cpu 2, limits.memory 1Gi, флагов GC нет. Какой будет сборщик и heap?</summary>
+          <p>Serial, потому что памяти меньше порога server-class. Heap — 256 МБ, 25% от гигабайта. Проверено в контейнере <code>eclipse-temurin:21</code> с такими лимитами.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>После уменьшения подов до 1 CPU вырос p99, а в конфиге JVM ничего не меняли. Что проверишь первым?</summary>
+          <p>Какой сборщик выбран: скорее всего, эргономика переключилась с G1 на Serial. Это видно в первой строке лога GC. Решение — вернуть поду 2 CPU или явно задать сборщик и проверить паузы на этих лимитах.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="choose-gc" data-freq="3">
+      <h3>Как выбрать сборщик для сервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Начинаю с метрики, которая важна бизнесу: p99 ответа, пропускная способность или память. Для обычного сервиса с SLA в сотни миллисекунд оставляю G1 по умолчанию. Если нужен p99 в единицы миллисекунд при heap в несколько гигабайт и есть запас памяти — пробую ZGC. Для батча, где паузы не важны, — Parallel.</p>
+          <p>Решение подтверждаю замером: та же нагрузка, те же лимиты пода, смотрю задержку запросов целиком, пропускную способность и RSS. Без измеренной проблемы сборщик не меняю.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Паузы G1 и Parallel растут с объёмом живых данных, у ZGC и Shenandoah — нет. Поэтому для больших heap с живыми кешами конкурентные сборщики выигрывают сильнее всего.</li>
+            <li>У конкурентных сборщиков нужно отдельно следить за allocation stall: их нет в метриках пауз.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему замер на ноутбуке может обмануть?</summary>
+          <p>На ноутбуке много свободных ядер и памяти, а конкурентные сборщики как раз выигрывают, когда им есть где работать. В поде с двумя CPU и тесным heap результат бывает обратным. Мерить нужно на тех же лимитах, что в проде.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="parallel-vs-g1" data-freq="2">
+      <h3>Когда Parallel лучше G1?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда важна пропускная способность, а паузы не важны: ночные расчёты, отчёты, ETL. Parallel делает всю работу в паузе всеми ядрами и не тратит ресурсы на конкурентную маркировку и remembered sets. В замере урока на маленьком живом наборе он обработал на 21% больше, чем G1.</p>
+          <p>Для сервиса с запросами Parallel плох: full GC всего old останавливает приложение надолго, в замере на большом живом наборе пауза дошла до 109 мс против 29 у G1.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="container-cpu" data-freq="2">
+      <h3>Как JVM ведёт себя в контейнере?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>С Java 10 JVM видит лимиты контейнера: число CPU и память берутся из cgroup, а не из параметров машины. По ним работает эргономика: выбирается сборщик, heap по умолчанию — 25% лимита памяти, число потоков GC и JIT. В логе <code>-Xlog:gc+init</code> видно, что она насчитала, например <code>CPUs: 18 total, 1 available</code>.</p>
+          <p>Отсюда типичные ловушки: под с одним CPU получает Serial, под на 4 ГБ — heap всего в гигабайт. Поэтому в контейнере задают <code>MaxRAMPercentage</code> и следят, чтобы у пода было не меньше двух CPU.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Как проверить, что увидела JVM в конкретном поде?</summary>
+          <p>Запустить в нём <code>java -Xlog:gc+init -version</code> или <code>java -XX:+PrintFlagsFinal -version</code> и посмотреть число CPU, память, выбранный сборщик и <code>MaxHeapSize</code>.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/ergonomics.html">JDK 21 GC Tuning Guide: Ergonomics</a> — основа урока: server-class, выбор сборщика и heap по умолчанию.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/available-collectors.html">JDK 21 GC Tuning Guide: Available Collectors</a> — когда какой сборщик выбирать.</li>
+      <li><a href="https://openjdk.org/jeps/248">JEP 248: Make G1 the Default Garbage Collector</a> — почему с Java 9 по умолчанию G1.</li>
+      <li><a href="https://openjdk.org/jeps/318">JEP 318: Epsilon</a> — сборщик, который не собирает, и зачем он нужен.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

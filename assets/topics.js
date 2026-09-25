@@ -455,7 +455,7 @@ window.KB_TREE = [
             scope: 'регионы, young и mixed GC, remembered sets, concurrent marking, humongous-объекты, MaxGCPauseMillis, full GC у G1' },
           { id: 'zgc', freq: 2, status: 'draft', title: 'ZGC & Shenandoah',
             scope: 'конкурентное перемещение, colored pointers, load barriers, generational ZGC, цена низких пауз' },
-          { id: 'gc-choice', freq: 3, status: 'empty', title: 'Choosing a Collector',
+          { id: 'gc-choice', freq: 3, status: 'draft', title: 'Choosing a Collector',
             scope: 'Serial, Parallel, G1, ZGC, Shenandoah, выбор JVM по умолчанию, контейнер с одним CPU, latency или throughput' },
           { id: 'gc-tuning', freq: 2, status: 'empty', title: 'GC Logs & Tuning',
             scope: '-Xlog:gc, как читать лог, размер heap, allocation rate и live set, частые full GC, что не трогать' },
