@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Class Loading · Java KB</title>
+<title>JVM: Class Loading · Java KB</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
@@ -12,257 +12,731 @@
 <script src="../assets/search.js"></script>
 </head>
 <body data-page="topic" data-root="../" data-topic="classloading">
+
 <main class="page">
-  <header class="topic-head"><h1>Class Loading</h1></header>
+
+  <header class="topic-head">
+    <h1>JVM: Class Loading</h1>
+  </header>
+
   <div class="lesson">
+
     <section class="step" id="delayed-failure">
-      <h2>Сервис может стартовать, а упасть только на редком платеже</h2>
-      <p>Платёжный сервис поднялся и принимает обычные платежи. Но обработка крупного перевода впервые обращается к <code>RiskRules</code> из отдельного JAR и получает <code>NoClassDefFoundError</code>. Успешный старт не доказывает, что все class-файлы приложения уже найдены: JVM загружает классы по мере необходимости.</p>
-      <p>У класса есть несколько разных состояний. Загрузить байты — не то же самое, что проверить их, подготовить статические поля и выполнить static-инициализацию. Ошибка может возникнуть в любом из этих мест. Поэтому при расследовании сначала выясни, что именно произошло и какой загрузчик искал класс.</p>
-      <p>В обычном сервисе стартовый класс загружает системный application class loader. Он ищет классы приложения в classpath или module path. Но библиотека, контейнер приложений или plugin может создать свой загрузчик, и тогда одинаковое имя класса не гарантирует, что это один и тот же тип.</p>
-      <div class="trap"><p class="myth">Если приложение запустилось, все зависимости точно на месте.</p><p class="fact">JVM не обязана разрешить каждую ссылку при старте. Отсутствующий класс или метод может обнаружиться только при исполнении пути, который его использует. Прогон критичных сценариев в том же образе, что и прод, ловит это раньше клиента.</p></div>
-    </section>
-
-    <section class="step" id="loader-tree">
-      <h2>Загрузчик определяет, откуда брать байты и чьим станет класс</h2>
-      <p>В JDK 21 есть bootstrap loader для базовых классов, platform loader для части платформенных модулей и system/application loader для приложения. <code>String.class.getClassLoader()</code> возвращает <code>null</code>: это обозначение bootstrap loader в Java API, а не отсутствие загрузки. Родитель application loader — platform loader; его родитель в API также <code>null</code>.</p>
-      <p>Объект загрузчика не просто читает файл. Он участвует в идентичности класса и держит набор уже загруженных типов. Когда Java-код ссылается на <code>RiskRules</code>, JVM получает class-файл через подходящий loader и создаёт объект <code>Class</code>, связанный с определившим его загрузчиком.</p>
-      <figure class="fig">
-        <div class="fig-box">
-          <svg class="dg" viewBox="0 0 720 246" role="img" aria-label="Иерархия загрузчиков JDK 21. Bootstrap определяет java.lang.String, platform — часть модулей платформы, application — классы платёжного сервиса. Стрелки parent идут от application к platform и от platform к bootstrap. Классы относятся к определившему их загрузчику.">
-            <defs><marker id="cl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
-            <text x="20" y="20" class="dg-cap">КТО ОПРЕДЕЛЯЕТ КЛАСС</text>
-            <rect x="20" y="42" width="192" height="56" rx="8" class="dg-box"/>
-            <text x="34" y="66" class="dg-t">bootstrap</text><text x="34" y="84" class="dg-s">java.lang.String</text>
-            <rect x="264" y="42" width="192" height="56" rx="8" class="dg-box"/>
-            <text x="278" y="66" class="dg-t">platform</text><text x="278" y="84" class="dg-s">платформенные модули</text>
-            <rect x="508" y="42" width="192" height="56" rx="8" class="dg-box"/>
-            <text x="522" y="66" class="dg-t">application</text><text x="522" y="84" class="dg-s">PaymentService</text>
-            <path d="M508 60 L460 60" class="dg-line" marker-end="url(#cl-n)"/>
-            <path d="M264 60 L216 60" class="dg-line" marker-end="url(#cl-n)"/>
-            <text x="224" y="128" class="dg-s">parent</text><text x="468" y="128" class="dg-s">parent</text>
-            <rect x="498" y="156" width="202" height="58" rx="8" class="dg-cell hit"/>
-            <text x="512" y="181" class="dg-t">RiskRules.class</text><text x="512" y="199" class="dg-s">из JAR приложения</text>
-            <path d="M606 98 L606 152" class="dg-line" marker-end="url(#cl-n)"/>
-            <text x="20" y="185" class="dg-s">Имя + defining loader</text>
-            <text x="20" y="203" class="dg-s">задают тип в JVM.</text>
-          </svg>
-        </div>
-        <figcaption>Стрелки parent показывают делегирование запроса вверх. Зелёный класс определяет application loader, если родители его не нашли.</figcaption>
-      </figure>
-      <p>Выполни на JDK 21: <code>String.class.getClassLoader()</code> и <code>ClassLoader.getPlatformClassLoader().getParent()</code> дают <code>null</code>, а <code>ClassLoader.getSystemClassLoader().getParent() == ClassLoader.getPlatformClassLoader()</code> даёт <code>true</code>. Это способ проверить реальную иерархию, а не запоминать картинку без связи с API.</p>
-    </section>
-
-    <section class="step" id="delegation">
-      <h2>Стандартный loadClass спрашивает родителя раньше своего JAR</h2>
-      <p>Алгоритм <code>ClassLoader.loadClass(name, resolve)</code> в исходниках JDK 21 начинается с <code>findLoadedClass</code>. Если класс уже загружен, второй раз байты не читаются. Иначе loader спрашивает родителя; лишь если тот не нашёл класс, вызывает собственный <code>findClass</code>. При <code>resolve=true</code> затем вызывается <code>resolveClass</code>.</p>
-      <p>Для <code>java.lang.String</code> запрос из application loader уйдёт вверх и завершится на bootstrap. Для <code>RiskRules</code> родители не найдут class-файл приложения, поэтому его определит application loader. Такой порядок не даёт случайному <code>java.lang.String</code> внутри JAR подменить базовый класс.</p>
-      <figure class="fig play">
-        <div class="fig-box">
-          <svg class="dg" viewBox="0 0 720 226" role="img" aria-label="Application loader получает запрос RiskRules. Сначала проверяет уже загруженные классы, затем обращается к platform и bootstrap. Родители не находят RiskRules, application ищет его в JAR и определяет класс. После этого повторный запрос вернёт уже готовый Class.">
-            <defs><marker id="cd-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
-            <text x="18" y="22" class="dg-cap">ЗАПРОС: RiskRules</text>
-            <rect x="18" y="50" width="122" height="46" rx="7" class="dg-box"/>
-            <rect x="222" y="50" width="122" height="46" rx="7" class="dg-box"/>
-            <rect x="426" y="50" width="122" height="46" rx="7" class="dg-box"/>
-            <rect x="426" y="146" width="122" height="46" rx="7" class="dg-cell"/>
-            <g data-s="1"><rect x="426" y="50" width="122" height="46" rx="7" class="dg-cell hit"/><text x="566" y="76" class="dg-s">findLoadedClass: нет</text></g>
-            <g data-s="2"><path d="M426 73 L348 73" class="dg-line" marker-end="url(#cd-n)"/><rect x="222" y="50" width="122" height="46" rx="7" class="dg-cell hit"/><text x="566" y="76" class="dg-s">запрос platform</text></g>
-            <g data-s="3"><path d="M222 73 L144 73" class="dg-line" marker-end="url(#cd-n)"/><rect x="18" y="50" width="122" height="46" rx="7" class="dg-cell hit"/><text x="566" y="76" class="dg-s">bootstrap: нет</text></g>
-            <g data-s="4"><path d="M487 100 L487 142" class="dg-line ok" marker-end="url(#cd-n)"/><rect x="426" y="146" width="122" height="46" rx="7" class="dg-cell hit"/><text x="566" y="173" class="dg-ok">app: findClass</text></g>
-            <g data-s="5"><rect x="426" y="50" width="122" height="46" rx="7" class="dg-cell hit"/><text x="566" y="76" class="dg-ok">уже загружен</text></g>
-            <g data-s="1"><text x="18" y="215" class="dg-t">1 · проверка кэша loader'а</text></g>
-            <g data-s="2"><text x="18" y="215" class="dg-t">2 · запрос к platform</text></g>
-            <g data-s="3"><text x="18" y="215" class="dg-t">3 · запрос к bootstrap</text></g>
-            <g data-s="4"><text x="18" y="215" class="dg-t">4 · свой JAR определяет класс</text></g>
-            <g data-s="5"><text x="18" y="215" class="dg-t">5 · повтор не читает JAR</text></g>
-            <text x="79" y="77" class="dg-t" text-anchor="middle">bootstrap</text>
-            <text x="283" y="77" class="dg-t" text-anchor="middle">platform</text>
-            <text x="487" y="77" class="dg-t" text-anchor="middle">application</text>
-            <text x="487" y="173" class="dg-in" text-anchor="middle">risk.jar</text>
-          </svg>
-        </div>
-        <ol class="play-steps">
-          <li>Application loader получает имя <code>RiskRules</code> и проверяет, не определил ли он его раньше. Пока ответа нет.</li>
-          <li>Он делегирует запрос своему parent, platform loader. Тот тоже не знает класс приложения.</li>
-          <li>Platform loader обращается к bootstrap. Там есть базовые классы Java, но нет <code>RiskRules</code>.</li>
-          <li>После отказа bootstrap и platform application loader ищет class-файл в своём JAR и определяет класс. Именно он становится defining loader.</li>
-          <li>При повторном запросе <code>findLoadedClass</code> находит уже определённый класс, и цепочка не повторяется.</li>
-        </ol>
-      </figure>
-      <p>Parent delegation — поведение базового <code>loadClass</code>, а не непреложный закон JVM. Загрузчик может переопределить алгоритм, например для plugin isolation, но обязан учитывать ограничения на пакеты платформы и совместимость типов. В проде child-first без чёткой причины часто заканчивается двумя копиями одной библиотеки и ошибками приведения.</p>
-    </section>
-
-    <section class="step" id="class-identity">
-      <h2>Одинаковое имя не делает классы одним типом</h2>
-      <p>Представь два plugin-загрузчика, A и B. Каждый прочитал свои байты <code>bank.RiskRules</code> и сам определил класс. JVM различает эти классы по паре «бинарное имя + defining loader», поэтому объект из A нельзя привести к <code>bank.RiskRules</code>, который ожидает B, даже если байты одинаковые.</p>
-      <figure class="fig">
-        <div class="fig-box">
-          <svg class="dg" viewBox="0 0 720 205" role="img" aria-label="Два независимых загрузчика A и B определяют класс с одним бинарным именем bank.RiskRules. Получаются разные объекты Class и несовместимые типы; приведение объекта из A к типу B падает.">
-            <defs><marker id="ci-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
-            <rect x="24" y="32" width="286" height="126" rx="10" class="dg-box"/>
-            <text x="40" y="55" class="dg-cap">PLUGIN A · loader A</text>
-            <rect x="40" y="70" width="254" height="62" rx="7" class="dg-cell hit"/>
-            <text x="52" y="96" class="dg-in">bank.RiskRules</text><text x="52" y="115" class="dg-s">Class A → объект A</text>
-            <rect x="410" y="32" width="286" height="126" rx="10" class="dg-box"/>
-            <text x="426" y="55" class="dg-cap">PLUGIN B · loader B</text>
-            <rect x="426" y="70" width="254" height="62" rx="7" class="dg-cell"/>
-            <text x="438" y="96" class="dg-in">bank.RiskRules</text><text x="438" y="115" class="dg-s">Class B → ожидаемый тип</text>
-            <path d="M294 101 L406 101" class="dg-line bad" marker-end="url(#ci-n)"/>
-            <text x="360" y="88" class="dg-bad" text-anchor="middle">cast?</text>
-            <text x="24" y="186" class="dg-bad">ClassCastException: A и B — разные типы</text>
-          </svg>
-        </div>
-        <figcaption>Для общих интерфейсов plugin'ов используй один родительский loader. Тогда обе стороны видят один и тот же тип контракта.</figcaption>
-      </figure>
-      <p>Отсюда и типичная проблема hot reload: старый loader удерживается ссылкой из thread, static cache или callback, а вместе с ним остаются его классы и метаданные. Разбор Metaspace и утечек — в «Memory Areas» и «Diagnostics». Здесь достаточно помнить: выгрузка класса связана с достижимостью его defining loader, а не с удалением JAR с диска.</p>
-    </section>
-
-    <section class="step" id="initialize">
-      <h2>Загрузка не равна static-инициализации</h2>
-      <p>После получения байтов JVM делает linking: проверяет class-файл и байткод, подготавливает static-поля с начальными значениями, разрешает символические ссылки. Затем при первом активном использовании класса выполняется initialization: присваивания static-полей и блоки <code>static {}</code> в текстовом порядке. Для подкласса сначала инициализируется его суперкласс.</p>
-      <p>На этапе preparation поле <code>fee</code> ещё равно нулю. Константа <code>LIMIT</code> получает 100 из атрибута ConstantValue, а вызов <code>initFee()</code> относится к последующей initialization. Чтение compile-time константы может вообще не загружать <code>Rules</code> в момент чтения: значение встроено в вызывающий class-файл. Литерал <code>Rules.class</code> и <code>Class.forName(name, false, loader)</code> не инициируют класс; чтение <code>Rules.fee</code> инициирует.</p>
-      <figure class="fig">
-        <div class="fig-box">
-          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Слева класс Rules после подготовки: константа LIMIT равна 100, изменяемое поле fee равно нулю; class literal не запускает инициализацию. Справа после чтения Rules.fee выполнен initFee, поэтому fee равно 5.">
-            <defs><marker id="cs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker></defs>
-            <text x="20" y="24" class="dg-cap">ПОСЛЕ PREPARATION</text>
-            <text x="410" y="24" class="dg-cap">ПОСЛЕ INITIALIZATION</text>
-            <rect x="20" y="42" width="290" height="140" rx="9" class="dg-box"/>
-            <text x="36" y="65" class="dg-t">Rules</text>
-            <rect x="36" y="78" width="258" height="38" rx="6" class="dg-cell"/>
-            <text x="50" y="102" class="dg-in">LIMIT = 100</text>
-            <rect x="36" y="126" width="258" height="38" rx="6" class="dg-cell"/>
-            <text x="50" y="150" class="dg-in">fee = 0</text>
-            <rect x="410" y="42" width="290" height="140" rx="9" class="dg-box"/>
-            <text x="426" y="65" class="dg-t">Rules</text>
-            <rect x="426" y="78" width="258" height="38" rx="6" class="dg-cell"/>
-            <text x="440" y="102" class="dg-in">LIMIT = 100</text>
-            <rect x="426" y="126" width="258" height="38" rx="6" class="dg-cell hit"/>
-            <text x="440" y="150" class="dg-in">fee = 5</text>
-            <path d="M310 136 L406 136" class="dg-line ok" marker-end="url(#cs-n)"/>
-            <text x="358" y="119" class="dg-s" text-anchor="middle">&lt;clinit&gt;</text>
-            <text x="20" y="211" class="dg-s">Rules.class не меняет состояние</text>
-            <text x="410" y="211" class="dg-ok">Rules.fee вызвал initFee()</text>
-          </svg>
-        </div>
-        <figcaption>Нулевое значение <code>fee</code> существует до вызова <code>initFee()</code>, но обычный Java-код не получает его через активное чтение поля: такое чтение сначала запускает initialization.</figcaption>
-      </figure>
-      <pre><code class="language-java">public class LoadDemo {
-    static class Rules {
-        static final int LIMIT = 100;
-        static int fee = initFee();
-        static int initFee() {
-            System.out.println("Rules init");
-            return 5;
-        }
+      <h2>Класс грузится, когда впервые понадобился, — и там же может упасть</h2>
+      <p>Платёжный сервис после деплоя прошёл все проверки: health зелёный, мелкие платежи проходят. Через час приходит первый крупный перевод, и сервис отвечает ошибкой <code>NoClassDefFoundError: RiskRules</code>. Класс правил антифрода лежал в отдельном <code>risk.jar</code>, и этот JAR не попал в образ.</p>
+      <p>Почему упало не при старте? Потому что JVM не загружает все классы приложения заранее. Класс ищут в момент, когда код впервые к нему обращается. Пока ни один платёж не дошёл до ветки антифрода, отсутствие JAR никто не заметил.</p>
+      <pre><code class="language-java">public class Lazy {
+    // Правила антифрода: в сервисе они лежат в отдельном risk.jar
+    static class RiskRules {
+        static boolean allow(long amount) { return amount &lt; 1_000_000; }
     }
-    static class Broken {
-        static {
-            if (true) throw new IllegalStateException("bad config");
-        }
-    }
-    public static void main(String[] args) throws Exception {
-        System.out.println("start");
-        System.out.println(Rules.LIMIT);
-        System.out.println(Rules.class.getSimpleName());
-        Class.forName("LoadDemo$Rules", false, LoadDemo.class.getClassLoader());
-        System.out.println(Rules.fee);
-        for (int i = 0; i &lt; 2; i++) {
-            try { Class.forName("LoadDemo$Broken"); }
-            catch (Throwable e) { System.out.println(e.getClass().getSimpleName()); }
+
+    public static void main(String[] args) {
+        long amount = Long.parseLong(args[0]);
+        System.out.println("платёж " + amount);
+        // RiskRules нужен только крупным платежам:
+        // пока ветка не выполнилась, JVM этот класс даже не ищет
+        if (amount &gt; 100_000) {
+            System.out.println("антифрод: " + RiskRules.allow(amount));
         }
     }
 }</code></pre>
-      <pre class="out">start
-100
-Rules
-Rules init
-5
-ExceptionInInitializerError
-NoClassDefFoundError</pre>
-      <p>Запуск <code>java LoadDemo.java</code> на JDK 21.0.11 даёт именно этот порядок. Первый доступ к <code>Broken</code> оборачивает исключение из static-блока в <code>ExceptionInInitializerError</code>. Класс помечен ошибочным для этого loader'а: вторая попытка уже даёт <code>NoClassDefFoundError</code> с причиной «Could not initialize class».</p>
-      <div class="trap"><p class="myth">Любое упоминание класса в коде запускает его static-блок.</p><p class="fact">Константа времени компиляции встраивается в вызывающий код; <code>.class</code> и <code>Class.forName(..., false, ...)</code> не инициируют initialization. Чтение обычного static-поля <code>Rules.fee</code> или <code>Class.forName(name)</code> инициирует.</p></div>
-      <details class="deep"><summary>Под капотом: однократность и сбой инициализации</summary><p>JLS §12.4.2 описывает синхронизацию инициализации: один поток выполняет её, остальные ждут; повторно успешная инициализация не запускается. Если инициализация завершилась с ошибкой, класс помечается erroneous в этом loader. Поэтому перехватить первый <code>ExceptionInInitializerError</code> и просто повторить тот же вызов нельзя: нужен исправленный конфиг и новый процесс или новый defining loader.</p></details>
+      <p>Флаг <code>-Xlog:class+load</code> печатает каждый загруженный класс и откуда он взят. Запусти пример дважды и сравни. Ниже — реальный вывод на JDK 21, из лога оставлены только строки про пример, путь заменён на <code>/app/classes/</code>.</p>
+      <pre><code class="language-text">$ java -Xlog:class+load -cp out Lazy 500
+[0.019s][info][class,load] Lazy source: file:/app/classes/
+платёж 500                                        # RiskRules в логе нет: его не загружали
+
+$ java -Xlog:class+load -cp out Lazy 500000
+[0.017s][info][class,load] Lazy source: file:/app/classes/
+платёж 500000
+[0.022s][info][class,load] Lazy$RiskRules source: file:/app/classes/   # загружен только сейчас
+антифрод: true
+
+$ rm 'out/Lazy$RiskRules.class'                   # «забыли risk.jar в образе»
+$ java -cp out Lazy 500
+платёж 500                                        # мелкий платёж проходит как ни в чём не бывало
+$ java -cp out Lazy 500000
+платёж 500000
+Exception in thread "main" java.lang.NoClassDefFoundError: Lazy$RiskRules
+	at Lazy.main(Lazy.java:13)
+Caused by: java.lang.ClassNotFoundException: Lazy$RiskRules</code></pre>
+      <p>Этим занимаются загрузчики классов. Чтобы разбирать такие аварии, нужно знать четыре вещи: какие загрузчики есть, в каком порядке они ищут класс, через какие этапы проходит класс после загрузки и почему одно имя может означать два разных класса. Об этом следующие шаги.</p>
+      <div class="note exp">
+        <p>Чтобы ловить такие ошибки до клиента, прогоняй критичные сценарии на том же образе, что уйдёт в прод. Проверки health и smoke-тест на мелком платеже редкую ветку не заденут.</p>
+      </div>
+    </section>
+
+    <section class="step" id="loader-tree">
+      <h2>Три встроенных загрузчика, у каждого свой источник классов</h2>
+      <p>Загрузчик класса — объект, который по имени класса находит его байты и превращает их в объект <code>Class</code>. В JDK 21 их три, и они выстроены цепочкой через ссылку <code>parent</code>.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Цепочка загрузчиков JDK 21: app, его родитель platform, у того родитель bootstrap. Bootstrap читает ядро платформы вроде java.base, platform — остальные модули платформы вроде java.sql, app — JAR приложения из classpath. Класс видит классы своего загрузчика и всех родителей выше.">
+            <defs>
+              <marker id="lt-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">ЗАГРУЗЧИК</text>
+            <text x="330" y="20" class="dg-cap">ОТКУДА БЕРЁТ КЛАССЫ</text>
+
+            <!-- загрузчики -->
+            <rect x="20" y="36" width="250" height="48" rx="8" class="dg-box"/>
+            <text x="34" y="56" class="dg-t">bootstrap</text>
+            <text x="34" y="74" class="dg-s">внутри JVM; в Java — null</text>
+            <rect x="20" y="106" width="250" height="48" rx="8" class="dg-box"/>
+            <text x="34" y="126" class="dg-t">platform</text>
+            <text x="34" y="144" class="dg-s">PlatformClassLoader</text>
+            <rect x="20" y="176" width="250" height="48" rx="8" class="dg-box"/>
+            <text x="34" y="196" class="dg-t">app</text>
+            <text x="34" y="214" class="dg-s">AppClassLoader, он же system</text>
+
+            <!-- источники -->
+            <rect x="330" y="36" width="376" height="48" rx="8" class="dg-cell"/>
+            <text x="344" y="56" class="dg-in">java.base, java.logging, java.xml…</text>
+            <text x="344" y="74" class="dg-s">ядро платформы из образа модулей JDK</text>
+            <rect x="330" y="106" width="376" height="48" rx="8" class="dg-cell"/>
+            <text x="344" y="126" class="dg-in">java.sql, java.net.http…</text>
+            <text x="344" y="144" class="dg-s">остальные модули платформы</text>
+            <rect x="330" y="176" width="376" height="48" rx="8" class="dg-cell hit"/>
+            <text x="344" y="196" class="dg-in">payments.jar, risk.jar</text>
+            <text x="344" y="214" class="dg-s">classpath и module path приложения</text>
+
+            <!-- parent: ссылка вверх -->
+            <path d="M145 176 L 145 158" class="dg-line" marker-end="url(#lt-n)"/>
+            <text x="153" y="170" class="dg-s">parent</text>
+            <path d="M145 106 L 145 88" class="dg-line" marker-end="url(#lt-n)"/>
+            <text x="153" y="100" class="dg-s">parent</text>
+
+            <!-- кто что читает -->
+            <path d="M270 60 L 326 60" class="dg-line" marker-end="url(#lt-n)"/>
+            <path d="M270 130 L 326 130" class="dg-line" marker-end="url(#lt-n)"/>
+            <path d="M270 200 L 326 200" class="dg-line" marker-end="url(#lt-n)"/>
+
+            <text x="20" y="252" class="dg-s">Класс видит классы своего загрузчика и всех родителей выше. Вниз видимости нет.</text>
+          </svg>
+        </div>
+        <figcaption>Классы приложения — зелёные: их определяет app. Bootstrap написан внутри JVM, поэтому Java-объекта у него нет.</figcaption>
+      </figure>
+      <p>Проверить цепочку можно из кода. Запускай пример через <code>javac</code> и <code>java -cp</code>, а не командой <code>java Loaders.java</code>: в режиме исходника класс грузит отдельный <code>MemoryClassLoader</code> лаунчера, и цепочка станет на одно звено длиннее.</p>
+      <pre><code class="language-java">public class Loaders {
+    public static void main(String[] args) {
+        // Класс приложения: его определил загрузчик приложения
+        ClassLoader app = Loaders.class.getClassLoader();
+        System.out.println(app.getName());
+        // Родитель app — platform, у platform родитель bootstrap,
+        // но bootstrap живёт внутри JVM, и в Java он выглядит как null
+        System.out.println(app.getParent().getName());
+        System.out.println(app.getParent().getParent());
+        // java.sql — модуль платформы, его грузит platform
+        System.out.println(java.sql.Connection.class.getClassLoader().getName());
+        // java.lang.String из java.base — bootstrap, поэтому снова null
+        System.out.println(String.class.getClassLoader());
+    }
+}</code></pre>
+      <pre class="out">app
+platform
+null
+platform
+null</pre>
+      <p>Правило видимости из подписи к схеме объясняет, почему платформа не может напрямую создать класс приложения. Код из <code>java.sql</code>, загруженный platform, не видит <code>payments.jar</code>: этот JAR читает только app, а он ниже по цепочке. К этому вернёмся в шаге про свои загрузчики.</p>
+      <details class="deep">
+        <summary>Под капотом: что было до Java 9</summary>
+        <p>До модулей цепочка выглядела так: bootstrap читал <code>rt.jar</code>, extension loader — каталог <code>lib/ext</code>, application loader — classpath. В Java 9 платформу разрезали на модули, <code>rt.jar</code> и <code>lib/ext</code> исчезли, а extension loader заменил platform loader. Часть модулей, которые раньше грузил bootstrap, переехала в platform: так у них стало меньше привилегий. На собеседовании про «extension class loader» ещё спрашивают — отвечай, что в современных JDK его место занял platform.</p>
+      </details>
+    </section>
+
+    <section class="step" id="delegation">
+      <h2>Загрузчик сначала спрашивает родителя и только потом ищет сам</h2>
+      <p>Порядок поиска задаёт метод <code>ClassLoader.loadClass</code>. Ниже — его логика из исходников JDK 21, без блокировок и замеров времени. Так ищут все загрузчики, унаследованные от <code>ClassLoader</code>: <code>URLClassLoader</code>, загрузчики Tomcat и Spring Boot, твои собственные.</p>
+      <pre><code class="language-java">protected Class&lt;?&gt; loadClass(String name, boolean resolve) throws ClassNotFoundException {
+    // 1. Этот загрузчик уже загружал класс с таким именем? Тогда вернуть тот же Class
+    Class&lt;?&gt; c = findLoadedClass(name);
+    if (c == null) {
+        try {
+            // 2. Спросить родителя. parent == null означает bootstrap: его спрашивают отдельным методом
+            c = (parent != null) ? parent.loadClass(name, false)
+                                 : findBootstrapClassOrNull(name);
+        } catch (ClassNotFoundException e) {
+            // родитель не нашёл — это нормально, идём дальше
+        }
+        if (c == null) {
+            // 3. Только теперь искать в своём источнике: JAR, каталог, сеть
+            c = findClass(name);   // внутри читает байты и вызывает defineClass
+        }
+    }
+    if (resolve) resolveClass(c);
+    return c;
+}</code></pre>
+      <p>Проследи по шагам, что происходит, когда сервис впервые обращается к <code>RiskRules</code>.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 272" role="img" aria-label="PaymentService просит у app класс RiskRules. App спрашивает platform, platform спрашивает bootstrap. Bootstrap не находит класс в модулях ядра и возвращает null, platform не находит в своих модулях и возвращает null. App ищет сам, находит RiskRules в risk.jar и определяет класс. Повторный запрос app отдаёт из своего кэша.">
+            <defs>
+              <marker id="dl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dl-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="dl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">КТО ПРОСИТ</text>
+            <text x="250" y="20" class="dg-cap">ЗАГРУЗЧИКИ</text>
+            <text x="500" y="20" class="dg-cap">ГДЕ ИЩУТ</text>
+
+            <!-- основа: вызывающий код, загрузчики, источники -->
+            <rect x="20" y="188" width="190" height="48" rx="8" class="dg-box"/>
+            <text x="115" y="208" class="dg-t" text-anchor="middle">PaymentService</text>
+            <text x="115" y="226" class="dg-s" text-anchor="middle">loadClass("RiskRules")</text>
+            <path d="M210 212 L 246 212" class="dg-line" marker-end="url(#dl-n)"/>
+
+            <rect x="250" y="36" width="180" height="48" rx="8" class="dg-box"/>
+            <rect x="250" y="112" width="180" height="48" rx="8" class="dg-box"/>
+            <rect x="250" y="188" width="180" height="48" rx="8" class="dg-box"/>
+
+            <rect x="500" y="36" width="206" height="48" rx="8" class="dg-cell"/>
+            <rect x="500" y="112" width="206" height="48" rx="8" class="dg-cell"/>
+            <rect x="500" y="188" width="206" height="48" rx="8" class="dg-cell"/>
+
+            <!-- активный загрузчик на каждом шаге -->
+            <rect data-s="1" x="250" y="188" width="180" height="48" rx="8" class="dg-cell hit"/>
+            <rect data-s="2" x="250" y="112" width="180" height="48" rx="8" class="dg-cell hit"/>
+            <rect data-s="3-4" x="250" y="36" width="180" height="48" rx="8" class="dg-cell hit"/>
+            <rect data-s="5" x="250" y="112" width="180" height="48" rx="8" class="dg-cell hit"/>
+            <rect data-s="6-7" x="250" y="188" width="180" height="48" rx="8" class="dg-cell hit"/>
+
+            <!-- запросы вверх: висят, пока родитель не ответит -->
+            <g data-s="2-5"><path d="M300 188 L 300 164" class="dg-line" marker-end="url(#dl-n)"/><text x="254" y="180" class="dg-s">запрос</text></g>
+            <g data-s="3-4"><path d="M300 112 L 300 88" class="dg-line" marker-end="url(#dl-n)"/><text x="254" y="104" class="dg-s">запрос</text></g>
+            <!-- ответы вниз -->
+            <g data-s="4-5"><path d="M380 84 L 380 108" class="dg-line bad" marker-end="url(#dl-bad)"/><text x="388" y="104" class="dg-bad">null</text></g>
+            <g data-s="5-6"><path d="M380 160 L 380 184" class="dg-line bad" marker-end="url(#dl-bad)"/><text x="388" y="180" class="dg-bad">null</text></g>
+
+            <!-- поиск в своём источнике -->
+            <g data-s="4"><path d="M430 60 L 496 60" class="dg-line bad" marker-end="url(#dl-bad)"/><rect x="500" y="36" width="206" height="48" rx="8" class="dg-cell miss"/><text x="694" y="58" class="dg-bad" text-anchor="end">нет</text></g>
+            <g data-s="5"><path d="M430 136 L 496 136" class="dg-line bad" marker-end="url(#dl-bad)"/><rect x="500" y="112" width="206" height="48" rx="8" class="dg-cell miss"/><text x="694" y="134" class="dg-bad" text-anchor="end">нет</text></g>
+            <g data-s="6"><path d="M430 212 L 496 212" class="dg-line ok" marker-end="url(#dl-ok)"/><rect x="500" y="188" width="206" height="48" rx="8" class="dg-cell hit"/><text x="694" y="210" class="dg-ok" text-anchor="end">нашёл</text></g>
+
+            <!-- подписи поверх заливки -->
+            <text x="340" y="66" class="dg-t" text-anchor="middle">bootstrap</text>
+            <text x="340" y="142" class="dg-t" text-anchor="middle">platform</text>
+            <text x="340" y="207" class="dg-t" text-anchor="middle">app</text>
+            <text data-s="1-5" x="340" y="225" class="dg-s" text-anchor="middle">в кэше: нет</text>
+            <text data-s="6" x="340" y="225" class="dg-s" text-anchor="middle">defineClass</text>
+            <text data-s="7" x="340" y="225" class="dg-ok" text-anchor="middle">в кэше: RiskRules</text>
+            <text x="514" y="58" class="dg-in">java.base…</text><text x="514" y="76" class="dg-s">модули ядра</text>
+            <text x="514" y="134" class="dg-in">java.sql…</text><text x="514" y="152" class="dg-s">модули платформы</text>
+            <text x="514" y="210" class="dg-in">risk.jar</text><text x="514" y="228" class="dg-s">classpath</text>
+
+            <!-- состояние: стек вызовов loadClass -->
+            <text data-s="1" x="20" y="262" class="dg-in">стек вызовов: app.loadClass</text>
+            <text data-s="2" x="20" y="262" class="dg-in">стек вызовов: app → platform</text>
+            <text data-s="3" x="20" y="262" class="dg-in">стек вызовов: app → platform → bootstrap</text>
+            <text data-s="4" x="20" y="262" class="dg-bad">bootstrap вернул null</text>
+            <text data-s="5" x="20" y="262" class="dg-bad">platform вернул null</text>
+            <text data-s="6" x="20" y="262" class="dg-ok">app: findClass → defineClass, класс определён</text>
+            <text data-s="7" x="20" y="262" class="dg-ok">повторный запрос: findLoadedClass, родителей не спрашивают</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>PaymentService просит у своего загрузчика app класс <code>RiskRules</code>. App проверяет кэш <code>findLoadedClass</code>: такого класса он ещё не загружал.</li>
+          <li>Прежде чем искать самому, app вызывает <code>loadClass</code> у родителя, platform. Тот тоже сначала смотрит в свой кэш.</li>
+          <li>Platform передаёт запрос дальше, в bootstrap. В стеке теперь три вложенных вызова <code>loadClass</code>.</li>
+          <li>Bootstrap ищет <code>RiskRules</code> в модулях ядра и не находит. Он возвращает <code>null</code>, и platform продолжает сам.</li>
+          <li>Platform ищет в своих модулях — тоже нет, и возвращает <code>null</code>. Очередь дошла до app.</li>
+          <li>Только теперь app вызывает свой <code>findClass</code>: читает <code>RiskRules.class</code> из <code>risk.jar</code> и определяет класс. App стал его <b>defining loader</b>.</li>
+          <li>Следующий запрос <code>RiskRules</code> заканчивается на первом же шаге: кэш находит готовый класс, родителей больше не спрашивают.</li>
+        </ol>
+      </figure>
+      <p>Зачем такой обход, если класс всё равно лежит в JAR приложения? Ради двух гарантий. Первая: системный класс нельзя подменить. Запрос <code>java.lang.String</code> оборвётся на шаге 4, потому что bootstrap найдёт его в <code>java.base</code>, и до <code>risk.jar</code> очередь не дойдёт. Вторая: каждый класс платформы существует в процессе в одном экземпляре, и объекты <code>String</code> из разных библиотек совместимы между собой.</p>
+      <details class="deep">
+        <summary>Под капотом: встроенные загрузчики знают про модули</summary>
+        <p>App и platform в JDK 9+ — наследники <code>jdk.internal.loader.BuiltinClassLoader</code>, и у них своя версия поиска, <code>loadClassOrNull</code>. Сначала загрузчик смотрит, не принадлежит ли пакет класса именованному модулю платформы. Если принадлежит, запрос уходит сразу загрузчику этого модуля: <code>java.sql.Connection</code> app отдаст прямо platform, <code>java.lang.String</code> — прямо bootstrap. Классическая цепочка через родителей работает для классов без модуля, то есть для всего classpath, как <code>RiskRules</code> на схеме. Ещё одно отличие: не найдя класс, встроенный загрузчик возвращает <code>null</code>, а не бросает <code>ClassNotFoundException</code>, — поэтому на схеме вниз идёт <code>null</code>.</p>
+      </details>
+      <div class="trap">
+        <p class="myth">Если положить свой <code>java.lang.String</code> в JAR и написать свой загрузчик, можно подменить системный класс.</p>
+        <p class="fact">Определить класс в пакете <code>java.*</code> может только bootstrap. Любой другой загрузчик на <code>defineClass</code> получит <code>SecurityException: Prohibited package name: java.lang</code>. Проверено на JDK 21.</p>
+      </div>
+    </section>
+
+    <section class="step" id="lifecycle">
+      <h2>После загрузки класс проходит связывание и инициализацию</h2>
+      <p>Найти байты — только начало. Между «класс загружен» и «можно вызвать метод» JVM проходит три этапа, и на каждом свои ошибки. Если знаешь, на каком этапе что ломается, по названию исключения сразу понятно, где искать.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Три этапа: loading находит байты и создаёт Class, linking проверяет байткод, готовит static-поля нулями и разрешает ссылки, initialization выполняет static-инициализацию. Поле FxRates.USD равно 0.0 после preparation и 92.5 после инициализации. Ошибки этапов: ClassNotFoundException и NoClassDefFoundError при loading, VerifyError и NoSuchMethodError при linking, ExceptionInInitializerError при initialization. После неудачной инициализации класс становится ошибочным, и каждое следующее обращение даёт NoClassDefFoundError: Could not initialize class.">
+            <defs>
+              <marker id="lc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="lc-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">LOADING</text>
+            <text x="200" y="20" class="dg-cap">LINKING</text>
+            <text x="512" y="20" class="dg-cap">INITIALIZATION</text>
+
+            <!-- этапы -->
+            <rect x="20" y="34" width="160" height="50" rx="8" class="dg-box"/>
+            <text x="32" y="55" class="dg-t">найти байты</text>
+            <text x="32" y="73" class="dg-s">defineClass → Class</text>
+            <rect x="200" y="30" width="296" height="62" rx="10" class="dg-sep" fill="none"/>
+            <rect x="206" y="38" width="88" height="46" rx="6" class="dg-cell"/>
+            <text x="250" y="57" class="dg-t" text-anchor="middle">verify</text>
+            <text x="250" y="75" class="dg-s" text-anchor="middle">байткод</text>
+            <rect x="302" y="38" width="88" height="46" rx="6" class="dg-cell"/>
+            <text x="346" y="57" class="dg-t" text-anchor="middle">prepare</text>
+            <text x="346" y="75" class="dg-s" text-anchor="middle">static = 0</text>
+            <rect x="398" y="38" width="88" height="46" rx="6" class="dg-cell"/>
+            <text x="442" y="57" class="dg-t" text-anchor="middle">resolve</text>
+            <text x="442" y="75" class="dg-s" text-anchor="middle">ссылки</text>
+            <rect x="512" y="34" width="194" height="50" rx="8" class="dg-box"/>
+            <text x="524" y="55" class="dg-t">&lt;clinit&gt;</text>
+            <text x="524" y="73" class="dg-s">static-поля и static {}</text>
+            <path d="M180 59 L 196 59" class="dg-line" marker-end="url(#lc-n)"/>
+            <path d="M496 59 L 508 59" class="dg-line" marker-end="url(#lc-n)"/>
+
+            <!-- значение поля по этапам -->
+            <text x="20" y="119" class="dg-in">FxRates.USD</text>
+            <rect x="302" y="100" width="88" height="28" rx="6" class="dg-cell"/>
+            <text x="346" y="119" class="dg-in" text-anchor="middle">0.0</text>
+            <rect x="512" y="100" width="194" height="28" rx="6" class="dg-cell hit"/>
+            <text x="609" y="119" class="dg-in" text-anchor="middle">92.5</text>
+
+            <!-- чем падает каждый этап -->
+            <text x="20" y="152" class="dg-bad">ClassNotFoundException</text>
+            <text x="20" y="170" class="dg-bad">NoClassDefFoundError</text>
+            <text x="206" y="152" class="dg-bad">VerifyError</text>
+            <text x="206" y="170" class="dg-bad">NoSuchMethodError</text>
+            <text x="512" y="152" class="dg-bad">ExceptionInInitializerError</text>
+
+            <!-- ошибочный класс -->
+            <path d="M609 160 L 609 196" class="dg-line bad" marker-end="url(#lc-bad)"/>
+            <rect x="512" y="200" width="194" height="36" rx="6" class="dg-cell miss"/>
+            <text x="609" y="223" class="dg-in" text-anchor="middle">ошибочный класс</text>
+            <path d="M508 218 L 376 218" class="dg-line bad" marker-end="url(#lc-bad)"/>
+            <text x="20" y="212" class="dg-s">каждое следующее обращение к FxRates:</text>
+            <text x="20" y="231" class="dg-bad">NoClassDefFoundError: Could not initialize class</text>
+          </svg>
+        </div>
+        <figcaption>Красным — ошибка, которой заканчивается сбой на этом этапе. Ошибочный класс остаётся таким до перезапуска процесса.</figcaption>
+      </figure>
+      <p><b>Loading</b> находит байты и создаёт <code>Class</code>. Если байтов нет, получаешь <code>ClassNotFoundException</code> при явном поиске или <code>NoClassDefFoundError</code>, если на класс ссылался скомпилированный код. Сюда же относится проверка версии class-файла: слишком новый файл даёт <code>UnsupportedClassVersionError</code>.</p>
+      <p><b>Linking</b> состоит из трёх частей. <i>Verify</i> проверяет, что байткод не нарушает правил JVM: типы на стеке сходятся, переходы не выходят за метод. <i>Prepare</i> выделяет static-поля и ставит им нули: <code>USD</code> пока равен <code>0.0</code>. <i>Resolve</i> превращает символические ссылки в реальные методы и поля, обычно лениво, при первом использовании. Если в библиотеке другой версии нужного метода нет, падает <code>NoSuchMethodError</code>.</p>
+      <p><b>Initialization</b> выполняет код: инициализаторы static-полей и блоки <code>static {}</code> в порядке их записи в исходнике. Компилятор собирает их в один метод <code>&lt;clinit&gt;</code>. Если он бросил исключение, JVM заворачивает его в <code>ExceptionInInitializerError</code> и запоминает, что класс ошибочный.</p>
+      <pre><code class="language-java">public class BrokenInit {
+    static class FxRates {
+        // Инициализатор поля — часть static-инициализации класса
+        static final double USD = load();
+
+        static double load() {
+            throw new IllegalStateException("rates.yaml not found");
+        }
+    }
+
+    public static void main(String[] args) {
+        for (int attempt = 1; attempt &lt;= 2; attempt++) {
+            try {
+                System.out.println(FxRates.USD);   // первое чтение запускает инициализацию
+            } catch (Throwable e) {
+                System.out.println(attempt + ": " + e);        // тип ошибки и её сообщение
+                if (e instanceof ExceptionInInitializerError) {
+                    System.out.println("   причина: " + e.getCause());
+                }
+            }
+        }
+    }
+}</code></pre>
+      <pre class="out">1: java.lang.ExceptionInInitializerError
+   причина: java.lang.IllegalStateException: rates.yaml not found
+2: java.lang.NoClassDefFoundError: Could not initialize class BrokenInit$FxRates</pre>
+      <p>Вторая попытка не запускает инициализацию заново: класс уже помечен ошибочным. В проде это выглядит коварно. Первая ошибка с настоящей причиной случилась один раз, при старте или на первом запросе. А дальше в логах сотни одинаковых <code>NoClassDefFoundError</code>, и кажется, будто класса нет в JAR.</p>
+      <div class="note warn">
+        <p>Не клади в static-инициализацию то, что может временно не сработать: чтение файла, запрос в сеть или базу. Одна неудача делает класс непригодным до перезапуска процесса. Такие вещи место в бине с нормальной обработкой ошибок и повторами.</p>
+      </div>
+    </section>
+
+    <section class="step" id="initialize">
+      <h2>Инициализацию запускает только активное использование</h2>
+      <p>Когда именно выполнится <code>&lt;clinit&gt;</code>, JLS описывает точно: при первом <b>активном использовании</b> класса. Это создание объекта через <code>new</code>, вызов static-метода, чтение или запись static-поля, <code>Class.forName(name)</code> и инициализация подкласса. Всё остальное класс не инициализирует, даже если выглядит как обращение к нему. На собеседовании любят именно эти исключения.</p>
+      <pre><code class="language-java">public class InitRules {
+    static class Limits {
+        static final long MAX = 1_000_000;           // compile-time константа
+        static final Long BOXED = 500_000L;          // final, но не константа: Long — объект
+        static long daily = log("Limits");           // обычное static-поле
+    }
+    static class Base { static int fee = log("Base"); }
+    static class Card extends Base { static int cashback = log("Card"); }
+
+    static int log(String name) {
+        System.out.println("  init " + name);        // печатается из static-инициализации
+        return 1;
+    }
+
+    public static void main(String[] args) throws Exception {
+        ClassLoader loader = InitRules.class.getClassLoader();
+        System.out.println("MAX");
+        long max = Limits.MAX;                       // javac уже подставил 1_000_000 в этот класс
+        System.out.println(".class");
+        Class&lt;?&gt; type = Limits.class;                // ссылка на Class: загрузка без инициализации
+        System.out.println("массив");
+        Limits[] slots = new Limits[3];              // создаётся массив, а не объект Limits
+        System.out.println("loadClass");
+        loader.loadClass("InitRules$Limits");        // только загрузка
+        System.out.println("BOXED");
+        Long boxed = Limits.BOXED;                   // чтение настоящего поля: первое активное использование
+        System.out.println("Card.fee");
+        int fee = Card.fee;                          // поле объявлено в Base, инициализируется только Base
+        System.out.println("Card.cashback");
+        int cashback = Card.cashback;                // собственное поле Card: теперь и Card
+    }
+}</code></pre>
+      <pre class="out">MAX
+.class
+массив
+loadClass
+BOXED
+  init Limits
+Card.fee
+  init Base
+Card.cashback
+  init Card</pre>
+      <p>Две строки удивляют чаще всего. <code>BOXED</code> объявлен как <code>static final</code>, но это не константа: константой считается только поле примитивного типа или <code>String</code> со значением, которое известно компилятору. <code>Long</code> — объект, его создаёт <code>&lt;clinit&gt;</code>, значит чтение поля запускает инициализацию. А <code>Card.fee</code> инициализирует только <code>Base</code>: поле объявлено там, и <code>Card</code> для этого не нужен.</p>
+
+      <h3>Инициализация класса — готовая ленивая и потокобезопасная загрузка</h3>
+      <p>JVM выполняет <code>&lt;clinit&gt;</code> ровно один раз и под блокировкой класса: если два потока одновременно обратились к классу, второй ждёт, пока первый закончит. На этом построена идиома <b>holder</b> — ленивое значение без <code>synchronized</code> и <code>volatile</code>.</p>
+      <pre><code class="language-java">public class RatesDemo {
+    static class FxRates {
+        // Holder грузится при первом вызове usd(), а не при старте FxRates
+        private static class Holder {
+            static final double USD = load();       // JVM выполнит это один раз, под своей блокировкой
+        }
+
+        static double usd() { return Holder.USD; }
+
+        private static double load() {
+            System.out.println("загружаем курсы");  // дорогая операция: файл, сеть, база
+            return 92.5;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("сервис стартовал");
+        System.out.println(FxRates.usd());          // первый вызов: инициализация Holder
+        System.out.println(FxRates.usd());          // дальше — готовое значение
+    }
+}</code></pre>
+      <pre class="out">сервис стартовал
+загружаем курсы
+92.5
+92.5</pre>
+      <p>Курсы грузятся только когда впервые понадобились, и даже при сотне параллельных запросов загрузка случится один раз. Но помни предупреждение из прошлого шага: если <code>load()</code> упадёт, <code>Holder</code> станет ошибочным навсегда. Для данных, которые могут быть временно недоступны, holder не подходит.</p>
+      <details class="deep">
+        <summary>Под капотом: как устроена блокировка инициализации</summary>
+        <p>JLS §12.4.2 описывает процедуру по шагам. У каждого класса есть состояние: не инициализирован, инициализируется таким-то потоком, инициализирован, ошибочный. Поток, который застал класс в состоянии «инициализируется другим», ждёт. Тот же поток при рекурсивном обращении проходит сразу: поэтому внутри своего <code>&lt;clinit&gt;</code> класс может увидеть собственные поля ещё нулями. А два класса, которые в static-инициализации обращаются друг к другу из разных потоков, могут заблокировать друг друга навсегда. Такой deadlock не найти поиском <code>synchronized</code> по коду: потоки ждут друг друга внутри static-инициализации.</p>
+      </details>
+    </section>
+
+    <section class="step" id="class-identity">
+      <h2>Класс — это имя плюс загрузчик, который его определил</h2>
+      <p>Для JVM класс опознаётся не по имени, а по паре «полное имя + defining loader». Пока в процессе один загрузчик приложения, разница незаметна. Она всплывает там, где загрузчиков несколько: в плагинах, веб-контейнерах, при горячей перезагрузке.</p>
+      <p>Проверим на плагине антифрода. Скомпилируй правила отдельно, в каталог <code>plugin-out</code>, и загрузи их двумя независимыми загрузчиками.</p>
+      <pre><code class="language-java">public class RiskRules {
+    public boolean allow(long amount) { return amount &lt; 1_000_000; }
+}</code></pre>
+      <pre><code class="language-java">import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Path;
+
+public class TwoLoaders {
+    public static void main(String[] args) throws Exception {
+        URL[] plugin = { Path.of("plugin-out").toUri().toURL() };
+        // Два независимых загрузчика читают один и тот же каталог.
+        // parent = null: делегировать некому, кроме bootstrap
+        ClassLoader a = new URLClassLoader("plugin-a", plugin, null);
+        ClassLoader b = new URLClassLoader("plugin-b", plugin, null);
+
+        Class&lt;?&gt; rulesA = a.loadClass("RiskRules");
+        Class&lt;?&gt; rulesB = b.loadClass("RiskRules");
+        System.out.println(rulesA.getName().equals(rulesB.getName()));  // имена одинаковые
+        System.out.println(rulesA == rulesB);                           // а классы?
+
+        Object fromA = rulesA.getDeclaredConstructor().newInstance();
+        System.out.println(rulesB.isInstance(fromA));                   // объект A — экземпляр класса B?
+        try {
+            rulesB.cast(fromA);                                         // то же, что (RiskRules) fromA в коде B
+        } catch (ClassCastException e) {
+            System.out.println(e.getMessage());
+        }
+        System.out.println(a.loadClass("RiskRules") == rulesA);         // повторный запрос к тому же loader
+    }
+}</code></pre>
+      <pre><code class="language-text">javac -d plugin-out RiskRules.java     # плагин отдельно от приложения
+javac -d out TwoLoaders.java
+java -cp out TwoLoaders</code></pre>
+      <pre class="out">true
+false
+false
+Cannot cast RiskRules to RiskRules
+true</pre>
+      <p>Одни и те же байты, одно имя — и два несовместимых класса. Сообщение «Cannot cast RiskRules to RiskRules» выглядит абсурдно, пока не спросишь у обеих сторон <code>getClass().getClassLoader()</code>. Чинится это общим контрактом: интерфейс лежит в родительском загрузчике, который видят оба плагина, а в плагинах — только реализации.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Слева два загрузчика plugin-a и plugin-b, каждый определил свой RiskRules; приведение объекта из plugin-a к классу из plugin-b падает с Cannot cast RiskRules to RiskRules. Справа интерфейс RiskPolicy лежит в общем родителе app, plugin-a содержит CardRules, plugin-b — SbpRules, оба реализуют один и тот же RiskPolicy.">
+            <defs>
+              <marker id="id-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="id-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+
+            <!-- слева: свой класс в каждом плагине -->
+            <text x="20" y="20" class="dg-cap bad">СВОЙ RiskRules В КАЖДОМ</text>
+            <rect x="20" y="36" width="140" height="96" rx="8" class="dg-box"/>
+            <text x="90" y="58" class="dg-t" text-anchor="middle">plugin-a</text>
+            <rect x="32" y="72" width="116" height="44" rx="6" class="dg-cell"/>
+            <text x="90" y="99" class="dg-in" text-anchor="middle">RiskRules</text>
+            <rect x="200" y="36" width="140" height="96" rx="8" class="dg-box"/>
+            <text x="270" y="58" class="dg-t" text-anchor="middle">plugin-b</text>
+            <rect x="212" y="72" width="116" height="44" rx="6" class="dg-cell"/>
+            <text x="270" y="99" class="dg-in" text-anchor="middle">RiskRules</text>
+            <path d="M148 94 L 208 94" class="dg-line bad" marker-end="url(#id-bad)"/>
+            <text x="180" y="86" class="dg-bad" text-anchor="middle">cast</text>
+            <text x="20" y="210" class="dg-bad">Cannot cast RiskRules to RiskRules</text>
+            <text x="20" y="228" class="dg-s">одно имя, два загрузчика — два типа</text>
+
+            <line x1="360" y1="8" x2="360" y2="232" class="dg-sep"/>
+
+            <!-- справа: контракт в общем родителе -->
+            <text x="380" y="20" class="dg-cap">ОБЩИЙ КОНТРАКТ В РОДИТЕЛЕ</text>
+            <rect x="440" y="36" width="210" height="56" rx="8" class="dg-cell hit"/>
+            <text x="545" y="56" class="dg-t" text-anchor="middle">app</text>
+            <text x="545" y="78" class="dg-in" text-anchor="middle">interface RiskPolicy</text>
+            <rect x="380" y="130" width="150" height="56" rx="8" class="dg-box"/>
+            <text x="455" y="150" class="dg-t" text-anchor="middle">plugin-a</text>
+            <text x="455" y="172" class="dg-in" text-anchor="middle">CardRules</text>
+            <rect x="556" y="130" width="150" height="56" rx="8" class="dg-box"/>
+            <text x="631" y="150" class="dg-t" text-anchor="middle">plugin-b</text>
+            <text x="631" y="172" class="dg-in" text-anchor="middle">SbpRules</text>
+            <path d="M455 130 L 455 96" class="dg-line" marker-end="url(#id-n)"/>
+            <text x="463" y="118" class="dg-s">parent</text>
+            <path d="M631 130 L 631 96" class="dg-line" marker-end="url(#id-n)"/>
+            <text x="639" y="118" class="dg-s">parent</text>
+            <text x="380" y="210" class="dg-ok">оба реализуют один RiskPolicy</text>
+            <text x="380" y="228" class="dg-s">хост работает только через интерфейс</text>
+          </svg>
+        </div>
+        <figcaption>Справа хост приводит объекты к <code>RiskPolicy</code>, а этот тип определён один раз, в app. Если у загрузчиков плагинов parent — app, а класс лежит в classpath приложения, тот же <code>TwoLoaders</code> напечатает четыре раза <code>true</code>.</figcaption>
+      </figure>
+
+      <h3>Где свои загрузчики встречаются в backend</h3>
+      <p>Сам ты их почти не пишешь, но работаешь среди них каждый день:</p>
+      <ul>
+        <li><b>Spring Boot fat jar.</b> Стандартный app loader не умеет читать JAR внутри JAR. Лаунчер Spring Boot создаёт свой загрузчик (<code>LaunchedClassLoader</code> в Boot 3.2+), который читает <code>BOOT-INF/lib</code>.</li>
+        <li><b>Spring Boot DevTools.</b> Библиотеки грузит base-загрузчик, а твои классы — restart-загрузчик, который выбрасывают при каждой перезагрузке. Объект, переживший restart в кэше или сессии, даёт тот самый «Cannot cast X to X».</li>
+        <li><b>Tomcat и другие веб-контейнеры.</b> У каждого веб-приложения свой загрузчик, и он ищет сначала у себя, а потом у родителя (child-first). Так два приложения в одном Tomcat живут с разными версиями библиотек. Классы <code>java.*</code> всё равно отдаются вверх.</li>
+        <li><b>Прокси и генерация кода.</b> CGLIB и ByteBuddy, на которых стоят прокси Spring и Hibernate, генерируют байткод на лету и определяют классы через загрузчик.</li>
+      </ul>
+      <p>Остаётся правило видимости из шага 2: платформа не видит классы приложения. А <code>ServiceLoader</code> или JDBC <code>DriverManager</code> из платформы должны найти реализацию, которая лежит в твоём JAR. Для этого у каждого потока есть <b>context class loader</b> — <code>Thread.currentThread().getContextClassLoader()</code>, по умолчанию это app. Библиотека платформы грузит реализации через него, в обход обычного делегирования. Фреймворки подменяют его, когда код плагина выполняется в общем потоке.</p>
     </section>
 
     <section class="step" id="diagnose">
-      <h2>При сбое смотри на фазу и источник загруженного класса</h2>
-      <p>Ошибка поиска по имени (<code>ClassNotFoundException</code>) часто приходит из явного <code>loadClass</code> или <code>Class.forName</code>. <code>NoClassDefFoundError</code> при выполнении может означать отсутствующий class-файл, который был нужен для уже скомпилированной ссылки, либо класс с проваленной инициализацией. Поэтому одного простого названия исключения мало: читай cause и полный stack trace.</p>
-      <p>Включи <code>-Xlog:class+load=info</code> и найди интересующий класс и <code>source</code>. На JDK 21.0.11 после компиляции <code>LoadDemo.java</code> в <code>/tmp</code> лог содержит строки ниже; время и путь зависят от машины. Если класс пришёл из неожиданного JAR, исправляй classpath или конфликт версий, а не static-код класса.</p>
-      <pre><code class="language-text">[0.020s][info][class,load] LoadDemo$Rules source: file:/private/tmp/
-[0.020s][info][class,load] LoadDemo$Broken source: file:/private/tmp/</code></pre>
-      <p>Для диагностики имени класса в приложении выведи <code>SomeClass.class.getClassLoader()</code> и <code>SomeClass.class.getProtectionDomain().getCodeSource()</code>, учитывая, что для некоторых платформенных классов CodeSource может быть <code>null</code>. В plugin-системах сравни <code>Class</code> и loader обеих сторон приведения.</p>
-      <p>Этот урок объясняет поиск и жизненный цикл одного класса. Стек вызовов и heap — «Memory Areas», машинный код горячих методов — «JIT», команды для работающего процесса — «Diagnostics». Если задержка платежа вызвана базой или сетью, загрузчик классов здесь ни при чём: сначала нужен профиль запроса, а не флаги JVM.</p>
+      <h2>По исключению и логу загрузки видно, где искать причину</h2>
+      <p>Ошибки загрузки легко перепутать: названия похожие, а причины и лечение разные. Сначала определи этап по таблице, потом проверь источник класса.</p>
+      <table class="mx">
+        <thead><tr><th>Что видишь</th><th>Что случилось</th><th>Где искать</th></tr></thead>
+        <tbody>
+          <tr><td><code>ClassNotFoundException</code></td><td>явный поиск по имени (<code>Class.forName</code>, <code>loadClass</code>) не нашёл класс</td><td>имя класса в конфиге, classpath, какой загрузчик искал</td></tr>
+          <tr><td><code>NoClassDefFoundError</code>, в cause <code>ClassNotFoundException</code></td><td>класс был при компиляции, а при запуске его нет</td><td>состав образа и JAR, scope зависимости: <code>provided</code>, <code>test</code></td></tr>
+          <tr><td><code>NoClassDefFoundError: Could not initialize class</code></td><td>инициализация класса уже упала раньше</td><td>первое <code>ExceptionInInitializerError</code> в логе и его причина</td></tr>
+          <tr><td><code>ExceptionInInitializerError</code></td><td>исключение в static-инициализации</td><td>cause: файл, конфиг, сеть внутри static</td></tr>
+          <tr><td><code>NoSuchMethodError</code>, <code>NoSuchFieldError</code></td><td>класс нашёлся, но не той версии</td><td>конфликт версий: <code>mvn dependency:tree</code>, <code>gradle dependencies</code></td></tr>
+          <tr><td><code>ClassCastException: X cannot be cast to X</code></td><td>два класса X от разных загрузчиков</td><td><code>getClassLoader()</code> обеих сторон, DevTools, плагины</td></tr>
+          <tr><td><code>UnsupportedClassVersionError</code></td><td>class-файл собран под более новую Java</td><td>версия JDK в образе, флаг <code>--release</code></td></tr>
+        </tbody>
+      </table>
+      <p>Когда этап понятен, выясни, откуда пришёл класс. Три инструмента из JDK:</p>
+      <pre><code class="language-text"># откуда загружен каждый класс; фильтруй по своему пакету
+java -Xlog:class+load -jar payments.jar | grep bank.risk
+
+# дерево загрузчиков живого процесса
+jcmd &lt;pid&gt; VM.classloaders
+
+# сколько классов и памяти держит каждый загрузчик
+jcmd &lt;pid&gt; VM.classloader_stats</code></pre>
+      <p>Вот как выглядит дерево для процесса с загруженным плагином. Реальный вывод на JDK 21, PID заменён:</p>
+      <pre><code class="language-text">&lt;pid&gt;:
++-- &lt;bootstrap&gt;
+      |
+      +-- "platform", jdk.internal.loader.ClassLoaders$PlatformClassLoader
+      |     |
+      |     +-- "app", jdk.internal.loader.ClassLoaders$AppClassLoader
+      |
+      +-- "plugin-a", java.net.URLClassLoader      # parent = null, поэтому висит прямо под bootstrap</code></pre>
+      <p>Отсюда же видны утечки загрузчиков. Класс выгружается только вместе со своим загрузчиком, когда до загрузчика больше нельзя дойти по ссылкам. Если старый загрузчик держит <code>ThreadLocal</code>, static-кэш или незавершённый поток, после каждого редеплоя или перезагрузки плагина в памяти остаётся ещё один комплект классов. Растёт Metaspace, и однажды приходит <code>OutOfMemoryError: Metaspace</code>. В <code>VM.classloader_stats</code> это видно как десятки загрузчиков одного типа вместо одного.</p>
+      <p>Когда своего загрузчика не нужно? В обычном Spring Boot сервисе — почти никогда: одно приложение, один classpath, всё делает лаунчер. Свой загрузчик оправдан, если нужна настоящая изоляция: плагины разных версий в одном процессе, загрузка кода из внешнего источника. Если нужно просто найти реализации интерфейса, хватит <code>ServiceLoader</code> или бинов Spring.</p>
     </section>
 
-    <div class="summary"><ul>
-      <li>JVM загружает классы по мере необходимости, поэтому ошибку зависимости можно увидеть после успешного старта.</li>
-      <li>Стандартный <code>loadClass</code> проверяет уже загруженное, затем родителя, затем ищет сам; child-first требует отдельной реализации.</li>
-      <li>Бинарное имя вместе с defining loader задаёт тип. Два plugin-loader'а могут создать несовместимые классы с одним именем.</li>
-      <li>Loading, linking и initialization — разные фазы. Константа и class literal не обязаны запускать static-блок.</li>
-      <li>После провала static-инициализации класс остаётся ошибочным для этого loader; повторный доступ не перезапускает блок.</li>
-    </ul></div>
+    <div class="summary">
+      <ul>
+        <li>JVM грузит класс при первом обращении, поэтому отсутствующий класс может проявиться через час после старта, на редкой ветке кода.</li>
+        <li>Загрузчики выстроены цепочкой app → platform → bootstrap. Каждый сначала спрашивает родителя, и это защищает классы платформы от подмены.</li>
+        <li>После загрузки идут linking и initialization. Ошибку легко отнести к этапу по названию: CNFE и NoClassDefFoundError — поиск, VerifyError и NoSuchMethodError — связывание, ExceptionInInitializerError — static-код.</li>
+        <li>Инициализацию запускает только активное использование. Константы, <code>.class</code>, массивы и <code>loadClass</code> её не запускают. Неудачная инициализация делает класс ошибочным до перезапуска.</li>
+        <li>Класс — это имя плюс загрузчик. Отсюда «Cannot cast X to X» и утечки Metaspace от удержанных загрузчиков.</li>
+      </ul>
+    </div>
   </div>
 
-  <section class="interview" id="interview"><h2>На собеседовании</h2>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
     <article class="q" id="delegation-model" data-freq="3">
-      <h3>Что такое parent delegation и зачем она нужна?</h3>
+      <h3>Какие загрузчики классов есть в JVM и что такое parent delegation?</h3>
       <div class="answer">
-        <div data-level="middle"><p>Стандартный <code>ClassLoader.loadClass</code> сначала проверяет, не загружен ли класс, потом спрашивает родителя и только при отказе ищет байты сам. Поэтому запрос <code>java.lang.String</code> из кода приложения заканчивается на bootstrap loader, а класс платежного сервиса определяет application loader.</p><p>Так системные классы не подменяются случайной копией из JAR. Если класс не находится, я проверяю classpath и то, какой loader сделал запрос: наличие файла на диске само по себе недостаточно.</p></div>
-        <div data-level="senior"><ul><li>Child-first возможен у кастомного loader, но разные копии общего API ломают приведения между plugin'ами.</li><li><code>findLoadedClass</code> возвращает уже определённый класс, чтобы loader не создавал новый тип при повторном запросе.</li></ul></div>
+        <div data-level="middle">
+          <p>В JVM три встроенных загрузчика. Bootstrap грузит ядро платформы, <code>java.lang</code> и <code>java.util</code>, и в Java виден как <code>null</code>. Platform грузит остальные модули платформы, например <code>java.sql</code>. App грузит классы приложения из classpath. Они связаны ссылкой parent. Parent delegation значит, что загрузчик сначала спрашивает родителя и ищет сам, только если родитель класс не нашёл.</p>
+          <p>Отсюда два свойства. Системный класс нельзя подменить своим JAR: до JAR очередь просто не дойдёт. И каждый класс платформы существует в процессе в одном экземпляре. Если в сервисе пропал <code>RiskRules</code>, запрос пройдёт до bootstrap и обратно, а ошибку выбросит app, когда не найдёт класс в classpath.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>До Java 9 вместо platform был extension loader с каталогом <code>lib/ext</code>. С модулями его убрали.</li>
+            <li>Делегирование — поведение метода <code>loadClass</code>, его можно переопределить. Tomcat для веб-приложений ищет сначала у себя (child-first), но <code>java.*</code> всё равно отдаёт вверх: определить их может только bootstrap.</li>
+            <li>Родитель не видит классы ребёнка. Поэтому <code>ServiceLoader</code> и JDBC грузят реализации через context class loader потока.</li>
+          </ul>
+        </div>
       </div>
       <div class="check">
-        <details data-kind="задача"><summary>В application JAR лежит свой java.lang.String. Какой класс получит стандартный loader?</summary><p>Базовый <code>java.lang.String</code> от bootstrap loader. Application loader делегирует запрос родителю прежде, чем искать в своём JAR. Кроме того, определение классов пакета <code>java.*</code> ограничено.</p></details>
-        <details data-kind="уточнение"><summary>Можно ли вообще обойти parent-first?</summary><p>Можно переопределить <code>loadClass</code> в своём loader, как делают некоторые plugin-системы. Это требует явных правил: какие пакеты общие через родителя, какие изолированы. Иначе один и тот же интерфейс окажется двумя типами.</p></details>
+        <details data-kind="задача">
+          <summary>Что вернёт getClassLoader() для java.util.List, java.sql.Connection и класса из твоего JAR?</summary>
+          <p><code>null</code> (bootstrap), platform и app. Проверено на JDK 21 при запуске через <code>java -cp</code>. При запуске <code>java File.java</code> твой класс определит <code>MemoryClassLoader</code> лаунчера, а app станет его родителем.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Коллега положил в JAR свой java.lang.String с «исправленным» equals. Что будет?</summary>
+          <p>Ничего не подменится. Запрос <code>java.lang.String</code> дойдёт до bootstrap, тот найдёт класс в <code>java.base</code>, и JAR никто не откроет. Если попытаться определить класс в пакете <code>java.*</code> своим загрузчиком напрямую, <code>defineClass</code> бросит <code>SecurityException: Prohibited package name</code>.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>RiskRules лежит в JAR приложения. Зачем его ищут ещё два загрузчика?</summary>
+          <p>App заранее не знает, что выше класса нет: правило — сначала родитель. Цена — пара лишних вызовов при первой загрузке. Дальше класс берётся из кэша app, и цепочку не проходят.</p>
+        </details>
       </div>
     </article>
 
     <article class="q" id="loading-vs-initialization" data-freq="3">
-      <h3>Когда запускается static-блок класса?</h3>
+      <h3>Когда JVM инициализирует класс и чем это отличается от загрузки?</h3>
       <div class="answer">
-        <div data-level="middle"><p>Static-блок выполняется при initialization класса после loading и linking, один раз для конкретного defining loader. Активное использование вроде чтения обычного static-поля, создания объекта или <code>Class.forName(name)</code> запускает инициализацию. Если это подкласс, сначала инициализируется суперкласс.</p><p>Поэтому в платёжном сервисе конфигурационный static-блок может упасть только при первом обращении к редкому пути, хотя приложение давно работает. Для поиска причины я смотрю исходное исключение внутри <code>ExceptionInInitializerError</code>.</p></div>
-        <div data-level="senior"><ul><li>Compile-time constant может быть встроена в вызывающий class-файл и не инициировать свой класс.</li><li><code>Class.forName(name, false, loader)</code> загружает без initialization; <code>Foo.class</code> тоже не запускает static-блок.</li><li>JLS синхронизирует initialization: при конкурентном первом доступе только один поток выполняет код, остальные ждут.</li></ul></div>
+        <div data-level="middle">
+          <p>Загрузка — найти байты и создать объект <code>Class</code>. Инициализация — выполнить инициализаторы static-полей и блоки <code>static</code>. Она происходит при первом активном использовании: <code>new</code>, вызов static-метода, чтение или запись static-поля, которое не является константой, <code>Class.forName(name)</code>, инициализация подкласса. Константы времени компиляции, <code>Foo.class</code>, создание массива <code>Foo[]</code> и <code>loadClass</code> класс не инициализируют.</p>
+          <p>На этом держится ленивая загрузка через holder: курсы валют грузятся при первом вызове, а не при старте сервиса, и JVM гарантирует, что это произойдёт один раз, даже при параллельных запросах.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Инициализация идёт под блокировкой класса (JLS §12.4.2), другие потоки ждут. Поэтому holder безопасен без <code>volatile</code>. Но два класса, которые в static-коде обращаются друг к другу из разных потоков, могут заблокироваться навсегда.</li>
+            <li>Обращение <code>Card.fee</code> к полю, объявленному в <code>Base</code>, инициализирует только <code>Base</code>.</li>
+            <li><code>static final Long</code> — не константа. Константа — это поле примитивного типа или <code>String</code> со значением, известным компилятору.</li>
+          </ul>
+        </div>
       </div>
       <div class="check">
-        <details data-kind="задача"><summary>В LoadDemo что напечатается до Rules init?</summary><p><code>start</code>, <code>100</code>, <code>Rules</code>. Константа <code>LIMIT</code> встроена компилятором, а class literal не инициирует класс. Чтение <code>Rules.fee</code> запускает initialization.</p></details>
-        <details data-kind="ревью"><summary>Код использует static-блок для подключения к внешней базе. В чём риск?</summary><p>Сбой БД при первом активном использовании оставит класс erroneous для этого loader. Повтор вызова не переинициализирует его, а даст <code>NoClassDefFoundError</code>. Инициализацию внешнего ресурса держи в управляемом жизненном цикле приложения с явной обработкой и повтором, а не в static-блоке класса.</p></details>
-      </div>
-    </article>
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-java">public class Quiz {
+    static class Account {
+        static { System.out.println("init Account"); }
+        static final String BANK = "ACME";
+        static String region = "EU";
+    }
+    public static void main(String[] args) {
+        System.out.println(Account.BANK);
+        Account[] batch = new Account[2];
+        System.out.println(Account.region);
+    }
+}</code></pre>
+          <pre class="out">ACME
+init Account
+EU</pre>
+          <p><code>BANK</code> — строковая константа, javac подставил <code>"ACME"</code> прямо в <code>Quiz</code>. Массив создаёт массив, а не объект <code>Account</code>. Инициализацию запускает только чтение обычного поля <code>region</code>.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Найди проблему в ленивом singleton для курсов</summary>
+          <pre><code class="language-java">class FxRates {
+    private static FxRates instance;
 
-    <article class="q" id="class-identity-question" data-freq="2">
-      <h3>Почему два класса с одинаковым полным именем могут дать ClassCastException?</h3>
-      <div class="answer">
-        <div data-level="middle"><p>Для JVM идентичность типа — бинарное имя вместе с определившим его class loader. Если два plugin-loader'а сами определили <code>bank.RiskRules</code>, это два типа даже при одинаковых байтах. Объект из одного нельзя привести к классу второго.</p><p>При такой ошибке я сравню loader у реального объекта и у ожидаемого типа. Общие интерфейсы plugin'ов должны загружаться общим родителем, чтобы обе стороны видели один объект <code>Class</code>.</p></div>
-        <div data-level="senior"><ul><li>В stack trace современных JVM часто указаны loader и module обоих несовместимых классов; это помогает увидеть проблему без дебаггера.</li><li>Ссылки на thread, static cache и callback могут удержать старый loader после hot reload и помешать выгрузке его классов.</li></ul></div>
-      </div>
-      <div class="check">
-        <details data-kind="задача"><summary>Plugin A передал объект Payment в Plugin B; оба собраны из одного JAR, но cast упал. Что проверить?</summary><p>Проверь <code>object.getClass().getClassLoader()</code> и <code>Payment.class.getClassLoader()</code> на стороне B. Если A и B определили тип разными loader'ами, это разные классы. Общий API подними в родительский loader, а реализации оставь изолированными.</p></details>
-        <details data-kind="уточнение"><summary>Удаление старого JAR выгрузит его классы?</summary><p>Нет. Классы связаны с defining loader, который может оставаться достижимым из потока или кеша. Выгрузка требует убрать удерживающие ссылки; сам файл на диске здесь не критерий.</p></details>
+    static FxRates get() {
+        if (instance == null) {
+            synchronized (FxRates.class) {
+                if (instance == null) instance = new FxRates();
+            }
+        }
+        return instance;
+    }
+}</code></pre>
+          <p>Поле <code>instance</code> не <code>volatile</code>. Другой поток может увидеть ссылку на объект раньше, чем записи его полей, и прочитать недоинициализированные курсы. Исправить — объявить поле <code>volatile</code> или взять holder: инициализация класса сама даёт и ленивость, и безопасную публикацию.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Чем Class.forName отличается от loadClass?</summary>
+          <p><code>Class.forName(name)</code> по умолчанию инициализирует класс, <code>loader.loadClass(name)</code> только загружает. Поэтому старые JDBC-драйверы подключали через <code>Class.forName</code>: драйвер регистрировал себя в static-блоке. С JDBC 4 драйверы находятся через <code>ServiceLoader</code> сами.</p>
+        </details>
       </div>
     </article>
 
     <article class="q" id="loading-errors" data-freq="2">
-      <h3>Чем различаются ClassNotFoundException и NoClassDefFoundError?</h3>
+      <h3>Чем ClassNotFoundException отличается от NoClassDefFoundError?</h3>
       <div class="answer">
-        <div data-level="middle"><p><code>ClassNotFoundException</code> — проверяемое исключение при явном поиске имени, например через <code>Class.forName</code> или <code>loadClass</code>, когда loader его не нашёл. <code>NoClassDefFoundError</code> — ошибка линковки или доступа к классу во время исполнения: нужное определение недоступно либо предыдущая инициализация этого класса провалилась.</p><p>Поэтому я не угадываю по одному имени ошибки. Смотрю cause, исходный stack trace и источник class-файла в <code>-Xlog:class+load=info</code>: тогда видно, отсутствует JAR, загружена не та версия или упал static-блок.</p></div>
-        <div data-level="senior"><ul><li>После первого <code>ExceptionInInitializerError</code> повторный доступ к тому же классу через тот же loader даст <code>NoClassDefFoundError</code>, даже если class-файл лежит на месте.</li><li><code>NoSuchMethodError</code> и <code>NoSuchFieldError</code> обычно указывают на несовместимую версию зависимости, найденную при разрешении символической ссылки.</li></ul></div>
+        <div data-level="middle">
+          <p><code>ClassNotFoundException</code> — checked-исключение явного поиска: мой код вызвал <code>Class.forName</code> или <code>loadClass</code>, и класс не нашли. <code>NoClassDefFoundError</code> — ошибка JVM: класс был при компиляции, код на него ссылается, а при исполнении получить определение не удалось.</p>
+          <p>У второй две разные причины. Если в cause <code>ClassNotFoundException</code> — класса нет в рантайме, смотрю состав образа и scope зависимости. Если сообщение «Could not initialize class» — класс есть, но его инициализация уже упала, и я ищу в логе первое <code>ExceptionInInitializerError</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В JDK 21 у «Could not initialize class» в cause уже есть исходная ошибка инициализации. В старых версиях её приходилось искать в логе выше.</li>
+            <li><code>NoSuchMethodError</code> и <code>NoSuchFieldError</code> — родственники: класс нашёлся, но не той версии. Почти всегда это конфликт версий библиотек.</li>
+          </ul>
+        </div>
       </div>
       <div class="check">
-        <details data-kind="ревью"><summary>В логах NoClassDefFoundError: Could not initialize class RiskRules. Инженер добавляет JAR. Верно?</summary><p>Нет: сообщение говорит, что определение нашли, но инициализация раньше завершилась ошибкой. Найди первый <code>ExceptionInInitializerError</code> и его cause. Исправь причину и перезапусти процесс или создай новый loader; добавление JAR без этого не перезапустит static-блок.</p></details>
-        <details data-kind="уточнение"><summary>Как узнать, из какого JAR пришёл класс?</summary><p>Включи <code>-Xlog:class+load=info</code> и найди строку с именем и <code>source</code>. В коде можно посмотреть <code>getProtectionDomain().getCodeSource()</code>, но у платформенных классов источник не всегда доступен. Для конфликтов версий сравни этот путь с деревом зависимостей сборки.</p></details>
+        <details data-kind="ревью">
+          <summary>В логе сотни ошибок NoClassDefFoundError: Could not initialize class bank.fx.FxRates. Коллега предлагает добавить JAR с FxRates в образ. Прав ли он?</summary>
+          <p>Нет. Класс нашёлся, упала его инициализация. Нужна первая ошибка — <code>ExceptionInInitializerError</code> с настоящей причиной, скорее всего при старте или на первом запросе. Класс останется ошибочным до перезапуска процесса, поэтому после исправления причины сервис придётся перезапустить.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему NoClassDefFoundError может появиться через час после старта?</summary>
+          <p>JVM ищет класс при первом обращении. Если к нему обращается только редкая ветка, например антифрод крупных переводов, ошибка появится, когда туда впервые зайдёт запрос.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="class-identity-question" data-freq="2">
+      <h3>Почему приведение может упасть с «Cannot cast X to X»?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для JVM класс — это пара из полного имени и загрузчика, который его определил. Если два загрузчика независимо определили <code>RiskRules</code> даже из одних и тех же байтов, получатся два разных класса, и объект одного нельзя привести к другому.</p>
+          <p>В backend это встречается с плагинами, веб-контейнерами и Spring Boot DevTools. При restart DevTools перегружает классы приложения новым загрузчиком, а объект из кэша или сессии остался от старого. Лечится общим контрактом в родительском загрузчике или тем, что объекты не переживают перезагрузку.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Свои загрузчики нужны для изоляции и перезагрузки: веб-приложения в Tomcat, вложенные JAR Spring Boot, плагины, прокси, сгенерированные на лету.</li>
+            <li>Класс выгружается только вместе со своим загрузчиком. Ссылка на старый загрузчик из <code>ThreadLocal</code>, static-кэша или потока держит все его классы, и после серии редеплоев растёт Metaspace.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что напечатает TwoLoaders, если оба загрузчика создать с parent = app, а RiskRules положить в classpath приложения?</summary>
+          <p>Четыре раза <code>true</code>, и исключения не будет. Оба загрузчика сначала спросят app, тот найдёт <code>RiskRules</code> в своём classpath и определит его один раз. Проверено на JDK 21.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Что такое context class loader потока и зачем он нужен?</summary>
+          <p>Это загрузчик, привязанный к потоку, по умолчанию app. Код платформы, например <code>ServiceLoader</code>, не видит классы приложения через свою цепочку, поэтому ищет реализации через context class loader. Фреймворки подменяют его, когда в общем потоке выполняется код плагина или веб-приложения.</p>
+        </details>
       </div>
     </article>
   </section>
+
   <div class="qa"></div>
-  <div class="refs"><ul>
-    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ClassLoader.html">ClassLoader, JDK 21 API</a> — основа урока: алгоритм <code>loadClass</code>, parent delegation и иерархия встроенных загрузчиков.</li>
-    <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-5.html">JVMS 21, глава 5</a> — loading, linking, initialization и идентичность класса через defining loader.</li>
-    <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-12.html">JLS 21, §12</a> — события, запускающие static-инициализацию, и порядок при сбое.</li>
-    <li>Исходники OpenJDK 21 <code>java.base/java/lang/ClassLoader.java</code>, метод <code>loadClass(String, boolean)</code> — проверка загруженного, parent, затем <code>findClass</code>.</li>
-    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java, JDK 21</a> — <code>-Xlog:class+load=info</code> для диагностики источника class-файла.</li>
-  </ul></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-5.html">JVMS 21, глава 5: Loading, Linking, and Initializing</a> — основа урока: этапы, defining и initiating loader, ошибки каждого этапа.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-12.html#jls-12.4">JLS 21, §12.4</a> — когда класс инициализируется и процедура инициализации с блокировкой (§12.4.2).</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ClassLoader.html">ClassLoader, JDK 21</a> — делегирование, встроенные загрузчики, <code>loadClass</code> и <code>findClass</code>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jcmd.html">jcmd, JDK 21</a> — команды <code>VM.classloaders</code> и <code>VM.classloader_stats</code>.</li>
+      <li><a href="https://tomcat.apache.org/tomcat-10.1-doc/class-loader-howto.html">Apache Tomcat: Class Loader How-To</a> — child-first загрузчик веб-приложения и его исключения.</li>
+    </ul>
+  </div>
+
 </main>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="../assets/kb.js"></script>
 </body>
