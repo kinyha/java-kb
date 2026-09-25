@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: как выполняется код · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script><script src="../assets/search.js"></script>
+</head><body data-page="topic" data-root="../" data-topic="jvm-arch">
+<main class="page">
+<header class="topic-head"><h1>JVM: как выполняется код</h1></header>
+<div class="lesson"><section class="step" id="source-to-process">
+<h2>Исходник сам по себе сервер не запустит</h2>
+<p>Платёжный сервис написан на Java, а процессор выполняет машинные инструкции. Между исходником и процессором есть два перехода: компилятор создаёт байткод, затем JVM выполняет его на конкретной машине. Это позволяет собрать один набор class-файлов для разных операционных систем.</p>
+<pre><code class="language-java">public class JvmRun {
+    static long fee(long kopecks) { return kopecks * 15 / 1000; }
+    public static void main(String[] args) {
+        System.out.println(fee(10_000));
+    }
+}</code></pre>
+<pre class="out">150</pre>
+<p>Сохрани код как <code>JvmRun.java</code> и запусти <code>java JvmRun.java</code>. Команда компилирует одиночный исходный файл в памяти и запускает его; обычная сборка сначала вызывает <code>javac JvmRun.java</code>, а потом <code>java JvmRun</code>. Вывод одинаковый.</p>
+</section><section class="step" id="jdk-jre-jvm">
+<h2>JDK включает инструменты, JVM исполняет байткод</h2>
+<p><b>JDK</b> содержит компилятор <code>javac</code>, <code>java</code>, <code>javap</code> и диагностические инструменты. <b>JVM</b> — виртуальная машина, которая загружает классы, исполняет код и управляет памятью. <b>JRE</b> — историческое имя среды исполнения из JVM и библиотек без инструментов разработки; с Java 9 привычный отдельный дистрибутив JRE больше не является обязательной формой поставки.</p>
+<p>В проде приложение часто запускают на урезанном runtime image, собранном <code>jlink</code>, но смысл не меняется: внутри есть реализация JVM и необходимые модули. Термины описывают роли, а не три последовательных процесса.</p>
+</section><section class="step" id="class-file">
+<h2>Class-файл хранит инструкции и ссылки, а не готовый машинный код</h2>
+<p><code>javac</code> проверяет типы и записывает в class-файл байткод методов, константы и символические ссылки на другие классы и методы. JVM проверит формат и разрешит ссылки при загрузке и связывании. Поэтому отсутствующая библиотека может обнаружиться уже при запуске, хотя собственный исходник успешно скомпилировался.</p>
+<pre><code class="language-text">javac JvmRun.java
+javap -c JvmRun</code></pre>
+<p><code>javap -c</code> показывает инструкции, например <code>invokestatic</code> для вызова <code>fee</code>. Это полезно, когда нужно понять, что сделал компилятор, но вывод <code>javap</code> — ещё не машинный код процессора.</p>
+</section><section class="step" id="execute">
+<h2>Сначала код исполняется, горячие участки ускоряются</h2>
+<p>После загрузки класса JVM вызывает <code>main</code>. HotSpot сначала может интерпретировать байткод и собирать профиль: какие методы и ветви используются. Часто исполняемые участки JIT компилирует в машинный код; редкие могут так и остаться интерпретируемыми.</p>
+<figure class="fig play"><div class="fig-box"><svg class="dg" viewBox="0 0 720 184" role="img" aria-label="Путь исходника до исполняемого кода"><g data-s="1-"><rect x="24" y="25" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="45" class="dg-t">JvmRun.java → javac</text></g><g data-s="2-"><rect x="24" y="61" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="81" class="dg-t">JvmRun.class → загрузка и проверка</text></g><g data-s="3-"><rect x="24" y="97" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="117" class="dg-t">main → интерпретация байткода</text></g><g data-s="4-"><rect x="24" y="133" width="672" height="30" rx="5" class="dg-cell"/><text x="36" y="153" class="dg-t">горячий fee → JIT → машинный код</text></g></svg></div><ol class="play-steps"><li>Компилятор проверяет исходник и создаёт class-файл.</li><li>JVM загружает класс, проверяет его и готовит к использованию.</li><li>Программа начинает работать, не дожидаясь оптимизации всех методов.</li><li>Если вызов стал горячим, HotSpot может скомпилировать его; поведение Java остаётся тем же.</li></ol></figure>
+<p>JIT не обещает ускорения любого метода: решение зависит от профиля и бюджета компиляции. Подробности уровней C1/C2 вынесены в отдельную тему «JIT».</p>
+</section><section class="step" id="boundaries">
+<h2>JVM отвечает за исполнение, но не за всю платформу</h2>
+<p>Байткод может создать не только <code>javac</code>: например, Kotlin и Scala тоже используют JVM. При этом Java API предоставляет библиотеки, а JVM Specification задаёт формат class-файла и поведение инструкций. Конкретные GC и JIT — выбор реализации HotSpot, а не обещание каждой JVM.</p>
+<div class="trap"><p class="myth">Java всегда интерпретируется и поэтому медленная.</p><p class="fact">HotSpot сочетает интерпретацию и JIT. Реальную задержку сервиса измеряют по профилю, а не выводят из слова «виртуальная».</p></div>
+<p>Если программа упирается в сеть или базу, тонкая настройка JIT не устранит ожидание I/O. Сначала измерь, где тратится время, затем выбирай инструмент диагностики.</p>
+</section><div class="summary"><ul><li><code>javac</code> создаёт байткод; JVM загружает и выполняет его.</li><li>JDK — инструменты и runtime; JRE — роль среды исполнения, а не обязательный отдельный пакет.</li><li>Class-файл переносим между платформами, машинный код JIT создаётся для текущего процессора.</li><li>Интерпретация даёт быстрый старт, JIT ускоряет горячие участки.</li><li>Спецификация JVM и конкретная реализация HotSpot — разные уровни описания.</li></ul></div></div>
+<section class="interview" id="interview"><h2>На собеседовании</h2><article class="q" id="jdk-jre-jvm-question" data-freq="3">
+<h3>Чем отличаются JDK, JRE и JVM?</h3>
+<div class="answer"><div data-level="middle"><p>JDK беру для разработки: в нём есть <code>javac</code>, <code>java</code>, <code>javap</code> и инструменты диагностики. JVM загружает class-файлы и исполняет байткод. JRE называют набором, достаточным для запуска: JVM плюс нужные библиотеки.</p><p>Для backend-сервиса я собираю приложение JDK, а запускаю его на подходящем runtime. Отдельный пакет с названием JRE сегодня необязателен.</p></div><div data-level="senior"><ul><li>JVM Specification не предписывает конкретный GC или JIT; это решения реализации.</li><li><code>jlink</code> может собрать runtime image только с нужными модулями.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Можно ли запустить Java без javac?</summary><p>Да. Готовые class-файлы и JAR запускаются без компилятора; режим <code>java File.java</code>, напротив, требует компиляции исходника.</p></details><details data-kind="задача"><summary>Как увидеть байткод метода?</summary><p>Скомпилируй <code>javac JvmRun.java</code> и вызови <code>javap -c JvmRun</code>. Флаг <code>-c</code> печатает инструкции методов.</p></details></div>
+</article><article class="q" id="launch" data-freq="3">
+<h3>Что происходит после команды java JvmRun?</h3>
+<div class="answer"><div data-level="middle"><p>Лаунчер создаёт JVM, она находит основной класс, загружает и связывает его, инициализирует при первом активном использовании и вызывает <code>main</code>. По ходу выполнения она загружает другие классы и выполняет их байткод, а горячие методы может скомпилировать JIT.</p><p>Если в проде появляется <code>NoClassDefFoundError</code>, я сначала проверю classpath и зависимости, а не настройки GC.</p></div><div data-level="senior"><ul><li>Загрузка, linking и initialization разделены; детали переходов — в теме Class Loading.</li><li>Разрешение символических ссылок может происходить лениво, поэтому ошибка не обязательно возникает в момент старта.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Все классы приложения загружаются сразу?</summary><p>Нет. JVM загружает классы по мере необходимости, а linking и разрешение отдельных ссылок могут откладываться.</p></details><details data-kind="уточнение"><summary>Где появляется машинный код?</summary><p>HotSpot JIT создаёт его во время работы для выбранных горячих участков. В class-файле лежит переносимый байткод.</p></details></div>
+</article><article class="q" id="bytecode" data-freq="2">
+<h3>Зачем Java байткод, если CPU его не понимает?</h3>
+<div class="answer"><div data-level="middle"><p>Байткод — стабильный промежуточный формат. Компилятор проверяет программу один раз, а JVM на конкретной платформе исполняет её и может оптимизировать под текущий процессор и профиль нагрузки.</p><p>Это удобно для сервиса, который собирается в CI и запускается на разных ОС или архитектурах. Совместимость всё равно зависит от версии class-файла и доступных API.</p></div><div data-level="senior"><ul><li>Более новая версия class-файла на старой JVM даёт <code>UnsupportedClassVersionError</code>.</li><li>Байткод не гарантирует одинаковую производительность: JIT, GC и железо различаются.</li></ul></div></div>
+<div class="check"><details data-kind="уточнение"><summary>Можно ли открыть class-файл обычным редактором?</summary><p>Это бинарный формат. Для структуры используй <code>javap -v</code>, для инструкций — <code>javap -c</code>.</p></details><details data-kind="уточнение"><summary>Kotlin нужен отдельный JVM runtime?</summary><p>Его компилятор тоже выпускает class-файлы для JVM. Приложению могут понадобиться библиотеки Kotlin, но механизм исполнения байткода тот же.</p></details></div>
+</article></section>
+<div class="qa"></div>
+<div class="refs"><ul><li><a href="https://dev.java/learn/jvm/">dev.java, Getting to know the JVM</a> — основа урока: инструменты JDK и путь к исполнению.</li><li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html">JVMS 21, главы 2.1 и 2.5</a> — модель JVM и области времени выполнения.</li><li><a href="https://docs.oracle.com/en/java/javase/21/vm/java-virtual-machine-technology-overview.html">HotSpot VM Technology Overview</a> — интерпретатор и адаптивная компиляция.</li><li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/javap.html">javap, JDK 21</a> — просмотр class-файла и байткода.</li></ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body></html>

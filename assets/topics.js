@@ -432,7 +432,7 @@ window.KB_TREE = [
         ] },
       ] },
       { id: 'jvm', title: 'JVM', source: 'dev.java: Getting to know the JVM; Java Performance (Oaks); Baeldung: Memory Management', items: [
-        { id: 'jvm-arch', freq: 2, status: 'empty', title: 'How JVM Runs Code',
+        { id: 'jvm-arch', freq: 2, status: 'draft', title: 'How JVM Runs Code',
           scope: 'JDK, JRE и JVM, байткод, class-файл, интерпретатор и JIT, жизненный цикл программы' },
         { id: 'classloading', freq: 2, status: 'empty', title: 'Class Loading',
           scope: 'загрузчики классов, parent delegation, loading, linking и initialization, static-инициализация' },
