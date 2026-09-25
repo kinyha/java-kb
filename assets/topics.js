@@ -449,7 +449,7 @@ window.KB_TREE = [
             scope: 'достижимость, GC roots, утечка при живых ссылках, stop-the-world, safepoint, паузы и throughput' },
           { id: 'gc-generations', freq: 3, status: 'draft', title: 'Generations',
             scope: 'гипотеза поколений, Eden и Survivor, возраст и promotion, old generation, minor, major и full GC, card table' },
-          { id: 'gc-algorithms', freq: 2, status: 'empty', title: 'GC Algorithms',
+          { id: 'gc-algorithms', freq: 2, status: 'draft', title: 'GC Algorithms',
             scope: 'mark-sweep, copying, mark-compact, фрагментация, concurrent marking, tri-color, барьеры' },
           { id: 'g1', freq: 3, status: 'empty', title: 'G1',
             scope: 'регионы, young и mixed GC, remembered sets, concurrent marking, humongous-объекты, MaxGCPauseMillis, full GC у G1' },

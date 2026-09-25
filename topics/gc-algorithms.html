@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: GC Algorithms · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="gc-algorithms">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: GC Algorithms</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="after-mark">
+      <h2>Найти мусор — полдела, его ещё надо превратить в свободное место</h2>
+      <p>Из темы GC Basics мы знаем, как сборщик находит живые объекты: маркировкой от корней. Но после маркировки heap — это вперемешку живые и мёртвые объекты. Чтобы следующий <code>new</code> получил память, мёртвые куски надо превратить в свободное место. Способов три, и все сборщики HotSpot — это их комбинации:</p>
+      <ul>
+        <li><b>mark-sweep</b> — оставить живых на месте, а дыры между ними записать в список свободных;</li>
+        <li><b>mark-compact</b> — сдвинуть живых к началу, освободив один большой непрерывный кусок;</li>
+        <li><b>copying</b> — скопировать живых в другую, пустую область, а старую освободить целиком.</li>
+      </ul>
+      <p>У каждого своя цена: время, лишняя память, фрагментация. Понимание этих цен объясняет почти все особенности конкретных сборщиков: почему в young копируют, почему у G1 бывает full GC, зачем ZGC барьеры на каждое чтение. Пролистай все три способа на одном и том же heap.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Полоса heap из 12 ячеек с живыми объектами A, C, E, G и мёртвыми B, D, F, H. Sweep превращает мёртвые в дыры и список свободных. Объект на 4 ячейки не помещается, хотя свободно 7: дыры по 2, 1, 1 и 3. Compact сдвигает живых влево, и объект помещается. Copying переносит живых в пустую половину, а старую освобождает целиком.">
+            <text x="40" y="20" class="dg-cap">HEAP: 12 ЯЧЕЕК</text>
+            <g text-anchor="middle">
+              <text x="66" y="52" class="dg-n">0</text><text x="118" y="52" class="dg-n">1</text><text x="170" y="52" class="dg-n">2</text><text x="222" y="52" class="dg-n">3</text>
+              <text x="274" y="52" class="dg-n">4</text><text x="326" y="52" class="dg-n">5</text><text x="378" y="52" class="dg-n">6</text><text x="430" y="52" class="dg-n">7</text>
+              <text x="482" y="52" class="dg-n">8</text><text x="534" y="52" class="dg-n">9</text><text x="586" y="52" class="dg-n">10</text><text x="638" y="52" class="dg-n">11</text>
+            </g>
+
+            <!-- шаги 1–3: исходное размещение, живые на местах -->
+            <g data-s="1-3">
+              <rect x="42" y="60" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <rect x="198" y="60" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <rect x="302" y="60" width="100" height="40" rx="4" class="dg-cell hit"/>
+              <rect x="458" y="60" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <g text-anchor="middle"><text x="66" y="85" class="dg-in">A</text><text x="222" y="85" class="dg-in">C</text><text x="352" y="85" class="dg-in">E</text><text x="482" y="85" class="dg-in">G</text></g>
+            </g>
+            <!-- шаг 1: мёртвые помечены -->
+            <g data-s="1">
+              <rect x="94" y="60" width="100" height="40" rx="4" class="dg-cell"/><rect x="250" y="60" width="48" height="40" rx="4" class="dg-cell"/>
+              <rect x="406" y="60" width="48" height="40" rx="4" class="dg-cell"/><rect x="510" y="60" width="152" height="40" rx="4" class="dg-cell"/>
+              <g text-anchor="middle"><text x="144" y="85" class="dg-s">B</text><text x="274" y="85" class="dg-s">D</text><text x="430" y="85" class="dg-s">F</text><text x="586" y="85" class="dg-s">H</text></g>
+            </g>
+            <!-- шаги 2–3: дыры после sweep -->
+            <g data-s="2-3">
+              <rect x="94" y="60" width="100" height="40" rx="4" class="dg-sep" fill="none"/><rect x="250" y="60" width="48" height="40" rx="4" class="dg-sep" fill="none"/>
+              <rect x="406" y="60" width="48" height="40" rx="4" class="dg-sep" fill="none"/><rect x="510" y="60" width="152" height="40" rx="4" class="dg-sep" fill="none"/>
+              <text x="40" y="126" class="dg-in">свободно: [1–2] → [4] → [7] → [9–11]</text>
+            </g>
+            <!-- шаг 3: большой объект не помещается -->
+            <g data-s="3">
+              <rect x="458" y="150" width="204" height="36" rx="4" class="dg-cell miss"/>
+              <text x="560" y="173" class="dg-in" text-anchor="middle">новый, 4 ячейки</text>
+              <text x="40" y="164" class="dg-bad">свободно 7 ячеек, но кусками 2, 1, 1, 3</text>
+              <text x="40" y="182" class="dg-bad">— объекту на 4 некуда встать</text>
+            </g>
+            <!-- шаг 4: compact -->
+            <g data-s="4">
+              <rect x="42" y="60" width="48" height="40" rx="4" class="dg-cell hit"/><rect x="94" y="60" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <rect x="146" y="60" width="100" height="40" rx="4" class="dg-cell hit"/><rect x="250" y="60" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <g text-anchor="middle"><text x="66" y="85" class="dg-in">A</text><text x="118" y="85" class="dg-in">C</text><text x="196" y="85" class="dg-in">E</text><text x="274" y="85" class="dg-in">G</text></g>
+              <rect x="302" y="60" width="204" height="40" rx="4" class="dg-cell hit"/><text x="404" y="85" class="dg-in" text-anchor="middle">новый, 4 ячейки</text>
+              <rect x="510" y="60" width="152" height="40" rx="4" class="dg-sep" fill="none"/>
+              <text x="40" y="126" class="dg-in">живые сдвинуты влево, ссылки на них переписаны</text>
+            </g>
+            <!-- шаг 5: copying -->
+            <g data-s="5">
+              <rect x="42" y="60" width="620" height="40" rx="4" class="dg-sep" fill="none"/>
+              <text x="352" y="85" class="dg-s" text-anchor="middle">from-space: освобождена целиком, без обхода мёртвых</text>
+              <text x="40" y="138" class="dg-cap">TO-SPACE</text>
+              <rect x="42" y="150" width="48" height="40" rx="4" class="dg-cell hit"/><rect x="94" y="150" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <rect x="146" y="150" width="100" height="40" rx="4" class="dg-cell hit"/><rect x="250" y="150" width="48" height="40" rx="4" class="dg-cell hit"/>
+              <g text-anchor="middle"><text x="66" y="175" class="dg-in">A</text><text x="118" y="175" class="dg-in">C</text><text x="196" y="175" class="dg-in">E</text><text x="274" y="175" class="dg-in">G</text></g>
+              <rect x="302" y="150" width="360" height="40" rx="4" class="dg-sep" fill="none"/>
+            </g>
+
+            <!-- состояние -->
+            <text data-s="1" x="40" y="236" class="dg-in">после маркировки: живы A, C, E, G — 5 ячеек, мёртвых 7</text>
+            <text data-s="2" x="40" y="236" class="dg-in">mark-sweep: мёртвые стали дырами, живые не двигались</text>
+            <text data-s="3" x="40" y="236" class="dg-bad">фрагментация: места хватает в сумме, но не подряд</text>
+            <text data-s="4" x="40" y="236" class="dg-ok">mark-compact: одно большое свободное место</text>
+            <text data-s="5" x="40" y="236" class="dg-ok">copying: живые в новой области, старая пуста целиком</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Маркировка закончилась. Живы A, C, E и G, остальное мусор. Всего живых 5 ячеек из 12.</li>
+          <li><b>Mark-sweep</b> проходит по heap и превращает мёртвые объекты в дыры, связывая их в список свободных. Живые остаются на своих местах — это быстро, ничего не копируется.</li>
+          <li>Приложению нужен объект на 4 ячейки. Свободно 7, но самый большой кусок — 3. Объект не помещается, хотя памяти в сумме хватает. Это <b>фрагментация</b>.</li>
+          <li><b>Mark-compact</b> сдвигает живых к началу и переписывает все ссылки на них. Свободное место теперь одно, и объект встаёт. Цена — несколько проходов по heap и остановка на время перемещения.</li>
+          <li><b>Copying</b> копирует живых в заранее пустую область подряд и освобождает старую целиком. Мёртвых сборщик не трогает вовсе. Цена — нужна пустая область размером под выживших.</li>
+        </ol>
+      </figure>
+    </section>
+
+    <section class="step" id="costs">
+      <h2>Каждый способ платит своим: временем, памятью или фрагментацией</h2>
+      <p>Сведём цены в одну таблицу. Главное в ней — от чего зависит время: от живых объектов или от всего heap.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>mark-sweep</th><th>mark-compact</th><th>copying</th></tr></thead>
+        <tbody>
+          <tr><td>время</td><td>маркировка живых + проход по всему heap</td><td>маркировка + несколько проходов на перемещение</td><td>только живые: мёртвых не трогает</td></tr>
+          <tr><td>лишняя память</td><td>нет</td><td>нет</td><td>пустая область под выживших</td></tr>
+          <tr><td>фрагментация</td><td>да</td><td>нет</td><td>нет</td></tr>
+          <tr><td>выделение потом</td><td>поиск подходящей дыры в списке</td><td>сдвиг указателя</td><td>сдвиг указателя</td></tr>
+          <tr><td>объекты двигаются</td><td>нет</td><td>да, ссылки надо переписать</td><td>да, ссылки надо переписать</td></tr>
+        </tbody>
+      </table>
+      <p>Отсюда понятно, кто где работает. В <b>young</b> живых почти нет, поэтому копирование идеально: стоит копейки и оставляет eden пустым для выделения сдвигом указателя. Лишняя область — это как раз survivor из темы Generations. В <b>old</b> живых много, копировать всё в запасную половину слишком дорого по памяти, поэтому там mark-compact у Serial и Parallel.</p>
+      <p>Mark-sweep без уплотнения в HotSpot больше нет. Его использовал сборщик CMS, удалённый в Java 14. Он чистил old параллельно с приложением, но фрагментировал его, и в какой-то момент объект не помещался. Тогда CMS откатывался на полную сборку с уплотнением — ту самую долгую паузу, от которой пытался уйти. Этот урок учёл G1: он делит heap на регионы и уплотняет old по кусочкам, копируя живых из самых замусоренных регионов в свободные.</p>
+      <div class="trap">
+        <p class="myth">Сборка тем дороже, чем больше мусора накопилось.</p>
+        <p class="fact">Для копирования и маркировки наоборот: работа пропорциональна живым объектам. Много мусора и мало живых — самый дешёвый случай. Дорого, когда heap набит живыми данными.</p>
+      </div>
+    </section>
+
+    <section class="step" id="concurrent">
+      <h2>Маркировать параллельно с приложением мешает одна гонка</h2>
+      <p>Пауза на маркировку растёт с объёмом живых данных: у сервиса с 10 ГБ живых она занимает секунды. Поэтому G1, ZGC и Shenandoah маркируют <b>конкурентно</b> — параллельно с работой приложения. Для этого используют <b>трёхцветную маркировку</b>:</p>
+      <ul>
+        <li><b>белый</b> — объект ещё не найден. В конце маркировки белые считаются мусором;</li>
+        <li><b>серый</b> — найден, но его поля ещё не просмотрены: он в очереди маркировщика;</li>
+        <li><b>чёрный</b> — найден, и все его ссылки просмотрены. К нему маркировщик больше не вернётся.</li>
+      </ul>
+      <p>Маркировщик берёт серый объект, красит всё, на что он ссылается, в серый, а его самого — в чёрный. Когда серых не осталось, маркировка окончена. Проблема в том, что приложение в это время меняет ссылки. Пролистай, как теряется живой объект.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Корень указывает на A, A на B, B на C. Маркировщик просмотрел A (чёрный), B в очереди (серый), C ещё не найден (белый). Приложение записывает в A ссылку на C и удаляет ссылку из B на C. Маркировщик просматривает B и ничего не находит: C остаётся белым и будет освобождён, хотя A на него ссылается. Барьер SATB при удалении ссылки запоминает C, и C помечается.">
+            <defs>
+              <marker id="tc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="tc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- легенда -->
+            <rect x="420" y="190" width="18" height="14" rx="3" class="dg-sep" fill="none"/><text x="444" y="202" class="dg-n">белый</text>
+            <rect x="500" y="190" width="18" height="14" rx="3" class="dg-cell"/><text x="524" y="202" class="dg-n">серый</text>
+            <rect x="580" y="190" width="18" height="14" rx="3" class="dg-cell hit"/><text x="604" y="202" class="dg-n">чёрный</text>
+
+            <!-- корень -->
+            <rect x="20" y="90" width="100" height="40" rx="7" class="dg-box"/>
+            <text x="70" y="115" class="dg-t" text-anchor="middle">стек</text>
+            <path d="M120 110 L 176 110" class="dg-line" marker-end="url(#tc-n)"/>
+
+            <!-- A -->
+            <rect data-s="1" x="180" y="90" width="110" height="40" rx="6" class="dg-sep" fill="none"/>
+            <rect data-s="2-" x="180" y="90" width="110" height="40" rx="6" class="dg-cell hit"/>
+            <text x="235" y="115" class="dg-in" text-anchor="middle">A</text>
+            <!-- B -->
+            <rect data-s="1" x="360" y="30" width="110" height="40" rx="6" class="dg-sep" fill="none"/>
+            <rect data-s="2-4" x="360" y="30" width="110" height="40" rx="6" class="dg-cell"/>
+            <rect data-s="5-" x="360" y="30" width="110" height="40" rx="6" class="dg-cell hit"/>
+            <text x="415" y="55" class="dg-in" text-anchor="middle">B</text>
+            <!-- C -->
+            <rect data-s="1-4" x="540" y="90" width="110" height="40" rx="6" class="dg-sep" fill="none"/>
+            <rect data-s="5" x="540" y="90" width="110" height="40" rx="6" class="dg-cell miss"/>
+            <rect data-s="6" x="540" y="90" width="110" height="40" rx="6" class="dg-cell hit"/>
+            <text x="595" y="115" class="dg-in" text-anchor="middle">C</text>
+
+            <!-- ссылки -->
+            <path d="M290 100 C 320 100, 330 50, 356 50" class="dg-line" marker-end="url(#tc-n)"/>
+            <path data-s="1-3" d="M470 50 C 500 50, 510 100, 536 100" class="dg-line" marker-end="url(#tc-n)"/>
+            <path data-s="3-" d="M290 122 C 400 160, 440 160, 536 122" class="dg-line" marker-end="url(#tc-n)"/>
+
+            <!-- действия приложения -->
+            <text data-s="3" x="415" y="172" class="dg-s" text-anchor="middle">приложение: A.next = C</text>
+            <text data-s="4" x="490" y="80" class="dg-s">B.next = null</text>
+            <text data-s="5" x="595" y="152" class="dg-bad" text-anchor="middle">жив, но белый</text>
+            <g data-s="6"><text x="490" y="80" class="dg-ok">барьер: запомнил C</text></g>
+
+            <!-- очередь маркировщика -->
+            <text data-s="1" x="20" y="198" class="dg-in">очередь: [стек]</text>
+            <text data-s="2-4" x="20" y="198" class="dg-in">очередь: [B]</text>
+            <text data-s="5" x="20" y="198" class="dg-in">очередь: пусто</text>
+            <text data-s="6" x="20" y="198" class="dg-in">очередь: [C] от барьера</text>
+
+            <!-- состояние -->
+            <text data-s="1" x="20" y="228" class="dg-in">маркировка началась: всё белое</text>
+            <text data-s="2" x="20" y="228" class="dg-in">маркировщик просмотрел A, нашёл B; до C ещё не дошёл</text>
+            <text data-s="3" x="20" y="228" class="dg-in">приложение кладёт ссылку на C в чёрный A</text>
+            <text data-s="4" x="20" y="228" class="dg-in">и убирает единственный путь к C через серый B</text>
+            <text data-s="5" x="20" y="228" class="dg-bad">B просмотрен, C не найден: живой объект будет освобождён</text>
+            <text data-s="6" x="20" y="228" class="dg-ok">с барьером SATB: старое значение B.next ушло в очередь, C жив</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Конкурентная маркировка началась. Все объекты белые, в очереди корни.</li>
+          <li>Маркировщик просмотрел A и покрасил его в чёрный, B нашёл и поставил в очередь серым. До C он ещё не дошёл: C белый.</li>
+          <li>Приложение, которое работает параллельно, записывает в поле A ссылку на C. A уже чёрный, маркировщик в него больше не заглянет.</li>
+          <li>Приложение обнуляет ссылку из B на C. Теперь к C нельзя прийти ни через серый объект, ни через новый путь, который маркировщик увидит.</li>
+          <li>Маркировщик просматривает B, ничего не находит, и серых не остаётся. C белый и будет освобождён, хотя A на него ссылается. Приложение получит ссылку на мусор.</li>
+          <li>Так не бывает, потому что каждая запись ссылки проходит через <b>барьер</b>. Барьер SATB в G1 перед перезаписью <code>B.next</code> сохраняет старое значение — C — в очередь маркировщика. C помечен и выжил.</li>
+        </ol>
+      </figure>
+      <p>Ошибка возникает, только когда одновременно чёрный объект получает ссылку на белый и пропадает последний путь к белому через серые. Барьер ломает одно из двух условий:</p>
+      <ul>
+        <li><b>SATB</b> (snapshot-at-the-beginning) — при перезаписи ссылки запомнить старое значение. Маркировка сохраняет всё, что было живо на момент начала, даже если потом стало мусором: такой мусор соберут в следующий раз. Так работают G1 и Shenandoah.</li>
+        <li><b>Incremental update</b> — при записи ссылки в чёрный объект снова сделать его серым, чтобы маркировщик вернулся. Так работал CMS.</li>
+      </ul>
+      <p>Короткие остановки в начале и в конце всё равно нужны: снять корни из стеков и доделать то, что барьеры накопили за время маркировки. Это видно в настоящем логе G1:</p>
+      <pre><code class="language-text">$ java -XX:+UseG1GC -Xmx256m -Xlog:gc -cp out Recent 150000
+GC(5) Pause Young (Concurrent Start) (G1 Evacuation Pause) 175M-&gt;155M(256M) 2.117ms   # пауза: старт маркировки
+GC(6) Concurrent Mark Cycle                                                             # маркировка идёт вместе с приложением
+GC(6) Pause Remark 196M-&gt;91M(250M) 0.153ms                                              # пауза: доделать очереди барьеров
+GC(6) Pause Cleanup 123M-&gt;123M(250M) 0.038ms                                            # пауза: подсчёт по регионам
+GC(6) Concurrent Mark Cycle 7.095ms                                                     # вся маркировка — 7 мс, паузы — доли мс
+GC(10) Pause Young (Mixed) (G1 Evacuation Pause) 169M-&gt;154M(250M) 1.189ms              # теперь чистится и old</code></pre>
+      <p>Пример <code>Recent</code> — из темы Generations: очередь из 150 000 недавних платежей. Маркировка заняла 7 мс, но приложение стояло только в паузах по долям миллисекунды.</p>
+    </section>
+
+    <section class="step" id="race">
+      <h2>Если маркировка не успевает, сборщик возвращается к полной остановке</h2>
+      <p>У конкурентной сборки есть слабое место: приложение продолжает выделять память, пока идёт маркировка. Если heap кончится раньше, чем маркировка закончится и освободит место, ждать нечего. Сборщик останавливает всё и делает полную сборку. Тот же пример на heap в 128 МБ:</p>
+      <pre><code class="language-text">$ java -XX:+UseG1GC -Xmx128m -Xlog:gc -cp out Recent 150000
+GC(3)  Pause Young (Concurrent Start) (G1 Evacuation Pause) 79M-&gt;79M(128M) 1.783ms
+GC(4)  Concurrent Mark Cycle
+GC(9)  Pause Full (G1 Compaction Pause) 127M-&gt;38M(128M) 4.335ms      # heap кончился раньше, чем маркировка
+GC(4)  Concurrent Mark Cycle 10.784ms                                 # маркировка закончилась уже впустую</code></pre>
+      <p>Маркировка проиграла гонку, и вместо коротких пауз получилась полная сборка с уплотнением. У CMS это называлось concurrent mode failure, у G1 в логе — <code>Pause Full (G1 Compaction Pause)</code>, а ZGC в такой ситуации тормозит выделение памяти у потоков приложения (allocation stall). Лечится запасом heap и ранним стартом маркировки: у G1 её начало задаёт порог заполнения <code>InitiatingHeapOccupancyPercent</code>, который G1 сам подстраивает по истории.</p>
+    </section>
+
+    <section class="step" id="moving">
+      <h2>Двигать объекты во время работы приложения ещё сложнее</h2>
+      <p>Конкурентная маркировка решает только половину задачи. Освободить память всё равно нужно — уплотнением или копированием, а это перемещение объектов. Пока объект переезжает, приложение может читать его по старому адресу. G1 поэтому копирует объекты только в паузах: паузы короткие, потому что за раз он переносит лишь несколько регионов, но их длина растёт с числом живых в них.</p>
+      <p>ZGC и Shenandoah переносят объекты конкурентно. Для этого им нужен барьер уже не на запись, а на <b>чтение ссылки</b>: при каждой загрузке ссылки из поля код проверяет, не переехал ли объект, и при необходимости исправляет ссылку на новый адрес. У ZGC признак «ссылка устарела» хранится в нескольких битах самого указателя — окрашенные указатели, colored pointers. Цена — барьер на каждое чтение ссылки и больше CPU, выигрыш — паузы, не зависящие от размера heap. Подробно — в теме ZGC &amp; Shenandoah.</p>
+      <table class="mx">
+        <thead><tr><th>Сборщик</th><th>young</th><th>old</th><th>маркировка old</th><th>барьеры</th></tr></thead>
+        <tbody>
+          <tr><td>Serial</td><td>copying, один поток</td><td>mark-compact</td><td>в паузе</td><td>card table</td></tr>
+          <tr><td>Parallel</td><td>copying, много потоков</td><td>mark-compact, много потоков</td><td>в паузе</td><td>card table</td></tr>
+          <tr><td>G1</td><td>copying регионов</td><td>copying выбранных регионов в mixed-сборках</td><td>конкурентная, SATB</td><td>запись: SATB и remembered sets</td></tr>
+          <tr><td>ZGC</td><td>конкурентное копирование</td><td>конкурентное копирование</td><td>конкурентная</td><td>чтение: load barrier</td></tr>
+          <tr><td>Shenandoah</td><td>конкурентное копирование</td><td>конкурентное копирование</td><td>конкурентная, SATB</td><td>запись и чтение</td></tr>
+        </tbody>
+      </table>
+      <p>Где кончается эта тема? Мы разобрали механизмы, из которых собраны сборщики. Какой из них выбрать для сервиса и как это проверить на своей нагрузке — тема Choosing a Collector, а детали двух главных — G1 и ZGC &amp; Shenandoah.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>После маркировки память освобождают тремя способами: sweep оставляет дыры, compact сдвигает живых, copying переносит живых в пустую область.</li>
+        <li>Копирование и маркировка работают пропорционально живым объектам, поэтому копирование идеально для young, где почти все мертвы.</li>
+        <li>Sweep без уплотнения фрагментирует heap: CMS из-за этого откатывался на полную сборку и был удалён в Java 14.</li>
+        <li>Конкурентная маркировка трёхцветная, и без барьера живой объект может остаться белым. G1 и Shenandoah используют SATB, CMS использовал incremental update.</li>
+        <li>Если маркировка не успевает до заполнения heap, конкурентный сборщик падает в полную сборку. Конкурентное перемещение, как у ZGC, требует барьера на каждое чтение ссылки.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="gc-algorithms-q" data-freq="2">
+      <h3>Какие алгоритмы сборки мусора знаешь и чем они отличаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Все начинаются с маркировки живых от корней, а дальше три способа освободить память. Mark-sweep оставляет живых на месте и записывает дыры в список свободных — быстро, но heap фрагментируется. Mark-compact сдвигает живых к началу — фрагментации нет, но нужны несколько проходов и перезапись ссылок. Copying переносит живых в пустую область — время пропорционально только живым, но нужна запасная память.</p>
+          <p>Поэтому в young используют копирование: там почти все мертвы. В old у Serial и Parallel — mark-compact, а G1 чистит old копированием отдельных регионов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Копирование и уплотнение позволяют потом выделять память сдвигом указателя. После sweep нужно искать дыру подходящего размера.</li>
+            <li>CMS был mark-sweep в old и из-за фрагментации откатывался на полную сборку. Его удалили в Java 14.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>В heap 10 ГБ, живы 100 МБ. Какой алгоритм освободит память быстрее и почему?</summary>
+          <p>Копирование: оно тратит время только на 100 МБ живых объектов, а 9,9 ГБ мусора не трогает. Sweep пришлось бы пройти по всем 10 ГБ, чтобы найти дыры.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="fragmentation-q" data-freq="2">
+      <h3>Что такое фрагментация heap и как с ней борются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это когда свободной памяти в сумме достаточно, но она разбита на куски между живыми объектами, и большой объект не помещается ни в один. Возникает при сборке без перемещения — mark-sweep. Борются перемещением: уплотнением или копированием живых объектов в непрерывную область.</p>
+          <p>Все современные сборщики HotSpot перемещают объекты. G1 при этом может получить нехватку непрерывных регионов под очень большой объект и уйти в полную сборку — поэтому большие массивы в G1 требуют внимания, об этом тема G1.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему фрагментация делает выделение медленнее, даже если места хватает?</summary>
+          <p>После уплотнения или копирования новые объекты кладут сдвигом указателя. При фрагментации нужно искать в списке свободных кусок подходящего размера, а это дольше и хуже для кешей процессора.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Старый сервис переводят на Java 21, в скрипте запуска -XX:+UseConcMarkSweepGC. Что будет и что делать?</summary>
+          <p>JVM не запустится: <code>Unrecognized VM option 'UseConcMarkSweepGC'</code> — проверено на JDK 21, CMS удалён в Java 14. Флаг нужно убрать вместе со всеми <code>CMS*</code>-настройками. Ближайшая замена по духу — G1, он и так по умолчанию. Если CMS выбирали ради коротких пауз, стоит проверить и ZGC. Настройки подбирать заново, на своей нагрузке.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="tri-color-q" data-freq="2">
+      <h3>Как сборщик маркирует объекты параллельно с приложением?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Трёхцветной маркировкой. Белые — ещё не найденные, серые — найденные, но не просмотренные, чёрные — просмотренные целиком. Маркировщик берёт серый объект, красит его ссылки в серый, а его — в чёрный. В конце белые считаются мусором.</p>
+          <p>Опасность в том, что приложение может положить ссылку на белый объект в уже чёрный и убрать последний путь к нему через серые. Тогда живой объект соберут. Поэтому каждая запись ссылки идёт через барьер: в G1 это SATB, который запоминает старое значение перезаписываемого поля.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>SATB сохраняет всё, что было живо на момент старта, поэтому объект, умерший во время маркировки, доживёт до следующего цикла — это плавающий мусор.</li>
+            <li>В начале и в конце нужны короткие паузы: снять корни и обработать накопленное барьерами. В логе G1 это Concurrent Start и Remark.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что будет, если конкурентная маркировка не успеет закончиться до заполнения heap?</summary>
+          <p>Сборщик остановит приложение и сделает полную сборку. В уроке на heap в 128 МБ G1 получил <code>Pause Full (G1 Compaction Pause)</code>, а маркировка закончилась уже впустую. Лечится запасом heap и более ранним стартом маркировки.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="barriers-q" data-freq="2">
+      <h3>Что такое барьеры в сборщике мусора?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это несколько инструкций, которые JIT вставляет в код приложения вокруг работы со ссылками, чтобы сборщик узнал об изменениях. Барьер записи нужен поколениям — отметить карту в card table — и конкурентной маркировке, чтобы не потерять живой объект. Барьер чтения нужен сборщикам, которые перемещают объекты параллельно с приложением, как ZGC: при загрузке ссылки он проверяет, не переехал ли объект.</p>
+          <p>Барьеры — постоянная цена сборщика, которую платит само приложение. Поэтому сборщик с короткими паузами обычно отнимает больше CPU.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему ZGC нужен барьер на чтение, а G1 обходится барьером на запись?</summary>
+          <p>G1 перемещает объекты только в паузах, когда приложение стоит, поэтому читать по старому адресу некому. ZGC перемещает объекты, пока приложение работает, и каждое чтение ссылки должно получить актуальный адрес.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://gchandbook.org/">The Garbage Collection Handbook (Jones, Hosking, Moss)</a> — основа урока: главы о mark-sweep, mark-compact, copying и конкурентной маркировке.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/gctuning/garbage-first-g1-garbage-collector1.html">JDK 21 GC Tuning Guide: G1</a> — фазы конкурентного цикла и смешанные сборки.</li>
+      <li><a href="https://openjdk.org/jeps/363">JEP 363: Remove the CMS Garbage Collector</a> — почему CMS удалили.</li>
+      <li><a href="https://wiki.openjdk.org/display/zgc/Main">OpenJDK Wiki: ZGC</a> — окрашенные указатели и барьеры чтения.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
