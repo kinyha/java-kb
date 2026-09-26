@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Virtual Threads · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="virtual-threads">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Virtual Threads</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="ten-thousand">
+      <h2>10 000 запросов по секунде ожидания: 50 секунд на пуле и одна на виртуальных потоках</h2>
+      <p>Сервис должен сделать 10 000 вызовов банка, и каждый ждёт ответа секунду. Код одинаковый, меняется только исполнитель: пул из 200 обычных потоков или новый виртуальный поток на каждую задачу (Java 21):</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.stream.IntStream;
+
+public class TenThousand {
+    static void run(String name, ExecutorService executor) throws Exception {
+        long start = System.nanoTime();
+        try (executor) {                                             // close() ждёт все задачи
+            IntStream.range(0, 10_000).forEach(i -&gt; executor.submit(() -&gt; {
+                Thread.sleep(1_000);                                 // запрос к банку: секунда ожидания
+                return i;
+            }));
+        }
+        System.out.printf("%-34s %6d мс%n", name, (System.nanoTime() - start) / 1_000_000);
+    }
+
+    public static void main(String[] args) throws Exception {
+        run("пул из 200 платформенных потоков:", Executors.newFixedThreadPool(200));
+        run("виртуальный поток на задачу:", Executors.newVirtualThreadPerTaskExecutor());
+    }
+}</code></pre>
+      <pre><code class="language-text">пул из 200 платформенных потоков:   50215 мс
+виртуальный поток на задачу:         1040 мс</code></pre>
+      <p>Пул обрабатывает по 200 задач за раз — 50 волн по секунде. Виртуальных потоков создано 10 000, все ждут одновременно, и всё заканчивается через секунду. При этом CPU почти не работал: задачи только ждали. Платформенный поток дорог — около 27 мкс на создание и 60–90 КБ памяти (тема Threads), поэтому их держат в пулах ограниченного размера. Виртуальный поток дёшев настолько, что его создают на каждую задачу.</p>
+      <p>В этой теме — как устроены виртуальные потоки и чем они отличаются от платформенных, где дают выигрыш, а где нет, что такое pinning и как structured concurrency исправляет недостатки <code>CompletableFuture.allOf</code>.</p>
+    </section>
+
+    <section class="step" id="how">
+      <h2>Виртуальный поток снимается с носителя, когда блокируется, и отдаёт его другому</h2>
+      <p>Виртуальный поток — объект JVM, а не поток ОС. Выполняют его обычные потоки-<b>носители</b> (carrier threads) из отдельного <code>ForkJoinPool</code>, по умолчанию их столько же, сколько ядер. Когда виртуальный поток блокируется — <code>sleep</code>, чтение из сокета, <code>BlockingQueue.take</code>, <code>ReentrantLock</code>, — JVM снимает его с носителя: сохраняет его стек в heap и отдаёт носитель следующему. Когда ожидание кончилось, поток снова встаёт в очередь и продолжает на любом свободном носителе.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Слева очередь планировщика, в центре три потока-носителя, справа виртуальные потоки, которые ждут ввода-вывода, их стеки лежат в heap. V1, V2, V3 выполняются на носителях, V4 ждёт в очереди. V1 блокируется на чтении из сокета и снимается с носителя, на освободившийся носитель встаёт V4. Ответ пришёл — V1 возвращается в очередь. V2 закончил, и V1 продолжает уже на втором носителе. V3 блокируется внутри synchronized и остаётся закреплённым за носителем: носитель простаивает, но другим не достаётся.">
+            <defs>
+              <marker id="vt-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ОЧЕРЕДЬ</text>
+            <text x="220" y="24" class="dg-cap">НОСИТЕЛИ</text>
+            <text x="500" y="24" class="dg-cap">ЖДУТ ВВОДА-ВЫВОДА</text>
+            <rect x="20" y="36" width="160" height="164" rx="8" class="dg-box"/>
+            <rect x="500" y="36" width="200" height="164" rx="8" class="dg-box"/>
+            <text x="600" y="190" class="dg-n" text-anchor="middle">стеки лежат в heap</text>
+
+            <!-- носители -->
+            <rect x="220" y="36" width="240" height="46" rx="8" class="dg-box"/>
+            <text x="232" y="64" class="dg-n">носитель 1</text>
+            <rect x="220" y="96" width="240" height="46" rx="8" class="dg-box"/>
+            <text x="232" y="124" class="dg-n">носитель 2</text>
+            <rect data-s="1-4" x="220" y="156" width="240" height="46" rx="8" class="dg-box"/>
+            <rect data-s="5" x="220" y="156" width="240" height="46" rx="8" class="dg-cell miss"/>
+            <text x="232" y="184" class="dg-n">носитель 3</text>
+
+            <!-- шаг 1 -->
+            <g data-s="1">
+              <rect x="350" y="46" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="64" class="dg-in" text-anchor="middle">V1</text>
+              <rect x="350" y="106" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="124" class="dg-in" text-anchor="middle">V2</text>
+              <rect x="350" y="166" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="184" class="dg-in" text-anchor="middle">V3</text>
+              <rect x="40" y="52" width="120" height="26" rx="13" class="dg-cell"/><text x="100" y="70" class="dg-in" text-anchor="middle">V4</text>
+            </g>
+            <!-- шаг 2 -->
+            <g data-s="2">
+              <rect x="350" y="46" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="64" class="dg-in" text-anchor="middle">V4</text>
+              <rect x="350" y="106" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="124" class="dg-in" text-anchor="middle">V2</text>
+              <rect x="350" y="166" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="184" class="dg-in" text-anchor="middle">V3</text>
+              <rect x="540" y="52" width="120" height="26" rx="13" class="dg-cell"/><text x="600" y="70" class="dg-in" text-anchor="middle">V1: read()</text>
+              <path d="M440 56 C 470 40, 500 40, 536 62" class="dg-line" marker-end="url(#vt-n)"/>
+            </g>
+            <!-- шаг 3 -->
+            <g data-s="3">
+              <rect x="350" y="46" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="64" class="dg-in" text-anchor="middle">V4</text>
+              <rect x="350" y="106" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="124" class="dg-in" text-anchor="middle">V2</text>
+              <rect x="350" y="166" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="184" class="dg-in" text-anchor="middle">V3</text>
+              <rect x="40" y="52" width="120" height="26" rx="13" class="dg-cell"/><text x="100" y="70" class="dg-in" text-anchor="middle">V1</text>
+              <path d="M540 90 C 400 20, 250 20, 164 60" class="dg-line" marker-end="url(#vt-n)"/>
+            </g>
+            <!-- шаг 4 -->
+            <g data-s="4">
+              <rect x="350" y="46" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="64" class="dg-in" text-anchor="middle">V4</text>
+              <rect x="350" y="106" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="124" class="dg-in" text-anchor="middle">V1</text>
+              <rect x="350" y="166" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="184" class="dg-in" text-anchor="middle">V3</text>
+              <path d="M160 70 C 250 90, 300 110, 346 118" class="dg-line" marker-end="url(#vt-n)"/>
+            </g>
+            <!-- шаг 5 -->
+            <g data-s="5">
+              <rect x="350" y="46" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="64" class="dg-in" text-anchor="middle">V4</text>
+              <rect x="350" y="106" width="90" height="26" rx="13" class="dg-cell hit"/><text x="395" y="124" class="dg-in" text-anchor="middle">V1</text>
+              <rect x="300" y="166" width="140" height="26" rx="13" class="dg-cell miss"/><text x="370" y="184" class="dg-in" text-anchor="middle">V3 в synchronized</text>
+              <rect x="40" y="52" width="120" height="26" rx="13" class="dg-cell"/><text x="100" y="70" class="dg-in" text-anchor="middle">V5 ждёт</text>
+            </g>
+
+            <text data-s="1" x="20" y="240" class="dg-in">V1–V3 выполняются на трёх носителях, V4 ждёт свободного</text>
+            <text data-s="2" x="20" y="240" class="dg-ok">V1 блокируется на сокете: стек — в heap, носитель — V4</text>
+            <text data-s="3" x="20" y="240" class="dg-in">ответ пришёл: V1 снова в очереди</text>
+            <text data-s="4" x="20" y="240" class="dg-ok">V2 закончил — V1 продолжает, но уже на носителе 2</text>
+            <text data-s="5" x="20" y="240" class="dg-bad">V3 блокируется внутри synchronized: закреплён, носитель потерян</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Три носителя выполняют виртуальные потоки V1, V2 и V3. V4 готов работать и ждёт свободного носителя в очереди планировщика.</li>
+          <li>V1 читает из сокета, данных нет. JVM снимает V1 с носителя (unmount): его стек — цепочка кадров — копируется в heap. Носитель свободен и сразу берёт V4. Поток ОС не заблокирован ни на мгновение.</li>
+          <li>Ответ пришёл. V1 снова готов работать и встаёт в очередь.</li>
+          <li>V2 закончил, и носитель 2 взял V1. Стек вернулся из heap (mount), и V1 продолжил ровно с того места, где остановился, — но на другом потоке ОС. Для кода это незаметно: <code>Thread.currentThread()</code> всё тот же V1.</li>
+          <li>V3 блокируется, держа монитор <code>synchronized</code>. В Java 21 такой поток снять нельзя: он <b>закреплён</b> (pinned) за носителем. Носитель 3 простаивает вместе с ним, и V5 его не получит. Это шаг 4.</li>
+        </ol>
+      </figure>
+      <p>Смену носителя видно в <code>toString()</code> виртуального потока — там и сам поток, и его текущий носитель:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Carrier {
+    public static void main(String[] args) throws Exception {
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i &lt; 3; i++) {
+                executor.submit(() -&gt; {
+                    System.out.println("до sleep:    " + Thread.currentThread());   // виртуальный поток и его носитель
+                    Thread.sleep(100);                                           // блокировка — поток снимается с носителя
+                    System.out.println("после sleep: " + Thread.currentThread());
+                    return null;
+                });
+            }
+        }
+        Thread vt = Thread.ofVirtual().unstarted(() -&gt; { });
+        System.out.println("isVirtual: " + vt.isVirtual() + ", daemon: " + vt.isDaemon());
+    }
+}</code></pre>
+      <pre><code class="language-text">до sleep:    VirtualThread[#30]/runnable@ForkJoinPool-1-worker-2
+до sleep:    VirtualThread[#31]/runnable@ForkJoinPool-1-worker-3
+до sleep:    VirtualThread[#28]/runnable@ForkJoinPool-1-worker-1
+после sleep: VirtualThread[#30]/runnable@ForkJoinPool-1-worker-3
+после sleep: VirtualThread[#28]/runnable@ForkJoinPool-1-worker-1
+после sleep: VirtualThread[#31]/runnable@ForkJoinPool-1-worker-2
+isVirtual: true, daemon: true</code></pre>
+      <p>В этом запуске поток #30 уснул на <code>worker-2</code>, а проснулся на <code>worker-3</code>. От запуска к запуску распределение разное. Виртуальные потоки всегда daemon: JVM их не ждёт.</p>
+      <p>Цена виртуального потока — его стек в heap, сколько он реально занимает. Миллион виртуальных потоков, каждый из которых ждёт на <code>CountDownLatch</code>, занял 765 МБ heap, то есть около 770 байт на поток. Миллион платформенных потоков ОС не создаст.</p>
+    </section>
+
+    <section class="step" id="when">
+      <h2>Виртуальные потоки ускоряют ожидание, а не вычисления</h2>
+      <p>Виртуальные потоки не делают код быстрее, они позволяют ждать одновременно больше. Для вычислений выигрыша нет — ядер столько же:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class Cpu {
+    static double cpuTask() {                                    // ~2 мс чистых вычислений
+        double x = 1;
+        for (int i = 0; i &lt; 2_000_000; i++) x = x * 1.0000001 + 1e-9;
+        return x;
+    }
+
+    static long run(ExecutorService executor) throws Exception {
+        long start = System.nanoTime();
+        try (executor) {
+            Callable&lt;Double&gt; task = Cpu::cpuTask;
+            for (Future&lt;Double&gt; f : executor.invokeAll(Collections.nCopies(720, task))) f.get();
+        }
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    public static void main(String[] args) throws Exception {
+        run(Executors.newFixedThreadPool(18));                  // прогрев
+        System.out.println("CPU-задачи, пул 18 потоков:     " + run(Executors.newFixedThreadPool(18)) + " мс");
+        System.out.println("CPU-задачи, виртуальные потоки: " + run(Executors.newVirtualThreadPerTaskExecutor()) + " мс");
+    }
+}</code></pre>
+      <pre><code class="language-text">CPU-задачи, пул 18 потоков:     110 мс
+CPU-задачи, виртуальные потоки: 114 мс</code></pre>
+      <p>Когда полезны:</p>
+      <ul>
+        <li><b>Сервис, где запрос в основном ждёт</b> — базу, HTTP, брокер. Классическая модель «поток на запрос» снова работает без асинхронного кода. В Spring Boot 3.2+ её включает <code>spring.threads.virtual.enabled=true</code>.</li>
+        <li><b>Много одновременных блокирующих операций</b>: тысячи соединений, опрос внешних систем, fan-out запросов.</li>
+        <li><b>Замена <code>CompletableFuture</code>-цепочек</b> обычным последовательным кодом: блокироваться дёшево, поэтому не нужно превращать логику в колбэки.</li>
+      </ul>
+      <p>Правила, которые меняются вместе с моделью:</p>
+      <ul>
+        <li><b>Виртуальные потоки не кладут в пул.</b> Пул нужен, чтобы переиспользовать дорогие потоки, а виртуальные дешевле самой задачи. Каждой задаче — новый поток.</li>
+        <li><b>Ограничение конкурентности — отдельно.</b> Раньше размер пула заодно ограничивал нагрузку на базу. Теперь 10 000 виртуальных потоков одновременно придут за соединением. Лимит ставят явно — <code>Semaphore</code> (тема Synchronizers) или размером пула соединений.</li>
+        <li><b><code>ThreadLocal</code> осторожно.</b> Потоков миллионы, и кеш на <code>ThreadLocal</code> вроде «свой форматтер на поток» перестаёт быть кешем и становится утечкой. Для контекста есть <code>ScopedValue</code> (preview в Java 21).</li>
+      </ul>
+    </section>
+
+    <section class="step" id="pinning">
+      <h2>Блокировка внутри synchronized закрепляет виртуальный поток за носителем</h2>
+      <p>В Java 21 виртуальный поток нельзя снять с носителя, пока он внутри <code>synchronized</code> или в нативном методе. Если в этот момент он блокируется, носитель простаивает вместе с ним. Проверим на четырёх носителях: 100 задач, каждая 50 мс ждёт банк под замком. Замки у задач свои — конкуренции за них нет:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+public class Pinning {
+    static long run(String name, Runnable guardedCall) {
+        long start = System.nanoTime();
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int i = 0; i &lt; 100; i++) executor.submit(guardedCall);
+        }
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        System.out.printf("%-16s 100 задач по 50 мс ожидания: %5d мс%n", name, ms);
+        return ms;
+    }
+
+    static void io() {
+        try { Thread.sleep(50); } catch (InterruptedException e) { }   // вызов банка под замком
+    }
+
+    public static void main(String[] args) {
+        System.out.println("носителей: " + System.getProperty("jdk.virtualThreadScheduler.parallelism"));
+        run("synchronized:", () -&gt; {
+            Object lock = new Object();                                 // у каждой задачи свой замок — конкуренции нет
+            synchronized (lock) { io(); }
+        });
+        run("ReentrantLock:", () -&gt; {
+            Lock lock = new ReentrantLock();
+            lock.lock();
+            try { io(); } finally { lock.unlock(); }
+        });
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Djdk.virtualThreadScheduler.parallelism=4 Pinning
+носителей: 4
+synchronized:    100 задач по 50 мс ожидания:  1364 мс
+ReentrantLock:   100 задач по 50 мс ожидания:    55 мс</code></pre>
+      <p>С <code>synchronized</code> 100 задач прошли волнами по четыре: 25 волн по 50 мс. Все четыре носителя были закреплены за спящими потоками. С <code>ReentrantLock</code> поток снимается с носителя, и все 100 ждут одновременно. Разница в 25 раз, хотя замки даже не конкурируют.</p>
+      <p>Найти закрепления помогает флаг <code>-Djdk.tracePinnedThreads=short</code> (или <code>full</code> со стеком) и событие JFR <code>jdk.VirtualThreadPinned</code>:</p>
+      <pre><code class="language-text">$ java -Djdk.virtualThreadScheduler.parallelism=4 -Djdk.tracePinnedThreads=short Pinning
+VirtualThread[#28]/runnable@ForkJoinPool-1-worker-1 reason:MONITOR
+    Pinning.lambda$main$0(Pinning.java:23) &lt;== monitors:1</code></pre>
+      <p>Поэтому в Java 21 для кода, который блокируется под замком, рекомендуют <code>ReentrantLock</code>. Короткий <code>synchronized</code> без ввода-вывода внутри безвреден: закрепление на наносекунды ничему не мешает. В JDK 24 ограничение сняли (JEP 491): виртуальный поток отпускает носитель и внутри <code>synchronized</code>. Нативные вызовы и вызовы через JNI закрепляют поток по-прежнему.</p>
+    </section>
+
+    <section class="step" id="structured">
+      <h2>Structured concurrency отменяет соседей при первой ошибке</h2>
+      <p>В теме CompletableFuture <code>allOf</code> ждал все три вызова, хотя один упал через 20 мс, — ошибка пришла только через 304 мс, а остальные вызовы доработали впустую. <b>Structured concurrency</b> (в Java 21 — preview, JEP 453) задаёт подзадачам область жизни: они не могут пережить блок, в котором запущены, и отменяются вместе с ним:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.StructuredTaskScope.Subtask;
+
+public class Scope {
+    static String call(String name, int ms, boolean fail) throws InterruptedException {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            System.out.println("  " + name + ": отменён");               // соседа отменили — он узнал об этом
+            throw e;
+        }
+        if (fail) throw new IllegalStateException(name + " недоступен");
+        return name;
+    }
+
+    public static void main(String[] args) throws Exception {
+        long start = System.nanoTime();
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {  // первая ошибка отменяет остальных
+            Subtask&lt;String&gt; client = scope.fork(() -&gt; call("клиент", 100, false));
+            Subtask&lt;String&gt; limits = scope.fork(() -&gt; call("лимиты", 20, true));
+            Subtask&lt;String&gt; rate = scope.fork(() -&gt; call("курс", 300, false));
+            scope.join();                                                // ждём все или первую ошибку
+            scope.throwIfFailed();                                       // пробросить её
+            System.out.println(client.get() + limits.get() + rate.get());
+        } catch (ExecutionException e) {
+            System.out.printf("ошибка: %s — через %d мс%n", e.getCause().getMessage(), (System.nanoTime() - start) / 1_000_000);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ javac --release 21 --enable-preview Scope.java
+$ java --enable-preview Scope
+  клиент: отменён
+  курс: отменён
+ошибка: лимиты недоступен — через 35 мс</code></pre>
+      <p>Ошибка пришла через 35 мс вместо 304, а два других вызова получили прерывание и остановились. Порядок строк «отменён» меняется от запуска к запуску. <code>fork</code> запускает каждую подзадачу в новом виртуальном потоке. Блок <code>try</code> гарантирует, что после выхода из него ни одна подзадача не работает. Утечь в фон, как задача после <code>orTimeout</code> в теме CompletableFuture, ей некуда. В дампе потоков <code>jcmd Thread.dump_to_file -format=json</code> подзадачи видны сгруппированными по своей области.</p>
+      <p>API в статусе preview менялся от версии к версии: в JDK 25 вместо подклассов <code>ShutdownOnFailure</code> — <code>StructuredTaskScope.open()</code> с политиками. Идея та же: время жизни задач совпадает с блоком кода, отмена и ошибки распространяются по дереву.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Виртуальный поток — объект JVM. Его выполняют потоки-носители (по умолчанию по числу ядер). При блокировке он снимается с носителя, стек уходит в heap, носитель берёт другой поток.</li>
+        <li>Стоят сотни байт: миллион ждущих потоков — 765 МБ heap. Их не кладут в пул: новый поток на каждую задачу.</li>
+        <li>Выигрыш — для задач, которые ждут: 10 000 вызовов по секунде за 1 с вместо 50 с на пуле из 200. Для вычислений выигрыша нет.</li>
+        <li>Лимит нагрузки на внешние ресурсы ставят явно (<code>Semaphore</code>, пул соединений): размер пула потоков больше его не задаёт.</li>
+        <li>В Java 21 блокировка внутри <code>synchronized</code> закрепляет поток за носителем (в замере — в 25 раз медленнее, чем с <code>ReentrantLock</code>). Поиск: <code>-Djdk.tracePinnedThreads</code>, JFR. В JDK 24 исправлено.</li>
+        <li>Structured concurrency (preview) ограничивает жизнь подзадач блоком и отменяет соседей при первой ошибке: 35 мс вместо 304 у <code>allOf</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-vt" data-freq="3">
+      <h3>Что такое виртуальные потоки и чем они отличаются от обычных?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Виртуальный поток (Java 21) — поток, которым управляет JVM, а не ОС. Его выполняет небольшой пул потоков-носителей. Когда виртуальный поток блокируется на вводе-выводе, <code>sleep</code> или замке из <code>java.util.concurrent</code>, JVM снимает его с носителя и сохраняет стек в heap, а носитель выполняет другой поток. Поэтому виртуальный поток стоит сотни байт, а не десятки килобайт, и их можно создавать миллионами — по одному на задачу. Платформенный поток — обёртка над потоком ОС, дорогой и ограниченный.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Носители — <code>ForkJoinPool</code> размером по числу ядер (<code>jdk.virtualThreadScheduler.parallelism</code>).</li>
+            <li>Виртуальные потоки всегда daemon, не видны в <code>Thread.print</code> — только в <code>Thread.dump_to_file</code>.</li>
+            <li>API тот же <code>Thread</code>: <code>Thread.ofVirtual()</code>, <code>Thread.startVirtualThread</code>, <code>Executors.newVirtualThreadPerTaskExecutor()</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Ускорят ли виртуальные потоки вычислительную задачу?</summary>
+          <p>Нет. Они выполняются на тех же ядрах, через те же носители. В замере урока 720 вычислительных задач на пуле из 18 потоков и на виртуальных потоках заняли одинаково: 110 и 114 мс. Выигрыш — только когда задачи ждут.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pinning-q" data-freq="2">
+      <h3>Что такое pinning?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ситуация, когда виртуальный поток нельзя снять с носителя. В Java 21 — внутри <code>synchronized</code> и в нативных методах. Если закреплённый поток блокируется, например на вводе-выводе, носитель простаивает вместе с ним, и остальные виртуальные потоки его не получают. В замере урока на 4 носителях 100 задач с ожиданием под <code>synchronized</code> шли в 25 раз дольше, чем под <code>ReentrantLock</code>. Находят через <code>-Djdk.tracePinnedThreads=full</code> или событие JFR <code>jdk.VirtualThreadPinned</code>. Лечат заменой на <code>ReentrantLock</code>, а в JDK 24 проблему с <code>synchronized</code> исправили (JEP 491).</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="vt-when" data-freq="2">
+      <h3>Когда использовать виртуальные потоки и что нужно поменять в коде?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда задачи в основном ждут: сервис «поток на запрос» с походами в базу и HTTP, тысячи одновременных соединений. Что меняется: виртуальные потоки не пулят — создают на каждую задачу; нагрузку на базу и партнёров ограничивают явно, через <code>Semaphore</code> или пул соединений, а не размером пула потоков; не кешируют дорогие объекты в <code>ThreadLocal</code>; блокирующий ввод-вывод под <code>synchronized</code> в Java 21 заменяют на <code>ReentrantLock</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Сервис перевели на виртуальные потоки, и через час база начала отвечать «too many connections». Что случилось?</summary>
+          <p>Раньше пул из 200 потоков неявно ограничивал число одновременных запросов к базе. Виртуальных потоков тысячи, и все одновременно идут за соединением. Нужно явное ограничение: пул соединений разумного размера с таймаутом ожидания или <code>Semaphore</code> перед обращением к базе.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="structured-q" data-freq="1">
+      <h3>Что такое structured concurrency?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Подход, при котором подзадачи живут в пределах блока кода, запустившего их, как локальные переменные. <code>StructuredTaskScope</code> (preview в Java 21) запускает подзадачи в виртуальных потоках, ждёт их в <code>join()</code> и гарантирует, что после выхода из блока ни одна не работает. Политика <code>ShutdownOnFailure</code> отменяет остальных при первой ошибке: в замере урока ошибка пришла через 35 мс, а не через 304, как у <code>CompletableFuture.allOf</code>.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://openjdk.org/jeps/444">JEP 444: Virtual Threads</a> — основа урока: устройство, pinning, рекомендации по переходу.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/core/virtual-threads.html">Oracle: Virtual Threads (JDK 21)</a> — руководство: когда применять, не пулить, ограничивать конкурентность.</li>
+      <li><a href="https://openjdk.org/jeps/453">JEP 453: Structured Concurrency (Preview)</a> — StructuredTaskScope в Java 21.</li>
+      <li><a href="https://openjdk.org/jeps/491">JEP 491: Synchronize Virtual Threads without Pinning</a> — что изменилось в JDK 24.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
