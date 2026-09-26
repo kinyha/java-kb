@@ -349,7 +349,7 @@ window.KB_TREE = [
     source: 'roadmap.sh/java, dev.java Learn, Core Java (Horstmann) т. I–II, Effective Java, enhorse/java-interview, Baeldung Interview Questions',
     items: [
       { id: 'core', title: 'Core', source: 'Core Java т. I, гл. 3–8; Baeldung: Type System, Exceptions, Generics, Annotations', items: [
-        { id: 'java-types', freq: 3, status: 'empty', title: 'Types & Wrappers',
+        { id: 'java-types', freq: 3, status: 'draft', title: 'Types & Wrappers',
           scope: 'примитивы и обёртки, autoboxing, кеш Integer, приведение типов и переполнение, pass-by-value' },
         { id: 'strings', freq: 3, status: 'empty', title: 'Strings',
           scope: 'неизменяемость, String pool, intern, StringBuilder, конкатенация, text blocks, кодировки' },

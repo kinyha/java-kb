@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Types &amp; Wrappers · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="java-types">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Types &amp; Wrappers</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="long-equals">
+      <h2>Проверка владельца заказа работает для id до 127 и ломается дальше</h2>
+      <p>Сервис проверяет, что заказ принадлежит пользователю. Идентификаторы из базы приходят как <code>Long</code>. На тестовых данных с маленькими id всё работает, в проде пользователи начинают получать «заказ не найден»:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class SameUser {
+    record Order(Long userId, long amount) { }
+    record User(Long id, String name) { }
+
+    static boolean owns(User user, Order order) {
+        return order.userId() == user.id();                      // сравнение Long через ==
+    }
+
+    public static void main(String[] args) {
+        for (long id : new long[]{42, 127, 128, 100_500}) {
+            User user = new User(id, "user" + id);               // id из базы — автоупаковка в Long
+            Order order = new Order(id, 1_000);
+            System.out.printf("id %6d: owns = %s, equals = %s%n", id, owns(user, order), order.userId().equals(user.id()));
+        }
+    }
+}</code></pre>
+      <pre class="out">id     42: owns = true, equals = true
+id    127: owns = true, equals = true
+id    128: owns = false, equals = true
+id 100500: owns = false, equals = true</pre>
+      <p><code>==</code> между двумя <code>Long</code> сравнивает ссылки на объекты, а не числа. Для значений от −128 до 127 JDK отдаёт одни и те же закешированные объекты, поэтому сравнение случайно работает. С 128 объекты разные, и <code>==</code> даёт <code>false</code> для равных чисел.</p>
+      <p>В этой теме — примитивы и обёртки: как работает автоупаковка и где она роняет NPE, что с переполнением и приведением типов, и почему в Java всё передаётся по значению, даже объекты.</p>
+    </section>
+
+    <section class="step" id="primitives">
+      <h2>Восемь примитивов хранят значение, обёртки — ссылку на объект</h2>
+      <p>В Java восемь примитивных типов. Их значения лежат прямо в переменной — на стеке или внутри объекта — без заголовка и без ссылки:</p>
+      <pre><code class="language-java">public class Ranges {
+    public static void main(String[] args) {
+        System.out.printf("byte   %d байт  %d … %d%n", Byte.BYTES, Byte.MIN_VALUE, Byte.MAX_VALUE);
+        System.out.printf("short  %d байт  %d … %d%n", Short.BYTES, Short.MIN_VALUE, Short.MAX_VALUE);
+        System.out.printf("char   %d байт  %d … %d%n", Character.BYTES, (int) Character.MIN_VALUE, (int) Character.MAX_VALUE);
+        System.out.printf("int    %d байт  %d … %d%n", Integer.BYTES, Integer.MIN_VALUE, Integer.MAX_VALUE);
+        System.out.printf("long   %d байт  %d … %d%n", Long.BYTES, Long.MIN_VALUE, Long.MAX_VALUE);
+        System.out.printf("float  %d байт  ~7 значащих цифр,  до %.2e%n", Float.BYTES, Float.MAX_VALUE);
+        System.out.printf("double %d байт  ~15 значащих цифр, до %.2e%n", Double.BYTES, Double.MAX_VALUE);
+        System.out.println("16777216f + 1 = " + (16_777_216f + 1));   // у float кончились значащие биты
+    }
+}</code></pre>
+      <pre class="out">byte   1 байт  -128 … 127
+short  2 байт  -32768 … 32767
+char   2 байт  0 … 65535
+int    4 байт  -2147483648 … 2147483647
+long   8 байт  -9223372036854775808 … 9223372036854775807
+float  4 байт  ~7 значащих цифр,  до 3.40e+38
+double 8 байт  ~15 значащих цифр, до 1.80e+308
+16777216f + 1 = 1.6777216E7</pre>
+      <ul>
+        <li>Все целые — знаковые, кроме <code>char</code>. Беззнакового <code>int</code> нет, есть методы <code>Integer.toUnsignedString</code>, <code>Integer.divideUnsigned</code>.</li>
+        <li><code>char</code> — это 16-битная единица UTF-16, а не «символ». Эмодзи занимает два <code>char</code> (тема Strings).</li>
+        <li>Размер <code>boolean</code> спецификация не задаёт. В массиве HotSpot тратит байт на элемент.</li>
+        <li><code>float</code> хранит около 7 значащих цифр: к 16 777 216 уже нельзя прибавить единицу. Для денег не годятся ни <code>float</code>, ни <code>double</code> — тема BigDecimal &amp; Money.</li>
+      </ul>
+      <p>У каждого примитива есть <b>обёртка</b> — неизменяемый класс: <code>Integer</code>, <code>Long</code>, <code>Double</code>, <code>Boolean</code>, <code>Character</code> и другие. Обёртки нужны там, где требуется объект: в коллекциях, в дженериках, для <code>null</code> как «значения нет». Цена — объект в heap: 16 байт вместо 4 для <code>Integer</code> (тема Object Layout &amp; Allocation), ссылка вместо значения и возможность <code>null</code>.</p>
+    </section>
+
+    <section class="step" id="autoboxing">
+      <h2>Автоупаковка вставляет valueOf и intValue там, где их не видно</h2>
+      <p>С Java 5 компилятор сам превращает <code>int</code> в <code>Integer</code> (<code>Integer.valueOf</code>) и обратно (<code>intValue()</code>). Это удобно, пока не забываешь, что вызов там есть. Четыре классические ловушки:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Boxing {
+    public static void main(String[] args) {
+        Integer a = 127, b = 127, c = 128, d = 128;               // Integer.valueOf под капотом
+        System.out.println("127 == 127: " + (a == b) + ", 128 == 128: " + (c == d));
+
+        Map&lt;String, Integer&gt; limits = new HashMap&lt;&gt;(Map.of("card", 50_000));
+        try {
+            int limit = limits.get("sbp");                         // ключа нет — get вернул null
+        } catch (NullPointerException e) {
+            System.out.println("распаковка null: " + e.getMessage());
+        }
+
+        boolean vip = false;
+        try {
+            Integer bonus = vip ? 100 : limits.get("sbp");         // тернарный оператор с int и Integer
+            System.out.println("bonus = " + bonus);
+        } catch (NullPointerException e) {
+            System.out.println("тернарный оператор: NPE, хотя результат — Integer");
+        }
+
+        Map&lt;Long, String&gt; users = new HashMap&lt;&gt;(Map.of(1L, "Анна"));
+        System.out.println("users.get(1) = " + users.get(1) + ", users.get(1L) = " + users.get(1L));
+        System.out.println("Long.valueOf(1).equals(1) = " + Long.valueOf(1).equals(1));
+    }
+}</code></pre>
+      <pre class="out">127 == 127: true, 128 == 128: false
+распаковка null: Cannot invoke "java.lang.Integer.intValue()" because the return value of "java.util.Map.get(Object)" is null
+тернарный оператор: NPE, хотя результат — Integer
+users.get(1) = null, users.get(1L) = Анна
+Long.valueOf(1).equals(1) = false</pre>
+      <ol>
+        <li><b>Кеш.</b> <code>Integer.valueOf</code> возвращает закешированные объекты для −128…127, для остальных создаёт новые. Поэтому <code>==</code> работает «иногда», как в шаге 1. Верхнюю границу кеша для <code>Integer</code> можно поднять флагом <code>-XX:AutoBoxCacheMax=1000</code> — тогда и <code>128 == 128</code> станет <code>true</code>. Но это только маскирует ошибку. У <code>Long</code>, <code>Short</code>, <code>Byte</code> и <code>Character</code> кеш фиксированный. Обёртки сравнивают через <code>equals</code> или распаковывают.</li>
+        <li><b>Распаковка <code>null</code>.</b> <code>int limit = map.get(key)</code> — это <code>map.get(key).intValue()</code>. Нет ключа — NPE. Сообщение с Java 14 подсказывает, что именно было <code>null</code> (helpful NPE, JEP 358).</li>
+        <li><b>Тернарный оператор.</b> Если одна ветка <code>int</code>, а другая <code>Integer</code>, тип всего выражения — <code>int</code>. Компилятор распаковывает <code>Integer</code>-ветку и только потом упаковывает результат обратно. <code>null</code> из <code>map.get</code> падает на распаковке, хотя присваиваем в <code>Integer</code>. Решение — сделать обе ветки <code>Integer</code>: <code>vip ? Integer.valueOf(100) : map.get(k)</code>.</li>
+        <li><b><code>equals</code> между разными обёртками.</b> <code>Long.equals</code> возвращает <code>true</code> только для другого <code>Long</code>. Литерал <code>1</code> упаковывается в <code>Integer</code>, поэтому <code>Map&lt;Long, …&gt;.get(1)</code> молча возвращает <code>null</code>. Компилятор не предупреждает: <code>get</code> принимает <code>Object</code>.</li>
+      </ol>
+      <p>Ещё одна цена упаковки — объекты. Сумма миллиона элементов списка в переменную <code>Long</code> вместо <code>long</code>:</p>
+      <pre><code class="language-java">import java.lang.management.ManagementFactory;
+import java.util.*;
+
+public class BoxedSum {
+    public static void main(String[] args) {
+        var threads = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        List&lt;Long&gt; amounts = new ArrayList&lt;&gt;();
+        for (long i = 0; i &lt; 1_000_000; i++) amounts.add(i * 37 % 10_000);
+        for (int round = 0; round &lt; 3; round++) {                         // первые круги — прогрев
+            long bytes = threads.getCurrentThreadAllocatedBytes(), start = System.nanoTime();
+            Long boxed = 0L;
+            for (Long a : amounts) boxed += a;                               // boxed = Long.valueOf(boxed + a)
+            long boxedNs = System.nanoTime() - start, boxedMb = (threads.getCurrentThreadAllocatedBytes() - bytes) &gt;&gt; 20;
+
+            bytes = threads.getCurrentThreadAllocatedBytes(); start = System.nanoTime();
+            long primitive = 0;
+            for (Long a : amounts) primitive += a;                           // распаковка, сумма в long
+            long primNs = System.nanoTime() - start, primMb = (threads.getCurrentThreadAllocatedBytes() - bytes) &gt;&gt; 20;
+            if (round == 2)
+                System.out.printf("Long sum: %.1f мс, выделено %d МБ; long sum: %.1f мс, выделено %d МБ (%b)%n",
+                    boxedNs / 1e6, boxedMb, primNs / 1e6, primMb, boxed == primitive);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">Long sum: 2.0 мс, выделено 22 МБ; long sum: 0.5 мс, выделено 0 МБ (true)</code></pre>
+      <p>Одна буква в типе переменной — миллион объектов <code>Long</code> по 24 байта и вчетверо медленнее. Сравнение <code>boxed == primitive</code> в последней строке работает правильно: если один операнд примитив, второй распаковывается.</p>
+      <p>Конструкторы <code>new Integer(5)</code> и остальные устарели с Java 9 и с Java 16 помечены к удалению (JEP 390): обёртки — value-based классы, и полагаться на идентичность их объектов нельзя. javac предупреждает даже о <code>synchronized</code> на них (тема synchronized &amp; wait/notify).</p>
+    </section>
+
+    <section class="step" id="overflow">
+      <h2>Переполнение в Java молчит, а приведение отрезает биты</h2>
+      <p>Целочисленная арифметика в Java не проверяет переполнение: результат просто оборачивается по модулю 2<sup>32</sup> или 2<sup>64</sup>. Самая частая ошибка — выражение, которое считается в <code>int</code> и только потом расширяется:</p>
+      <pre><code class="language-java">public class Overflow {
+    public static void main(String[] args) {
+        long monthMs = 30 * 24 * 60 * 60 * 1000;                     // считается в int, потом расширяется
+        long monthMsOk = 30L * 24 * 60 * 60 * 1000;                  // L у первого множителя — всё в long
+        System.out.println("30 дней в мс: " + monthMs + " вместо " + monthMsOk);
+
+        int balance = Integer.MAX_VALUE;
+        System.out.println("MAX_VALUE + 1 = " + (balance + 1));      // молча переходит через ноль
+        try {
+            Math.addExact(balance, 1);
+        } catch (ArithmeticException e) {
+            System.out.println("Math.addExact: " + e.getMessage());
+        }
+
+        System.out.println("(int) 3_000_000_000L = " + (int) 3_000_000_000L);   // отбрасываются старшие биты
+        System.out.println("(int) 99.99 = " + (int) 99.99 + ", (int) -99.99 = " + (int) -99.99);
+        System.out.println("(byte) 200 = " + (byte) 200);
+        System.out.println("(int) 1e20 = " + (int) 1e20 + ", (int) Double.NaN = " + (int) Double.NaN);
+        System.out.println("0.1 + 0.2 = " + (0.1 + 0.2));
+        System.out.println("-7 / 2 = " + (-7 / 2) + ", -7 % 2 = " + (-7 % 2) + ", Math.floorMod(-7, 2) = " + Math.floorMod(-7, 2));
+        System.out.println("Math.abs(Integer.MIN_VALUE) = " + Math.abs(Integer.MIN_VALUE));
+
+        byte b = 10;
+        b += 300;                                                    // скрытое приведение: b = (byte) (b + 300)
+        System.out.println("byte b = 10; b += 300 → " + b);
+        char c = 'A';
+        System.out.println("'A' + 1 = " + ('A' + 1) + ", (char) ('A' + 1) = " + (char) (c + 1));
+    }
+}</code></pre>
+      <pre class="out">30 дней в мс: -1702967296 вместо 2592000000
+MAX_VALUE + 1 = -2147483648
+Math.addExact: integer overflow
+(int) 3_000_000_000L = -1294967296
+(int) 99.99 = 99, (int) -99.99 = -99
+(byte) 200 = -56
+(int) 1e20 = 2147483647, (int) Double.NaN = 0
+0.1 + 0.2 = 0.30000000000000004
+-7 / 2 = -3, -7 % 2 = -1, Math.floorMod(-7, 2) = 1
+Math.abs(Integer.MIN_VALUE) = -2147483648
+byte b = 10; b += 300 → 54
+'A' + 1 = 66, (char) ('A' + 1) = B</pre>
+      <table class="mx">
+        <thead><tr><th>Операция</th><th>Правило</th></tr></thead>
+        <tbody>
+          <tr><td>арифметика <code>byte</code>, <code>short</code>, <code>char</code>, <code>int</code></td><td>всё повышается до <code>int</code>; если есть <code>long</code> — до <code>long</code>. Тип результата решается до присваивания, поэтому <code>long x = int * int</code> переполняется в <code>int</code></td></tr>
+          <tr><td>сужение целых: <code>(int) long</code>, <code>(byte) 200</code></td><td>отбрасываются старшие биты, знак может смениться</td></tr>
+          <tr><td>дробное в целое: <code>(int) 99.99</code></td><td>отбрасывание дробной части к нулю; за пределами диапазона — <code>MAX_VALUE</code>/<code>MIN_VALUE</code>; <code>NaN</code> — 0</td></tr>
+          <tr><td><code>/</code> и <code>%</code> для целых</td><td>деление округляется к нулю, остаток берёт знак делимого. Для «математического» остатка — <code>Math.floorMod</code></td></tr>
+          <tr><td><code>+=</code>, <code>-=</code> и другие составные</td><td>содержат скрытое приведение к типу слева: <code>b += 300</code> компилируется, <code>b = b + 300</code> — нет</td></tr>
+          <tr><td>деление целого на 0</td><td><code>ArithmeticException</code>; у <code>double</code> — <code>Infinity</code> или <code>NaN</code></td></tr>
+        </tbody>
+      </table>
+      <p>Где переполнение недопустимо — суммы, счётчики, размеры, — используют <code>Math.addExact</code>, <code>multiplyExact</code>, <code>toIntExact</code>: они бросают <code>ArithmeticException</code> вместо тихого мусора. Отдельный сюрприз — <code>Math.abs(Integer.MIN_VALUE)</code>: у минимального значения нет положительной пары в <code>int</code>, и модуль остаётся отрицательным. Отсюда ошибки в коде вида <code>Math.abs(hash) % n</code> — индекс оказывается отрицательным.</p>
+    </section>
+
+    <section class="step" id="by-value">
+      <h2>Java всегда передаёт по значению — для объектов копируется ссылка</h2>
+      <p>При вызове метода каждый аргумент копируется в параметр. Для примитива копируется число, для объекта — ссылка. Поэтому метод может изменить объект, но не может заменить его у вызывающего:</p>
+      <pre><code class="language-java">public class ByValue {
+    static class Account {
+        long balance;
+        Account(long balance) { this.balance = balance; }
+    }
+
+    static void deposit(Account acc, long amount) {
+        acc.balance += amount;                       // меняем объект по скопированной ссылке — видно снаружи
+    }
+
+    static void reopen(Account acc) {
+        acc = new Account(0);                        // меняем копию ссылки — снаружи не видно
+        acc.balance = 999;
+    }
+
+    static void addBonus(Integer bonus) {
+        bonus += 100;                                // bonus = Integer.valueOf(bonus + 100) — новый объект в копии
+    }
+
+    static void swap(Account x, Account y) {
+        Account t = x; x = y; y = t;                 // меняются только локальные копии
+    }
+
+    public static void main(String[] args) {
+        Account acc = new Account(100);
+        deposit(acc, 50);
+        System.out.println("после deposit: " + acc.balance);
+        reopen(acc);
+        System.out.println("после reopen:  " + acc.balance);
+
+        Integer bonus = 10;
+        addBonus(bonus);
+        System.out.println("после addBonus: " + bonus);
+
+        Account a = new Account(1), b = new Account(2);
+        swap(a, b);
+        System.out.println("после swap: a=" + a.balance + ", b=" + b.balance);
+    }
+}</code></pre>
+      <pre class="out">после deposit: 150
+после reopen:  150
+после addBonus: 10
+после swap: a=1, b=2</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Стек и heap при передаче объекта в метод. В кадре main переменная acc ссылается на объект Account с балансом 100. При вызове deposit в новом кадре появляется параметр acc — копия ссылки на тот же объект. deposit меняет баланс на 150, и main это видит. При вызове reopen параметр — снова копия ссылки; присваивание new Account перенаправляет только копию на новый объект, ссылка в main не меняется. После возврата кадр исчезает, новый объект никому не нужен, а main видит 150.">
+            <defs>
+              <marker id="bv-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="bv-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">СТЕК ПОТОКА</text>
+            <text x="440" y="24" class="dg-cap">HEAP</text>
+
+            <!-- кадр main -->
+            <rect x="20" y="40" width="280" height="64" rx="8" class="dg-box"/>
+            <text x="32" y="60" class="dg-n">кадр main</text>
+            <text x="32" y="86" class="dg-in">acc</text>
+            <circle cx="120" cy="82" r="5" class="dg-cell hit"/>
+            <path d="M125 82 L 436 82" class="dg-line" marker-end="url(#bv-n)"/>
+
+            <!-- объект 1 -->
+            <rect data-s="1-2" x="440" y="58" width="260" height="48" rx="8" class="dg-box"/>
+            <rect data-s="3-" x="440" y="58" width="260" height="48" rx="8" class="dg-cell hit"/>
+            <text x="452" y="78" class="dg-n">Account</text>
+            <text data-s="1-2" x="452" y="96" class="dg-in">balance = 100</text>
+            <text data-s="3-" x="452" y="96" class="dg-in">balance = 150</text>
+
+            <!-- кадр метода -->
+            <g data-s="2-4">
+              <rect x="20" y="140" width="280" height="64" rx="8" class="dg-box"/>
+              <text data-s="2-3" x="32" y="160" class="dg-n">кадр deposit(acc, 50)</text>
+              <text data-s="4" x="32" y="160" class="dg-n">кадр reopen(acc)</text>
+              <text x="32" y="186" class="dg-in">acc (копия)</text>
+              <circle cx="140" cy="182" r="5" class="dg-cell"/>
+            </g>
+            <path data-s="2-3" d="M145 182 C 300 182, 380 110, 436 96" class="dg-line ok" marker-end="url(#bv-ok)"/>
+            <!-- шаг 4-5: новый объект -->
+            <g data-s="4">
+              <path d="M145 182 L 436 182" class="dg-line" marker-end="url(#bv-n)"/>
+            </g>
+            <g data-s="4-">
+              <rect x="440" y="158" width="260" height="48" rx="8" class="dg-box"/>
+              <text x="452" y="178" class="dg-n">Account (новый)</text>
+              <text x="452" y="196" class="dg-in">balance = 999</text>
+            </g>
+            <rect data-s="5" x="440" y="158" width="260" height="48" rx="8" class="dg-sep" fill="none"/>
+            <text data-s="5" x="570" y="226" class="dg-n" text-anchor="middle">ссылок нет — достанется GC</text>
+
+            <text data-s="1" x="20" y="250" class="dg-in">main: переменная acc хранит ссылку на объект в heap</text>
+            <text data-s="2" x="20" y="250" class="dg-in">вызов deposit: в параметр скопирована ссылка — тот же объект</text>
+            <text data-s="3" x="20" y="250" class="dg-ok">acc.balance += 50 меняет общий объект — main видит 150</text>
+            <text data-s="4" x="20" y="250" class="dg-in">reopen: acc = new Account(...) перенаправляет только копию</text>
+            <text data-s="5" x="20" y="250" class="dg-in">кадр исчез, ссылка в main не менялась: по-прежнему 150</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>В кадре <code>main</code> переменная <code>acc</code> хранит не объект, а ссылку на него. Сам <code>Account</code> лежит в heap.</li>
+          <li>Вызов <code>deposit(acc, 50)</code> создаёт новый кадр, и в параметр <code>acc</code> копируется значение ссылки. Две переменные указывают на один объект.</li>
+          <li><code>acc.balance += 50</code> идёт по ссылке и меняет общий объект. <code>main</code> видит 150 — это и создаёт иллюзию «передачи по ссылке».</li>
+          <li><code>reopen</code> присваивает параметру новый объект. Меняется только копия ссылки в кадре <code>reopen</code>: <code>acc</code> в <code>main</code> по-прежнему указывает на старый объект.</li>
+          <li>Метод вернулся, его кадр исчез. Новый <code>Account</code> больше ни на кого не ссылается и достанется сборщику, а <code>main</code> видит 150.</li>
+        </ol>
+      </figure>
+      <p>По той же причине <code>addBonus</code> не изменил <code>Integer</code> вызывающего: обёртка неизменяема, и <code>bonus += 100</code> создаёт новый объект в локальной копии. А <code>swap</code> двух объектов в Java написать нельзя — только поменять их содержимое. Метод, которому нужно вернуть несколько значений, возвращает record или объект-результат, а не пытается менять аргументы.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Восемь примитивов хранят значения, обёртки — неизменяемые объекты со ссылкой и возможным <code>null</code>.</li>
+        <li><code>==</code> на обёртках сравнивает ссылки. Кеш −128…127 заставляет его «работать» на маленьких числах. Обёртки сравнивают через <code>equals</code>.</li>
+        <li>Распаковка <code>null</code> — NPE, в том числе в тернарном операторе с веткой-примитивом. <code>Long.equals(Integer)</code> — всегда <code>false</code>, отсюда <code>Map&lt;Long,…&gt;.get(1) == null</code>.</li>
+        <li>Упаковка в цикле создаёт объекты: в замере миллион <code>Long</code> и вчетверо медленнее.</li>
+        <li>Целые переполняются молча. <code>long x = a * b</code> считается в <code>int</code>. Сужение отбрасывает биты, дробное в целое — к нулю. Для проверок — <code>Math.*Exact</code>.</li>
+        <li>Передача всегда по значению: для объекта копируется ссылка. Метод может изменить объект, но не заменить его у вызывающего.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="integer-cache" data-freq="3">
+      <h3>Почему Integer a = 127, b = 127; a == b — true, а для 128 — false?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Автоупаковка вызывает <code>Integer.valueOf</code>, который для −128…127 возвращает объекты из кеша, а для остальных создаёт новые. <code>==</code> на объектах сравнивает ссылки: для 127 это один и тот же объект, для 128 — два разных. Обёртки сравнивают через <code>equals</code> или распаковкой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Верхнюю границу кеша <code>Integer</code> можно поднять флагом <code>-XX:AutoBoxCacheMax</code>, у <code>Long</code> и остальных кеш фиксированный.</li>
+            <li>Обёртки — value-based классы: конструкторы помечены к удалению (JEP 390), полагаться на их идентичность нельзя.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>if (order.getUserId() == currentUser.getId()) — оба Long. Тесты проходят. Что не так?</summary>
+          <p>Сравниваются ссылки. В тестах id маленькие и попадают в кеш <code>Long</code>, поэтому всё работает; в проде id больше 127, и проверка начинает возвращать <code>false</code> для равных значений — в замере урока с id 128. Нужно <code>Objects.equals(a, b)</code> или сравнение примитивов.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="autoboxing-npe" data-freq="3">
+      <h3>Где автоупаковка может привести к NullPointerException?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При распаковке <code>null</code>: <code>int x = map.get(key)</code>, если ключа нет; арифметика с <code>Integer</code>-полем, равным <code>null</code>; <code>Boolean</code> в условии <code>if</code>. Менее очевидный случай — тернарный оператор: если одна ветка <code>int</code>, а другая <code>Integer</code>, тип выражения <code>int</code>, и <code>null</code> из <code>Integer</code>-ветки распаковывается, даже если результат присваивают в <code>Integer</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Map&lt;Long, String&gt; users = Map.of(1L, "Анна"); что вернёт users.get(1)?</summary>
+          <p><code>null</code>. Литерал <code>1</code> упаковывается в <code>Integer</code>, а <code>Long.equals</code> возвращает <code>true</code> только для <code>Long</code>. Компилятор не предупреждает: <code>Map.get</code> принимает <code>Object</code>. Нужно <code>users.get(1L)</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="overflow-q" data-freq="2">
+      <h3>Что происходит при переполнении int? Как его заметить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ничего не бросается: результат оборачивается по модулю 2<sup>32</sup>, <code>Integer.MAX_VALUE + 1</code> даёт <code>MIN_VALUE</code>. Чтобы переполнение стало ошибкой, используют <code>Math.addExact</code>, <code>multiplyExact</code>, <code>toIntExact</code>. Частая ловушка — <code>long x = a * b</code>, где <code>a</code> и <code>b</code> — <code>int</code>: произведение считается в <code>int</code> и переполняется до расширения.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>long monthMs = 30 * 24 * 60 * 60 * 1000; — чему равно?</summary>
+          <p>−1 702 967 296. Все множители <code>int</code>, произведение 2 592 000 000 не помещается в <code>int</code> и переполняется, а в <code>long</code> расширяется уже испорченное значение. Исправление — <code>30L * 24 * ...</code>, тогда всё считается в <code>long</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pass-by-value" data-freq="3">
+      <h3>В Java передача по значению или по ссылке?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Всегда по значению. Для примитивов копируется значение, для объектов — значение ссылки. Поэтому метод может изменить состояние переданного объекта, и вызывающий это увидит. Но присвоить параметру другой объект так, чтобы изменилась переменная вызывающего, нельзя. Классическая проверка — метод <code>swap(a, b)</code> для объектов в Java не работает.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему метод addBonus(Integer bonus) { bonus += 100; } не меняет значение у вызывающего?</summary>
+          <p><code>Integer</code> неизменяем. <code>bonus += 100</code> — это <code>bonus = Integer.valueOf(bonus + 100)</code>: создаётся новый объект, и ссылка на него записывается в локальную копию параметра. Переменная вызывающего по-прежнему указывает на старый объект.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-5.html">JLS 21, глава 5: Conversions and Contexts</a> — основа урока: упаковка, расширение и сужение, числовые повышения.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.25">JLS 21, 15.25: Conditional Operator</a> — тип тернарного выражения с примитивом и обёрткой.</li>
+      <li><a href="https://openjdk.org/jeps/390">JEP 390: Warnings for Value-Based Classes</a> — почему конструкторы обёрток помечены к удалению.</li>
+      <li>Joshua Bloch, <i>Effective Java</i>, 3-е изд., Item 61 «Prefer primitive types to boxed primitives».</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
