@@ -22,7 +22,7 @@ window.KB_TREE = [
     source: 'NeetCode Roadmap, Grokking the Coding Interview (паттерны), Tech Interview Handbook: Algorithms Study Cheatsheet',
     items: [
       { id: 'foundations', title: 'Foundations', items: [
-        { id: 'complexity', freq: 3, status: 'empty', title: 'Big O',
+        { id: 'complexity', freq: 3, status: 'draft', title: 'Big O',
           scope: 'O-нотация, лучший и худший случай, амортизированная сложность, память, как оценить решение' },
         { id: 'recursion', freq: 1, status: 'empty', title: 'Recursion',
           scope: 'стек вызовов, базовый случай, мемоизация, рекурсия против цикла' },
