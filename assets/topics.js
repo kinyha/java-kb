@@ -353,7 +353,7 @@ window.KB_TREE = [
           scope: 'примитивы и обёртки, autoboxing, кеш Integer, приведение типов и переполнение, pass-by-value' },
         { id: 'strings', freq: 3, status: 'draft', title: 'Strings',
           scope: 'неизменяемость, String pool, intern, StringBuilder, конкатенация, text blocks, кодировки' },
-        { id: 'object', freq: 3, status: 'empty', title: 'equals & hashCode',
+        { id: 'object', freq: 3, status: 'draft', title: 'equals & hashCode',
           scope: 'контракт equals и hashCode, HashMap и изменяемые ключи, toString, clone, Comparable' },
         { id: 'exceptions', freq: 3, status: 'empty', title: 'Exceptions',
           scope: 'иерархия, checked и unchecked, try-with-resources, finally, suppressed, свои исключения, обработка на границах' },

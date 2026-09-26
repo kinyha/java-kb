@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>equals &amp; hashCode · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="object">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>equals &amp; hashCode</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="dedup">
+      <h2>Платёж равен уже обработанному, но HashSet его не узнаёт</h2>
+      <p>Обработчик платежей защищается от повторной доставки: обработанные платежи хранятся в <code>HashSet</code>, и повтор с тем же id пропускается. <code>equals</code> в классе написан — сравнивает id:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Dedup {
+    static class Payment {
+        final String id;
+        final long amount;
+        Payment(String id, long amount) { this.id = id; this.amount = amount; }
+
+        @Override public boolean equals(Object o) {                    // equals переопределён...
+            return o instanceof Payment p &amp;&amp; id.equals(p.id);
+        }
+        // ...а hashCode — нет: остаётся Object.hashCode, у каждого объекта свой
+    }
+
+    public static void main(String[] args) {
+        Set&lt;Payment&gt; processed = new HashSet&lt;&gt;();
+        processed.add(new Payment("p-1", 1000));
+        Payment retry = new Payment("p-1", 1000);                         // брокер доставил повторно
+        System.out.println("equals: " + retry.equals(new Payment("p-1", 1000)));
+        System.out.println("уже обработан: " + processed.contains(retry));
+        processed.add(retry);
+        System.out.println("в множестве платежей: " + processed.size());
+    }
+}</code></pre>
+      <pre class="out">equals: true
+уже обработан: false
+в множестве платежей: 2</pre>
+      <p>Объекты равны по <code>equals</code>, а множество считает их разными — платёж проведён дважды. <code>HashSet</code> сначала по <code>hashCode</code> выбирает корзину и только внутри неё вызывает <code>equals</code>. Без своего <code>hashCode</code> у двух равных платежей разные хеши, их ищут в разных корзинах, и до <code>equals</code> дело не доходит.</p>
+      <p>В этой теме — контракт <code>equals</code> и <code>hashCode</code> и что ломается при каждом нарушении, изменяемые ключи, качество хеша, согласованность с <code>compareTo</code>, а также <code>toString</code> и <code>clone</code>. Как устроен сам <code>HashMap</code> — корзины, деревья, расширение — разобрано в теме HashMap.</p>
+    </section>
+
+    <section class="step" id="contract">
+      <h2>Контракт: равные объекты обязаны иметь равные хеши</h2>
+      <p>Правила из javadoc <code>Object</code>, на которые опираются все коллекции:</p>
+      <table class="mx">
+        <thead><tr><th>Свойство equals</th><th>Смысл</th><th>Что ломается при нарушении</th></tr></thead>
+        <tbody>
+          <tr><td>рефлексивность</td><td><code>x.equals(x)</code></td><td>объект не находится в коллекции сам с собой</td></tr>
+          <tr><td>симметричность</td><td>если <code>x.equals(y)</code>, то <code>y.equals(x)</code></td><td>результат <code>contains</code> зависит от того, чей <code>equals</code> вызвали</td></tr>
+          <tr><td>транзитивность</td><td><code>x = y</code> и <code>y = z</code> → <code>x = z</code></td><td>порядок элементов меняет итог дедупликации</td></tr>
+          <tr><td>согласованность</td><td>тот же ответ, пока объекты не менялись</td><td>элемент «пропадает» из коллекции — шаг 3</td></tr>
+          <tr><td><code>x.equals(null)</code></td><td>всегда <code>false</code>, без исключения</td><td>NPE внутри коллекций</td></tr>
+          <tr><td>связь с <code>hashCode</code></td><td>равные объекты — равные хеши</td><td>шаг 1: равный объект не находится</td></tr>
+        </tbody>
+      </table>
+      <p>Обратное не требуется: разные объекты могут иметь одинаковый хеш (коллизия). Это разрешено, но дорого — шаг 4. Нарушение симметрии проявляется так:</p>
+      <pre><code class="language-java">import java.math.BigDecimal;
+import java.util.*;
+
+public class Contract {
+    // «удобное» сравнение: код валюты равен и объекту, и строке
+    record Currency(String code) {
+        @Override public boolean equals(Object o) {
+            if (o instanceof Currency c) return code.equalsIgnoreCase(c.code);
+            if (o instanceof String s) return code.equalsIgnoreCase(s);  // нарушает симметрию
+            return false;
+        }
+        @Override public int hashCode() { return code.toUpperCase().hashCode(); }
+    }
+
+    public static void main(String[] args) {
+        Currency rub = new Currency("rub");
+        System.out.println("rub.equals(\"RUB\") = " + rub.equals("RUB") + ", \"RUB\".equals(rub) = " + "RUB".equals(rub));
+        List&lt;Object&gt; strings = List.of("RUB"), currencies = List.of(rub);
+        System.out.println("strings.contains(rub) = " + strings.contains(rub)          // вызывает rub.equals("RUB")
+            + ", currencies.contains(\"RUB\") = " + currencies.contains("RUB"));        // вызывает "RUB".equals(rub)
+
+        BigDecimal a = new BigDecimal("100.0"), b = new BigDecimal("100.00");
+        System.out.println("equals: " + a.equals(b) + ", compareTo: " + a.compareTo(b));
+        System.out.println("HashSet: " + new HashSet&lt;&gt;(List.of(a, b)).size() + " элемента, TreeSet: " + new TreeSet&lt;&gt;(List.of(a, b)).size());
+    }
+}</code></pre>
+      <pre class="out">rub.equals("RUB") = true, "RUB".equals(rub) = false
+strings.contains(rub) = true, currencies.contains("RUB") = false
+equals: false, compareTo: 0
+HashSet: 2 элемента, TreeSet: 1</pre>
+      <p><code>Currency</code> «умеет» сравниваться со строкой, а <code>String</code> о <code>Currency</code> не знает. Итог зависит от того, какая сторона вызвала <code>equals</code>, и две похожие проверки дают разные ответы. Правило: <code>equals</code> сравнивает только с объектами своего типа. Последние две строки — к шагу 5.</p>
+      <p>Отдельная ловушка — наследование. Если подкласс добавляет поле в <code>equals</code>, симметрию или транзитивность с базовым классом сохранить нельзя. Отсюда выбор между <code>instanceof</code> (подклассы равны базовому, но не должны менять <code>equals</code>) и <code>getClass() == o.getClass()</code> (объекты разных классов никогда не равны, но это ломает принцип подстановки). Обычный выход — сделать класс <code>final</code> или использовать композицию.</p>
+      <p>Писать <code>equals</code> и <code>hashCode</code> руками почти не нужно. Record генерирует оба по всем компонентам. Для обычных классов есть <code>Objects.equals</code> и <code>Objects.hash</code>, генерация в IDE, <code>@EqualsAndHashCode</code> в Lombok. Главное — одинаковый набор полей в обоих методах.</p>
+    </section>
+
+    <section class="step" id="mutable-keys">
+      <h2>Ключ, изменённый после put, в HashMap больше не найти</h2>
+      <p>Контракт позволяет <code>hashCode</code> меняться, если меняется объект. Но коллекция запомнила объект по старому хешу:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class MutableKey {
+    static class Card {
+        String number;                                                  // изменяемое поле участвует в hashCode
+        Card(String number) { this.number = number; }
+        @Override public boolean equals(Object o) { return o instanceof Card c &amp;&amp; number.equals(c.number); }
+        @Override public int hashCode() { return number.hashCode(); }
+        @Override public String toString() { return "Card(" + number + ")"; }
+    }
+
+    public static void main(String[] args) {
+        Map&lt;Card, Long&gt; limits = new HashMap&lt;&gt;();
+        Card card = new Card("4111 1111");
+        limits.put(card, 50_000L);
+
+        card.number = "4111-1111";                                      // «нормализовали» номер после put
+        System.out.println("get(card):         " + limits.get(card));
+        System.out.println("containsKey(card): " + limits.containsKey(card));
+        System.out.println("get(старый номер): " + limits.get(new Card("4111 1111")));
+        System.out.println("remove(card):      " + limits.remove(card) + ", size = " + limits.size());
+        System.out.println("но при обходе запись есть: " + limits);
+    }
+}</code></pre>
+      <pre class="out">get(card):         null
+containsKey(card): false
+get(старый номер): null
+remove(card):      null, size = 1
+но при обходе запись есть: {Card(4111-1111)=50000}</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Таблица из восьми корзин. put кладёт запись с ключом Card 4111 1111 в корзину 3 по его хешу. Затем номер карты меняют прямо в объекте-ключе: запись остаётся в корзине 3, а новый хеш указывает на корзину 6. get по тому же объекту идёт в корзину 6 и ничего не находит. get по новому объекту со старым номером идёт в корзину 3, но equals сравнивает старый номер с изменённым и возвращает false. Запись нельзя ни найти, ни удалить — только увидеть при обходе.">
+            <defs>
+              <marker id="mk-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="mk-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">КОРЗИНЫ HASHMAP</text>
+            <g>
+              <rect x="20" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="106" y="36" width="78" height="36" rx="5" class="dg-box"/>
+              <rect x="192" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="278" y="36" width="78" height="36" rx="5" class="dg-box"/>
+              <rect x="364" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="450" y="36" width="78" height="36" rx="5" class="dg-box"/>
+              <rect x="536" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="622" y="36" width="78" height="36" rx="5" class="dg-box"/>
+            </g>
+            <g text-anchor="middle">
+              <text x="59" y="86" class="dg-n">0</text><text x="145" y="86" class="dg-n">1</text><text x="231" y="86" class="dg-n">2</text><text x="317" y="86" class="dg-n">3</text>
+              <text x="403" y="86" class="dg-n">4</text><text x="489" y="86" class="dg-n">5</text><text x="575" y="86" class="dg-n">6</text><text x="661" y="86" class="dg-n">7</text>
+            </g>
+            <!-- запись в корзине 3 -->
+            <rect data-s="1" x="278" y="36" width="78" height="36" rx="5" class="dg-cell hit"/>
+            <rect data-s="2-" x="278" y="36" width="78" height="36" rx="5" class="dg-cell"/>
+            <text x="317" y="59" class="dg-in" text-anchor="middle">•</text>
+            <rect x="230" y="108" width="174" height="44" rx="6" class="dg-box"/>
+            <path d="M298 72 L 298 104" class="dg-line" marker-end="url(#mk-n)"/>
+            <text data-s="1" x="317" y="128" class="dg-in" text-anchor="middle">Card(4111 1111)</text>
+            <text data-s="2-" x="317" y="128" class="dg-in" text-anchor="middle">Card(4111-1111)</text>
+            <text x="317" y="144" class="dg-n" text-anchor="middle">= 50000</text>
+
+            <text data-s="1" x="430" y="128" class="dg-ok">put: hash("4111 1111") → корзина 3</text>
+            <g data-s="2">
+              <text x="430" y="128" class="dg-bad">номер изменён в самом ключе</text>
+              <text x="430" y="146" class="dg-n">новый хеш → корзина 6, запись в 3</text>
+            </g>
+            <g data-s="3">
+              <rect x="536" y="36" width="78" height="36" rx="5" class="dg-cell miss"/>
+              <path d="M575 180 L 575 76" class="dg-line bad" marker-end="url(#mk-bad)"/>
+              <text x="430" y="196" class="dg-bad">get(card): корзина 6 пуста → null</text>
+            </g>
+            <g data-s="4">
+              <rect x="278" y="36" width="78" height="36" rx="5" class="dg-cell miss"/>
+              <text x="317" y="59" class="dg-in" text-anchor="middle">•</text>
+              <text x="40" y="196" class="dg-bad">get(new Card("4111 1111")): корзина 3,</text>
+              <text x="40" y="212" class="dg-bad">но equals("4111 1111", "4111-1111") = false</text>
+            </g>
+            <g data-s="5">
+              <rect x="230" y="108" width="174" height="44" rx="6" class="dg-cell miss"/>
+              <text x="317" y="128" class="dg-in" text-anchor="middle">Card(4111-1111)</text>
+              <text x="317" y="144" class="dg-n" text-anchor="middle">= 50000</text>
+              <text x="430" y="128" class="dg-bad">ни найти, ни удалить</text>
+              <text x="430" y="146" class="dg-n">видна только при обходе — утечка</text>
+            </g>
+
+            <text data-s="1" x="20" y="240" class="dg-in">put кладёт запись в корзину по хешу ключа в момент вставки</text>
+            <text data-s="2" x="20" y="240" class="dg-bad">ключ изменили: объект тот же, хеш другой, запись не переехала</text>
+            <text data-s="3" x="20" y="240" class="dg-bad">поиск по новому хешу идёт не в ту корзину</text>
+            <text data-s="4" x="20" y="240" class="dg-bad">поиск по старому значению попадает в корзину, но equals не совпадает</text>
+            <text data-s="5" x="20" y="240" class="dg-bad">запись осталась в карте навсегда</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>put</code> вычисляет хеш ключа и кладёт запись в корзину 3. Запись хранит ссылку на сам объект-ключ и его хеш на момент вставки.</li>
+          <li>Номер изменили прямо в объекте, который лежит в карте ключом. Запись никуда не переехала: карта не знает, что ключ изменился. По новому номеру ключ должен был бы оказаться в корзине 6.</li>
+          <li><code>get(card)</code> считает новый хеш и смотрит в корзину 6 — там пусто. Результат <code>null</code>, хотя это тот же самый объект.</li>
+          <li><code>get</code> с новым объектом со старым номером попадает в корзину 3. Но <code>equals</code> сравнивает «4111 1111» с изменённым «4111-1111» — не равны.</li>
+          <li>Ни один поиск не находит запись, <code>remove</code> её не удаляет. Она видна только при обходе и живёт, пока жива карта. Если такое происходит в кеше — это утечка памяти.</li>
+        </ol>
+      </figure>
+      <p>Правило: поля, которые участвуют в <code>equals</code> и <code>hashCode</code>, у ключей не меняются. Проще всего сделать ключ неизменяемым — record, <code>String</code>, <code>Long</code>. Если объект изменяемый, его вынимают из карты, меняют и кладут заново.</p>
+      <div class="note warn">
+        <p>Та же проблема в JPA-сущностях. Если <code>hashCode</code> считается по <code>id</code>, который база присваивает при сохранении, то сущность, положенная в <code>HashSet</code> до <code>persist</code>, «теряется» после него: <code>id</code> был <code>null</code>, стал числом. Обычные решения — сравнение по естественному неизменяемому ключу или <code>hashCode</code>, возвращающий константу класса вместе с <code>equals</code> по непустому <code>id</code>.</p>
+      </div>
+    </section>
+
+    <section class="step" id="hash-quality">
+      <h2>Плохой hashCode превращает HashMap в список</h2>
+      <p>Контракт выполняет и <code>hashCode</code>, возвращающий одну константу: равные объекты получают равный хеш. Но тогда все ключи попадают в одну корзину. Сравним с нормальным хешем и с тем же постоянным хешем у ключа, который реализует <code>Comparable</code>:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.function.LongFunction;
+
+public class BadHash {
+    record Good(long id) { }                                         // hashCode от record — по полям
+    static final class Bad {                                          // одинаковый hashCode у всех
+        final long id;
+        Bad(long id) { this.id = id; }
+        @Override public boolean equals(Object o) { return o instanceof Bad b &amp;&amp; b.id == id; }
+        @Override public int hashCode() { return 42; }
+    }
+
+    static final class BadComparable implements Comparable&lt;BadComparable&gt; {   // тот же hashCode, но с порядком
+        final long id;
+        BadComparable(long id) { this.id = id; }
+        @Override public boolean equals(Object o) { return o instanceof BadComparable b &amp;&amp; b.id == id; }
+        @Override public int hashCode() { return 42; }
+        @Override public int compareTo(BadComparable o) { return Long.compare(id, o.id); }
+    }
+
+    static long run(int n, LongFunction&lt;Object&gt; key) {               // n вставок и n поисков, мс
+        long start = System.nanoTime();
+        Map&lt;Object, Long&gt; map = new HashMap&lt;&gt;();
+        for (long i = 0; i &lt; n; i++) map.put(key.apply(i), i);
+        for (long i = 0; i &lt; n; i++) map.get(key.apply(i));
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    public static void main(String[] args) {
+        run(5_000, Good::new); run(5_000, Bad::new); run(5_000, BadComparable::new);   // прогрев
+        for (int n : new int[]{5_000, 10_000, 20_000})
+            System.out.printf("%,6d ключей: хороший hashCode %d мс, hashCode = 42 %4d мс, 42 + Comparable %2d мс%n",
+                n, run(n, Good::new), run(n, Bad::new), run(n, BadComparable::new));
+    }
+}</code></pre>
+      <pre><code class="language-text"> 5,000 ключей: хороший hashCode 0 мс, hashCode = 42   53 мс, 42 + Comparable  1 мс
+10,000 ключей: хороший hashCode 0 мс, hashCode = 42  201 мс, 42 + Comparable  1 мс
+20,000 ключей: хороший hashCode 0 мс, hashCode = 42 1038 мс, 42 + Comparable  3 мс</code></pre>
+      <p>С постоянным хешем каждая операция перебирает всю корзину. Вдвое больше ключей — в 4–5 раз больше времени, и на 20 000 ключей это секунда вместо долей миллисекунды. С Java 8 большая корзина превращается в красно-чёрное дерево, но упорядочить его без хеша можно только через <code>compareTo</code>. Для <code>Comparable</code>-ключей поиск остаётся логарифмическим — 3 мс. Для остальных дерево не помогает.</p>
+      <p>Хороший хеш зависит от тех же полей, что и <code>equals</code>, и равномерно их перемешивает. Сгенерированный <code>hashCode</code> record или <code>Objects.hash(a, b, c)</code> для этого достаточен. <code>Objects.hash</code> создаёт массив для varargs, поэтому в очень горячем коде пишут <code>31 * a.hashCode() + b.hashCode()</code>. Постоянные хеши и хеши по одному полю с малым числом значений, например по статусу, — частая причина внезапно медленных карт.</p>
+    </section>
+
+    <section class="step" id="comparable">
+      <h2>compareTo должен соглашаться с equals, иначе HashSet и TreeSet расходятся</h2>
+      <p>Сортированные коллекции — <code>TreeMap</code>, <code>TreeSet</code> — не используют <code>equals</code>: одинаковыми для них считаются элементы с <code>compareTo(...) == 0</code>. Если порядок не согласован с <code>equals</code>, одни и те же данные дают разный результат. В выводе шага 2: <code>BigDecimal("100.0")</code> и <code>BigDecimal("100.00")</code> не равны по <code>equals</code> — у них разный масштаб, — но равны по <code>compareTo</code>. Поэтому <code>HashSet</code> хранит два элемента, а <code>TreeSet</code> — один. Деньги в <code>BigDecimal</code> сравнивают через <code>compareTo</code> (тема BigDecimal &amp; Money).</p>
+      <p>Вторая классическая ошибка — компаратор через вычитание:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Compare {
+    record Payment(String id, int amount) { }
+
+    public static void main(String[] args) {
+        List&lt;Payment&gt; list = new ArrayList&lt;&gt;(List.of(
+            new Payment("a", 2_000_000_000), new Payment("b", -2_000_000_000), new Payment("c", 0)));
+
+        list.sort((x, y) -&gt; x.amount() - y.amount());                           // вычитание переполняется
+        System.out.println("x - y:            " + list.stream().map(Payment::id).toList());
+
+        list.sort(Comparator.comparingInt(Payment::amount));                     // Integer.compare внутри
+        System.out.println("comparingInt:     " + list.stream().map(Payment::id).toList());
+
+        list.sort(Comparator.comparingInt(Payment::amount).reversed().thenComparing(Payment::id));
+        System.out.println("по убыванию суммы: " + list.stream().map(Payment::id).toList());
+    }
+}</code></pre>
+      <pre class="out">x - y:            [a, b, c]
+comparingInt:     [b, c, a]
+по убыванию суммы: [a, c, b]</pre>
+      <p><code>2 000 000 000 − (−2 000 000 000)</code> переполняет <code>int</code> и становится отрицательным, поэтому «a» оказывается меньше «b». Сортировка вышла неверной, и никакого исключения. Сравнивают через <code>Integer.compare</code>, <code>Long.compare</code> или фабрики <code>Comparator.comparing…</code>, которые собираются в цепочки <code>thenComparing</code> и <code>reversed</code>.</p>
+    </section>
+
+    <section class="step" id="tostring-clone">
+      <h2>toString — для логов без секретов, clone — лучше не использовать</h2>
+      <p>Два других метода <code>Object</code>, о которых спрашивают на собеседованиях.</p>
+      <p><b><code>toString</code></b> по умолчанию печатает имя класса и хеш в шестнадцатеричном виде: <code>Payment@1b6d3586</code>. Переопределять его стоит для логов и отладки. Record делает это сам. Но в <code>toString</code> не включают номера карт, токены и персональные данные: всё, что попало в <code>toString</code>, рано или поздно окажется в логах. И не обращаются к ленивым связям JPA — это лишний запрос к базе или <code>LazyInitializationException</code> при логировании.</p>
+      <p><b><code>clone</code></b> — неудачный механизм. Он требует маркерного интерфейса <code>Cloneable</code>, бросает checked-исключение, обходит конструкторы и по умолчанию копирует поля поверхностно:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Cloning {
+    static class Order implements Cloneable {
+        String id;
+        List&lt;String&gt; items = new ArrayList&lt;&gt;();
+        Order(String id) { this.id = id; }
+
+        @Override public Order clone() {
+            try { return (Order) super.clone(); }                      // поверхностная копия полей
+            catch (CloneNotSupportedException e) { throw new AssertionError(e); }
+        }
+        Order(Order other) {                                            // конструктор копирования
+            this.id = other.id;
+            this.items = new ArrayList&lt;&gt;(other.items);                  // глубокая копия списка
+        }
+    }
+
+    public static void main(String[] args) {
+        Order original = new Order("o-1");
+        original.items.add("кофе");
+        Order cloned = original.clone(), copied = new Order(original);
+        cloned.items.add("торт");
+        copied.items.add("чай");
+        System.out.println("original: " + original.items + ", clone делит список: " + (cloned.items == original.items));
+        System.out.println("copy:     " + copied.items);
+    }
+}</code></pre>
+      <pre class="out">original: [кофе, торт], clone делит список: true
+copy:     [кофе, чай]</pre>
+      <p>Клон делит список с оригиналом, и «торт» появился в исходном заказе. Конструктор копирования или статический метод <code>copyOf</code> явно решают, что копировать глубоко, и работают с <code>final</code>-полями. Effective Java прямо советует их вместо <code>clone</code>. Для массивов <code>clone()</code> по-прежнему удобен: <code>int[] copy = array.clone()</code>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Хеш-коллекции ищут сначала по <code>hashCode</code>, потом по <code>equals</code>. Переопределён <code>equals</code> — обязательно переопределить и <code>hashCode</code> по тем же полям.</li>
+        <li><code>equals</code>: рефлексивность, симметричность, транзитивность, согласованность, <code>false</code> для <code>null</code>. Сравнение только с объектами своего типа.</li>
+        <li>Ключ, изменённый после <code>put</code>, не найти и не удалить. Ключи делают неизменяемыми.</li>
+        <li>Постоянный или плохой хеш превращает карту в список: секунда вместо миллисекунды на 20 000 ключей. Дерево в корзине спасает только <code>Comparable</code>-ключи.</li>
+        <li><code>compareTo</code> должен соглашаться с <code>equals</code>: <code>BigDecimal</code> 100.0 и 100.00 — два элемента в <code>HashSet</code> и один в <code>TreeSet</code>. Компаратор — через <code>Integer.compare</code>, не вычитание.</li>
+        <li><code>toString</code> — без секретов и ленивых связей. Вместо <code>clone</code> — конструктор копирования.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="equals-hashcode-contract" data-freq="3">
+      <h3>Какой контракт у equals и hashCode? Что будет, если переопределить только equals?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>equals</code> должен быть рефлексивным, симметричным, транзитивным, согласованным и возвращать <code>false</code> для <code>null</code>. Главное правило связи: равные по <code>equals</code> объекты обязаны иметь одинаковый <code>hashCode</code>. Обратное не требуется — коллизии допустимы.</p>
+          <p>Если переопределить только <code>equals</code>, равные объекты получат разные хеши от <code>Object.hashCode</code>. <code>HashSet</code> и <code>HashMap</code> будут искать их в разных корзинах и считать разными: дубликаты в множестве, <code>get</code> возвращает <code>null</code>. В замере урока повторная доставка того же платежа не распознавалась.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С наследованием контракт хрупок: подкласс, добавивший поле в <code>equals</code>, ломает симметрию или транзитивность. Выход — <code>final</code>-классы, record или композиция.</li>
+            <li>Для JPA-сущностей <code>id</code> меняется при <code>persist</code>, поэтому хеш по <code>id</code> «теряет» сущность в <code>HashSet</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>class Payment { String id; public boolean equals(Object o) {...по id...} } — используется в HashSet для дедупликации. Что не так?</summary>
+          <p>Нет <code>hashCode</code>. Два платежа с одним id имеют разные хеши, и множество их не отождествляет: <code>contains</code> возвращает <code>false</code>, дубликат добавляется. Нужен <code>hashCode</code> по тем же полям, что и <code>equals</code>, а проще — сделать <code>Payment</code> record.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mutable-key-q" data-freq="3">
+      <h3>Что будет, если изменить объект, который лежит ключом в HashMap?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если изменилось поле, участвующее в <code>hashCode</code>, запись останется в корзине, вычисленной по старому хешу. <code>get</code> и <code>containsKey</code> по этому же объекту будут искать в другой корзине и вернут <code>null</code>. Поиск по старому значению попадёт в нужную корзину, но не пройдёт <code>equals</code>. Запись нельзя найти и удалить, её видно только при обходе — это утечка. Ключи делают неизменяемыми.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="bad-hashcode" data-freq="2">
+      <h3>Можно ли вернуть из hashCode константу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Контракт это допускает, но все ключи окажутся в одной корзине, и <code>HashMap</code> станет линейным: в замере урока 20 000 ключей обрабатывались секунду вместо долей миллисекунды. С Java 8 большая корзина превращается в дерево, но без хеша упорядочить его можно только через <code>compareTo</code>. Для <code>Comparable</code>-ключей поиск остаётся логарифмическим, для остальных — нет.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="compareto-equals" data-freq="2">
+      <h3>Что значит «compareTo согласован с equals» и почему это важно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Что <code>a.compareTo(b) == 0</code> тогда и только тогда, когда <code>a.equals(b)</code>. <code>TreeSet</code> и <code>TreeMap</code> определяют равенство через <code>compareTo</code>, а хеш-коллекции — через <code>equals</code>. При несогласованности одни и те же данные ведут себя по-разному. Пример — <code>BigDecimal</code>: 100.0 и 100.00 не равны по <code>equals</code>, но равны по <code>compareTo</code>, поэтому в <code>HashSet</code> их два, а в <code>TreeSet</code> один.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Компаратор (a, b) -&gt; a.amount() - b.amount() для сумм до ±2 млрд. Что может пойти не так?</summary>
+          <p>Вычитание переполняет <code>int</code>: 2 000 000 000 − (−2 000 000 000) становится отрицательным, и порядок переворачивается без исключения. В замере урока список отсортировался неверно. Нужно <code>Integer.compare</code> или <code>Comparator.comparingInt</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="clone-q" data-freq="1">
+      <h3>Почему clone считается неудачным механизмом?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нужен маркерный интерфейс <code>Cloneable</code>, <code>Object.clone</code> — protected и бросает checked-исключение, он обходит конструкторы и по умолчанию копирует поля поверхностно: изменяемые поля остаются общими с оригиналом. С <code>final</code>-полями глубокую копию через <code>clone</code> не сделать. Вместо него используют конструктор копирования или фабрику <code>copyOf</code>.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html">Object (JDK 21)</a> — основа урока: контракты equals, hashCode, toString и clone.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Comparable.html">Comparable (JDK 21)</a> — согласованность с equals и пример BigDecimal.</li>
+      <li>Joshua Bloch, <i>Effective Java</i>, 3-е изд., Items 10–14: equals, hashCode, toString, clone, Comparable.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
