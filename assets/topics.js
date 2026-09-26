@@ -31,7 +31,7 @@ window.KB_TREE = [
           items: [
             { id: 'sorting-basics', freq: 2, status: 'draft', title: 'Basics',
               scope: 'порядок и Comparator, стабильность, сравнения и нижняя граница, время и память, выбор сортировки' },
-            { id: 'merge-sort', freq: 2, status: 'empty', title: 'Merge Sort',
+            { id: 'merge-sort', freq: 2, status: 'draft', title: 'Merge Sort',
               scope: 'слияние отсортированных частей, рекурсивная и итеративная сортировка, стабильность, подсчёт инверсий' },
             { id: 'quick-sort', freq: 2, status: 'empty', title: 'Quick Sort',
               scope: 'partition, выбор pivot, повторы и трёхстороннее разбиение, худший случай, стек, quickselect' },
