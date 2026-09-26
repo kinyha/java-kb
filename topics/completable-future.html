@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: CompletableFuture · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="completable-future">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: CompletableFuture</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="parallel-calls">
+      <h2>Три асинхронных вызова, а ответ не быстрее последовательного</h2>
+      <p>Перед платежом сервис спрашивает три других: данные клиента (100 мс), лимиты (150 мс) и курс валюты (120 мс). По очереди это 370 мс. Разработчик переписал на <code>CompletableFuture</code> — и получил ровно столько же:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Checkout {
+    static final ExecutorService io = Executors.newFixedThreadPool(8);   // пул для вызовов сервисов
+
+    static String call(String service, int ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) { throw new RuntimeException(e); }
+        return service;
+    }
+
+    public static void main(String[] args) {
+        long start = System.nanoTime();
+        String a = call("клиент", 100), b = call("лимиты", 150), c = call("курс", 120);   // по очереди
+        System.out.printf("последовательно:         %d мс%n", (System.nanoTime() - start) / 1_000_000);
+
+        start = System.nanoTime();
+        String a2 = CompletableFuture.supplyAsync(() -&gt; call("клиент", 100), io).join();   // запустили — и сразу ждём
+        String b2 = CompletableFuture.supplyAsync(() -&gt; call("лимиты", 150), io).join();
+        String c2 = CompletableFuture.supplyAsync(() -&gt; call("курс", 120), io).join();
+        System.out.printf("supplyAsync + join сразу: %d мс%n", (System.nanoTime() - start) / 1_000_000);
+
+        start = System.nanoTime();
+        CompletableFuture&lt;String&gt; client = CompletableFuture.supplyAsync(() -&gt; call("клиент", 100), io);
+        CompletableFuture&lt;String&gt; limits = CompletableFuture.supplyAsync(() -&gt; call("лимиты", 150), io);
+        CompletableFuture&lt;String&gt; rate = CompletableFuture.supplyAsync(() -&gt; call("курс", 120), io);
+        String all = CompletableFuture.allOf(client, limits, rate)          // все три идут одновременно
+            .thenApply(v -&gt; client.join() + " + " + limits.join() + " + " + rate.join())
+            .join();
+        System.out.printf("все три параллельно:     %d мс → %s%n", (System.nanoTime() - start) / 1_000_000, all);
+        io.shutdown();
+    }
+}</code></pre>
+      <pre><code class="language-text">последовательно:         385 мс
+supplyAsync + join сразу: 379 мс
+все три параллельно:     156 мс → клиент + лимиты + курс</code></pre>
+      <p>Вторая версия запускает вызов в другом потоке и тут же ждёт его. Асинхронности нет, есть только лишний переход между потоками. Выигрыш появляется, когда все три запущены <i>до</i> первого ожидания. Тогда время равно самому долгому вызову, 150 мс, а не сумме.</p>
+      <p><code>CompletableFuture</code> — это обещание результата, которое можно завершить позже и на которое можно навесить следующие шаги, не блокируя поток. В этой теме — чем он отличается от обычного <code>Future</code>, <code>thenApply</code> и <code>thenCompose</code>, в каком потоке выполняется каждый шаг, как идут ошибки по цепочке, как объединять результаты и ставить таймауты — и почему <code>cancel(true)</code> ничего не отменяет.</p>
+    </section>
+
+    <section class="step" id="future-vs-cf">
+      <h2>Future можно только ждать, CompletableFuture — продолжать</h2>
+      <p>Обычный <code>Future</code> из <code>ExecutorService.submit</code> умеет немного: проверить готовность, отменить и ждать через <code>get()</code>. Чтобы что-то сделать с результатом, поток должен заблокироваться. <code>CompletableFuture</code> реализует <code>Future</code> и добавляет <code>CompletionStage</code> — цепочки продолжений, которые выполнятся, когда результат будет готов:</p>
+      <table class="mx">
+        <thead><tr><th>Метод</th><th>Что делает</th><th>Аналог в стримах</th></tr></thead>
+        <tbody>
+          <tr><td><code>supplyAsync(supplier, executor)</code></td><td>запустить задачу с результатом</td><td>—</td></tr>
+          <tr><td><code>thenApply(f)</code></td><td>преобразовать результат: <code>T → U</code></td><td><code>map</code></td></tr>
+          <tr><td><code>thenCompose(f)</code></td><td>продолжить асинхронным шагом: <code>T → CompletableFuture&lt;U&gt;</code></td><td><code>flatMap</code></td></tr>
+          <tr><td><code>thenCombine(other, f)</code></td><td>объединить два независимых результата</td><td>—</td></tr>
+          <tr><td><code>thenAccept</code>, <code>thenRun</code></td><td>потребить результат / просто выполнить после</td><td><code>forEach</code></td></tr>
+          <tr><td><code>allOf</code>, <code>anyOf</code></td><td>дождаться всех / первого</td><td>—</td></tr>
+          <tr><td><code>exceptionally</code>, <code>handle</code>, <code>whenComplete</code></td><td>обработка ошибок — шаг 4</td><td>—</td></tr>
+          <tr><td><code>complete(v)</code>, <code>completeExceptionally(e)</code></td><td>завершить вручную, например из колбэка чужой библиотеки</td><td>—</td></tr>
+        </tbody>
+      </table>
+      <p>Разница между <code>thenApply</code> и <code>thenCompose</code> — как между <code>map</code> и <code>flatMap</code>. Если шаг сам возвращает <code>CompletableFuture</code>, <code>thenApply</code> завернёт его во второй слой:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Errors {
+    static CompletableFuture&lt;Long&gt; balance(String account) {                 // асинхронный запрос баланса
+        return CompletableFuture.supplyAsync(() -&gt; {
+            if (account.equals("blocked")) throw new IllegalStateException("счёт заблокирован");
+            return 1_000L;
+        });
+    }
+
+    public static void main(String[] args) throws Exception {
+        CompletableFuture&lt;CompletableFuture&lt;Long&gt;&gt; nested = CompletableFuture.completedFuture("acc-1").thenApply(Errors::balance);
+        CompletableFuture&lt;Long&gt; flat = CompletableFuture.completedFuture("acc-1").thenCompose(Errors::balance);
+        System.out.println("thenApply:   " + nested.join().join() + " (пришлось join дважды)");
+        System.out.println("thenCompose: " + flat.join());
+
+        CompletableFuture&lt;String&gt; failed = balance("blocked")
+            .thenApply(b -&gt; { System.out.println("этап не выполнится"); return b * 2; })  // пропускается
+            .thenApply(b -&gt; "баланс " + b);
+        try { failed.join(); } catch (CompletionException e) { System.out.println("join бросил: " + e); }
+        try { failed.get(); } catch (ExecutionException e) { System.out.println("get бросил:  " + e.getClass().getSimpleName() + " с причиной " + e.getCause().getMessage()); }
+
+        String recovered = failed.exceptionally(e -&gt; "баланс недоступен: " + e.getCause().getMessage()).join();
+        System.out.println("exceptionally: " + recovered);
+
+        String handled = balance("acc-1").handle((b, e) -&gt; e == null ? "баланс " + b : "ошибка").join();
+        System.out.println("handle:        " + handled);
+
+        try {
+            balance("blocked").whenComplete((b, e) -&gt; System.out.println("whenComplete увидел ошибку: " + (e != null))).join();
+        } catch (CompletionException e) {
+            System.out.println("после whenComplete ошибка осталась: " + e.getCause().getMessage());
+        }
+    }
+}</code></pre>
+      <pre class="out">thenApply:   1000 (пришлось join дважды)
+thenCompose: 1000
+join бросил: java.util.concurrent.CompletionException: java.lang.IllegalStateException: счёт заблокирован
+get бросил:  ExecutionException с причиной счёт заблокирован
+exceptionally: баланс недоступен: счёт заблокирован
+handle:        баланс 1000
+whenComplete увидел ошибку: true
+после whenComplete ошибка осталась: счёт заблокирован</pre>
+      <p>Первые две строки — о <code>thenCompose</code>: с ним цепочка остаётся плоской, <code>CompletableFuture&lt;Long&gt;</code> вместо вложенного. Остальной вывод разберём в шаге 4.</p>
+    </section>
+
+    <section class="step" id="threads">
+      <h2>Шаг без Async выполняется в том потоке, который оказался рядом</h2>
+      <p>Самый частый вопрос на собеседовании про <code>CompletableFuture</code> — в каком потоке выполнится <code>thenApply</code>. Ответ зависит от момента регистрации:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class WhichThread {
+    static String name() { return Thread.currentThread().getName(); }
+
+    public static void main(String[] args) throws Exception {
+        ExecutorService bank = Executors.newSingleThreadExecutor(r -&gt; new Thread(r, "bank-io"));
+
+        CompletableFuture&lt;Integer&gt; done = CompletableFuture.completedFuture(1);          // уже завершён
+        done.thenApply(x -&gt; { System.out.println("thenApply на готовом:    " + name()); return x; });
+
+        CompletableFuture&lt;Integer&gt; slow = CompletableFuture.supplyAsync(() -&gt; {           // завершится позже
+            try { Thread.sleep(100); } catch (InterruptedException e) { }
+            return 1;
+        }, bank);
+        slow.thenApply(x -&gt; { System.out.println("thenApply на незавершённом: " + name()); return x; });
+        slow.thenApplyAsync(x -&gt; { System.out.println("thenApplyAsync:            " + name()); return x; });
+        slow.thenApplyAsync(x -&gt; { System.out.println("thenApplyAsync(executor):  " + name()); return x; }, bank);
+        Thread.sleep(300);
+        bank.shutdown();
+    }
+}</code></pre>
+      <pre class="out">thenApply на готовом:    main
+thenApply на незавершённом: bank-io
+thenApplyAsync:            ForkJoinPool.commonPool-worker-1
+thenApplyAsync(executor):  bank-io</pre>
+      <ul>
+        <li><b>Шаг без <code>Async</code>, будущее уже завершено</b> — выполняется сразу в потоке, который вызвал <code>thenApply</code>, здесь <code>main</code>.</li>
+        <li><b>Шаг без <code>Async</code>, будущее ещё не завершено</b> — выполнится в потоке, который его завершит, здесь <code>bank-io</code>. Какой из двух случаев сработает, зависит от гонки: код один, а поток разный.</li>
+        <li><b><code>thenApplyAsync(f)</code></b> — в <code>ForkJoinPool.commonPool()</code>.</li>
+        <li><b><code>thenApplyAsync(f, executor)</code></b> — в указанном пуле.</li>
+      </ul>
+      <p>Отсюда практические правила. Тяжёлый или блокирующий шаг без <code>Async</code> может выполниться в потоке ввода-вывода чужой библиотеки — например, в event loop HTTP-клиента — и остановить его. Блокирующие шаги и <code>supplyAsync</code> всегда получают свой пул вторым аргументом. Иначе они уходят в <code>commonPool</code>, где, как в теме Executors, мешают всем остальным. И ещё: в другом потоке нет <code>ThreadLocal</code> вызывающего — ни MDC, ни пользователя Spring Security, ни транзакции (тема Threads).</p>
+    </section>
+
+    <section class="step" id="errors">
+      <h2>Ошибка пропускает все шаги до ближайшего обработчика</h2>
+      <p>Исключение внутри шага завершает его будущее с ошибкой. Все следующие <code>thenApply</code>, <code>thenCompose</code> и <code>thenAccept</code> пропускаются: в выводе шага 2 нет строки «этап не выполнится». Ошибка доходит до ближайшего обработчика:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Цепочка обработки платежа. Два независимых вызова — клиент и лимиты — объединяются через thenCombine, затем thenCompose списывает деньги в банке, thenApply формирует чек, exceptionally в конце превращает ошибку в ответ «повторите позже». При успехе значение проходит все шаги, а exceptionally пропускает его без изменений. Если банк отказал, thenApply пропускается, и ошибку обрабатывает exceptionally.">
+            <defs>
+              <marker id="cf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- узлы -->
+            <rect data-s="1" x="20" y="30" width="150" height="50" rx="8" class="dg-cell"/>
+            <rect data-s="2-" x="20" y="30" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <text x="32" y="52" class="dg-in">supplyAsync</text>
+            <text x="32" y="70" class="dg-n">клиент, 100 мс</text>
+            <rect data-s="1-2" x="20" y="130" width="150" height="50" rx="8" class="dg-cell"/>
+            <rect data-s="3-" x="20" y="130" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <text x="32" y="152" class="dg-in">supplyAsync</text>
+            <text x="32" y="170" class="dg-n">лимиты, 150 мс</text>
+
+            <rect data-s="1-2" x="200" y="80" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="3-" x="200" y="80" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <text x="212" y="102" class="dg-in">thenCombine</text>
+            <text x="212" y="120" class="dg-n">проверить лимит</text>
+
+            <rect data-s="1-3" x="380" y="80" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="4" x="380" y="80" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <rect data-s="5" x="380" y="80" width="150" height="50" rx="8" class="dg-cell miss"/>
+            <text x="392" y="102" class="dg-in">thenCompose</text>
+            <text x="392" y="120" class="dg-n">списать в банке</text>
+
+            <rect data-s="1-3" x="560" y="80" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="4" x="560" y="80" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <rect data-s="5" x="560" y="80" width="150" height="50" rx="8" class="dg-sep" fill="none"/>
+            <text x="572" y="102" class="dg-in">thenApply</text>
+            <text x="572" y="120" class="dg-n">сформировать чек</text>
+
+            <rect data-s="1-3" x="560" y="180" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="4" x="560" y="180" width="150" height="50" rx="8" class="dg-sep" fill="none"/>
+            <rect data-s="5" x="560" y="180" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <text x="572" y="202" class="dg-in">exceptionally</text>
+            <text x="572" y="220" class="dg-n">«повторите позже»</text>
+
+            <!-- рёбра -->
+            <path d="M170 55 L 196 98" class="dg-line" marker-end="url(#cf-n)"/>
+            <path d="M170 155 L 196 114" class="dg-line" marker-end="url(#cf-n)"/>
+            <path d="M350 105 L 376 105" class="dg-line" marker-end="url(#cf-n)"/>
+            <path d="M530 105 L 556 105" class="dg-line" marker-end="url(#cf-n)"/>
+            <path d="M635 130 L 635 176" class="dg-line" marker-end="url(#cf-n)"/>
+
+            <text data-s="4" x="380" y="210" class="dg-ok">чек проходит насквозь</text>
+            <text data-s="5" x="380" y="160" class="dg-bad">банк: отказ</text>
+            <text data-s="5" x="380" y="210" class="dg-ok">ответ «повторите позже»</text>
+
+            <text data-s="1" x="20" y="254" class="dg-in">цепочка собрана заранее; оба вызова уже запущены, никто не ждёт</text>
+            <text data-s="2" x="20" y="254" class="dg-in">клиент готов; thenCombine ждёт второй результат</text>
+            <text data-s="3" x="20" y="254" class="dg-ok">лимиты готовы — thenCombine выполнился, стартовал вызов банка</text>
+            <text data-s="4" x="20" y="254" class="dg-ok">успех: exceptionally пропускает значение без изменений</text>
+            <text data-s="5" x="20" y="254" class="dg-bad">отказ банка: thenApply пропущен, ошибку обработал exceptionally</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Цепочка описана заранее, и оба независимых вызова уже запущены. Ни один поток не заблокирован в ожидании.</li>
+          <li>Данные клиента готовы. <code>thenCombine</code> ждёт второй результат — без блокировок: он просто ещё не сработал.</li>
+          <li>Лимиты готовы — <code>thenCombine</code> выполнился в потоке, который завершил последний из двух вызовов. <code>thenCompose</code> запустил асинхронное списание в банке.</li>
+          <li>Успех: <code>thenApply</code> сформировал чек. <code>exceptionally</code> срабатывает только на ошибку и пропускает значение как есть.</li>
+          <li>Отказ банка: будущее списания завершилось с ошибкой, <code>thenApply</code> пропущен. Ошибку получил <code>exceptionally</code> и превратил её в ответ «повторите позже».</li>
+        </ol>
+      </figure>
+      <p>Три обработчика из вывода шага 2 ведут себя по-разному:</p>
+      <table class="mx">
+        <thead><tr><th>Метод</th><th>Когда вызывается</th><th>Восстанавливает?</th></tr></thead>
+        <tbody>
+          <tr><td><code>exceptionally(e -&gt; value)</code></td><td>только при ошибке</td><td>да, заменяет ошибку значением</td></tr>
+          <tr><td><code>handle((value, e) -&gt; result)</code></td><td>всегда; одно из двух — <code>null</code></td><td>да, возвращает новый результат</td></tr>
+          <tr><td><code>whenComplete((value, e) -&gt; ...)</code></td><td>всегда</td><td>нет: ошибка идёт дальше, как в последней строке вывода</td></tr>
+        </tbody>
+      </table>
+      <p>Детали, на которых ошибаются:</p>
+      <ul>
+        <li>Исключение приходит в обработчик обёрнутым в <code>CompletionException</code>, поэтому исходную ошибку достают через <code>e.getCause()</code>. В шаге 2 так сделано в <code>exceptionally</code>.</li>
+        <li><code>join()</code> бросает unchecked <code>CompletionException</code>, <code>get()</code> — checked <code>ExecutionException</code>. В лямбдах удобнее <code>join()</code>.</li>
+        <li>Цепочка без обработчика и без <code>join()</code> в конце теряет ошибку так же молча, как <code>submit()</code> в теме Executors.</li>
+      </ul>
+    </section>
+
+    <section class="step" id="combine">
+      <h2>allOf ждёт всех даже после первой ошибки, а таймаут не останавливает задачу</h2>
+      <p><code>allOf</code> возвращает <code>CompletableFuture&lt;Void&gt;</code>: он лишь сообщает, что все завершились, а результаты забирают из исходных будущих через <code>join()</code>, как в шаге 1. <code>anyOf</code> — первый завершившийся. Что происходит, если один из вызовов падает сразу:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class AllOfFail {
+    static CompletableFuture&lt;String&gt; call(String name, int ms, boolean fail) {
+        return CompletableFuture.supplyAsync(() -&gt; {
+            try { Thread.sleep(ms); } catch (InterruptedException e) { }
+            if (fail) throw new IllegalStateException(name + " недоступен");
+            return name;
+        });
+    }
+
+    public static void main(String[] args) {
+        long start = System.nanoTime();
+        try {
+            CompletableFuture.allOf(call("клиент", 100, false), call("лимиты", 20, true), call("курс", 300, false)).join();
+        } catch (CompletionException e) {
+            System.out.printf("allOf: %s — через %d мс%n", e.getCause().getMessage(), (System.nanoTime() - start) / 1_000_000);
+        }
+        start = System.nanoTime();
+        Object first = CompletableFuture.anyOf(call("банк А", 120, false), call("банк Б", 60, false)).join();
+        System.out.printf("anyOf: первым ответил %s — через %d мс%n", first, (System.nanoTime() - start) / 1_000_000);
+    }
+}</code></pre>
+      <pre><code class="language-text">allOf: лимиты недоступен — через 304 мс
+anyOf: первым ответил банк Б — через 65 мс</code></pre>
+      <p>Лимиты упали через 20 мс, но <code>allOf</code> сообщил об этом через 304 мс — когда закончился самый долгий вызов. Если ответ бессмыслен без всех частей, это лишнее ожидание. «Упасть при первой ошибке» <code>allOf</code> не умеет. Приходится вешать на каждое будущее <code>exceptionally</code>, которое завершает общий результат с ошибкой. В Java 21 это делает structured concurrency в статусе preview (тема Virtual Threads).</p>
+      <p>Таймауты появились в Java 9 и выглядят так же непривычно:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class Timeouts {
+    static CompletableFuture&lt;String&gt; rate(int ms, AtomicBoolean finished) {   // сервис курсов отвечает ms миллисекунд
+        return CompletableFuture.supplyAsync(() -&gt; {
+            try { Thread.sleep(ms); } catch (InterruptedException e) { return "прерван"; }
+            finished.set(true);
+            return "курс 90.1";
+        });
+    }
+
+    public static void main(String[] args) throws Exception {
+        AtomicBoolean f1 = new AtomicBoolean();
+        try {
+            rate(2_000, f1).orTimeout(200, TimeUnit.MILLISECONDS).join();       // не дождались — ошибка
+        } catch (CompletionException e) {
+            System.out.println("orTimeout: " + e.getCause());
+        }
+        String cached = rate(2_000, new AtomicBoolean())
+            .completeOnTimeout("курс из кеша 90.0", 200, TimeUnit.MILLISECONDS).join();  // не дождались — значение
+        System.out.println("completeOnTimeout: " + cached);
+
+        AtomicBoolean f2 = new AtomicBoolean();
+        CompletableFuture&lt;String&gt; call = rate(500, f2);
+        Thread.sleep(100);
+        System.out.println("cancel(true): " + call.cancel(true) + ", isCancelled: " + call.isCancelled());
+        Thread.sleep(600);
+        System.out.println("а задача всё равно доработала: " + f2.get());
+        Thread.sleep(1_200);
+        System.out.println("задача после orTimeout тоже доработала: " + f1.get());
+    }
+}</code></pre>
+      <pre class="out">orTimeout: java.util.concurrent.TimeoutException
+completeOnTimeout: курс из кеша 90.0
+cancel(true): true, isCancelled: true
+а задача всё равно доработала: true
+задача после orTimeout тоже доработала: true</pre>
+      <p><code>orTimeout</code> завершает будущее с <code>TimeoutException</code>, <code>completeOnTimeout</code> — запасным значением. Но задача, которая считала результат, об этом не узнаёт. Та же история с <code>cancel(true)</code>: будущее отменено, а задача доработала до конца. В отличие от <code>FutureTask</code> из <code>ExecutorService</code>, <code>CompletableFuture</code> не знает, в каком потоке выполняется его задача, и параметр <code>mayInterruptIfRunning</code> игнорирует — так написано в javadoc. Значит, настоящий таймаут на ввод-вывод ставят в самом клиенте: таймаут HTTP-запроса, <code>queryTimeout</code> в JDBC. Таймаут будущего только перестаёт ждать.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Параллельность появляется, только если все задачи запущены до первого ожидания. <code>supplyAsync(...).join()</code> подряд — это последовательный код.</li>
+        <li><code>thenApply</code> — <code>map</code>, <code>thenCompose</code> — <code>flatMap</code> для шага, который сам асинхронный. <code>thenCombine</code> объединяет два независимых результата.</li>
+        <li>Шаг без <code>Async</code> выполняется в вызывающем потоке, если будущее уже готово, или в потоке, который его завершит. <code>*Async</code> без пула уходит в <code>commonPool</code>. Блокирующим шагам — свой пул.</li>
+        <li>Ошибка пропускает шаги до обработчика. <code>exceptionally</code> и <code>handle</code> восстанавливают, <code>whenComplete</code> — нет. Причина лежит в <code>CompletionException.getCause()</code>.</li>
+        <li><code>allOf</code> ждёт всех даже после ошибки и возвращает <code>Void</code>. <code>orTimeout</code>, <code>completeOnTimeout</code> и <code>cancel(true)</code> не останавливают саму задачу.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="future-vs-cf-q" data-freq="3">
+      <h3>Чем CompletableFuture отличается от Future?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>Future</code> позволяет только проверить готовность, отменить и заблокироваться на <code>get()</code>. <code>CompletableFuture</code> реализует ещё <code>CompletionStage</code>: на него навешивают продолжения (<code>thenApply</code>, <code>thenCompose</code>, <code>thenCombine</code>), объединяют несколько (<code>allOf</code>, <code>anyOf</code>), обрабатывают ошибки (<code>exceptionally</code>, <code>handle</code>) без блокировки потоков. Его можно завершить вручную через <code>complete</code>, есть таймауты <code>orTimeout</code> и <code>completeOnTimeout</code>.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="apply-vs-compose" data-freq="3">
+      <h3>Чем thenApply отличается от thenCompose?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>thenApply</code> преобразует результат синхронной функцией <code>T → U</code>, как <code>map</code>. <code>thenCompose</code> принимает функцию, которая сама возвращает <code>CompletableFuture&lt;U&gt;</code>, и «разворачивает» его, как <code>flatMap</code>. Если передать асинхронный шаг в <code>thenApply</code>, получится <code>CompletableFuture&lt;CompletableFuture&lt;U&gt;&gt;</code>, и придётся ждать дважды.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="which-thread" data-freq="3">
+      <h3>В каком потоке выполняется thenApply?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если будущее уже завершено к моменту вызова — сразу в вызывающем потоке. Если нет — в потоке, который его завершит. <code>thenApplyAsync(f)</code> выполняется в <code>ForkJoinPool.commonPool()</code>, <code>thenApplyAsync(f, executor)</code> — в указанном пуле. <code>supplyAsync</code> без пула тоже использует <code>commonPool</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Из-за гонки один и тот же код выполняется то в одном потоке, то в другом. Тяжёлый шаг без <code>Async</code> может заблокировать поток ввода-вывода чужой библиотеки.</li>
+            <li>Блокирующие вызовы в <code>commonPool</code> тормозят параллельные стримы и все <code>*Async</code> без своего пула.</li>
+            <li><code>ThreadLocal</code>-контекст (MDC, security, транзакция) в другой поток не переходит.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В контроллере: CompletableFuture.supplyAsync(() -&gt; jdbcTemplate.query(...)).thenApply(this::toDto). Что не так?</summary>
+          <p>Блокирующий запрос к базе уходит в <code>commonPool</code>, рассчитанный на вычисления: под нагрузкой он займёт все его потоки и затормозит остальных пользователей пула. Нужен отдельный пул под базу, размером не больше пула соединений, и вторым аргументом <code>supplyAsync</code>. Ещё в потоке пула не будет транзакции и контекста безопасности вызывающего потока.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cf-errors" data-freq="2">
+      <h3>Как обрабатывать ошибки в CompletableFuture?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Исключение завершает будущее с ошибкой, и все следующие шаги пропускаются до обработчика. <code>exceptionally</code> вызывается только при ошибке и возвращает значение взамен. <code>handle</code> вызывается всегда, получает значение или ошибку и возвращает новый результат. <code>whenComplete</code> вызывается всегда, но результат не меняет: ошибка идёт дальше. В обработчик исключение приходит обёрнутым в <code>CompletionException</code>, исходное — в <code>getCause()</code>. <code>join()</code> бросает <code>CompletionException</code>, <code>get()</code> — <code>ExecutionException</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>allOf(a, b, c), где b падает через 20 мс, а c работает 300 мс. Когда join() на allOf бросит исключение?</summary>
+          <p>Через 300 мс, когда завершится последний. <code>allOf</code> ждёт всех, даже если кто-то уже упал, — в замере урока 304 мс. Чтобы падать сразу, на каждое будущее навешивают обработчик, который завершает общий результат с ошибкой, или используют structured concurrency.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cf-cancel" data-freq="2">
+      <h3>Останавливает ли cancel(true) или orTimeout задачу CompletableFuture?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нет. <code>CompletableFuture</code> не знает, какой поток выполняет его задачу, и <code>cancel(true)</code> не прерывает её: будущее помечается отменённым, а задача дорабатывает. <code>orTimeout</code> и <code>completeOnTimeout</code> так же только завершают будущее. В замере урока задачи доработали до конца после отмены и после таймаута. Реальный таймаут на ввод-вывод ставят в клиенте: HTTP, JDBC, брокера сообщений.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CompletableFuture.html">CompletableFuture (JDK 21)</a> — основа урока: правила выполнения шагов, исключения, cancel без прерывания.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CompletionStage.html">CompletionStage (JDK 21)</a> — контракт продолжений и обработки ошибок.</li>
+      <li><a href="https://openjdk.org/jeps/453">JEP 453: Structured Concurrency (Preview)</a> — альтернатива allOf с отменой остальных при первой ошибке.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

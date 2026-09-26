@@ -425,7 +425,7 @@ window.KB_TREE = [
         { id: 'async', title: 'Async', items: [
           { id: 'executors', freq: 3, status: 'draft', title: 'Executors',
             scope: 'ExecutorService, параметры ThreadPoolExecutor, очереди, rejection policy, размер пула, shutdown, ForkJoinPool' },
-          { id: 'completable-future', freq: 3, status: 'empty', title: 'CompletableFuture',
+          { id: 'completable-future', freq: 3, status: 'draft', title: 'CompletableFuture',
             scope: 'Future и CompletableFuture, thenApply и thenCompose, allOf, обработка ошибок, на каком пуле выполняется' },
           { id: 'virtual-threads', freq: 2, status: 'empty', title: 'Virtual Threads',
             scope: 'carrier threads, pinning, когда полезны, structured concurrency' },
