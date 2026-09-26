@@ -403,7 +403,7 @@ window.KB_TREE = [
         { id: 'basics', title: 'Basics', items: [
           { id: 'threads', freq: 3, status: 'draft', title: 'Threads',
             scope: 'Thread, Runnable и Callable, состояния потока, interrupt, join, daemon, ThreadLocal' },
-          { id: 'thread-safety', freq: 3, status: 'empty', title: 'Thread Safety',
+          { id: 'thread-safety', freq: 3, status: 'draft', title: 'Thread Safety',
             scope: 'race condition, атомарность, check-then-act, неизменяемость, thread confinement' },
           { id: 'synchronization', freq: 3, status: 'empty', title: 'synchronized & wait/notify',
             scope: 'монитор, reentrancy, synchronized метод и блок, wait, notify и notifyAll, spurious wakeup' },

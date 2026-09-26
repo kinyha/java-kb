@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Thread Safety · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="thread-safety">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Thread Safety</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="shared-field">
+      <h2>Одно поле в синглтоне — и 95% чеков уходят не тем людям</h2>
+      <p>Сервис чеков в Spring — синглтон: один объект обслуживает все запросы. Разработчик сохранил пользователя в поле, чтобы не передавать его в каждый метод. Под нагрузкой восемь потоков обработки запросов вызывают сервис одновременно:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class ReceiptService {
+    // синглтон, как @Service в Spring: один объект на все запросы
+    private String currentUser;                                  // «удобно»: не передавать в каждый метод
+
+    String receipt(String user, long amount) throws InterruptedException {
+        currentUser = user;
+        Thread.sleep(1);                                         // поход в базу за шаблоном чека
+        return "чек для " + currentUser + " на " + amount;
+    }
+
+    public static void main(String[] args) throws Exception {
+        ReceiptService service = new ReceiptService();
+        ExecutorService pool = Executors.newFixedThreadPool(8);   // 8 потоков обработки запросов
+        List&lt;Future&lt;Boolean&gt;&gt; ok = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 1000; i++) {
+            String user = "user" + i;
+            ok.add(pool.submit(() -&gt; service.receipt(user, 100).contains(user + " ")));
+        }
+        long wrong = 0;
+        for (Future&lt;Boolean&gt; f : ok) if (!f.get()) wrong++;
+        pool.shutdown();
+        System.out.println("чеков с чужим именем: " + wrong + " из 1000");
+    }
+}</code></pre>
+      <pre><code class="language-text">чеков с чужим именем: 956 из 1000</code></pre>
+      <p>В трёх запусках — 956, 957 и 954. Пока один поток ждёт базу, другой перезаписывает общее поле, и первый читает уже чужое имя. В тесте с одним запросом код работает идеально.</p>
+      <p>Код <b>потокобезопасен</b>, если он работает правильно при вызове из нескольких потоков — при любом их чередовании и без дополнительной синхронизации со стороны вызывающего. Проблемы возникают, только когда несколько потоков обращаются к одному <b>изменяемому</b> состоянию. Отсюда три способа их избежать: не делить состояние между потоками, сделать его неизменяемым или синхронизировать доступ. В этой теме — почему даже одна строка кода не атомарна, как ломаются составные действия и инварианты и как выбирать между этими тремя способами.</p>
+    </section>
+
+    <section class="step" id="race">
+      <h2>count++ — это три операции, и между ними может вклиниться другой поток</h2>
+      <p>Восемь потоков увеличивают общий счётчик по миллиону раз:</p>
+      <pre><code class="language-java">public class Counter {
+    static int count;                                            // общий счётчик платежей
+
+    public static void main(String[] args) throws Exception {
+        Thread[] threads = new Thread[8];
+        for (int t = 0; t &lt; threads.length; t++) {
+            threads[t] = new Thread(() -&gt; {
+                for (int i = 0; i &lt; 1_000_000; i++) count++;     // одна строка — три операции
+            });
+            threads[t].start();
+        }
+        for (Thread t : threads) t.join();
+        System.out.println("ожидали 8000000, получили " + count);
+    }
+}</code></pre>
+      <pre><code class="language-text">ожидали 8000000, получили 2337824
+ожидали 8000000, получили 2195493
+ожидали 8000000, получили 1252686</code></pre>
+      <p>Потеряно 70–85% увеличений, и каждый запуск даёт другое число. Причина видна в байткоде цикла (<code>javap -c</code>):</p>
+      <pre><code class="language-text">       8: getstatic     #28                 // Field count:I   прочитать count
+      11: iconst_1
+      12: iadd                                                  прибавить 1 у себя
+      13: putstatic     #28                 // Field count:I   записать обратно</code></pre>
+      <p>Чтение, вычисление и запись — отдельные шаги. Если два потока прочитали одно и то же значение, один из результатов затрётся:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Два потока увеличивают count, равный пяти. Поток A читает пять. Поток B тоже читает пять. Поток A прибавляет единицу и записывает шесть. Поток B прибавляет единицу к своим пяти и тоже записывает шесть. Было два увеличения, а count вырос на один.">
+            <defs>
+              <marker id="rc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rc-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ПОТОК A</text>
+            <text x="290" y="24" class="dg-cap">COUNT В ПАМЯТИ</text>
+            <text x="480" y="24" class="dg-cap">ПОТОК B</text>
+            <text x="706" y="24" class="dg-n" text-anchor="end">время ↓</text>
+
+            <!-- начало -->
+            <rect x="290" y="38" width="140" height="32" rx="6" class="dg-box"/>
+            <text x="360" y="59" class="dg-in" text-anchor="middle">5</text>
+
+            <!-- шаг 2: A читает -->
+            <g data-s="2-">
+              <rect x="20" y="82" width="220" height="32" rx="6" class="dg-cell"/>
+              <text x="32" y="103" class="dg-in">getstatic → у себя 5</text>
+              <rect x="290" y="82" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="103" class="dg-in" text-anchor="middle">5</text>
+              <path d="M290 98 L 244 98" class="dg-line" marker-end="url(#rc-n)"/>
+            </g>
+            <!-- шаг 3: B читает -->
+            <g data-s="3-">
+              <rect x="480" y="126" width="220" height="32" rx="6" class="dg-cell"/>
+              <text x="492" y="147" class="dg-in">getstatic → у себя 5</text>
+              <rect x="290" y="126" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="147" class="dg-in" text-anchor="middle">5</text>
+              <path d="M430 142 L 476 142" class="dg-line" marker-end="url(#rc-n)"/>
+            </g>
+            <!-- шаг 4: A пишет -->
+            <g data-s="4-">
+              <rect x="20" y="170" width="220" height="32" rx="6" class="dg-cell hit"/>
+              <text x="32" y="191" class="dg-in">iadd, putstatic 6</text>
+              <rect x="290" y="170" width="140" height="32" rx="6" class="dg-cell hit"/>
+              <text x="360" y="191" class="dg-in" text-anchor="middle">6</text>
+              <path d="M240 186 L 286 186" class="dg-line" marker-end="url(#rc-n)"/>
+            </g>
+            <!-- шаг 5: B пишет -->
+            <g data-s="5">
+              <rect x="480" y="214" width="220" height="32" rx="6" class="dg-cell miss"/>
+              <text x="492" y="235" class="dg-in">iadd, putstatic 6</text>
+              <rect x="290" y="214" width="140" height="32" rx="6" class="dg-cell miss"/>
+              <text x="360" y="235" class="dg-in" text-anchor="middle">6, а не 7</text>
+              <path d="M480 230 L 434 230" class="dg-line bad" marker-end="url(#rc-bad)"/>
+            </g>
+
+            <text data-s="1" x="20" y="274" class="dg-in">оба потока выполняют count++, в памяти 5</text>
+            <text data-s="2" x="20" y="274" class="dg-in">A прочитал 5 и держит его у себя</text>
+            <text data-s="3" x="20" y="274" class="dg-in">B успел прочитать то же 5 до записи A</text>
+            <text data-s="4" x="20" y="274" class="dg-ok">A записал 6</text>
+            <text data-s="5" x="20" y="274" class="dg-bad">B записал 6 поверх: два увеличения, count вырос на 1</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Оба потока собираются выполнить <code>count++</code>. В памяти 5.</li>
+          <li>Поток A выполнил <code>getstatic</code>: прочитал 5 в свой стек операндов.</li>
+          <li>Планировщик переключился, или B работает на соседнем ядре одновременно. B тоже прочитал 5: A ещё ничего не записал.</li>
+          <li>A прибавил единицу и записал 6.</li>
+          <li>B прибавил единицу к своим пяти и записал 6 поверх. Увеличения A как будто не было. На 18 ядрах такие наложения случаются постоянно, отсюда потеря большей части увеличений.</li>
+        </ol>
+      </figure>
+      <p>Это <b>race condition</b> — результат зависит от того, как потоки чередуются во времени. Действие «прочитать, изменить, записать» должно быть <b>атомарным</b>: другой поток видит либо состояние до него, либо после, но не середину. Та же потеря есть и без JIT: с <code>-Xint</code> получилось 1 209 836 и 1 257 576.</p>
+      <p>Рядом стоит термин <b>data race</b> из Java Memory Model: два потока обращаются к одной переменной без синхронизации, и хотя бы один пишет. Data race — про видимость и порядок операций, race condition — про логику. Они часто совпадают, но не всегда. Шаг 3 покажет race condition без единого data race — на потокобезопасных коллекциях.</p>
+      <div class="note tip">
+        <p><code>volatile</code> здесь не поможет. Он гарантирует, что потоки видят свежее значение, но <code>count++</code> на <code>volatile</code>-поле всё равно три отдельные операции. Подробно — в теме Java Memory Model.</p>
+      </div>
+    </section>
+
+    <section class="step" id="check-then-act">
+      <h2>Потокобезопасная коллекция не делает потокобезопасным код вокруг неё</h2>
+      <p>Вторая классическая форма гонки — <b>check-then-act</b>: проверить условие, потом действовать по его результату. Между проверкой и действием условие может измениться. Каждая операция <code>ConcurrentHashMap</code> по отдельности потокобезопасна, но их сочетание — нет:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class Compound {
+    static void inParallel(Runnable action) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        List&lt;Future&lt;?&gt;&gt; fs = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 80_000; i++) fs.add(pool.submit(action));
+        for (Future&lt;?&gt; f : fs) f.get();
+        pool.shutdown();
+    }
+
+    public static void main(String[] args) throws Exception {
+        Map&lt;String, Integer&gt; byBank = new ConcurrentHashMap&lt;&gt;();
+        inParallel(() -&gt; {                                                   // проверить, потом записать
+            Integer old = byBank.get("sber");
+            byBank.put("sber", old == null ? 1 : old + 1);
+        });
+        System.out.println("get + put: " + byBank.get("sber") + " из 80000");
+
+        Map&lt;String, Integer&gt; fixed = new ConcurrentHashMap&lt;&gt;();
+        inParallel(() -&gt; fixed.merge("sber", 1, Integer::sum));             // одна атомарная операция
+        System.out.println("merge:     " + fixed.get("sber") + " из 80000");
+    }
+}</code></pre>
+      <pre><code class="language-text">get + put: 69215 из 80000
+merge:     80000 из 80000</code></pre>
+      <p>Тот же <code>count++</code>, только распределённый по двум вызовам карты. <code>merge</code> делает чтение и запись одной атомарной операцией внутри карты.</p>
+      <p>Опаснее всего check-then-act в проверке идемпотентности. Брокер доставляет сообщение о платеже повторно, и обработчик проверяет, не отправляли ли его уже:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Idempotent {
+    static final AtomicInteger sent = new AtomicInteger();
+
+    static void send(String id) throws InterruptedException {
+        Thread.sleep(1);                                             // вызов платёжного шлюза
+        sent.incrementAndGet();
+    }
+
+    static void run(String name, Set&lt;String&gt; seen, Callable&lt;Void&gt; perMessage) throws Exception {
+        sent.set(0);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        List&lt;Future&lt;Void&gt;&gt; fs = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 2_000; i++) fs.add(pool.submit(perMessage));
+        for (Future&lt;Void&gt; f : fs) f.get();
+        pool.shutdown();
+        System.out.printf("%-16s отправлено %d, уникальных платежей %d%n", name, sent.get(), seen.size());
+    }
+
+    public static void main(String[] args) throws Exception {
+        Set&lt;String&gt; seen = ConcurrentHashMap.newKeySet();
+        run("contains + add:", seen, () -&gt; {
+            String id = "payment-" + ThreadLocalRandom.current().nextInt(500);  // брокер доставляет повторно
+            if (!seen.contains(id)) {                                    // проверили: ещё не отправляли
+                send(id);                                                // отправили
+                seen.add(id);                                            // отметили
+            }
+            return null;
+        });
+
+        Set&lt;String&gt; seen2 = ConcurrentHashMap.newKeySet();
+        run("add как проверка:", seen2, () -&gt; {
+            String id = "payment-" + ThreadLocalRandom.current().nextInt(500);
+            if (seen2.add(id)) send(id);                                 // add атомарно проверяет и отмечает
+            return null;
+        });
+    }
+}</code></pre>
+      <pre><code class="language-text">contains + add:  отправлено 510, уникальных платежей 488
+add как проверка: отправлено 486, уникальных платежей 486</code></pre>
+      <p>22 платежа ушли дважды: пока первый поток ходил в шлюз, второй успел проверить тот же id и тоже не нашёл его. <code>Set.add</code> возвращает <code>false</code>, если элемент уже был, и делает это атомарно — проверка и отметка стали одним действием. Числа случайные, но в трёх запусках дубли были каждый раз: 22, 21 и 16.</p>
+      <p>У потокобезопасных классов почти всегда есть атомарные версии частых составных действий. Их и нужно искать вместо «get, потом put»:</p>
+      <table class="mx">
+        <thead><tr><th>Составное действие</th><th>Атомарная замена</th></tr></thead>
+        <tbody>
+          <tr><td>если нет — положить</td><td><code>map.putIfAbsent(k, v)</code>, <code>map.computeIfAbsent(k, f)</code>, <code>set.add(x)</code></td></tr>
+          <tr><td>прочитать, изменить, записать</td><td><code>map.merge</code>, <code>map.compute</code>, <code>atomic.updateAndGet</code></td></tr>
+          <tr><td>увеличить счётчик</td><td><code>AtomicLong.incrementAndGet</code>, <code>LongAdder.increment</code></td></tr>
+          <tr><td>заменить, если значение не изменилось</td><td><code>map.replace(k, old, new)</code>, <code>atomic.compareAndSet</code></td></tr>
+        </tbody>
+      </table>
+      <p>Если нужной операции нет, составное действие целиком заключают под одну блокировку. В базе данных та же проблема решается уникальным индексом или <code>INSERT ... ON CONFLICT DO NOTHING</code>. Проверка в коде не спасёт, если экземпляров сервиса несколько.</p>
+    </section>
+
+    <section class="step" id="invariants">
+      <h2>Две атомарные переменные — ещё не атомарная пара</h2>
+      <p>Лимиты платежа хранятся в двух <code>AtomicLong</code>, и должно выполняться <code>min &lt;= max</code>. Каждый сеттер проверяет инвариант. Два потока меняют границы одновременно, и каждое изменение по отдельности допустимо:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.AtomicLong;
+
+public class Limits {
+    // инвариант: min &lt;= max
+    static final AtomicLong min = new AtomicLong(0), max = new AtomicLong(1_000);
+
+    static void setMin(long v) { if (v &lt;= max.get()) min.set(v); }   // каждая операция атомарна,
+    static void setMax(long v) { if (v &gt;= min.get()) max.set(v); }   // а пара — нет
+
+    public static void main(String[] args) throws Exception {
+        long broken = 0;
+        for (int round = 0; round &lt; 20_000; round++) {
+            min.set(0); max.set(1_000);
+            Thread a = new Thread(() -&gt; setMin(900));                // оба изменения по отдельности допустимы
+            Thread b = new Thread(() -&gt; setMax(100));
+            a.start(); b.start(); a.join(); b.join();
+            if (min.get() &gt; max.get()) broken++;
+        }
+        System.out.println("min &gt; max в " + broken + " раундах из 20000");
+    }
+}</code></pre>
+      <pre><code class="language-text">min &gt; max в 2 раундах из 20000</code></pre>
+      <p>Поток A проверил, что 900 ≤ 1000, поток B — что 100 ≥ 0. Обе проверки прошли на старых значениях, обе записи состоялись, и получилось <code>min = 900, max = 100</code>. Это случилось 2–3 раза на 20 000 попыток. Такую ошибку не поймает ни один тест, а в проде она однажды пропустит платёж, который лимит должен был запретить.</p>
+      <p>Правило: <b>все переменные одного инварианта защищаются вместе</b> — одной блокировкой или одной атомарной заменой. Второй вариант — сложить границы в неизменяемый объект и менять его целиком:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.AtomicReference;
+
+public class SafeLimits {
+    record Range(long min, long max) { }                            // неизменяемая пара
+    static final AtomicReference&lt;Range&gt; range = new AtomicReference&lt;&gt;(new Range(0, 1_000));
+
+    // обе границы меняются одной атомарной заменой всего объекта
+    static void setMin(long v) { range.updateAndGet(r -&gt; v &lt;= r.max() ? new Range(v, r.max()) : r); }
+    static void setMax(long v) { range.updateAndGet(r -&gt; v &gt;= r.min() ? new Range(r.min(), v) : r); }
+
+    public static void main(String[] args) throws Exception {
+        long broken = 0;
+        for (int round = 0; round &lt; 20_000; round++) {
+            range.set(new Range(0, 1_000));
+            Thread a = new Thread(() -&gt; setMin(900));
+            Thread b = new Thread(() -&gt; setMax(100));
+            a.start(); b.start(); a.join(); b.join();
+            Range r = range.get();
+            if (r.min() &gt; r.max()) broken++;
+        }
+        System.out.println("min &gt; max в " + broken + " раундах из 20000");
+    }
+}</code></pre>
+      <pre class="out">min &gt; max в 0 раундах из 20000</pre>
+      <p><code>updateAndGet</code> применяет функцию к текущему значению и подменяет его, только если за это время никто другой не успел. Иначе повторяет с новым значением. Проверка инварианта и запись стали одной операцией. Как устроен этот повтор — в теме Atomics &amp; CAS.</p>
+    </section>
+
+    <section class="step" id="immutability">
+      <h2>Неизменяемый объект потокобезопасен без единой блокировки</h2>
+      <p>Если состояние нельзя изменить, гонкам не на чем возникнуть. Неизменяемый объект можно отдавать любым потокам. Условия:</p>
+      <ul>
+        <li>все поля <code>final</code>, и состояние не меняется после конструктора;</li>
+        <li>ссылка <code>this</code> не утекает из конструктора — например, в регистрацию слушателя;</li>
+        <li>изменяемые объекты внутри не доступны снаружи: их копируют на входе и не отдают наружу.</li>
+      </ul>
+      <p>Поля <code>final</code> дают ещё и гарантию Java Memory Model: другой поток, получивший ссылку на объект, увидит их проинициализированными даже без синхронизации. Подробнее — в теме Java Memory Model.</p>
+      <p>Record выглядит неизменяемым, но его неизменяемость поверхностная: <code>final</code> — ссылка на список, а не сам список:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Orders {
+    record Order(String id, List&lt;String&gt; items) { }                  // поля final, но список — нет
+
+    record SafeOrder(String id, List&lt;String&gt; items) {
+        SafeOrder { items = List.copyOf(items); }                    // своя неизменяемая копия
+    }
+
+    public static void main(String[] args) {
+        List&lt;String&gt; items = new ArrayList&lt;&gt;(List.of("кофе"));
+        Order order = new Order("1", items);
+        SafeOrder safe = new SafeOrder("2", items);
+        items.add("торт");                                           // вызывающий меняет свой список
+        System.out.println("Order:     " + order.items());
+        System.out.println("SafeOrder: " + safe.items());
+        try {
+            safe.items().add("чай");
+        } catch (UnsupportedOperationException e) {
+            System.out.println("изменить SafeOrder нельзя: " + e.getClass().getSimpleName());
+        }
+    }
+}</code></pre>
+      <pre class="out">Order:     [кофе, торт]
+SafeOrder: [кофе]
+изменить SafeOrder нельзя: UnsupportedOperationException</pre>
+      <p><code>Order</code> изменился без единого вызова его методов: список остался общим с вызывающим. <code>List.copyOf</code> в компактном конструкторе делает собственную неизменяемую копию. Такой record можно передавать между потоками без оглядки.</p>
+      <p>Неизменяемость не запрещает изменений, а меняет их форму: вместо правки объекта создают новый. <code>String</code>, <code>BigDecimal</code>, <code>LocalDate</code> и <code>Range</code> из шага 4 работают так. Новое значение публикуют заменой одной ссылки — через <code>volatile</code>-поле или <code>AtomicReference</code>.</p>
+    </section>
+
+    <section class="step" id="confinement">
+      <h2>Лучшая синхронизация — не делить состояние вообще</h2>
+      <p>Самый надёжный способ — <b>thread confinement</b>: изменяемые данные доступны только одному потоку. Тогда синхронизация не нужна.</p>
+      <ul>
+        <li><b>Стек.</b> Локальные переменные и объекты, созданные внутри метода и никуда не сохранённые, видит только текущий поток. Исправление сервиса чеков из шага 1 — передавать пользователя параметром, а не хранить в поле. Синглтоны Spring должны быть без изменяемого состояния на запрос.</li>
+        <li><b><code>ThreadLocal</code></b> — копия на поток. Удобно для контекста запроса, но в пуле его нужно чистить (тема Threads).</li>
+        <li><b>Один поток-владелец.</b> Всё изменение состояния отдаётся одному потоку через очередь, например <code>Executors.newSingleThreadExecutor()</code>. Так устроены event loop в Netty и акторы: снаружи много потоков, внутри последовательная обработка.</li>
+      </ul>
+      <p>Если делить состояние всё-таки нужно, остаётся синхронизация. Её инструменты сильно различаются по цене. Тот же счётчик из шага 2, 8 потоков по миллиону увеличений:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.*;
+
+public class Fixes {
+    static int plain;
+    static int locked;
+    static final Object LOCK = new Object();
+    static final AtomicInteger atomic = new AtomicInteger();
+    static final LongAdder adder = new LongAdder();
+
+    static long run(Runnable increment) throws InterruptedException {
+        Thread[] threads = new Thread[8];
+        long start = System.nanoTime();
+        for (int t = 0; t &lt; threads.length; t++) {
+            threads[t] = new Thread(() -&gt; { for (int i = 0; i &lt; 1_000_000; i++) increment.run(); });
+            threads[t].start();
+        }
+        for (Thread t : threads) t.join();
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    public static void main(String[] args) throws Exception {
+        long ms;
+        ms = run(() -&gt; plain++);
+        System.out.printf("без защиты:    %8d за %4d мс%n", plain, ms);
+        ms = run(() -&gt; { synchronized (LOCK) { locked++; } });
+        System.out.printf("synchronized:  %8d за %4d мс%n", locked, ms);
+        ms = run(atomic::incrementAndGet);
+        System.out.printf("AtomicInteger: %8d за %4d мс%n", atomic.get(), ms);
+        ms = run(adder::increment);
+        System.out.printf("LongAdder:     %8d за %4d мс%n", adder.sum(), ms);
+    }
+}</code></pre>
+      <pre><code class="language-text">без защиты:     1342708 за    4 мс
+synchronized:   8000000 за  185 мс
+AtomicInteger:  8000000 за   69 мс
+LongAdder:      8000000 за    7 мс</code></pre>
+      <p>Без защиты — быстро и неправильно. <code>synchronized</code> правилен, но потоки выстраиваются в очередь за монитором. <code>AtomicInteger</code> обходится без блокировки, но все 8 потоков бьются за одну ячейку памяти. <code>LongAdder</code> раскладывает счёт по нескольким ячейкам и складывает их при чтении, поэтому почти не мешает потокам. Цифры из трёх запусков сходятся с точностью до 10%. Устройство каждого варианта — в темах synchronized, Locks и Atomics &amp; CAS.</p>
+      <p>Порядок выбора такой:</p>
+      <ol>
+        <li>Можно не делить состояние — не делить: параметры, локальные переменные, один поток-владелец.</li>
+        <li>Можно сделать неизменяемым — сделать: records с копиями, замена целого объекта.</li>
+        <li>Иначе — готовые потокобезопасные классы и их атомарные операции: <code>ConcurrentHashMap.merge</code>, атомики.</li>
+        <li>И только потом свои блокировки. Одна блокировка на весь инвариант, и документировать, что именно она защищает.</li>
+      </ol>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Проблемы возникают, только когда несколько потоков обращаются к общему изменяемому состоянию. Три защиты: не делить, сделать неизменяемым, синхронизировать.</li>
+        <li><code>count++</code> — чтение, изменение и запись. Без атомарности увеличения теряются: в замере 70–85%. <code>volatile</code> не помогает.</li>
+        <li>Check-then-act ломается и на потокобезопасных коллекциях. Нужны атомарные операции: <code>merge</code>, <code>computeIfAbsent</code>, <code>putIfAbsent</code>, <code>Set.add</code> как проверка.</li>
+        <li>Переменные одного инварианта защищают вместе: одной блокировкой или неизменяемым объектом в <code>AtomicReference</code>.</li>
+        <li>Неизменяемый объект — <code>final</code>-поля, без утечки <code>this</code>, с копиями изменяемых частей. Record неизменяем только поверхностно.</li>
+        <li>Синглтоны вроде Spring-бинов не хранят данные запроса в полях.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-thread-safe" data-freq="3">
+      <h3>Что значит «потокобезопасный класс» и как его добиться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Класс ведёт себя правильно при вызове из нескольких потоков при любом их чередовании и не требует от вызывающих дополнительной синхронизации. Проблемы возникают только из-за общего изменяемого состояния, поэтому способа три. Не делить состояние: локальные переменные, параметры, <code>ThreadLocal</code>, один поток-владелец. Сделать его неизменяемым. Или синхронизировать доступ: <code>synchronized</code>, <code>Lock</code>, атомики, потокобезопасные коллекции.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Все переменные одного инварианта защищаются одной блокировкой или меняются одной атомарной заменой неизменяемого объекта.</li>
+            <li>Потокобезопасность составных действий над потокобезопасными объектами не наследуется: <code>get</code> плюс <code>put</code> на <code>ConcurrentHashMap</code> теряет обновления.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>@Service с полем private String currentUser, которое метод заполняет в начале обработки запроса. Что не так?</summary>
+          <p>Бин — синглтон, поле общее для всех потоков запросов. Пока один запрос работает, другой перезаписывает пользователя. В замере урока 95% чеков получили чужое имя. Пользователя нужно передавать параметром или брать из контекста запроса; бины не хранят данные запроса в полях.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="race-condition" data-freq="3">
+      <h3>Что такое race condition? Почему count++ не потокобезопасен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Race condition — ситуация, когда результат зависит от чередования потоков. <code>count++</code> — это три операции: прочитать, прибавить, записать. Если два потока прочитали одно значение, одна запись затрёт другую. В замере 8 потоков по миллиону увеличений потеряли больше двух третей. Лечится атомарностью: <code>synchronized</code>, <code>AtomicInteger.incrementAndGet()</code> или <code>LongAdder</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Data race — термин JMM: доступ к переменной из нескольких потоков без синхронизации, и хотя бы один пишет. Race condition бывает и без data race — например, check-then-act на <code>ConcurrentHashMap</code>.</li>
+            <li><code>volatile</code> даёт видимость, но не атомарность составных операций.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Поможет ли сделать count volatile?</summary>
+          <p>Нет. <code>volatile</code> гарантирует, что каждое чтение видит последнюю запись, но между чтением и записью в <code>count++</code> другой поток всё так же успевает вклиниться. Нужна атомарная операция или блокировка.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="check-then-act-q" data-freq="2">
+      <h3>Что такое check-then-act и как с ним бороться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Шаблон «проверить условие, потом действовать»: ленивая инициализация, «если ключа нет — положить», «если платёж ещё не отправлен — отправить». Между проверкой и действием другой поток может изменить условие. Лечится тем, что проверку и действие делают одной атомарной операцией: <code>putIfAbsent</code>, <code>computeIfAbsent</code>, <code>merge</code>, <code>Set.add</code> как проверка — или ставят обе части под одну блокировку.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>if (!sent.contains(id)) { gateway.send(id); sent.add(id); } — sent это ConcurrentHashMap.newKeySet(). Может ли платёж уйти дважды? Как исправить?</summary>
+          <p>Может: два потока с одним id оба проверят <code>contains</code> до того, как кто-то вызовет <code>add</code>. В замере урока из 2000 сообщений 22 платежа ушли дважды. Исправление — <code>if (sent.add(id)) gateway.send(id);</code>. Если сервис запущен в нескольких экземплярах, нужна проверка в общем хранилище — например, уникальный ключ в базе.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="immutable-q" data-freq="2">
+      <h3>Почему неизменяемые объекты потокобезопасны? Как сделать класс неизменяемым?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Их состояние нельзя изменить, значит, гонкам не на чем возникнуть, и синхронизация не нужна. Правила: все поля <code>final</code>, нет сеттеров, <code>this</code> не утекает из конструктора, изменяемые поля копируются на входе и не отдаются наружу. Record помогает, но его неизменяемость поверхностная: список внутри нужно копировать через <code>List.copyOf</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JMM гарантирует видимость <code>final</code>-полей после конструктора любому потоку, получившему ссылку, даже при публикации без синхронизации.</li>
+            <li>Изменения делают заменой целого объекта через <code>volatile</code>-поле или <code>AtomicReference</code>. Так защищают инварианты из нескольких полей.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 2–3 «Thread Safety», «Sharing Objects» — основа урока: атомарность, составные действия, инварианты, неизменяемость, confinement.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html">JLS 21, глава 17: Threads and Locks</a> — формальное определение data race и семантика <code>final</code>-полей.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html">ConcurrentHashMap (JDK 21)</a> — какие операции атомарны: <code>merge</code>, <code>compute</code>, <code>putIfAbsent</code>.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
