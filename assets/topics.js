@@ -379,7 +379,7 @@ window.KB_TREE = [
           scope: 'static nested, inner, локальные, анонимные, утечка ссылки на внешний объект' },
       ] },
       { id: 'collections', title: 'Collections', source: 'Core Java т. I, гл. Collections; Baeldung: Collections Interview Questions', items: [
-        { id: 'collections', freq: 3, status: 'empty', title: 'Overview',
+        { id: 'collections', freq: 3, status: 'draft', title: 'Overview',
           scope: 'иерархия Collection и Map, выбор реализации, Iterator, fail-fast, Comparator, List.of, Sequenced Collections' },
         { id: 'lists', freq: 3, status: 'empty', title: 'List',
           scope: 'ArrayList и LinkedList, рост массива, сложность операций, удаление при обходе' },

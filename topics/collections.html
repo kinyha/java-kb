@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Collections Overview · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="collections">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Collections Overview</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="five-lists">
+      <h2>Пять объектов с типом List: add, set и contains(null) ведут себя по-разному</h2>
+      <p>Сервис проверки платежей держит список заблокированных счетов. Список приходит из разных мест: из базы, из конфига, из кеша, из стрима. Везде тип один — <code>List&lt;String&gt;</code>. Код проверки вызывает <code>contains(account)</code>, где <code>account</code> бывает <code>null</code> у платежей без счёта-отправителя, а процедура обновления делает <code>add</code> и <code>set</code>. Что будет с каждым из списков:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class FiveLists {
+    static String attempt(Runnable action) {                       // выполнить и вернуть ok или имя исключения
+        try { action.run(); return "ok"; }
+        catch (RuntimeException e) { return e.getClass().getSimpleName(); }
+    }
+
+    public static void main(String[] args) {
+        List&lt;String&gt; fromDb = new ArrayList&lt;&gt;(List.of("acc-1", "acc-2", "acc-3"));
+        Map&lt;String, List&lt;String&gt;&gt; lists = new LinkedHashMap&lt;&gt;();
+        lists.put("new ArrayList", new ArrayList&lt;&gt;(fromDb));                    // обычный изменяемый список
+        lists.put("Arrays.asList", Arrays.asList("acc-1", "acc-2", "acc-3"));    // обёртка над массивом
+        lists.put("List.of", List.of("acc-1", "acc-2", "acc-3"));              // неизменяемый, Java 9
+        lists.put("unmodifiableList", Collections.unmodifiableList(fromDb));    // обёртка только для чтения
+        lists.put("stream().toList()", fromDb.stream().toList());              // неизменяемый, Java 16
+
+        System.out.printf("%-18s %-30s %-30s %s%n", "", "add", "set(0, …)", "contains(null)");
+        lists.forEach((name, list) -&gt; System.out.printf("%-18s %-30s %-30s %s%n", name,
+            attempt(() -&gt; list.add("acc-4")),
+            attempt(() -&gt; list.set(0, "acc-0")),
+            attempt(() -&gt; list.contains(null))));
+    }
+}</code></pre>
+      <pre class="out">                   add                            set(0, …)                      contains(null)
+new ArrayList      ok                             ok                             ok
+Arrays.asList      UnsupportedOperationException  ok                             ok
+List.of            UnsupportedOperationException  UnsupportedOperationException  NullPointerException
+unmodifiableList   UnsupportedOperationException  UnsupportedOperationException  ok
+stream().toList()  UnsupportedOperationException  UnsupportedOperationException  ok</pre>
+      <p>Пять объектов одного типа — четыре разных поведения. <code>Arrays.asList</code> разрешает <code>set</code>, но не <code>add</code>. <code>List.of</code> падает даже на безобидном <code>contains(null)</code>. В юнит-тесте, где список создан через <code>new ArrayList</code>, всё проходит, а в проде тот же метод получает <code>List.of</code> из конфига и падает.</p>
+      <p>Это не баг JDK, а контракт. В javadoc <code>List.add</code> помечен как <i>optional operation</i>: реализация вправе отказаться и бросить <code>UnsupportedOperationException</code>. <code>Collection</code> так же разрешает реализациям запрещать <code>null</code> и бросать <code>NullPointerException</code> даже при поиске. Интерфейс говорит, <b>какие операции существуют</b>, но не обещает, что они разрешены. Изменяемость и отношение к <code>null</code> — свойство конкретной реализации.</p>
+      <p>Отсюда устройство урока. Сначала карта: какие интерфейсы есть и как выбрать реализацию. Потом неизменяемые коллекции и представления — источник первого сюрприза. Потом итератор и <code>ConcurrentModificationException</code>, порядок через <code>Comparator</code>, новые методы Java 21 и в конце — сколько коллекции стоят по памяти.</p>
+    </section>
+
+    <section class="step" id="hierarchy">
+      <h2>Collection и Map — две иерархии, а реализацию выбирают по нужным операциям</h2>
+      <p>Каркас коллекций — набор интерфейсов. Каждый добавляет обещание к родителю. <code>Collection</code> — группа элементов: добавить, удалить, проверить наличие, обойти. <code>List</code> добавляет порядок и доступ по индексу, <code>Set</code> — уникальность, <code>Queue</code> — «взять следующий». <code>Map</code> стоит отдельно: она хранит пары ключ → значение, и операция «добавить элемент» у неё не имеет смысла — нужен ещё ключ.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 380" role="img" aria-label="Иерархия интерфейсов коллекций в Java 21. Iterable над Collection. От Collection наследуются Set, SequencedCollection и Queue. List наследует SequencedCollection, Deque наследует Queue и SequencedCollection, SequencedSet наследует Set и SequencedCollection. NavigableSet через SortedSet наследует SequencedSet. Отдельная иерархия Map, SequencedMap и NavigableMap через SortedMap; Map не наследует Collection, но отдаёт коллекции keySet, values и entrySet. Под каждым интерфейсом — его основные реализации.">
+            <defs>
+              <marker id="hi-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="168" y="22" class="dg-cap">COLLECTION</text>
+            <text x="562" y="22" class="dg-cap">MAP</text>
+
+            <!-- интерфейсы Collection -->
+            <rect x="168" y="36" width="172" height="34" rx="7" class="dg-box"/>
+            <rect x="168" y="96" width="172" height="34" rx="7" class="dg-box"/>
+            <rect x="14" y="160" width="134" height="48" rx="7" class="dg-box"/>
+            <rect x="168" y="160" width="172" height="48" rx="7" class="dg-cell hit"/>
+            <rect x="360" y="160" width="180" height="48" rx="7" class="dg-box"/>
+            <rect x="14" y="240" width="134" height="48" rx="7" class="dg-cell hit"/>
+            <rect x="168" y="240" width="172" height="48" rx="7" class="dg-box"/>
+            <rect x="360" y="240" width="180" height="48" rx="7" class="dg-box"/>
+            <rect x="14" y="316" width="134" height="48" rx="7" class="dg-box"/>
+
+            <!-- интерфейсы Map -->
+            <rect x="562" y="96" width="144" height="48" rx="7" class="dg-box"/>
+            <rect x="562" y="160" width="144" height="48" rx="7" class="dg-cell hit"/>
+            <rect x="562" y="240" width="144" height="48" rx="7" class="dg-box"/>
+
+            <!-- наследование: от потомка к родителю -->
+            <path d="M254 96 L 254 74" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M81 160 C 81 142, 200 148, 212 134" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M254 160 L 254 134" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M450 160 C 450 142, 310 148, 298 134" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M81 240 L 81 212" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M148 256 C 190 256, 200 232, 212 212" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M254 240 L 254 212" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M450 240 L 450 212" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M360 256 C 320 256, 308 232, 298 212" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M81 316 L 81 292" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M634 160 L 634 148" class="dg-line" marker-end="url(#hi-n)"/>
+            <path d="M634 240 L 634 212" class="dg-line" marker-end="url(#hi-n)"/>
+            <!-- Map отдаёт коллекции-представления -->
+            <path d="M558 113 L 344 113" class="dg-line" stroke-dasharray="4 4" marker-end="url(#hi-n)"/>
+
+            <!-- подписи интерфейсов -->
+            <g text-anchor="middle">
+              <text x="254" y="58" class="dg-t">Iterable</text>
+              <text x="254" y="118" class="dg-t">Collection</text>
+              <text x="81" y="180" class="dg-t">Set</text>
+              <text x="254" y="180" class="dg-t">SequencedCollection</text>
+              <text x="450" y="180" class="dg-t">Queue</text>
+              <text x="81" y="260" class="dg-t">SequencedSet</text>
+              <text x="254" y="260" class="dg-t">List</text>
+              <text x="450" y="260" class="dg-t">Deque</text>
+              <text x="81" y="336" class="dg-t">NavigableSet</text>
+              <text x="634" y="116" class="dg-t">Map</text>
+              <text x="634" y="180" class="dg-t">SequencedMap</text>
+              <text x="634" y="260" class="dg-t">NavigableMap</text>
+            </g>
+            <!-- реализации -->
+            <g text-anchor="middle">
+              <text x="81" y="198" class="dg-in">HashSet</text>
+              <text x="254" y="198" class="dg-n">Java 21</text>
+              <text x="450" y="198" class="dg-in">PriorityQueue</text>
+              <text x="81" y="278" class="dg-in">LinkedHashSet</text>
+              <text x="254" y="278" class="dg-in">ArrayList, LinkedList</text>
+              <text x="450" y="278" class="dg-in">ArrayDeque, LinkedList</text>
+              <text x="81" y="354" class="dg-in">TreeSet</text>
+              <text x="634" y="134" class="dg-in">HashMap</text>
+              <text x="634" y="198" class="dg-in">LinkedHashMap</text>
+              <text x="634" y="278" class="dg-in">TreeMap</text>
+            </g>
+            <text x="89" y="308" class="dg-n">через SortedSet</text>
+            <text x="626" y="229" class="dg-n" text-anchor="end">через SortedMap</text>
+            <text x="451" y="105" class="dg-n" text-anchor="middle">keySet(), values(), entrySet()</text>
+          </svg>
+        </div>
+        <figcaption>Стрелка ведёт от интерфейса к родителю, строкой ниже названия — основные реализации. Зелёные интерфейсы появились в Java 21 и встали между старыми (шаг 6). LinkedList реализует сразу List и Deque.</figcaption>
+      </figure>
+      <p>По схеме видно, почему <code>Map</code> — не <code>Collection</code>: у неё другая основная операция, <code>put(key, value)</code>. Но <code>Map</code> отдаёт три коллекции-представления: <code>keySet()</code>, <code>values()</code>, <code>entrySet()</code>. Через них карту обходят и чистят. Над всем стоит <code>Iterable</code> — «можно обойти в for-each».</p>
+      <p>Реализацию выбирают не по названию, а по операциям, которые нужны быстро, и по порядку обхода:</p>
+      <table class="mx">
+        <thead><tr><th>Нужно</th><th>Бери</th><th>Внутри</th><th>Порядок обхода</th><th>Цена операций</th></tr></thead>
+        <tbody>
+          <tr><td>список, доступ по индексу, добавление в конец</td><td><code>ArrayList</code></td><td>массив с запасом</td><td>по индексу</td><td><code>get</code> O(1), <code>add</code> в конец O(1) в среднем, вставка в середину O(n)</td></tr>
+          <tr><td>очередь или стек</td><td><code>ArrayDeque</code></td><td>кольцевой массив</td><td>от головы к хвосту</td><td>добавить и взять с любого края O(1)</td></tr>
+          <tr><td>ключ → значение</td><td><code>HashMap</code></td><td>массив корзин</td><td>не определён</td><td><code>get</code>, <code>put</code> O(1) в среднем</td></tr>
+          <tr><td>уникальность и быстрый <code>contains</code></td><td><code>HashSet</code></td><td><code>HashMap</code> без значений</td><td>не определён</td><td>O(1) в среднем</td></tr>
+          <tr><td>то же, но в порядке добавления</td><td><code>LinkedHashSet</code>, <code>LinkedHashMap</code></td><td>хеш-таблица и двусвязный список</td><td>порядок вставки</td><td>O(1) в среднем</td></tr>
+          <tr><td>сортировка, диапазоны, «ближайший больший»</td><td><code>TreeSet</code>, <code>TreeMap</code></td><td>красно-чёрное дерево</td><td>по возрастанию</td><td>O(log n), <code>floor</code>, <code>ceiling</code>, <code>subMap</code></td></tr>
+          <tr><td>всегда брать самый срочный</td><td><code>PriorityQueue</code></td><td>двоичная куча в массиве</td><td>не отсортирован</td><td><code>offer</code>, <code>poll</code> O(log n), <code>peek</code> O(1)</td></tr>
+          <tr><td>ключи — значения enum</td><td><code>EnumMap</code>, <code>EnumSet</code></td><td>массив, битовая маска</td><td>порядок констант</td><td>O(1) без хеширования</td></tr>
+          <tr><td>доступ из нескольких потоков</td><td><code>ConcurrentHashMap</code> и др.</td><td colspan="3">тема Concurrent Collections</td></tr>
+        </tbody>
+      </table>
+      <p>Устройство каждой строки разобрано в следующих темах папки: List, HashMap, Other Maps &amp; Sets, Queue &amp; Deque. Здесь важен один столбец — <b>порядок обхода</b>. «Не определён» значит, что на порядок нельзя опираться вовсе. Для неизменяемых <code>Set.of</code> и <code>Map.of</code> JDK делает это правило наглядным: порядок обхода меняется от запуска к запуску.</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class MapOrder {
+    public static void main(String[] args) {
+        Map&lt;String, Integer&gt; limits = Map.of("RUB", 100, "USD", 5, "EUR", 4, "CNY", 30);
+        Map&lt;String, Integer&gt; copy = new HashMap&lt;&gt;(limits);          // HashMap из тех же четырёх пар
+        System.out.println("Map.of:  " + limits.keySet());
+        System.out.println("HashMap: " + copy.keySet());
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java MapOrder          # три запуска подряд, один и тот же class-файл
+Map.of:  [CNY, RUB, USD, EUR]
+HashMap: [EUR, RUB, CNY, USD]
+Map.of:  [EUR, CNY, RUB, USD]
+HashMap: [EUR, RUB, CNY, USD]
+Map.of:  [RUB, USD, EUR, CNY]
+HashMap: [EUR, RUB, USD, CNY]      # и HashMap тоже поменял порядок</code></pre>
+      <p><code>Map.of</code> при старте JVM берёт случайную «соль» из <code>System.nanoTime()</code> и от неё начинает обход. Так сделано нарочно, чтобы код, случайно зависящий от порядка, сломался в тестах, а не в проде после обновления JDK. Интереснее вторая строка. <code>HashMap</code> тоже поменял порядок: USD и CNY попали в одну корзину из восьми, и внутри корзины они лежат в порядке вставки — а вставляли их в порядке обхода <code>Map.of</code>. Порядок <code>HashMap</code> зависит от хешей, ёмкости таблицы и истории вставок. Нужен предсказуемый — бери <code>LinkedHashMap</code> или <code>TreeMap</code>.</p>
+      <div class="trap">
+        <p class="myth">HashMap обходит ключи в порядке добавления, по крайней мере для маленьких карт.</p>
+        <p class="fact">Порядок определяется номерами корзин, и при расширении таблицы он меняется целиком. Тесты, которые сравнивают <code>toString()</code> карты или JSON из <code>HashMap</code> со строкой-эталоном, ломаются при смене ключей, ёмкости или версии JDK.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: RandomAccess, AbstractList и класс Collections</summary>
+        <p><code>RandomAccess</code> — пустой интерфейс-метка. Его реализует <code>ArrayList</code> и не реализует <code>LinkedList</code>. Алгоритмы из класса <code>Collections</code> (<code>binarySearch</code>, <code>shuffle</code>) проверяют метку и для списков без неё идут через итератор, а не через <code>get(i)</code>, который у связного списка стоит O(n).</p>
+        <p>Классы <code>AbstractCollection</code>, <code>AbstractList</code>, <code>AbstractMap</code> реализуют большинство методов через несколько базовых. Чтобы написать свой список только для чтения, достаточно <code>get</code> и <code>size</code>, а <code>add</code> по умолчанию бросит <code>UnsupportedOperationException</code> — так и устроены «необязательные операции».</p>
+        <p><code>Collections</code> (с «s») — не интерфейс, а служебный класс со статическими методами: <code>sort</code>, <code>unmodifiableList</code>, <code>synchronizedMap</code>, <code>emptyList</code>, <code>nCopies</code>. Путать его с <code>Collection</code> — классика вопросов для джунов.</p>
+      </details>
+    </section>
+
+    <section class="step" id="immutable">
+      <h2>List.of — неизменяемая копия, а unmodifiableList и Arrays.asList — окна в чужие данные</h2>
+      <p>Вернёмся к первому шагу. Три «нестандартных» списка из пяти устроены по-разному, и разница важнее, чем кажется. Одни — <b>копии</b> со своим хранилищем. Другие — <b>представления</b> (view): у них нет своих данных, они обращаются к чужому массиву или списку.</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Views {
+    public static void main(String[] args) {
+        String[] fromConfig = {"acc-1", "acc-2", "acc-3"};
+        List&lt;String&gt; asList = Arrays.asList(fromConfig);            // обёртка над тем же массивом
+        asList.set(0, "acc-X");                                     // пишет прямо в массив
+        System.out.println("массив после asList.set: " + Arrays.toString(fromConfig));
+
+        List&lt;String&gt; source = new ArrayList&lt;&gt;(List.of("acc-1", "acc-2", "acc-3"));
+        List&lt;String&gt; view = Collections.unmodifiableList(source);   // окно только для чтения
+        List&lt;String&gt; copy = List.copyOf(source);                    // снимок в собственный массив
+        source.add("acc-4");                                        // меняем исходный список
+        System.out.println("view: " + view + ", copy: " + copy);
+
+        List&lt;String&gt; firstTwo = source.subList(0, 2);               // subList — тоже представление
+        firstTwo.clear();                                           // удаляет из source
+        System.out.println("source после subList.clear(): " + source);
+        System.out.println("List.copyOf(copy) == copy: " + (List.copyOf(copy) == copy));
+    }
+}</code></pre>
+      <pre class="out">массив после asList.set: [acc-X, acc-2, acc-3]
+view: [acc-1, acc-2, acc-3, acc-4], copy: [acc-1, acc-2, acc-3]
+source после subList.clear(): [acc-3, acc-4]
+List.copyOf(copy) == copy: true</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Переменная source ссылается на ArrayList с массивом. Обёртка unmodifiableList хранит ссылку на тот же ArrayList, поэтому видит каждое добавление. List.copyOf создаёт отдельный неизменяемый список со своим массивом, и дальнейшие изменения source его не касаются.">
+            <defs>
+              <marker id="vw-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ПЕРЕМЕННЫЕ</text>
+            <text x="180" y="24" class="dg-cap">HEAP</text>
+
+            <!-- ArrayList с массивом -->
+            <rect x="180" y="36" width="330" height="70" rx="8" class="dg-box"/>
+            <text x="192" y="54" class="dg-t">ArrayList</text>
+            <rect x="192" y="64" width="56" height="30" rx="5" class="dg-cell"/>
+            <rect x="254" y="64" width="56" height="30" rx="5" class="dg-cell"/>
+            <rect x="316" y="64" width="56" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="3-" x="378" y="64" width="56" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="5" x="440" y="64" width="56" height="30" rx="5" class="dg-cell hit"/>
+
+            <!-- обёртка -->
+            <g data-s="2-">
+              <rect x="180" y="126" width="170" height="34" rx="7" class="dg-box"/>
+              <path d="M265 126 L 265 110" class="dg-line" marker-end="url(#vw-n)"/>
+            </g>
+
+            <!-- копия со своим массивом -->
+            <g data-s="4-">
+              <rect x="180" y="182" width="330" height="54" rx="8" class="dg-box"/>
+              <rect x="192" y="198" width="56" height="30" rx="5" class="dg-cell"/>
+              <rect x="254" y="198" width="56" height="30" rx="5" class="dg-cell"/>
+              <rect x="316" y="198" width="56" height="30" rx="5" class="dg-cell"/>
+              <rect x="378" y="198" width="56" height="30" rx="5" class="dg-cell"/>
+            </g>
+
+            <!-- ссылки из переменных -->
+            <path d="M84 71 L 176 71" class="dg-line" marker-end="url(#vw-n)"/>
+            <path data-s="2-" d="M84 143 L 176 143" class="dg-line" marker-end="url(#vw-n)"/>
+            <path data-s="4-" d="M84 209 L 176 209" class="dg-line" marker-end="url(#vw-n)"/>
+
+            <!-- подписи -->
+            <text x="20" y="75" class="dg-in">source</text>
+            <text data-s="2-" x="20" y="147" class="dg-in">view</text>
+            <text data-s="4-" x="20" y="213" class="dg-in">copy</text>
+            <g text-anchor="middle">
+              <text x="220" y="84" class="dg-in">p1</text><text x="282" y="84" class="dg-in">p2</text><text x="344" y="84" class="dg-in">p3</text>
+              <text data-s="3-" x="406" y="84" class="dg-in">p4</text>
+              <text data-s="5" x="468" y="84" class="dg-in">p5</text>
+            </g>
+            <text data-s="2-" x="265" y="148" class="dg-in" text-anchor="middle">UnmodifiableList</text>
+            <g data-s="4-">
+              <text x="468" y="193" class="dg-n" text-anchor="middle">ListN</text>
+              <g text-anchor="middle"><text x="220" y="218" class="dg-in">p1</text><text x="282" y="218" class="dg-in">p2</text><text x="344" y="218" class="dg-in">p3</text><text x="406" y="218" class="dg-in">p4</text></g>
+            </g>
+
+            <!-- счётчики: отдельный слой на шаг -->
+            <g data-s="1"><text x="540" y="75" class="dg-in">size = 3</text></g>
+            <g data-s="2"><text x="540" y="75" class="dg-in">size = 3</text><text x="540" y="147" class="dg-in">view: 3</text><text x="540" y="165" class="dg-bad">add → UOE</text></g>
+            <g data-s="3"><text x="540" y="75" class="dg-in">size = 4</text><text x="540" y="147" class="dg-ok">view: 4</text></g>
+            <g data-s="4"><text x="540" y="75" class="dg-in">size = 4</text><text x="540" y="147" class="dg-in">view: 4</text><text x="540" y="213" class="dg-in">copy: 4</text></g>
+            <g data-s="5"><text x="540" y="75" class="dg-in">size = 5</text><text x="540" y="147" class="dg-ok">view: 5</text><text x="540" y="213" class="dg-in">copy: 4</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>source = new ArrayList&lt;&gt;(…)</code>: объект списка и внутри него массив с тремя ссылками. Как массив растёт при добавлении — тема List.</li>
+          <li><code>view = Collections.unmodifiableList(source)</code> создаёт маленький объект-обёртку с одним полем — ссылкой на тот же <code>ArrayList</code>. Методы записи обёртки бросают <code>UnsupportedOperationException</code>, методы чтения переадресуются в <code>source</code>.</li>
+          <li><code>source.add("p4")</code> меняет массив. Обёртка не хранит копии, поэтому <code>view.size()</code> уже 4. Запрещена запись <i>через обёртку</i>, а не сама запись.</li>
+          <li><code>copy = List.copyOf(source)</code> копирует четыре ссылки в собственный массив неизменяемого списка <code>ListN</code>. С этого момента он ни от кого не зависит.</li>
+          <li><code>source.add("p5")</code>: обёртка видит пять элементов, копия — по-прежнему четыре. Копию можно отдать кому угодно, обёртку — только если исходник больше никто не меняет.</li>
+        </ol>
+      </figure>
+      <p>Все способы получить «неизменяемый» список в одной таблице:</p>
+      <table class="mx">
+        <thead><tr><th>Как получен</th><th>Что это</th><th>Изменения источника видны</th><th>null</th><th>Запись</th></tr></thead>
+        <tbody>
+          <tr><td><code>List.of</code>, <code>List.copyOf</code> (9, 10)</td><td>копия</td><td>нет</td><td>запрещён, даже в <code>contains</code></td><td>UOE</td></tr>
+          <tr><td><code>stream().toList()</code> (16)</td><td>копия</td><td>нет</td><td>разрешён</td><td>UOE</td></tr>
+          <tr><td><code>Collectors.toList()</code></td><td>копия, сейчас <code>ArrayList</code></td><td>нет</td><td>разрешён</td><td>работает, но javadoc этого не обещает</td></tr>
+          <tr><td><code>Collections.unmodifiableList</code></td><td>представление</td><td>да</td><td>как у источника</td><td>UOE через обёртку</td></tr>
+          <tr><td><code>Arrays.asList</code></td><td>представление массива</td><td>да, в обе стороны</td><td>разрешён</td><td><code>set</code> работает, <code>add</code> и <code>remove</code> — UOE</td></tr>
+          <tr><td><code>subList</code>, <code>keySet()</code>, <code>values()</code></td><td>представление</td><td>да, в обе стороны</td><td>как у источника</td><td>удаление меняет источник</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Геттер, который возвращает Collections.unmodifiableList(items), защищает список от изменений.</p>
+        <p class="fact">Он защищает только от записи через возвращённый объект. Класс продолжает менять <code>items</code>, и вызывающий увидит изменения, в том числе посреди своего обхода. Если нужен снимок, возвращай <code>List.copyOf(items)</code>.</p>
+      </div>
+      <p>Неизменяемые коллекции из <code>List.of</code>, <code>Set.of</code>, <code>Map.of</code> к тому же строгие: ловят ошибки при создании, а не при использовании.</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.stream.*;
+
+public class Strict {
+    static void attempt(String name, Runnable action) {
+        try { action.run(); System.out.println(name + ": ok"); }
+        catch (RuntimeException e) { System.out.println(name + ": " + e.getClass().getSimpleName()); }
+    }
+
+    public static void main(String[] args) {
+        attempt("Set.of с дубликатом", () -&gt; Set.of("RUB", "USD", "RUB"));      // дубликат — ошибка создания
+        attempt("Map.of с null", () -&gt; Map.of("RUB", null));                   // null нельзя ни в ключ, ни в значение
+        attempt("toList() с null", () -&gt; Stream.of("acc-1", null).toList());    // этот метод null пропускает
+        Map&lt;String, Integer&gt; limits = Map.of("RUB", 100);
+        attempt("Map.of containsKey(null)", () -&gt; limits.containsKey(null));     // даже вопрос про null запрещён
+        attempt("HashMap containsKey(null)", () -&gt; new HashMap&lt;&gt;(limits).containsKey(null));
+    }
+}</code></pre>
+      <pre class="out">Set.of с дубликатом: IllegalArgumentException
+Map.of с null: NullPointerException
+toList() с null: ok
+Map.of containsKey(null): NullPointerException
+HashMap containsKey(null): ok</pre>
+      <p>Почему так строго. <code>null</code> в коллекции почти всегда — ошибка данных, и лучше упасть там, где он появился, чем через час в чужом коде. Дубликат в <code>Set.of</code> — скорее всего опечатка в константе. А неизменяемость даёт то же, что у <code>String</code>: такой список можно без копирования отдавать между потоками и хранить в полях. Поэтому <code>List.copyOf</code> от уже неизменяемого списка возвращает тот же объект — копировать незачем.</p>
+    </section>
+
+    <section class="step" id="iterator">
+      <h2>Итератор fail-fast замечает изменение мимо себя по счётчику modCount</h2>
+      <p>Любой for-each по коллекции — это <code>Iterator</code>. Компилятор разворачивает цикл в вызовы <code>iterator()</code>, <code>hasNext()</code> и <code>next()</code>:</p>
+      <pre><code class="language-text">$ javap -c ForEach        # отрывок метода total: for (long a : amounts) sum += a;
+   3: invokeinterface #7,  1   // InterfaceMethod java/util/Collection.iterator:()Ljava/util/Iterator;
+  10: invokeinterface #13,  1  // InterfaceMethod java/util/Iterator.hasNext:()Z
+  15: ifeq          40         # элементов нет — выход из цикла
+  19: invokeinterface #19,  1  // InterfaceMethod java/util/Iterator.next:()Ljava/lang/Object;
+  24: checkcast     #23        // class java/lang/Long
+  27: invokevirtual #25        // Method java/lang/Long.longValue:()J
+  37: goto          9          # снова hasNext()</code></pre>
+      <p>Итератор хранит позицию обхода. Если коллекцию поменять мимо него — удалить элемент прямо через <code>map.remove</code>, — позиция может указывать на удалённое или пропустить элемент. Вместо тихой порчи обычные коллекции <code>java.util</code> падают. Сервис чистит истёкшие сессии:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Sessions {
+    public static void main(String[] args) {
+        Map&lt;String, Long&gt; sessions = new HashMap&lt;&gt;();                // sessionId → когда истекает
+        for (int i = 1; i &lt;= 6; i++) sessions.put("s" + i, i % 2 == 0 ? 0L : Long.MAX_VALUE);  // s2, s4, s6 истекли
+        long now = System.currentTimeMillis();
+        try {
+            for (String id : sessions.keySet())                      // обход через скрытый Iterator
+                if (sessions.get(id) &lt; now) sessions.remove(id);     // удаление мимо итератора
+        } catch (ConcurrentModificationException e) {
+            System.out.println(e + ", осталось " + sessions.size() + " из 6: " + sessions.keySet());
+        }
+        sessions.values().removeIf(expiresAt -&gt; expiresAt &lt; now);    // удаление через итератор самой коллекции
+        System.out.println("после removeIf: " + sessions.keySet());
+    }
+}</code></pre>
+      <pre class="out">java.util.ConcurrentModificationException, осталось 5 из 6: [s3, s5, s6, s1, s2]
+после removeIf: [s3, s5, s1]</pre>
+      <p>Один поток, никакой многопоточности — и <code>ConcurrentModificationException</code>. Название сбивает: «concurrent» здесь значит «одновременно с обходом», а не «из другого потока». И заметь: одна сессия уже удалена, а исключение вылетело позже. Как итератор это узнал:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Шесть сессий в порядке обхода HashMap: s3, s4, s5, s6, s1, s2; истекли s4, s6 и s2. Итератор запоминает modCount карты. Удаление s4 через map.remove увеличивает modCount до 7, а итератор ждёт 6, поэтому следующий next бросает ConcurrentModificationException. При удалении через итератор он сам обновляет ожидаемое значение, и обход доходит до конца.">
+            <defs>
+              <marker id="ff-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ff-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">SESSIONS: ПОРЯДОК ОБХОДА HASHMAP</text>
+
+            <!-- шесть записей -->
+            <rect x="20" y="60" width="84" height="36" rx="6" class="dg-cell"/>
+            <rect data-s="1-2" x="120" y="60" width="84" height="36" rx="6" class="dg-cell"/>
+            <rect x="220" y="60" width="84" height="36" rx="6" class="dg-cell"/>
+            <rect data-s="1-4" x="320" y="60" width="84" height="36" rx="6" class="dg-cell"/>
+            <rect x="420" y="60" width="84" height="36" rx="6" class="dg-cell"/>
+            <rect data-s="1-4" x="520" y="60" width="84" height="36" rx="6" class="dg-cell"/>
+
+            <!-- состояния записей -->
+            <rect data-s="2-" x="20" y="60" width="84" height="36" rx="6" class="dg-cell hit"/>
+            <rect data-s="3-" x="120" y="60" width="84" height="36" rx="6" class="dg-sep" fill="none"/>
+            <g data-s="4"><rect x="320" y="60" width="84" height="36" rx="6" class="dg-cell miss"/><rect x="520" y="60" width="84" height="36" rx="6" class="dg-cell miss"/></g>
+            <g data-s="5"><rect x="220" y="60" width="84" height="36" rx="6" class="dg-cell hit"/><rect x="420" y="60" width="84" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="320" y="60" width="84" height="36" rx="6" class="dg-sep" fill="none"/><rect x="520" y="60" width="84" height="36" rx="6" class="dg-sep" fill="none"/></g>
+
+            <!-- указатель итератора -->
+            <g data-s="1"><text x="14" y="40" class="dg-n">it</text><path d="M16 44 L 16 58" class="dg-line" marker-end="url(#ff-n)"/></g>
+            <g data-s="2"><text x="50" y="42" class="dg-n">it</text><path d="M62 44 L 62 56" class="dg-line" marker-end="url(#ff-n)"/></g>
+            <g data-s="3"><text x="150" y="42" class="dg-n">it</text><path d="M162 44 L 162 56" class="dg-line" marker-end="url(#ff-n)"/></g>
+            <g data-s="4"><text x="164" y="44" class="dg-bad" text-anchor="end">it.next()</text><path d="M170 40 C 200 30, 240 32, 258 56" class="dg-line bad" marker-end="url(#ff-bad)"/></g>
+            <g data-s="5"><text x="612" y="82" class="dg-n">конец</text></g>
+
+            <!-- ключи и статус -->
+            <g text-anchor="middle">
+              <text x="62" y="83" class="dg-in">s3</text>
+              <text data-s="1-2" x="162" y="83" class="dg-in">s4</text>
+              <text x="262" y="83" class="dg-in">s5</text>
+              <text data-s="1-4" x="362" y="83" class="dg-in">s6</text>
+              <text x="462" y="83" class="dg-in">s1</text>
+              <text data-s="1-4" x="562" y="83" class="dg-in">s2</text>
+              <text x="62" y="114" class="dg-n">живая</text>
+              <text data-s="1-2" x="162" y="114" class="dg-n">истекла</text>
+              <text data-s="3-" x="162" y="114" class="dg-n">удалена</text>
+              <text x="262" y="114" class="dg-n">живая</text>
+              <text data-s="1-3" x="362" y="114" class="dg-n">истекла</text>
+              <text data-s="4" x="362" y="114" class="dg-bad">осталась</text>
+              <text data-s="5" x="362" y="114" class="dg-n">удалена</text>
+              <text x="462" y="114" class="dg-n">живая</text>
+              <text data-s="1-3" x="562" y="114" class="dg-n">истекла</text>
+              <text data-s="4" x="562" y="114" class="dg-bad">осталась</text>
+              <text data-s="5" x="562" y="114" class="dg-n">удалена</text>
+            </g>
+
+            <!-- счётчики: отдельный слой на шаг -->
+            <text x="20" y="156" class="dg-in">map.modCount</text>
+            <text x="20" y="178" class="dg-in">it.expectedModCount</text>
+            <g data-s="1"><text x="200" y="156" class="dg-in">= 6</text><text x="200" y="178" class="dg-in">= 6</text></g>
+            <g data-s="2"><text x="200" y="156" class="dg-in">= 6</text><text x="200" y="178" class="dg-in">= 6</text><text x="250" y="178" class="dg-ok">совпало</text></g>
+            <g data-s="3"><text x="200" y="156" class="dg-bad">= 7</text><text x="200" y="178" class="dg-in">= 6</text></g>
+            <g data-s="4"><text x="200" y="156" class="dg-bad">= 7</text><text x="200" y="178" class="dg-in">= 6</text><text x="250" y="178" class="dg-bad">7 ≠ 6</text></g>
+            <g data-s="5"><text x="200" y="156" class="dg-in">= 9</text><text x="200" y="178" class="dg-in">= 9</text><text x="250" y="178" class="dg-ok">совпало</text></g>
+
+            <text data-s="1" x="20" y="222" class="dg-in">for-each создал итератор и запомнил modCount карты</text>
+            <text data-s="2" x="20" y="222" class="dg-ok">next() сверил счётчики и вернул s3 — живая, пропускаем</text>
+            <text data-s="3" x="20" y="222" class="dg-bad">sessions.remove("s4") мимо итератора: modCount = 7</text>
+            <text data-s="4" x="20" y="222" class="dg-bad">следующий next(): 7 ≠ 6 → ConcurrentModificationException</text>
+            <text data-s="5" x="20" y="222" class="dg-ok">removeIf удаляет через it.remove(), который обновляет счётчик</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>У <code>HashMap</code> есть поле <code>modCount</code> — счётчик структурных изменений: добавлений и удалений ключей. После шести <code>put</code> он равен 6. Итератор при создании копирует его в своё поле <code>expectedModCount</code>.</li>
+          <li>Каждый <code>next()</code> сначала сравнивает два счётчика. Совпали — значит, карту никто не трогал, и итератор возвращает s3.</li>
+          <li><code>next()</code> вернул s4, сессия истекла, и цикл вызывает <code>sessions.remove("s4")</code> — метод карты, а не итератора. Запись удалена, <code>modCount</code> стал 7. Итератор об этом ничего не знает.</li>
+          <li>Следующий <code>next()</code> видит 7 ≠ 6 и бросает <code>ConcurrentModificationException</code>. s4 уже удалена, а s6 и s2 так и остались: цикл прервался посередине.</li>
+          <li>Отдельный прогон с <code>removeIf</code>. Он обходит коллекцию итератором и удаляет через <code>it.remove()</code>. Этот метод удаляет текущий элемент и сам записывает <code>expectedModCount = modCount</code>. Три удаления, счётчики 9 и 9, обход дошёл до конца.</li>
+        </ol>
+      </figure>
+      <p>Что из этого следует на практике:</p>
+      <ul>
+        <li><b>Удалять при обходе — только через итератор</b>: <code>it.remove()</code> или <code>removeIf</code>. Для карты — через представление: <code>map.values().removeIf(…)</code>, <code>map.entrySet().removeIf(e -&gt; …)</code>, <code>map.keySet().removeAll(expired)</code>.</li>
+        <li><b>Структурное изменение — только добавление и удаление.</b> <code>put</code> по существующему ключу меняет значение, но не <code>modCount</code>, поэтому пересчитать лимиты в цикле по <code>keySet()</code> можно без исключения. Для этого есть и готовый <code>replaceAll</code>.</li>
+        <li><b>Fail-fast — не гарантия, а попытка.</b> Javadoc прямо говорит, что на исключение нельзя опираться. Счётчик не <code>volatile</code>, и при изменении из другого потока итератор может ничего не заметить и вернуть мусор. Исключение ловит ошибки в логике, а не защищает от гонок.</li>
+        <li><code>ListIterator</code> у списков умеет больше: ходит в обе стороны, возвращает индекс, делает <code>set</code> и <code>add</code> в текущую позицию — всё без исключения, потому что это изменения через итератор. Про удаление из <code>ArrayList</code> по индексу и его ловушки — тема List.</li>
+      </ul>
+      <div class="note tip">
+        <p>Коллекции из <code>java.util.concurrent</code> не бросают <code>ConcurrentModificationException</code>. Итераторы <code>ConcurrentHashMap</code> <b>слабо согласованные</b>: видят какое-то состояние карты во время обхода. Итератор <code>CopyOnWriteArrayList</code> обходит <b>снимок</b> массива на момент создания. Иногда их называют «fail-safe», но в javadoc такого термина нет. Разбор — в теме Concurrent Collections.</p>
+      </div>
+    </section>
+
+    <section class="step" id="comparator">
+      <h2>Comparator задаёт порядок, а в TreeSet и TreeMap — ещё и равенство</h2>
+      <p>Порядок элементов задают двумя способами. <code>Comparable</code> — «естественный порядок», который класс объявляет сам: <code>compareTo</code> у <code>String</code>, <code>Integer</code>, <code>BigDecimal</code>, <code>LocalDate</code>. <code>Comparator</code> — внешнее правило, которое передают в <code>sort</code>, <code>TreeMap</code>, <code>PriorityQueue</code>: платежи по сумме, по дате, по клиенту. Одному классу — один естественный порядок и сколько угодно компараторов.</p>
+      <p>Главная ловушка в коллекциях: <code>TreeSet</code> и <code>TreeMap</code> не вызывают <code>equals</code> и <code>hashCode</code>. Два элемента для них одинаковы, если <code>compare</code> вернул 0. Если порядок не согласован с <code>equals</code>, коллекции начинают расходиться:</p>
+      <pre><code class="language-java">import java.math.BigDecimal;
+import java.util.*;
+
+public class Amounts {
+    record Payment(String id, BigDecimal amount) {}
+
+    public static void main(String[] args) {
+        List&lt;BigDecimal&gt; amounts = List.of(new BigDecimal("100"), new BigDecimal("100.0"), new BigDecimal("100.00"));
+        System.out.println("equals: " + amounts.get(0).equals(amounts.get(1))           // сравнивает и масштаб
+            + ", compareTo: " + amounts.get(0).compareTo(amounts.get(1)));            // сравнивает только число
+        System.out.println("HashSet: " + new HashSet&lt;&gt;(amounts) + ", TreeSet: " + new TreeSet&lt;&gt;(amounts));
+
+        List&lt;Payment&gt; payments = List.of(new Payment("p1", new BigDecimal("500")),
+            new Payment("p2", new BigDecimal("500")), new Payment("p3", new BigDecimal("70")));
+        Set&lt;Payment&gt; byAmount = new TreeSet&lt;&gt;(Comparator.comparing(Payment::amount));  // «отсортируй по сумме»
+        byAmount.addAll(payments);
+        System.out.println("TreeSet по сумме: " + byAmount.stream().map(Payment::id).toList());
+        Set&lt;Payment&gt; fixed = new TreeSet&lt;&gt;(Comparator.comparing(Payment::amount)
+            .thenComparing(Payment::id));                                              // равные суммы различаются по id
+        fixed.addAll(payments);
+        System.out.println("с thenComparing(id): " + fixed.stream().map(Payment::id).toList());
+    }
+}</code></pre>
+      <pre class="out">equals: false, compareTo: 0
+HashSet: [100.00, 100.0, 100], TreeSet: [100]
+TreeSet по сумме: [p3, p1]
+с thenComparing(id): [p3, p1, p2]</pre>
+      <p>У <code>BigDecimal</code> <code>equals</code> учитывает масштаб, а <code>compareTo</code> — только значение. Поэтому одни и те же три суммы дают три элемента в <code>HashSet</code> и один в <code>TreeSet</code>. Второй случай опаснее: <code>TreeSet</code> с компаратором «по сумме» молча выбросил платёж p2, потому что его сумма равна сумме p1. <code>add</code> вернул <code>false</code>, никакого исключения. В отчёте просто не хватает платежа.</p>
+      <p>Правило: компаратор для <code>TreeSet</code> и ключей <code>TreeMap</code> должен различать все элементы, которые ты считаешь разными. Добавляй в конец цепочки уникальное поле — <code>thenComparing(Payment::id)</code>. Для <code>sort</code> это не важно: сортировка ничего не выбрасывает, равные элементы просто остаются рядом.</p>
+      <table class="mx">
+        <thead><tr><th>Метод Comparator</th><th>Что делает</th></tr></thead>
+        <tbody>
+          <tr><td><code>comparing(Payment::amount)</code></td><td>по ключу, у которого есть естественный порядок</td></tr>
+          <tr><td><code>comparingLong(Payment::cents)</code></td><td>по примитивному ключу, без упаковки</td></tr>
+          <tr><td><code>thenComparing(Payment::id)</code></td><td>следующий ключ, если предыдущие равны</td></tr>
+          <tr><td><code>reversed()</code></td><td>обратный порядок <b>всей цепочки</b>, собранной до него</td></tr>
+          <tr><td><code>comparing(Payment::date, reverseOrder())</code></td><td>обратный порядок только одного ключа</td></tr>
+          <tr><td><code>nullsFirst(…)</code>, <code>nullsLast(…)</code></td><td>где стоят <code>null</code>, вместо <code>NullPointerException</code></td></tr>
+          <tr><td><code>Map.Entry.comparingByValue()</code></td><td>сортировка записей карты по значению</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Компаратор по числу проще всего написать как (a, b) -&gt; a.amount() - b.amount().</p>
+        <p class="fact">Разность переполняется: для сумм в копейках порядка миллиардов знак результата переворачивается, и сортировка тихо ломается. Пиши <code>Long.compare</code> или <code>Comparator.comparingLong</code>. Контракт компаратора и что бывает при его нарушении — в теме Sorting Basics.</p>
+      </div>
+    </section>
+
+    <section class="step" id="sequenced">
+      <h2>Java 21 дала упорядоченным коллекциям общий интерфейс SequencedCollection</h2>
+      <p>До Java 21 у коллекций с порядком не было общего предка. «Взять последний элемент» у каждого типа писалось по-своему, а у <code>LinkedHashSet</code>, который порядок хранит, способа не было вовсе — только пройти весь набор. JEP 431 добавил три интерфейса и вставил их в иерархию (зелёные на схеме шага 2):</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Sequenced {
+    public static void main(String[] args) {
+        List&lt;String&gt; history = new ArrayList&lt;&gt;(List.of("p1", "p2", "p3"));
+        Deque&lt;String&gt; queue = new ArrayDeque&lt;&gt;(history);
+        SortedSet&lt;String&gt; sorted = new TreeSet&lt;&gt;(history);
+        LinkedHashSet&lt;String&gt; recent = new LinkedHashSet&lt;&gt;(history);
+
+        // до Java 21: у каждого типа свой способ взять последний элемент
+        String a = history.get(history.size() - 1);
+        String b = queue.getLast();
+        String c = sorted.last();
+        String d = null; for (String s : recent) d = s;            // LinkedHashSet: только обойти всё
+        System.out.println("до 21: " + a + " " + b + " " + c + " " + d);
+
+        // Java 21: один метод для всех
+        List&lt;SequencedCollection&lt;String&gt;&gt; all = List.of(history, queue, sorted, recent);
+        System.out.println("Java 21: " + all.stream().map(SequencedCollection::getLast).toList());
+
+        recent.addFirst("p3");                                     // уже есть — переставляется в начало
+        System.out.println("addFirst(p3): " + recent + ", reversed: " + recent.reversed());
+        List&lt;String&gt; rev = history.reversed();                     // представление, а не копия
+        rev.add("p0");                                             // конец rev — это начало history
+        System.out.println("history после rev.add: " + history);
+        try { sorted.addFirst("p0"); }                             // место в TreeSet определяет порядок
+        catch (UnsupportedOperationException e) { System.out.println("TreeSet.addFirst: " + e); }
+
+        LinkedHashMap&lt;String, Integer&gt; limits = new LinkedHashMap&lt;&gt;(Map.of("RUB", 100));
+        limits.putFirst("USD", 5);                                 // SequencedMap
+        System.out.println(limits.firstEntry() + " " + limits.lastEntry() + " " + limits.sequencedKeySet().reversed());
+        System.out.println("HashSet — SequencedCollection? " + (new HashSet&lt;&gt;(history) instanceof SequencedCollection));
+    }
+}</code></pre>
+      <pre class="out">до 21: p3 p3 p3 p3
+Java 21: [p3, p3, p3, p3]
+addFirst(p3): [p3, p1, p2], reversed: [p2, p1, p3]
+history после rev.add: [p0, p1, p2, p3]
+TreeSet.addFirst: java.lang.UnsupportedOperationException
+USD=5 RUB=100 [RUB, USD]
+HashSet — SequencedCollection? false</pre>
+      <table class="mx">
+        <thead><tr><th>Интерфейс</th><th>Методы</th><th>Кто реализует</th></tr></thead>
+        <tbody>
+          <tr><td><code>SequencedCollection</code></td><td><code>getFirst/getLast</code>, <code>addFirst/addLast</code>, <code>removeFirst/removeLast</code>, <code>reversed()</code></td><td><code>List</code>, <code>Deque</code>, <code>SequencedSet</code></td></tr>
+          <tr><td><code>SequencedSet</code></td><td>то же, <code>reversed()</code> возвращает <code>SequencedSet</code></td><td><code>LinkedHashSet</code>, <code>SortedSet</code> (<code>TreeSet</code>)</td></tr>
+          <tr><td><code>SequencedMap</code></td><td><code>firstEntry/lastEntry</code>, <code>pollFirstEntry/pollLastEntry</code>, <code>putFirst/putLast</code>, <code>sequencedKeySet/Values/EntrySet</code>, <code>reversed()</code></td><td><code>LinkedHashMap</code>, <code>SortedMap</code> (<code>TreeMap</code>)</td></tr>
+        </tbody>
+      </table>
+      <p>Детали, которые видны в выводе:</p>
+      <ul>
+        <li><b><code>reversed()</code> — представление.</b> Он не копирует, а переворачивает индексы: <code>rev.add("p0")</code> добавил элемент в начало <code>history</code>. Обойти список с конца теперь можно обычным for-each по <code>list.reversed()</code> без <code>ListIterator</code>.</li>
+        <li><b><code>addFirst</code> у <code>LinkedHashSet</code> переставляет</b> уже существующий элемент в начало, а не игнорирует его, как <code>add</code>. То же у <code>LinkedHashMap.putFirst</code>.</li>
+        <li><b>Отсортированные коллекции не дают вставить «в начало».</b> Место элемента в <code>TreeSet</code> определяет компаратор, поэтому <code>addFirst</code> и <code>addLast</code> бросают <code>UnsupportedOperationException</code>. Читать с краёв можно.</li>
+        <li><b><code>HashSet</code>, <code>HashMap</code> и <code>PriorityQueue</code> — не sequenced</b>: порядка обхода у них нет, и обещать «первый» и «последний» нечего.</li>
+      </ul>
+      <p>Для неизменяемых представлений добавили <code>Collections.unmodifiableSequencedCollection</code>, <code>…SequencedSet</code> и <code>…SequencedMap</code>. На собеседовании про Java 21 обычно ждут две вещи: общий интерфейс для коллекций с порядком и <code>reversed()</code> как представление.</p>
+    </section>
+
+    <section class="step" id="footprint">
+      <h2>Коллекция хранит ссылки: миллион long в HashSet занимает в 8 раз больше массива</h2>
+      <p>Коллекции работают только с объектами. <code>List&lt;Long&gt;</code> хранит не числа, а ссылки на объекты <code>Long</code>, а <code>HashSet</code> добавляет к каждому элементу ещё и узел хеш-таблицы. Сколько это стоит, видно по гистограмме heap — той же, что печатает <code>jcmd &lt;pid&gt; GC.class_histogram</code>. Программа снимает её до и после построения каждой структуры:</p>
+      <pre><code class="language-java">import java.lang.management.ManagementFactory;
+import java.util.*;
+import java.util.function.Supplier;
+import javax.management.ObjectName;
+
+public class Footprint {
+    // гистограмма живых объектов: класс → байты, как у jcmd GC.class_histogram
+    static Map&lt;String, Long&gt; histogram() throws Exception {
+        String text = (String) ManagementFactory.getPlatformMBeanServer().invoke(
+            new ObjectName("com.sun.management:type=DiagnosticCommand"), "gcClassHistogram",
+            new Object[]{null}, new String[]{String[].class.getName()});
+        Map&lt;String, Long&gt; bytes = new HashMap&lt;&gt;();
+        for (String line : text.lines().toList()) {
+            String[] f = line.trim().split("\\s+");                 // " 1:  1000000  24000000  java.lang.Long"
+            if (f.length &gt;= 4 &amp;&amp; f[0].endsWith(":")) bytes.put(f[3], Long.parseLong(f[2]));
+        }
+        return bytes;
+    }
+
+    static final List&lt;Object&gt; keep = new ArrayList&lt;&gt;();          // держим все структуры живыми
+
+    static void measure(String name, Supplier&lt;Object&gt; build) throws Exception {
+        Map&lt;String, Long&gt; before = histogram();
+        keep.add(build.get());
+        Map&lt;String, Long&gt; after = histogram();
+        long total = 0;
+        StringBuilder parts = new StringBuilder();
+        for (var e : after.entrySet()) {
+            long delta = e.getValue() - before.getOrDefault(e.getKey(), 0L);
+            if (delta &gt; 1_000_000) {                               // только крупные классы, без шума JDK
+                total += delta;
+                parts.append(String.format("  %s %.1f", e.getKey(), delta / (double) N));
+            }
+        }
+        System.out.printf("%-16s %5.1f байт на элемент =%s%n", name, total / (double) N, parts);
+    }
+
+    static final int N = 1_000_000;                                // значения от 1 000 000: мимо кеша Long
+
+    public static void main(String[] args) throws Exception {
+        measure("long[]", () -&gt; { long[] a = new long[N]; for (int i = 0; i &lt; N; i++) a[i] = 1_000_000L + i; return a; });
+        measure("ArrayList&lt;Long&gt;", () -&gt; { List&lt;Long&gt; l = new ArrayList&lt;&gt;(N); for (int i = 0; i &lt; N; i++) l.add(1_000_000L + i); return l; });
+        measure("HashSet&lt;Long&gt;", () -&gt; { Set&lt;Long&gt; s = new HashSet&lt;&gt;(); for (int i = 0; i &lt; N; i++) s.add(1_000_000L + i); return s; });
+    }
+}</code></pre>
+      <pre class="out">long[]             8.0 байт на элемент =  [J 8.0
+ArrayList&lt;Long&gt;   28.0 байт на элемент =  [Ljava.lang.Object; 4.0  java.lang.Long 24.0
+HashSet&lt;Long&gt;     64.4 байт на элемент =  java.lang.Long 24.0  [Ljava.util.HashMap$Node; 8.4  java.util.HashMap$Node 32.0</pre>
+      <p>Одни и те же восемь мегабайт полезных данных:</p>
+      <ul>
+        <li><b><code>long[]</code></b> — 8 байт на число, ровно 8 МБ плюс заголовок массива.</li>
+        <li><b><code>ArrayList&lt;Long&gt;</code></b> — 28 байт на число. Массив ссылок по 4 байта (сжатые указатели при heap меньше 32 ГБ) и объект <code>Long</code> по 24 байта: 12 байт заголовка, 8 байт значения и выравнивание до 8.</li>
+        <li><b><code>HashSet&lt;Long&gt;</code></b> — 64 байта на число, в 8 раз больше массива. К тем же 24 байтам <code>Long</code> добавляется узел <code>HashMap$Node</code> на 32 байта (хеш, ключ, значение, ссылка на следующий) и таблица корзин: 2<sup>21</sup> ссылок по 4 байта, то есть 8,4 байта на элемент. Корзин вдвое больше, чем элементов, потому что миллион не влез в 2<sup>20</sup> корзин при коэффициенте загрузки 0,75.</li>
+      </ul>
+      <p>Кроме памяти, каждая ссылка — это переход по указателю при обходе, а объекты <code>Long</code> могут лежать в любом месте heap. Поэтому обход <code>List&lt;Long&gt;</code> медленнее обхода <code>long[]</code> не на проценты, а в разы. В замере на этой машине сумма 10 млн чисел заняла 2 мс для <code>long[]</code>, 17 мс для <code>ArrayList&lt;Long&gt;</code> и 47 мс для того же списка после <code>Collections.shuffle</code>, когда соседние ссылки ведут в далёкие друг от друга места heap. Числа — после прогрева, первые проходы медленнее.</p>
+      <p>Где это важно — миллионы чисел в памяти, кеши идентификаторов, агрегаты в отчётах, — берут массивы примитивов или библиотеки примитивных коллекций: fastutil, Eclipse Collections, HPPC. Там <code>LongOpenHashSet</code> хранит числа прямо в массиве <code>long[]</code>. Размеры объектов и выравнивание подробно — в теме Object Layout.</p>
+      <p>Вторая граница — потоки. Ни одна коллекция из этой папки не потокобезопасна. Старые <code>Vector</code>, <code>Hashtable</code> и <code>Stack</code> синхронизируют каждый метод, но это не делает безопасными составные действия и обход, а замок на каждый вызов стоит дорого. Их не используют в новом коде. Для нескольких потоков — <code>ConcurrentHashMap</code>, <code>CopyOnWriteArrayList</code>, <code>BlockingQueue</code> (тема Concurrent Collections) или неизменяемая коллекция, опубликованная через <code>volatile</code>-поле.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Интерфейс <code>List</code> или <code>Map</code> не обещает, что запись и <code>null</code> разрешены: <code>add</code> — необязательная операция. Не меняй коллекцию, которую получил, если не создавал её сам.</li>
+        <li><code>List.of</code>, <code>List.copyOf</code>, <code>stream().toList()</code> — неизменяемые копии. <code>unmodifiableList</code>, <code>Arrays.asList</code>, <code>subList</code>, <code>keySet()</code> — представления: изменения источника видны сквозь них.</li>
+        <li>Реализацию выбирают по нужным быстрым операциям и порядку обхода. У <code>HashMap</code> и <code>HashSet</code> порядка нет, <code>Map.of</code> меняет его от запуска к запуску нарочно.</li>
+        <li><code>ConcurrentModificationException</code> бывает в одном потоке: итератор сверяет <code>modCount</code> на каждом <code>next()</code>. Удаляй при обходе через <code>it.remove()</code> или <code>removeIf</code>.</li>
+        <li><code>TreeSet</code> и <code>TreeMap</code> считают элементы равными, если <code>compare</code> вернул 0, и молча выбрасывают «дубликаты». Компаратор должен различать все разные элементы.</li>
+        <li>Java 21: <code>getFirst</code>, <code>getLast</code>, <code>reversed()</code> у всех коллекций с порядком. Коллекция объектов стоит в 3–8 раз больше массива примитивов.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="collections-hierarchy" data-freq="3">
+      <h3>Расскажи об иерархии коллекций. Почему Map не наследует Collection?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Наверху <code>Iterable</code> — всё, что можно обойти в for-each. От него <code>Collection</code>: группа элементов с <code>add</code>, <code>remove</code>, <code>contains</code>, <code>size</code>. Дальше три ветки: <code>List</code> — порядок и индексы, <code>Set</code> — уникальность, <code>Queue</code> и <code>Deque</code> — очередь и дек. Основные реализации: <code>ArrayList</code>, <code>HashSet</code>, <code>LinkedHashSet</code>, <code>TreeSet</code>, <code>ArrayDeque</code>, <code>PriorityQueue</code>.</p>
+          <p><code>Map</code> — отдельная иерархия, потому что хранит пары, а не элементы: операция <code>add(e)</code> для неё бессмысленна, нужен <code>put(key, value)</code>. Зато карта отдаёт три коллекции-представления: <code>keySet</code>, <code>values</code>, <code>entrySet</code>. Реализации — <code>HashMap</code>, <code>LinkedHashMap</code>, <code>TreeMap</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Java 21 между <code>Collection</code> и <code>List</code>/<code>Deque</code> встал <code>SequencedCollection</code>, а у множеств и карт — <code>SequencedSet</code> и <code>SequencedMap</code> (JEP 431).</li>
+            <li>Методы записи в интерфейсах — необязательные операции: реализация может бросить <code>UnsupportedOperationException</code>. Поэтому один интерфейс покрывает и изменяемые, и неизменяемые коллекции.</li>
+            <li><code>RandomAccess</code> — метка быстрого доступа по индексу, по ней алгоритмы <code>Collections</code> выбирают способ обхода.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем Collection отличается от Collections?</summary>
+          <p><code>Collection</code> — корневой интерфейс коллекций. <code>Collections</code> — служебный класс со статическими методами: <code>sort</code>, <code>reverse</code>, <code>unmodifiableList</code>, <code>synchronizedMap</code>, <code>emptyList</code>, <code>frequency</code>. Похожая пара — <code>Array</code> в reflection и служебный класс <code>Arrays</code>.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>public void settle(ArrayList&lt;Payment&gt; payments) — метод только обходит платежи. Что не так с сигнатурой?</summary>
+          <p>Параметр привязан к реализации: метод нельзя вызвать с <code>List.of</code>, <code>LinkedList</code>, результатом <code>stream().toList()</code> или <code>Set</code>, и вызывающим придётся копировать данные в <code>ArrayList</code>. Для обхода достаточно <code>Collection&lt;Payment&gt;</code> или даже <code>Iterable&lt;Payment&gt;</code>. Правило: в параметрах и возвращаемых типах — самый общий интерфейс, которого хватает; конкретный класс — только в <code>new</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="choose-collection" data-freq="3">
+      <h3>Как выбрать реализацию коллекции под задачу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я смотрю, какие операции должны быть быстрыми и нужен ли порядок обхода. Список с доступом по индексу — <code>ArrayList</code>. Очередь или стек — <code>ArrayDeque</code>. Быстрый <code>contains</code> и уникальность — <code>HashSet</code>, если важен порядок добавления — <code>LinkedHashSet</code>. Сортировка и поиск ближайшего — <code>TreeSet</code> или <code>TreeMap</code> за O(log n). Всегда брать самый приоритетный — <code>PriorityQueue</code>. Ключи-enum — <code>EnumMap</code>.</p>
+          <p>Например, проверку «счёт в стоп-листе» на каждом платеже делаю через <code>HashSet</code>, а не через <code>List.contains</code>: на ста тысячах счетов это O(1) против прохода по всему списку.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Коллекции хранят ссылки: миллион <code>Long</code> в <code>HashSet</code> занимает 64 МБ против 8 МБ в <code>long[]</code>. Для больших объёмов примитивов — массивы или fastutil/Eclipse Collections.</li>
+            <li><code>LinkedList</code> почти никогда не выигрывает у <code>ArrayList</code> и <code>ArrayDeque</code> из-за промахов кеша и 24 байт на узел.</li>
+            <li>Если коллекцию читают из нескольких потоков — неизменяемая копия или коллекции из <code>java.util.concurrent</code>; <code>Vector</code> и <code>Hashtable</code> — наследие.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Подбери коллекцию: 1) убрать дубликаты id платежей, сохранив порядок прихода; 2) хранить курсы валют по дате и находить курс на ближайшую прошедшую дату; 3) очередь задач на выплату, где первыми идут самые крупные суммы.</summary>
+          <p>1) <code>LinkedHashSet</code>: уникальность за O(1) и порядок вставки. 2) <code>TreeMap&lt;LocalDate, Rate&gt;</code> и <code>floorEntry(date)</code> — ближайший ключ не больше заданного за O(log n). 3) <code>PriorityQueue</code> с <code>Comparator.comparing(Payout::amount).reversed()</code>; если задачи берут несколько потоков — <code>PriorityBlockingQueue</code>.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>static final List&lt;String&gt; BLOCKED = loadFromDb(); // 80 000 счетов … if (BLOCKED.contains(payment.account())) reject(); — вызывается на каждом платеже. Что поправить?</summary>
+          <p><code>List.contains</code> идёт по списку и вызывает <code>equals</code> до совпадения: 80 000 сравнений на каждый платёж, O(n). Нужен <code>Set.copyOf(loadFromDb())</code> — поиск по хешу за O(1), заодно неизменяемый. Если у счёта может не быть значения, проверь <code>null</code> до вызова: <code>Set.copyOf(...).contains(null)</code> бросит <code>NullPointerException</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="unmodifiable" data-freq="3">
+      <h3>Чем List.of отличается от Collections.unmodifiableList и Arrays.asList?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>List.of</code> и <code>List.copyOf</code> создают настоящую неизменяемую копию: любая запись — <code>UnsupportedOperationException</code>, <code>null</code> запрещён даже в <code>contains</code>. <code>Collections.unmodifiableList</code> — обёртка только для чтения над чужим списком: через неё писать нельзя, но изменения исходного списка через неё видны. <code>Arrays.asList</code> — представление массива фиксированной длины: <code>set</code> работает и пишет прямо в массив, а <code>add</code> и <code>remove</code> бросают исключение.</p>
+          <p>Поэтому из геттера сущности я возвращаю <code>List.copyOf(items)</code>, если нужен снимок, и <code>unmodifiableList</code>, только если вызывающий должен видеть живые изменения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>stream().toList()</code> (Java 16) неизменяем, но пропускает <code>null</code>. <code>Collectors.toList()</code> сейчас возвращает <code>ArrayList</code>, но javadoc изменяемость не обещает.</li>
+            <li><code>List.copyOf</code> от уже неизменяемого списка возвращает тот же объект, без копирования.</li>
+            <li><code>Set.of</code> и <code>Map.of</code> бросают <code>IllegalArgumentException</code> на дубликате и меняют порядок обхода от запуска к запуску.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>String[] ids = {"a", "b", "c"}; List&lt;String&gt; list = Arrays.asList(ids); list.set(1, "X"); ids[2] = "Y"; — что в list и в ids? Что сделает list.remove("a")?</summary>
+          <p>И <code>list</code>, и <code>ids</code> — <code>[a, X, Y]</code>: это одно и то же хранилище, изменения видны в обе стороны. <code>list.remove("a")</code> бросит <code>UnsupportedOperationException</code>: длина массива фиксирована. Если нужен обычный список — <code>new ArrayList&lt;&gt;(Arrays.asList(ids))</code>.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>class Account { private final List&lt;Payment&gt; history = new ArrayList&lt;&gt;(); public List&lt;Payment&gt; getHistory() { return Collections.unmodifiableList(history); } } — отчёт обходит getHistory(), пока в счёт добавляют платежи. Что может пойти не так?</summary>
+          <p>Обёртка не копирует данные: отчёт обходит тот же <code>ArrayList</code>, в который пишет другой код. В одном потоке это <code>ConcurrentModificationException</code>, если платёж добавят посреди обхода. Из разных потоков — вообще гонка без гарантий. Нужен снимок <code>List.copyOf(history)</code>, а при записи из нескольких потоков — ещё и синхронизация в самом <code>Account</code>.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему List.of запрещает null?</summary>
+          <p>Чтобы ошибка данных падала там, где <code>null</code> появился, а не позже в чужом коде. Ещё это делает однозначными ответы: <code>indexOf</code>, <code>contains</code>, <code>Map.get</code> — <code>null</code> из <code>get</code> у <code>Map.of</code> значит только «ключа нет». Цена — <code>contains(null)</code> тоже бросает <code>NullPointerException</code>, поэтому проверку на <code>null</code> делают до обращения к коллекции.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="fail-fast" data-freq="3">
+      <h3>Что такое fail-fast итератор? Когда бывает ConcurrentModificationException?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Коллекции <code>java.util</code> считают структурные изменения — добавления и удаления — в поле <code>modCount</code>. Итератор при создании запоминает его значение и на каждом <code>next()</code> сравнивает. Если коллекцию изменили мимо итератора, счётчики расходятся, и итератор бросает <code>ConcurrentModificationException</code> вместо того, чтобы вернуть неверные данные.</p>
+          <p>Чаще всего это однопоточная ошибка: <code>map.remove(key)</code> внутри for-each по <code>keySet()</code>. Удалять при обходе нужно через <code>iterator.remove()</code> или <code>removeIf</code> — они обновляют ожидаемый счётчик.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Fail-fast — best effort: <code>modCount</code> не <code>volatile</code>, при гонке исключения может не быть. Опираться на него для корректности нельзя.</li>
+            <li><code>put</code> по существующему ключу не структурное изменение и исключения не вызывает.</li>
+            <li>Итераторы <code>ConcurrentHashMap</code> слабо согласованные, <code>CopyOnWriteArrayList</code> — по снимку; ни те ни другие не бросают CME.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-java">import java.util.*;
+
+public class Structural {
+    public static void main(String[] args) {
+        Map&lt;String, Long&gt; limits = new HashMap&lt;&gt;();
+        limits.put("RUB", 100L); limits.put("USD", 5L); limits.put("EUR", 4L);
+        for (String cur : limits.keySet()) limits.put(cur, limits.get(cur) * 2);
+        System.out.println(limits);
+        try {
+            for (String cur : limits.keySet()) limits.put("CNY", 30L);
+        } catch (ConcurrentModificationException e) { System.out.println("put нового ключа: " + e); }
+        Iterator&lt;String&gt; it = limits.keySet().iterator();
+        it.next(); it.remove();
+        try { it.remove(); } catch (IllegalStateException e) { System.out.println("второй remove: " + e); }
+    }
+}</code></pre>
+          <pre class="out">{EUR=8, USD=10, RUB=200}
+put нового ключа: java.util.ConcurrentModificationException
+второй remove: java.lang.IllegalStateException</pre>
+          <p>Удвоение лимитов проходит: замена значения у существующего ключа не меняет <code>modCount</code>. Новый ключ CNY — структурное изменение, и следующий <code>next()</code> бросает исключение. Второй <code>it.remove()</code> подряд — <code>IllegalStateException</code>: удалять можно только элемент, возвращённый последним <code>next()</code>, и только один раз.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>for (Payment p : payments) if (p.status() == FAILED) payments.remove(p); — «в тестах работает». Что не так?</summary>
+          <p>Удаление мимо итератора: на следующем <code>next()</code> будет <code>ConcurrentModificationException</code>. В тестах «работает», если там один неудачный платёж на предпоследнем месте — у <code>ArrayList</code> после такого удаления <code>hasNext()</code> возвращает <code>false</code>, и последний элемент тихо пропускается (разбор — тема List). Правильно: <code>payments.removeIf(p -&gt; p.status() == FAILED)</code>.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Что такое fail-safe итератор?</summary>
+          <p>Так неофициально называют итераторы, которые не бросают CME при изменении коллекции. Их два вида. Снимок у <code>CopyOnWriteArrayList</code>: обходит массив на момент создания и изменений не видит. Слабо согласованный у <code>ConcurrentHashMap</code> и <code>ConcurrentLinkedQueue</code>: видит часть изменений, сделанных во время обхода, но никогда не падает и не возвращает элемент дважды.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="comparable-comparator" data-freq="3">
+      <h3>Чем Comparable отличается от Comparator?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>Comparable</code> реализует сам класс: метод <code>compareTo</code> задаёт его естественный порядок — так сравниваются <code>String</code>, числа, даты. <code>Comparator</code> — отдельный объект с методом <code>compare</code>, его передают в <code>sort</code>, <code>TreeMap</code>, <code>PriorityQueue</code>. Порядков через компараторы может быть сколько угодно: платежи по сумме, по дате, по клиенту. Собираю их фабриками: <code>Comparator.comparing(Payment::amount).thenComparing(Payment::id)</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>TreeSet</code> и <code>TreeMap</code> определяют равенство через <code>compare</code>, а не <code>equals</code>: при несогласованном порядке «равные» элементы молча теряются.</li>
+            <li><code>BigDecimal</code>: <code>equals</code> учитывает масштаб, <code>compareTo</code> — нет, поэтому 100 и 100.00 — два элемента в <code>HashSet</code> и один в <code>TreeSet</code>.</li>
+            <li><code>reversed()</code> в конце цепочки переворачивает всю цепочку; для одного ключа — <code>comparing(key, reverseOrder())</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>new BigDecimal("100"), new BigDecimal("100.0") и new BigDecimal("100.00") кладут в HashSet и в TreeSet. Какие размеры у множеств?</summary>
+          <p><code>HashSet</code> — 3, <code>TreeSet</code> — 1. <code>equals</code> и <code>hashCode</code> у <code>BigDecimal</code> учитывают масштаб, поэтому для хеш-множества это разные элементы. <code>compareTo</code> сравнивает только значение и возвращает 0, и <code>TreeSet</code> считает их одним элементом. Проверено запуском в уроке.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Для отчёта «платежи по возрастанию суммы» написали new TreeSet&lt;&gt;(Comparator.comparing(Payment::amount)) и addAll(payments). Бухгалтерия говорит, что сумма по отчёту меньше реальной. Почему?</summary>
+          <p>У платежей с одинаковой суммой компаратор возвращает 0, и <code>TreeSet</code> считает их дубликатами: <code>add</code> возвращает <code>false</code>, второй платёж не попадает в отчёт. Исправление — либо <code>thenComparing(Payment::id)</code>, чтобы порядок различал все платежи, либо вообще не множество, а <code>List</code> и <code>sort</code>: сортировка ничего не выбрасывает.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="sequenced-collections" data-freq="2">
+      <h3>Что такое Sequenced Collections в Java 21?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это три новых интерфейса из JEP 431: <code>SequencedCollection</code>, <code>SequencedSet</code> и <code>SequencedMap</code>. Они объединили все коллекции с определённым порядком обхода — <code>List</code>, <code>Deque</code>, <code>LinkedHashSet</code>, <code>TreeSet</code>, <code>LinkedHashMap</code>, <code>TreeMap</code> — и дали им общие методы: <code>getFirst</code>, <code>getLast</code>, <code>addFirst</code>, <code>addLast</code>, <code>removeFirst</code>, <code>removeLast</code> и <code>reversed()</code>. Раньше последний элемент брали у каждого типа по-своему, а у <code>LinkedHashSet</code> — только обходом всего набора.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>reversed()</code> — представление, запись через него меняет исходную коллекцию.</li>
+            <li>У <code>TreeSet</code> <code>addFirst</code> бросает <code>UnsupportedOperationException</code>: место определяет компаратор. <code>HashSet</code> и <code>HashMap</code> не sequenced.</li>
+            <li><code>LinkedHashSet.addFirst</code> и <code>LinkedHashMap.putFirst</code> переставляют существующий элемент в начало.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>LinkedHashSet&lt;String&gt; s = new LinkedHashSet&lt;&gt;(List.of("a", "b", "c")); s.add("a"); s.addFirst("c"); s.reversed().addFirst("z"); — что в s?</summary>
+          <p><code>[c, a, b, z]</code>. <code>add("a")</code> ничего не меняет: элемент уже есть. <code>addFirst("c")</code> переставляет существующий c в начало. <code>reversed().addFirst("z")</code> — начало перевёрнутого представления — это конец исходного набора.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему HashSet не реализует SequencedCollection, а TreeSet реализует?</summary>
+          <p>У <code>TreeSet</code> порядок обхода определён — по возрастанию, поэтому у него есть «первый» и «последний»: те же <code>first()</code> и <code>last()</code>. У <code>HashSet</code> порядок зависит от хешей и ёмкости таблицы и меняется при расширении, так что «последний элемент» ничего не значит.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://horstmann.com/corejava/index.html">Cay Horstmann. Core Java, Volume I</a> — основа урока: глава Collections, интерфейсы каркаса, представления и итераторы.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/List.html">List (JDK 21)</a> — разделы Unmodifiable Lists и необязательные операции; то же в javadoc <code>Collection</code>.</li>
+      <li><a href="https://openjdk.org/jeps/431">JEP 431: Sequenced Collections</a> — зачем понадобились новые интерфейсы и куда их встроили.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/ConcurrentModificationException.html">ConcurrentModificationException (JDK 21)</a> — почему fail-fast работает по принципу best effort.</li>
+      <li><a href="https://www.baeldung.com/java-collections-interview-questions">Baeldung: Java Collections Interview Questions</a> — список вопросов, по которому собраны карточки.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
