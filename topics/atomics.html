@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Atomics &amp; CAS · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="atomics">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Atomics &amp; CAS</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="retries">
+      <h2>Счётчик без блокировок — и 58 миллионов напрасных попыток</h2>
+      <p>Атомарный счётчик обходится без блокировок: поток читает значение и записывает новое, только если за это время никто другой его не изменил. Иначе повторяет. Посчитаем, сколько таких повторов случается под нагрузкой. Каждый поток увеличивает счётчик миллион раз:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.*;
+
+public class CasRetries {
+    static final AtomicLong counter = new AtomicLong();
+    static final LongAdder failures = new LongAdder();
+
+    // то, что делает incrementAndGet, только с подсчётом неудач
+    static long increment() {
+        while (true) {
+            long current = counter.get();                        // прочитали
+            if (counter.compareAndSet(current, current + 1))     // записали, только если никто не успел раньше
+                return current + 1;
+            failures.increment();                                // успели — повторяем с новым значением
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int threads : new int[]{1, 2, 4, 8, 16}) {
+            counter.set(0); failures.reset();
+            Thread[] ts = new Thread[threads];
+            long start = System.nanoTime();
+            for (int t = 0; t &lt; threads; t++) {
+                ts[t] = new Thread(() -&gt; { for (int i = 0; i &lt; 1_000_000; i++) increment(); });
+                ts[t].start();
+            }
+            for (Thread t : ts) t.join();
+            System.out.printf("%2d потоков: итог %,11d, неудачных CAS %,11d (%.1f на успешный), %4d мс%n",
+                threads, counter.get(), failures.sum(), (double) failures.sum() / counter.get(), (System.nanoTime() - start) / 1_000_000);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text"> 1 потоков: итог   1,000,000, неудачных CAS           0 (0.0 на успешный),    6 мс
+ 2 потоков: итог   2,000,000, неудачных CAS     634,466 (0.3 на успешный),   44 мс
+ 4 потоков: итог   4,000,000, неудачных CAS   7,520,654 (1.9 на успешный),  273 мс
+ 8 потоков: итог   8,000,000, неудачных CAS  27,048,062 (3.4 на успешный),  881 мс
+16 потоков: итог  16,000,000, неудачных CAS  58,266,121 (3.6 на успешный), 1495 мс</code></pre>
+      <p>Итог всегда точный — ни одно увеличение не потеряно, в отличие от <code>count++</code> из темы Thread Safety. Но на 16 потоках на каждую успешную запись пришлось 3,6 неудачных, а работа в 16 раз больше заняла в 250 раз больше времени. Lock-free не значит бесплатно. В этой теме — как устроена операция compare-and-set, какие атомарные классы есть в JDK и почему <code>incrementAndGet</code> быстрее этого цикла. А ещё — как <code>LongAdder</code> убирает конкуренцию, что такое проблема ABA и когда вообще стоит писать код без блокировок.</p>
+    </section>
+
+    <section class="step" id="cas">
+      <h2>CAS записывает новое значение, только если старое не изменилось</h2>
+      <p><b>Compare-and-set</b> (CAS) — одна инструкция процессора: «если в ячейке по-прежнему <code>expected</code>, записать <code>new</code> и вернуть успех, иначе ничего не делать». Атомарность обеспечивает железо: <code>LOCK CMPXCHG</code> на x86, <code>CAS</code> или пара <code>LDAXR/STLXR</code> на ARM. В Java это <code>compareAndSet(expected, new)</code> у атомарных классов. Вокруг неё строится цикл: прочитать, вычислить, попытаться записать, при неудаче повторить.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Два потока увеличивают значение 5 через CAS. Оба читают 5. Поток A выполняет CAS с 5 на 6 и успешно записывает 6. Поток B выполняет CAS с 5 на 6, но в ячейке уже 6, поэтому CAS не проходит и ничего не записывает. Поток B перечитывает 6 и выполняет CAS с 6 на 7 — успешно. Оба увеличения учтены.">
+            <defs>
+              <marker id="cs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="cs-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ПОТОК A</text>
+            <text x="290" y="24" class="dg-cap">ЗНАЧЕНИЕ</text>
+            <text x="480" y="24" class="dg-cap">ПОТОК B</text>
+            <text x="706" y="24" class="dg-n" text-anchor="end">время ↓</text>
+
+            <rect x="290" y="38" width="140" height="32" rx="6" class="dg-box"/>
+            <text x="360" y="59" class="dg-in" text-anchor="middle">5</text>
+
+            <g data-s="2-">
+              <rect x="20" y="82" width="220" height="32" rx="6" class="dg-cell"/>
+              <text x="32" y="103" class="dg-in">get() → 5</text>
+              <rect x="480" y="82" width="220" height="32" rx="6" class="dg-cell"/>
+              <text x="492" y="103" class="dg-in">get() → 5</text>
+              <rect x="290" y="82" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="103" class="dg-in" text-anchor="middle">5</text>
+              <path d="M290 98 L 244 98" class="dg-line" marker-end="url(#cs-n)"/>
+              <path d="M430 98 L 476 98" class="dg-line" marker-end="url(#cs-n)"/>
+            </g>
+            <g data-s="3-">
+              <rect x="20" y="126" width="220" height="32" rx="6" class="dg-cell hit"/>
+              <text x="32" y="147" class="dg-in">CAS(5 → 6): успех</text>
+              <rect x="290" y="126" width="140" height="32" rx="6" class="dg-cell hit"/>
+              <text x="360" y="147" class="dg-in" text-anchor="middle">6</text>
+              <path d="M240 142 L 286 142" class="dg-line ok" marker-end="url(#cs-ok)"/>
+            </g>
+            <g data-s="4-">
+              <rect x="480" y="170" width="220" height="32" rx="6" class="dg-cell miss"/>
+              <text x="492" y="191" class="dg-in">CAS(5 → 6): там 6, отказ</text>
+              <rect x="290" y="170" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="191" class="dg-in" text-anchor="middle">6, не тронуто</text>
+              <path d="M480 186 L 434 186" class="dg-line bad" marker-end="url(#cs-bad)"/>
+            </g>
+            <g data-s="5">
+              <rect x="480" y="214" width="220" height="32" rx="6" class="dg-cell hit"/>
+              <text x="492" y="235" class="dg-in">get() → 6, CAS(6 → 7)</text>
+              <rect x="290" y="214" width="140" height="32" rx="6" class="dg-cell hit"/>
+              <text x="360" y="235" class="dg-in" text-anchor="middle">7</text>
+              <path d="M480 230 L 434 230" class="dg-line ok" marker-end="url(#cs-ok)"/>
+            </g>
+
+            <text data-s="1" x="20" y="274" class="dg-in">оба потока хотят увеличить значение 5</text>
+            <text data-s="2" x="20" y="274" class="dg-in">оба прочитали 5 — как в count++</text>
+            <text data-s="3" x="20" y="274" class="dg-ok">A: в ячейке всё ещё 5 — CAS записал 6</text>
+            <text data-s="4" x="20" y="274" class="dg-bad">B: ожидал 5, а там 6 — CAS ничего не записал</text>
+            <text data-s="5" x="20" y="274" class="dg-ok">B повторил с новым значением: 7, оба увеличения учтены</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Оба потока собираются увеличить значение 5.</li>
+          <li>Оба прочитали 5. До этого момента всё как в потерянном обновлении <code>count++</code> из темы Thread Safety.</li>
+          <li>Поток A выполняет <code>compareAndSet(5, 6)</code>. В ячейке по-прежнему 5, и процессор атомарно записывает 6.</li>
+          <li>Поток B выполняет <code>compareAndSet(5, 6)</code>, но в ячейке уже 6. Операция возвращает <code>false</code> и ничего не пишет. Обычная запись затёрла бы результат A, а CAS замечает, что опоздал.</li>
+          <li>B перечитывает 6 и пробует <code>compareAndSet(6, 7)</code> — успешно. Оба увеличения учтены. Цена — повторная попытка, и при 16 потоках их в среднем 3,6 на каждую успешную запись.</li>
+        </ol>
+      </figure>
+      <p>Кроме атомарности, CAS даёт те же гарантии видимости, что чтение и запись <code>volatile</code>: значение, записанное успешным CAS, видят все следующие чтения.</p>
+      <p>Этот цикл спрятан в <code>updateAndGet</code> и <code>accumulateAndGet</code>: они принимают функцию и повторяют CAS, пока не получится. Отсюда важное следствие — функция может выполниться несколько раз:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.*;
+
+public class SideEffect {
+    public static void main(String[] args) throws Exception {
+        AtomicLong balance = new AtomicLong();
+        LongAdder calls = new LongAdder();
+        Thread[] ts = new Thread[8];
+        for (int t = 0; t &lt; ts.length; t++) {
+            ts[t] = new Thread(() -&gt; {
+                for (int i = 0; i &lt; 100_000; i++) {
+                    balance.updateAndGet(x -&gt; {
+                        calls.increment();                           // «побочный эффект»: например, запись в аудит
+                        return x + 1;
+                    });
+                }
+            });
+            ts[t].start();
+        }
+        for (Thread t : ts) t.join();
+        System.out.printf("обновлений: %,d, вызовов функции: %,d%n", balance.get(), calls.sum());
+    }
+}</code></pre>
+      <pre><code class="language-text">обновлений: 800,000, вызовов функции: 4,332,798</code></pre>
+      <p>Функция выполнилась в 5,4 раза чаще, чем обновилось значение. Если бы она писала в аудит или отправляла событие, получились бы лишние записи. Javadoc требует, чтобы функция не имела побочных эффектов. То же касается <code>ConcurrentHashMap.compute</code> и <code>merge</code>.</p>
+    </section>
+
+    <section class="step" id="classes">
+      <h2>incrementAndGet — не цикл CAS, а одна инструкция процессора</h2>
+      <p>Атомарные классы JDK:</p>
+      <table class="mx">
+        <thead><tr><th>Класс</th><th>Для чего</th></tr></thead>
+        <tbody>
+          <tr><td><code>AtomicInteger</code>, <code>AtomicLong</code>, <code>AtomicBoolean</code></td><td>счётчики, генераторы id, флаги «выполнить один раз» (<code>compareAndSet(false, true)</code>)</td></tr>
+          <tr><td><code>AtomicReference&lt;V&gt;</code></td><td>атомарная замена неизменяемого объекта целиком, как <code>Range</code> в теме Thread Safety</td></tr>
+          <tr><td><code>AtomicIntegerArray</code>, <code>AtomicLongArray</code></td><td>массив с атомарными операциями над каждым элементом</td></tr>
+          <tr><td><code>AtomicIntegerFieldUpdater</code> и др.</td><td>атомарные операции над <code>volatile</code>-полем обычного объекта, без отдельного объекта-обёртки на каждый экземпляр</td></tr>
+          <tr><td><code>VarHandle</code> (Java 9)</td><td>низкоуровневый доступ к полям и элементам массивов: CAS, разные режимы упорядочивания. На нём построены сами атомики</td></tr>
+          <tr><td><code>LongAdder</code>, <code>LongAccumulator</code></td><td>счётчики и суммы при высокой конкуренции — шаг 4</td></tr>
+          <tr><td><code>AtomicStampedReference</code>, <code>AtomicMarkableReference</code></td><td>ссылка с версией или флагом — против ABA, шаг 5</td></tr>
+        </tbody>
+      </table>
+      <p>Цикл из шага 1 на 8 потоках занял 881 мс. Но в теме Thread Safety <code>AtomicInteger.incrementAndGet</code> на тех же 8 потоках справился за 69 мс. Дело в том, что простое сложение JIT превращает в одну атомарную инструкцию сложения — <code>LOCK XADD</code> на x86, <code>LDADD</code> на ARM — без цикла повторов. Сравним три способа на 1–16 потоках, по миллиону увеличений на поток:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.*;
+
+public class Scaling {
+    static long run(int threads, Runnable op) throws InterruptedException {
+        Thread[] ts = new Thread[threads];
+        long start = System.nanoTime();
+        for (int t = 0; t &lt; threads; t++) {
+            ts[t] = new Thread(() -&gt; { for (int i = 0; i &lt; 1_000_000; i++) op.run(); });
+            ts[t].start();
+        }
+        for (Thread t : ts) t.join();
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    public static void main(String[] args) throws Exception {
+        AtomicLong a = new AtomicLong(), b = new AtomicLong();
+        LongAdder adder = new LongAdder();
+        for (int round = 0; round &lt; 2; round++) {                // первый круг — прогрев
+            System.out.println(round == 0 ? "прогрев" : "потоков  incrementAndGet  updateAndGet(x -&gt; x + 1)  LongAdder");
+            for (int threads : new int[]{1, 2, 4, 8, 16}) {
+                long t1 = run(threads, a::incrementAndGet);
+                long t2 = run(threads, () -&gt; b.updateAndGet(x -&gt; x + 1));
+                long t3 = run(threads, adder::increment);
+                if (round == 1) System.out.printf("%6d  %12d мс  %20d мс  %8d мс%n", threads, t1, t2, t3);
+            }
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">прогрев
+потоков  incrementAndGet  updateAndGet(x -&gt; x + 1)  LongAdder
+     1             1 мс                     4 мс         4 мс
+     2            11 мс                    66 мс         4 мс
+     4            23 мс                   123 мс         4 мс
+     8            49 мс                   298 мс         4 мс
+    16            88 мс                   570 мс         5 мс</code></pre>
+      <p><code>updateAndGet</code> с той же арифметикой — это цикл CAS, и на 16 потоках он в 6,5 раза медленнее <code>incrementAndGet</code>. Но и одна атомарная инструкция не масштабируется: все ядра по очереди получают в эксклюзивное владение одну строку кеша, и время растёт с числом потоков. Не растёт только у <code>LongAdder</code>: 5 мс на 16 миллионов увеличений.</p>
+    </section>
+
+    <section class="step" id="longadder">
+      <h2>LongAdder убирает конкуренцию, раскладывая счёт по ячейкам</h2>
+      <p>Идея <code>LongAdder</code> — не бороться за одну ячейку. Пока конкуренции нет, он увеличивает поле <code>base</code> через CAS. Как только CAS не прошёл, адер заводит массив ячеек <code>cells</code>, и каждый поток дальше увеличивает свою ячейку, выбранную по хешу потока. Ячейки разнесены по разным строкам кеша (<code>@Contended</code>), поэтому ядра друг другу не мешают. Число ячеек растёт до числа ядер. <code>sum()</code> складывает <code>base</code> и все ячейки.</p>
+      <p>Цена — в чтении:</p>
+      <ul>
+        <li><code>sum()</code> обходит все ячейки, это дороже чтения <code>AtomicLong</code>;</li>
+        <li><code>sum()</code> — не атомарный снимок. Если в это время идут увеличения, результат может не совпасть ни с одним моментом времени;</li>
+        <li>нет <code>compareAndSet</code> и <code>incrementAndGet</code> с возвратом нового значения;</li>
+        <li>памяти больше: по ячейке с выравниванием на каждое ядро.</li>
+      </ul>
+      <p>Отсюда правило. <b><code>LongAdder</code></b> — для статистики, которую часто пишут и редко читают: метрики, счётчики запросов, суммы. <b><code>AtomicLong</code></b> — когда по значению принимают решение прямо сейчас: генератор id, лимит «не больше N», порядковый номер. <code>LongAccumulator</code> обобщает идею на любую ассоциативную операцию, например максимум: <code>new LongAccumulator(Math::max, Long.MIN_VALUE)</code>.</p>
+      <p>Тот же принцип лежит в основе <code>ConcurrentHashMap</code>: счётчик размера там устроен как <code>LongAdder</code>. Поэтому <code>size()</code> при параллельных изменениях приблизителен.</p>
+    </section>
+
+    <section class="step" id="aba">
+      <h2>ABA: значение вернулось прежним, и CAS не заметил, что всё изменилось</h2>
+      <p>CAS сравнивает значения, а не историю. Если за время между чтением и CAS значение успело смениться с A на B и обратно на A, CAS пройдёт, хотя состояние вокруг уже другое. Это <b>проблема ABA</b>. Классический пример — стек без блокировок, у которого узлы переиспользуются из пула. Настоящее чередование двух потоков поймать сложно, поэтому воспроизведём его по шагам:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.*;
+
+public class Aba {
+    static final class Node {
+        final String value;
+        Node next;
+        Node(String value) { this.value = value; }
+    }
+
+    static String dump(Node n) {
+        StringBuilder sb = new StringBuilder();
+        for (; n != null; n = n.next) sb.append(n.value).append(n.next != null ? " → " : "");
+        return sb.length() == 0 ? "пусто" : sb.toString();
+    }
+
+    public static void main(String[] args) {
+        // стек задач A → B → C; узлы берутся из пула и переиспользуются
+        Node a = new Node("A"), b = new Node("B"), c = new Node("C");
+        a.next = b; b.next = c;
+
+        AtomicReference&lt;Node&gt; top = new AtomicReference&lt;&gt;(a);
+        // поток 1 начал pop(): прочитал вершину и следующий узел — и его вытеснили
+        Node seen = top.get(), seenNext = seen.next;                 // A и B
+
+        // поток 2 за это время: pop A, pop B, push A обратно (узел из пула)
+        top.set(b); top.set(c);                                      // сняли A и B
+        a.next = top.get(); top.set(a);                              // вернули A поверх C
+        System.out.println("стек после потока 2: " + dump(top.get()));
+
+        // поток 1 продолжает: вершина снова A — CAS проходит
+        boolean ok = top.compareAndSet(seen, seenNext);
+        System.out.println("CAS(A → B) потока 1: " + ok + ", стек: " + dump(top.get()) + "   ← B уже забран потоком 2, A потерян");
+
+        // то же со штампом: каждое изменение увеличивает версию
+        a.next = b; b.next = c;
+        AtomicStampedReference&lt;Node&gt; stamped = new AtomicStampedReference&lt;&gt;(a, 0);
+        int[] stampHolder = new int[1];
+        Node seen2 = stamped.get(stampHolder);
+        int seenStamp = stampHolder[0];                              // поток 1 запомнил A и версию 0
+        Node seenNext2 = seen2.next;
+        stamped.set(b, 1); stamped.set(c, 2);                        // поток 2: pop, pop
+        a.next = c; stamped.set(a, 3);                               // поток 2: push A
+        boolean ok2 = stamped.compareAndSet(seen2, seenNext2, seenStamp, seenStamp + 1);
+        System.out.println("со штампом: CAS " + ok2 + ", стек: " + dump(stamped.getReference()));
+    }
+}</code></pre>
+      <pre class="out">стек после потока 2: A → C
+CAS(A → B) потока 1: true, стек: B → C   ← B уже забран потоком 2, A потерян
+со штампом: CAS false, стек: A → C</pre>
+      <p>Поток 1 запомнил «вершина A, под ней B» и хочет сдвинуть вершину на B. Пока он ждал, поток 2 снял A и B и вернул A обратно, уже поверх C. Вершина снова A, CAS проходит — и ставит на вершину узел B, который уже забрал поток 2. Задача B будет обработана дважды, а A пропала. <code>AtomicStampedReference</code> хранит вместе со ссылкой версию, и CAS сравнивает обе. Версия сменилась трижды — операция отказала.</p>
+      <p>В Java ABA встречается реже, чем в C: если узлы всегда создаются заново через <code>new</code>, сборщик мусора не отдаст адрес старого узла, пока на него ссылается поток 1. Опасны переиспользование объектов из пула и CAS по числам и состояниям, которые могут вернуться к прежнему значению. Например, «баланс 100 → 50 → 100» для CAS неотличим от «ничего не произошло».</p>
+    </section>
+
+    <section class="step" id="lock-free">
+      <h2>Lock-free гарантирует, что система движется, даже если поток остановился</h2>
+      <p>Алгоритмы делят по гарантиям продвижения:</p>
+      <table class="mx">
+        <thead><tr><th>Класс</th><th>Гарантия</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td>блокирующий</td><td>если поток, держащий замок, остановлен, остальные ждут</td><td><code>synchronized</code>, <code>ReentrantLock</code></td></tr>
+          <tr><td>lock-free</td><td>за конечное число шагов хотя бы один поток завершит операцию</td><td>цикл CAS: кто-то всегда побеждает</td></tr>
+          <tr><td>wait-free</td><td>каждый поток завершит операцию за конечное число своих шагов</td><td><code>incrementAndGet</code> на процессоре с инструкцией атомарного сложения</td></tr>
+        </tbody>
+      </table>
+      <p>Классическая lock-free структура — стек Трайбера. Вершина хранится в <code>AtomicReference</code>, а <code>push</code> и <code>pop</code> — это цикл CAS по вершине. Узлы неизменяемы и не переиспользуются, поэтому ABA здесь не возникает:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public class Treiber&lt;T&gt; {
+    private record Node&lt;T&gt;(T value, Node&lt;T&gt; next) { }            // узлы неизменяемы и не переиспользуются
+    private final AtomicReference&lt;Node&lt;T&gt;&gt; top = new AtomicReference&lt;&gt;();
+
+    void push(T value) {
+        Node&lt;T&gt; current, fresh;
+        do {
+            current = top.get();
+            fresh = new Node&lt;&gt;(value, current);                  // новый узел поверх текущей вершины
+        } while (!top.compareAndSet(current, fresh));            // вершина не сменилась — записали
+    }
+
+    T pop() {
+        Node&lt;T&gt; current;
+        do {
+            current = top.get();
+            if (current == null) return null;
+        } while (!top.compareAndSet(current, current.next()));
+        return current.value();
+    }
+
+    public static void main(String[] args) throws Exception {
+        Treiber&lt;Integer&gt; stack = new Treiber&lt;&gt;();
+        LongAdder pushed = new LongAdder(), popped = new LongAdder();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        for (int t = 0; t &lt; 8; t++) pool.submit(() -&gt; {
+            for (int i = 0; i &lt; 1_000_000; i++) {
+                stack.push(i); pushed.add(i);
+                Integer v = stack.pop();
+                if (v != null) popped.add(v);
+            }
+        });
+        pool.shutdown();
+        pool.awaitTermination(1, TimeUnit.MINUTES);
+        Integer v;
+        while ((v = stack.pop()) != null) popped.add(v);         // добрать остаток
+        System.out.println("сумма положенных = сумма снятых: " + (pushed.sum() == popped.sum()));
+    }
+}</code></pre>
+      <pre class="out">сумма положенных = сумма снятых: true</pre>
+      <p>Восемь потоков сделали по миллиону <code>push</code> и <code>pop</code>, и ни один элемент не потерялся и не задвоился. На том же приёме — CAS по одной ссылке или полю — построены <code>ConcurrentLinkedQueue</code>, вставка в пустую корзину <code>ConcurrentHashMap</code> и поле <code>state</code> в AQS, на котором держатся все замки из темы Locks.</p>
+      <p>Писать собственные lock-free структуры в прикладном коде почти никогда не нужно. Они сложны: ABA, порядок операций, проверка корректности. А под высокой конкуренцией, как показал шаг 1, CAS-цикл тратит CPU на повторы. Правильный выбор обычно — готовые классы: атомики для одной переменной, <code>LongAdder</code> для счётчиков, <code>ConcurrentHashMap</code> и очереди из <code>java.util.concurrent</code> для структур.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>CAS атомарно записывает новое значение, только если в ячейке всё ещё ожидаемое. Вокруг него строят цикл: прочитать, вычислить, попытаться, повторить. Видимость — как у <code>volatile</code>.</li>
+        <li>Под конкуренцией CAS-цикл тратит работу на повторы: на 16 потоках — 3,6 неудачных попытки на успешную.</li>
+        <li>Функция в <code>updateAndGet</code> может выполниться несколько раз (в замере — в 5,4 раза чаще обновлений) и должна быть без побочных эффектов.</li>
+        <li><code>incrementAndGet</code> — одна атомарная инструкция без повторов, но и она не масштабируется на одной ячейке. <code>LongAdder</code> раскладывает счёт по ячейкам и почти не зависит от числа потоков; <code>sum()</code> — не атомарный снимок.</li>
+        <li>ABA: значение вернулось к прежнему, и CAS не заметил изменений. Защита — <code>AtomicStampedReference</code> или неизменяемые, не переиспользуемые узлы.</li>
+        <li>Lock-free — хотя бы один поток всегда продвигается. Свои lock-free структуры пишут редко: готовые классы JDK надёжнее.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-cas" data-freq="3">
+      <h3>Что такое CAS и как на нём работают атомарные классы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Compare-and-set — атомарная инструкция процессора: записать новое значение, только если в ячейке сейчас ожидаемое, и сообщить, получилось ли. На ней строится цикл без блокировок: прочитать текущее значение, вычислить новое, попытаться записать через CAS; если кто-то успел раньше — повторить. Так работают <code>updateAndGet</code>, <code>accumulateAndGet</code> и <code>compareAndSet</code> в <code>AtomicInteger</code>, <code>AtomicLong</code> и <code>AtomicReference</code>. Потоки не блокируются, и итог всегда точный.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>incrementAndGet</code> и <code>getAndAdd</code> JIT компилирует в одну атомарную инструкцию сложения, без цикла. На 16 потоках это в 6,5 раза быстрее <code>updateAndGet(x -&gt; x + 1)</code>.</li>
+            <li>CAS даёт семантику <code>volatile</code> для видимости.</li>
+            <li>Функция в <code>updateAndGet</code> может вызываться многократно — побочные эффекты запрещены.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>balance.updateAndGet(x -&gt; { audit.log("списание"); return x - amount; }) — что не так?</summary>
+          <p>Функция может выполниться несколько раз: при каждом неудачном CAS она вызывается снова. Аудит получит лишние записи — в замере урока на 8 потоках функция вызывалась в 5,4 раза чаще, чем менялось значение. Аудит пишут после успешного обновления, а функцию оставляют чистой.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="longadder-q" data-freq="2">
+      <h3>Чем LongAdder отличается от AtomicLong?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>AtomicLong</code> — одна ячейка, за которую при конкуренции соревнуются все потоки. <code>LongAdder</code> при конкуренции раскладывает счёт по нескольким ячейкам, каждый поток увеличивает свою, а <code>sum()</code> складывает их. Запись масштабируется почти идеально: в замере урока 16 потоков сделали 16 млн увеличений за 5 мс против 88 мс у <code>AtomicLong</code>. Зато чтение дороже, <code>sum()</code> — не атомарный снимок, и нет <code>compareAndSet</code>. Поэтому <code>LongAdder</code> — для метрик и счётчиков, <code>AtomicLong</code> — когда по значению принимают решение: id, лимиты.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="aba-q" data-freq="2">
+      <h3>Что такое проблема ABA?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>CAS сравнивает только текущее значение. Если между чтением и CAS значение сменилось с A на B и обратно на A, CAS пройдёт, хотя состояние вокруг изменилось. Классика — lock-free стек с переиспользуемыми узлами: CAS восстанавливает вершину на узел, который уже снят другим потоком. Решение — <code>AtomicStampedReference</code>, где вместе со ссылкой хранится версия, или узлы, которые не переиспользуются.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Java сборщик мусора защищает от ABA по адресам, пока на узел есть ссылка. Но ABA остаётся при пулах объектов и при CAS по значениям, которые могут вернуться: числа, состояния.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="lock-free-q" data-freq="2">
+      <h3>Всегда ли lock-free быстрее блокировок?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нет. Без конкуренции CAS очень дёшев. Под сильной конкуренцией CAS-цикл тратит CPU на неудачные попытки: в замере урока на 16 потоках — 3,6 повтора на каждую успешную запись, и работа в 16 раз больше заняла в 250 раз больше времени. Главное достоинство lock-free — не скорость, а гарантия продвижения: остановленный поток не блокирует остальных. Для горячих счётчиков лучше убрать конкуренцию (<code>LongAdder</code>), для структур — взять готовые классы <code>java.util.concurrent</code>.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/package-summary.html">java.util.concurrent.atomic (JDK 21)</a> — основа урока: атомарные классы, требования к функциям обновления.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/atomic/LongAdder.html">LongAdder (JDK 21)</a> — когда предпочесть его AtomicLong.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/invoke/VarHandle.html">VarHandle (JDK 21)</a> — режимы доступа и CAS на низком уровне.</li>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 15 «Atomic Variables and Nonblocking Synchronization» — CAS, стек Трайбера, ABA.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -415,7 +415,7 @@ window.KB_TREE = [
         { id: 'juc', title: 'java.util.concurrent', items: [
           { id: 'locks', freq: 2, status: 'draft', title: 'Locks',
             scope: 'ReentrantLock, tryLock, Condition, fairness, ReadWriteLock, StampedLock' },
-          { id: 'atomics', freq: 2, status: 'empty', title: 'Atomics & CAS',
+          { id: 'atomics', freq: 2, status: 'draft', title: 'Atomics & CAS',
             scope: 'CAS, AtomicInteger, LongAdder, ABA, lock-free' },
           { id: 'synchronizers', freq: 2, status: 'empty', title: 'Synchronizers',
             scope: 'CountDownLatch, CyclicBarrier, Semaphore, Phaser, Exchanger' },
