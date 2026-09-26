@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: synchronized &amp; wait/notify · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="synchronization">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: synchronized &amp; wait/notify</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="if-wait">
+      <h2>Два потребителя, notifyAll — и NoSuchElementException из пустой очереди</h2>
+      <p>Очередь входящих платежей на <code>synchronized</code> и <code>wait/notify</code>. Если платежей нет, потребитель ждёт; производитель кладёт платёж и будит ждущих. Код выглядит учебным и правильным:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class Inbox {
+    private final Deque&lt;String&gt; payments = new ArrayDeque&lt;&gt;();
+
+    synchronized void put(String p) {
+        payments.addLast(p);
+        notifyAll();                                             // разбудить всех ждущих
+    }
+
+    synchronized String take() throws InterruptedException {
+        if (payments.isEmpty()) wait();                          // ждём платёж — через if
+        return payments.removeFirst();
+    }
+
+    public static void main(String[] args) throws Exception {
+        Inbox inbox = new Inbox();
+        for (int c = 1; c &lt;= 2; c++) {
+            new Thread(() -&gt; {
+                try {
+                    while (true) inbox.take();
+                } catch (Exception e) {
+                    System.out.println(Thread.currentThread().getName() + ": " + e);
+                }
+            }, "consumer-" + c).start();
+        }
+        for (int i = 0; i &lt; 100_000; i++) inbox.put("p" + i);
+        Thread.sleep(500);
+        System.exit(0);
+    }
+}</code></pre>
+      <pre><code class="language-text">consumer-2: java.util.NoSuchElementException</code></pre>
+      <p>Три запуска — три падения, в разных потребителях. Метод <code>take()</code> целиком под <code>synchronized</code>, проверка пустоты есть, а <code>removeFirst()</code> всё равно достаёт из пустой очереди. Ошибка в одном слове — <code>if</code> вместо <code>while</code>. Чтобы понять почему, нужно знать, как устроен монитор и что происходит с потоком между <code>notifyAll()</code> и возвратом из <code>wait()</code>.</p>
+      <p>В этой теме — что такое монитор и что именно блокирует <code>synchronized</code>, почему важно, на каком объекте брать замок, как работают <code>wait</code>, <code>notify</code> и <code>notifyAll</code>, и почему <code>notify()</code> может остановить систему без единого deadlock в дампе.</p>
+    </section>
+
+    <section class="step" id="monitor">
+      <h2>synchronized захватывает монитор объекта: this, класс или явно указанный</h2>
+      <p>У каждого объекта в Java есть <b>монитор</b> — замок, который в каждый момент может держать только один поток. <code>synchronized</code> захватывает монитор при входе и отпускает при выходе, в том числе по исключению. Какой объект — зависит от формы:</p>
+      <table class="mx">
+        <thead><tr><th>Форма</th><th>Чей монитор</th></tr></thead>
+        <tbody>
+          <tr><td><code>synchronized void m()</code></td><td><code>this</code></td></tr>
+          <tr><td><code>static synchronized void m()</code></td><td>объект класса, <code>Monitors.class</code></td></tr>
+          <tr><td><code>synchronized (lock) { ... }</code></td><td>объект <code>lock</code></td></tr>
+        </tbody>
+      </table>
+      <p>Проверим три свойства — повторный вход, независимость статического и обычного замков и запрет <code>wait()</code> без монитора:</p>
+      <pre><code class="language-java">public class Monitors {
+    static synchronized void staticWork() throws InterruptedException { Thread.sleep(200); }   // замок: Monitors.class
+    synchronized void instanceWork() throws InterruptedException { Thread.sleep(200); }       // замок: this
+
+    synchronized void outer() { inner(); }                       // уже держим монитор this
+    synchronized void inner() {                                  // и входим в него снова
+        System.out.println("inner: держим this — " + Thread.holdsLock(this));
+    }
+
+    public static void main(String[] args) throws Exception {
+        Monitors m = new Monitors();
+        m.outer();                                               // реентерабельность: не зависли
+
+        long start = System.nanoTime();
+        Thread a = new Thread(() -&gt; { try { staticWork(); } catch (InterruptedException e) { } });
+        Thread b = new Thread(() -&gt; { try { m.instanceWork(); } catch (InterruptedException e) { } });
+        a.start(); b.start(); a.join(); b.join();
+        System.out.printf("static + instance: %d мс — выполнялись одновременно%n", (System.nanoTime() - start) / 1_000_000);
+
+        try {
+            m.wait();                                            // монитор m не захвачен
+        } catch (IllegalMonitorStateException e) {
+            System.out.println("wait() без synchronized: " + e);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">inner: держим this — true
+static + instance: 211 мс — выполнялись одновременно
+wait() без synchronized: java.lang.IllegalMonitorStateException: current thread is not owner</code></pre>
+      <ul>
+        <li><b>Монитор реентерабелен.</b> Поток, который уже держит монитор, входит в него снова без ожидания. JVM считает число входов и отпускает монитор, когда счётчик вернётся к нулю. Без этого вызов одного <code>synchronized</code>-метода из другого зависал бы навсегда.</li>
+        <li><b>Статический и обычный методы защищены разными замками</b>: 211 мс, а не 400. Если статический метод меняет то же состояние, что и обычный, защиты между ними нет.</li>
+        <li><b><code>wait</code> и <code>notify</code> можно вызывать, только держа монитор этого объекта</b>, иначе <code>IllegalMonitorStateException</code>.</li>
+      </ul>
+      <p>Кроме взаимного исключения, <code>synchronized</code> даёт видимость: всё, что поток записал до выхода из блока, увидит следующий поток, вошедший в блок с тем же монитором. Это правило happens-before из темы Java Memory Model. Поэтому чтение общего поля тоже должно идти под тем же замком, что и запись.</p>
+      <p>Устроен монитор так. Пока за него никто не соревнуется, JVM обходится флагом в заголовке объекта и одной атомарной операцией. При конкуренции монитор «раздувается» в полноценную структуру с очередями ждущих, и потоки паркуются через ОС. Оптимизацию для объектов, которые всегда захватывает один поток (biased locking), убрали: с JDK 15 она выключена (JEP 374), в JDK 21 флага <code>UseBiasedLocking</code> уже нет.</p>
+    </section>
+
+    <section class="step" id="lock-object">
+      <h2>Замок должен быть приватным, неизменным и вашим</h2>
+      <p>Монитор есть у любого объекта, поэтому чужой код может захватить монитор вашего объекта — и остановить ваши <code>synchronized</code>-методы. Сервис отчётов «для согласованности» строит отчёт под <code>synchronized (account)</code>:</p>
+      <pre><code class="language-java">public class Exposed {
+    static class Account {
+        private long balance;
+        synchronized void deposit(long amount) { balance += amount; }        // замок — this
+    }
+
+    static class SafeAccount {
+        private final Object lock = new Object();                            // замок недоступен снаружи
+        private long balance;
+        void deposit(long amount) { synchronized (lock) { balance += amount; } }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Account account = new Account();
+        SafeAccount safe = new SafeAccount();
+        Thread reporter = new Thread(() -&gt; {
+            synchronized (account) {                                         // чужой код взял наш монитор
+                synchronized (safe) {
+                    try { Thread.sleep(500); } catch (InterruptedException e) { }  // «строит отчёт»
+                }
+            }
+        });
+        reporter.start();
+        Thread.sleep(50);
+
+        long start = System.nanoTime();
+        account.deposit(100);
+        System.out.printf("Account.deposit:     %d мс%n", (System.nanoTime() - start) / 1_000_000);
+        start = System.nanoTime();
+        safe.deposit(100);
+        System.out.printf("SafeAccount.deposit: %d мс%n", (System.nanoTime() - start) / 1_000_000);
+        reporter.join();
+    }
+}</code></pre>
+      <pre><code class="language-text">Account.deposit:     459 мс
+SafeAccount.deposit: 0 мс</code></pre>
+      <p>Пополнение счёта ждало чужой отчёт полсекунды. <code>SafeAccount</code> держит замок в приватном поле, и захват его монитора снаружи ни на что не влияет. <code>synchronized</code>-методы удобны, но их замок — публичный объект.</p>
+      <p>Вторая ошибка — замок, который меняется. Счётчик-<code>Integer</code> как замок:</p>
+      <pre><code class="language-java">public class WrongLock {
+    static Integer count = 0;
+
+    public static void main(String[] args) throws Exception {
+        Thread[] threads = new Thread[8];
+        for (int t = 0; t &lt; threads.length; t++) {
+            threads[t] = new Thread(() -&gt; {
+                for (int i = 0; i &lt; 100_000; i++) {
+                    synchronized (count) {                       // замок — текущий объект Integer
+                        count++;                                 // count = Integer.valueOf(count + 1): новый объект
+                    }
+                }
+            });
+            threads[t].start();
+        }
+        for (Thread t : threads) t.join();
+        System.out.println("ожидали 800000, получили " + count);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ javac WrongLock.java
+WrongLock.java:9: warning: [synchronization] attempt to synchronize on an instance of a value-based class
+$ java WrongLock
+ожидали 800000, получили 654090</code></pre>
+      <p>Каждый <code>count++</code> кладёт в поле новый объект <code>Integer</code>, и потоки захватывают мониторы разных объектов. Защиты нет, хотя <code>synchronized</code> в коде стоит. То же случится с любым полем, которое переприсваивают, пока его используют как замок. Отдельная опасность — <code>Integer</code> от −128 до 127 и строковые литералы: это общие объекты на всю JVM. Замок на <code>"lock"</code> в вашем классе — тот же замок, что в чужой библиотеке.</p>
+      <p>Правило: замок — <code>private final Object lock = new Object()</code> или <code>this</code>, если класс осознанно документирует, что синхронизирован на себе. Никогда — строки, обёртки, <code>Class</code> чужих классов и изменяемые поля.</p>
+    </section>
+
+    <section class="step" id="wait-notify">
+      <h2>wait() отпускает монитор, а notify() лишь переводит поток в очередь за ним</h2>
+      <p><code>wait</code> и <code>notify</code> позволяют потоку ждать условия, не занимая монитор и не тратя CPU. Ключ к ним — у монитора две очереди: <b>entry set</b> — потоки, которые хотят войти (<code>BLOCKED</code>), и <b>wait set</b> — потоки, которые вызвали <code>wait()</code> (<code>WAITING</code>).</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Монитор с владельцем, очередью входа и очередью ожидания. Поток A владеет монитором, B и C ждут входа. A вызывает wait, отпускает монитор и уходит в очередь ожидания, владельцем становится B. B вызывает notify, и A переходит из очереди ожидания в очередь входа, но не начинает выполняться. B выходит из synchronized, монитор захватывает C и забирает платёж. Когда A наконец получает монитор, условие уже снова ложно, поэтому его нужно проверить заново в цикле while.">
+            <defs>
+              <marker id="mn-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="mn-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- три области -->
+            <rect x="20" y="70" width="190" height="150" rx="8" class="dg-box"/>
+            <text x="32" y="90" class="dg-t">entry set</text>
+            <text x="32" y="106" class="dg-n">BLOCKED, хотят войти</text>
+            <rect x="270" y="90" width="180" height="70" rx="8" class="dg-box"/>
+            <text x="282" y="108" class="dg-t">владелец</text>
+            <rect x="510" y="70" width="190" height="150" rx="8" class="dg-box"/>
+            <text x="522" y="90" class="dg-t">wait set</text>
+            <text x="522" y="106" class="dg-n">WAITING, ждут notify</text>
+
+            <!-- переходы -->
+            <path d="M210 128 L 266 128" class="dg-line" marker-end="url(#mn-n)"/>
+            <path d="M450 128 L 506 128" class="dg-line" marker-end="url(#mn-n)"/>
+            <text x="456" y="120" class="dg-n">wait()</text>
+            <path d="M605 66 C 605 22, 115 22, 115 66" class="dg-line" marker-end="url(#mn-n)"/>
+            <text x="360" y="60" class="dg-n" text-anchor="middle">notify(): из wait set в entry set</text>
+            <path d="M360 160 L 360 206" class="dg-line" marker-end="url(#mn-n)"/>
+            <text x="368" y="196" class="dg-n">выход из synchronized</text>
+
+            <!-- шаг 1 -->
+            <g data-s="1">
+              <rect x="290" y="118" width="140" height="30" rx="6" class="dg-cell hit"/><text x="360" y="138" class="dg-in" text-anchor="middle">A (потребитель)</text>
+              <rect x="40" y="120" width="150" height="30" rx="6" class="dg-cell"/><text x="115" y="140" class="dg-in" text-anchor="middle">B (производитель)</text>
+              <rect x="40" y="160" width="150" height="30" rx="6" class="dg-cell"/><text x="115" y="180" class="dg-in" text-anchor="middle">C (потребитель)</text>
+            </g>
+            <!-- шаг 2 -->
+            <g data-s="2">
+              <rect x="290" y="118" width="140" height="30" rx="6" class="dg-cell hit"/><text x="360" y="138" class="dg-in" text-anchor="middle">B</text>
+              <rect x="40" y="160" width="150" height="30" rx="6" class="dg-cell"/><text x="115" y="180" class="dg-in" text-anchor="middle">C</text>
+              <rect x="530" y="120" width="150" height="30" rx="6" class="dg-cell miss"/><text x="605" y="140" class="dg-in" text-anchor="middle">A</text>
+              <path d="M450 128 L 506 128" class="dg-line ok" marker-end="url(#mn-ok)"/>
+              <path d="M210 128 L 266 128" class="dg-line ok" marker-end="url(#mn-ok)"/>
+            </g>
+            <!-- шаг 3 -->
+            <g data-s="3">
+              <rect x="290" y="118" width="140" height="30" rx="6" class="dg-cell hit"/><text x="360" y="138" class="dg-in" text-anchor="middle">B</text>
+              <rect x="40" y="120" width="150" height="30" rx="6" class="dg-cell"/><text x="115" y="140" class="dg-in" text-anchor="middle">A</text>
+              <rect x="40" y="160" width="150" height="30" rx="6" class="dg-cell"/><text x="115" y="180" class="dg-in" text-anchor="middle">C</text>
+              <path d="M605 66 C 605 22, 115 22, 115 66" class="dg-line ok" marker-end="url(#mn-ok)"/>
+            </g>
+            <!-- шаг 4 -->
+            <g data-s="4">
+              <rect x="290" y="118" width="140" height="30" rx="6" class="dg-cell hit"/><text x="360" y="138" class="dg-in" text-anchor="middle">C забрал платёж</text>
+              <rect x="40" y="120" width="150" height="30" rx="6" class="dg-cell"/><text x="115" y="140" class="dg-in" text-anchor="middle">A</text>
+              <path d="M210 128 L 266 128" class="dg-line ok" marker-end="url(#mn-ok)"/>
+            </g>
+            <!-- шаг 5 -->
+            <g data-s="5">
+              <rect x="290" y="118" width="140" height="30" rx="6" class="dg-cell miss"/><text x="360" y="138" class="dg-in" text-anchor="middle">A: очередь пуста</text>
+              <path d="M210 128 L 266 128" class="dg-line ok" marker-end="url(#mn-ok)"/>
+            </g>
+
+            <text data-s="1" x="20" y="258" class="dg-in">A держит монитор, очередь пуста; B и C ждут входа</text>
+            <text data-s="2" x="20" y="258" class="dg-in">A вызвал wait(): отпустил монитор и ушёл в wait set, вошёл B</text>
+            <text data-s="3" x="20" y="258" class="dg-ok">B положил платёж и вызвал notify(): A перешёл в entry set</text>
+            <text data-s="4" x="20" y="258" class="dg-in">B вышел. Монитор взял C — порядок не гарантирован</text>
+            <text data-s="5" x="20" y="258" class="dg-bad">A наконец вернулся из wait() — а платежа уже нет</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Потребитель A держит монитор и видит пустую очередь. Производитель B и второй потребитель C стоят в entry set.</li>
+          <li>A вызывает <code>wait()</code>: атомарно отпускает монитор и уходит в wait set. Монитор свободен, его берёт B.</li>
+          <li>B кладёт платёж и вызывает <code>notify()</code>. A переходит из wait set в entry set — и только. Он не выполняется и не держит монитор: B всё ещё внутри <code>synchronized</code>.</li>
+          <li>B выходит. За монитор соревнуются A и C, и JVM не обещает, кто победит. Победил C и забрал платёж.</li>
+          <li>Когда A наконец получает монитор, он возвращается из <code>wait()</code> в точку после вызова. С <code>if</code> он сразу идёт к <code>removeFirst()</code> — и получает <code>NoSuchElementException</code>, как в шаге 1.</li>
+        </ol>
+      </figure>
+      <p>Поэтому условие после <code>wait()</code> всегда перепроверяют в цикле:</p>
+      <pre><code class="language-java">    synchronized String take() throws InterruptedException {
+        while (payments.isEmpty()) wait();                       // проснулся — проверь снова
+        return payments.removeFirst();
+    }</code></pre>
+      <p>С <code>while</code> программа из шага 1 отрабатывает все 100 000 платежей без ошибок. Есть и вторая причина для цикла — <b>spurious wakeup</b>. Спецификация разрешает потоку выйти из <code>wait()</code> вообще без <code>notify</code>, и на некоторых платформах это действительно случается. Цикл покрывает оба случая. Это не стиль, а часть контракта <code>wait()</code>, записанная в его javadoc.</p>
+      <table class="mx">
+        <thead><tr><th></th><th><code>wait()</code></th><th><code>sleep()</code></th></tr></thead>
+        <tbody>
+          <tr><td>монитор</td><td>отпускает на время ожидания</td><td>держит, если вызван внутри <code>synchronized</code></td></tr>
+          <tr><td>где вызывать</td><td>только под монитором объекта</td><td>где угодно</td></tr>
+          <tr><td>как проснуться</td><td><code>notify</code>, таймаут, прерывание, spurious wakeup</td><td>таймаут или прерывание</td></tr>
+          <tr><td>чей метод</td><td><code>Object</code></td><td><code>Thread</code>, статический</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="notify-all">
+      <h2>notify() будит одного случайного — и может разбудить не того</h2>
+      <p><code>notify()</code> переводит из wait set один произвольный поток, <code>notifyAll()</code> — все. Кажется, что <code>notify()</code> экономнее. Буфер на один платёж, два производителя и два потребителя, все проверяют условие в <code>while</code>:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.AtomicLong;
+
+public class OneSlot {
+    private String slot;                                         // буфер на один платёж
+    private final boolean all;
+    static final AtomicLong moved = new AtomicLong();
+
+    OneSlot(boolean all) { this.all = all; }
+
+    synchronized void put(String p) throws InterruptedException {
+        while (slot != null) wait();                             // ждём, пока место освободится
+        slot = p;
+        if (all) notifyAll(); else notify();
+    }
+
+    synchronized String take() throws InterruptedException {
+        while (slot == null) wait();                             // ждём платёж
+        String p = slot;
+        slot = null;
+        if (all) notifyAll(); else notify();
+        return p;
+    }
+
+    public static void main(String[] args) throws Exception {
+        OneSlot buf = new OneSlot(args[0].equals("notifyAll"));
+        for (int i = 0; i &lt; 2; i++) {
+            Thread producer = new Thread(() -&gt; { try { while (true) buf.put("p"); } catch (InterruptedException e) { } });
+            Thread consumer = new Thread(() -&gt; { try { while (true) { buf.take(); moved.incrementAndGet(); } } catch (InterruptedException e) { } });
+            producer.setDaemon(true); consumer.setDaemon(true);
+            producer.start(); consumer.start();
+        }
+        long before = -1;
+        for (int sec = 1; sec &lt;= 5; sec++) {
+            Thread.sleep(1000);
+            long now = moved.get();
+            System.out.printf("%d с: передано %,d%s%n", sec, now, now == before ? " — стоит" : "");
+            before = now;
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java OneSlot notify
+1 с: передано 5
+2 с: передано 5 — стоит
+3 с: передано 5 — стоит
+4 с: передано 5 — стоит
+5 с: передано 5 — стоит
+$ java OneSlot notifyAll
+1 с: передано 226,680
+2 с: передано 495,926
+3 с: передано 748,676
+4 с: передано 1,023,463
+5 с: передано 1,295,825</code></pre>
+      <p>С <code>notify()</code> система передала 5–10 платежей и встала навсегда: так было во всех трёх запусках. Сценарий такой. Потребитель забрал платёж и вызвал <code>notify()</code>, чтобы разбудить производителя. А проснулся второй потребитель: слот пуст, и он снова уснул, никого не разбудив. Сигнал потерян, в wait set оказываются все четыре потока. Дамп потоков показывает всех в <code>WAITING (on object monitor)</code> внутри <code>Object.wait()</code>, а строки <code>Found one Java-level deadlock</code> нет. Формально это не deadlock — никто не ждёт замок, который держит другой. Но система стоит так же.</p>
+      <p>Беда в том, что в одном wait set ждут потоки с <b>разными условиями</b>: производители — «место есть», потребители — «платёж есть». <code>notify()</code> безопасен, только если все ждущие ждут одного и того же, и любого из них достаточно разбудить. Во всех остальных случаях — <code>notifyAll()</code>.</p>
+      <p>В прикладном коде <code>wait/notify</code> сегодня почти не пишут. Для очереди есть <code>BlockingQueue</code>, для разных условий — <code>Lock</code> с несколькими <code>Condition</code> (тема Locks), для «дождаться N событий» — синхронизаторы. Но на собеседовании эти механизмы спрашивают, и они объясняют, как устроены готовые классы.</p>
+    </section>
+
+    <section class="step" id="short-sections">
+      <h2>Под замком — только короткая работа без ввода-вывода</h2>
+      <p>Пока поток держит монитор, остальные стоят в entry set. Отсюда практические правила:</p>
+      <ul>
+        <li><b>Минимальная критическая секция.</b> Под замок попадает только работа с общим состоянием. Подготовку данных и вычисления делают до входа, логирование — после выхода.</li>
+        <li><b>Никакого ввода-вывода под замком.</b> HTTP-вызов, запрос в базу или запись в файл под <code>synchronized</code> превращают сетевую задержку в задержку всех потоков, которым нужен этот замок.</li>
+        <li><b>Никаких чужих методов под замком.</b> Вызов слушателя или колбэка, пока держишь монитор, — прямой путь к deadlock: чужой код может захватить другой замок в обратном порядке (тема Deadlocks &amp; Liveness).</li>
+      </ul>
+      <p>Цена конкуренции заметна: в теме Thread Safety 8 потоков, которые наращивали общий счётчик под <code>synchronized</code>, работали в 26 раз медленнее, чем с <code>LongAdder</code>. Когда один замок становится узким местом, его разбивают на несколько (lock striping, как в старом <code>ConcurrentHashMap</code>) или уходят от блокировок к атомарным операциям.</p>
+      <div class="note warn">
+        <p>С виртуальными потоками в Java 21 у <code>synchronized</code> есть особая цена. Виртуальный поток, который блокируется внутри <code>synchronized</code>, <b>закрепляется</b> (pinning) за потоком-носителем и не отпускает его. Долгий ввод-вывод под <code>synchronized</code> съедает носители. Поэтому в Java 21 для такого кода рекомендуют <code>ReentrantLock</code>. В JDK 24 это ограничение сняли (JEP 491). Подробно — в теме Virtual Threads.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>synchronized</code> захватывает монитор: у метода — <code>this</code>, у статического метода — объект класса, у блока — указанный объект. Статический и обычный методы защищены разными замками.</li>
+        <li>Монитор реентерабелен и даёт видимость: запись до выхода видна тому, кто войдёт следующим с тем же монитором.</li>
+        <li>Замок — приватное <code>final</code>-поле. Не <code>this</code> публичного объекта, не <code>Integer</code>, не строковый литерал, не переприсваиваемое поле.</li>
+        <li><code>wait()</code> отпускает монитор и уводит поток в wait set. <code>notify()</code> только переводит поток в очередь за монитором, и к моменту пробуждения условие может снова стать ложным.</li>
+        <li>Условие после <code>wait()</code> проверяют в <code>while</code>: из-за «украденных» условий и spurious wakeup.</li>
+        <li><code>notify()</code> безопасен только при одном условии у всех ждущих, иначе сигнал теряется и система встаёт без deadlock в дампе. По умолчанию — <code>notifyAll()</code>, а в новом коде — <code>BlockingQueue</code> и <code>Condition</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="how-synchronized" data-freq="3">
+      <h3>Как работает synchronized?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>У каждого объекта есть монитор. <code>synchronized</code> захватывает его при входе и отпускает при выходе, в том числе по исключению. Пока монитор занят, другие потоки, которые хотят войти, стоят в <code>BLOCKED</code>. У метода монитор — <code>this</code>, у статического метода — объект класса, у блока — указанный объект. Монитор реентерабелен: поток может войти в него повторно.</p>
+          <p>Кроме взаимного исключения, <code>synchronized</code> даёт видимость: выход из блока happens-before следующего входа в блок с тем же монитором.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без конкуренции монитор — флаг в заголовке объекта и CAS; при конкуренции он раздувается в структуру с очередями, и потоки паркуются.</li>
+            <li>Biased locking выключен с JDK 15 (JEP 374), в JDK 21 флага уже нет.</li>
+            <li>Виртуальный поток, заблокированный внутри <code>synchronized</code>, в Java 21 закрепляется за носителем; в JDK 24 это исправлено (JEP 491).</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Класс с static synchronized методом a() и обычным synchronized методом b(). Могут ли они выполняться одновременно?</summary>
+          <p>Могут: <code>a()</code> захватывает монитор объекта класса, <code>b()</code> — монитор экземпляра. В замере урока два метода по 200 мс в разных потоках вместе заняли 211 мс. Если они меняют общее состояние, защиты между ними нет.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="wait-vs-sleep" data-freq="3">
+      <h3>Чем wait() отличается от sleep()?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>wait()</code> — метод <code>Object</code>. Его вызывают только под монитором этого объекта, и на время ожидания он монитор отпускает. Будит его <code>notify</code> или <code>notifyAll</code>, таймаут или прерывание. <code>sleep()</code> — статический метод <code>Thread</code>. Он просто останавливает поток на время и никакие замки не отпускает: если вызвать его внутри <code>synchronized</code>, монитор останется занят.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что будет, если вызвать wait() вне synchronized?</summary>
+          <p><code>IllegalMonitorStateException: current thread is not owner</code>. Требование не формальное: проверка условия и уход в ожидание должны быть атомарны относительно <code>notify</code>. Иначе сигнал может прийти между проверкой и <code>wait()</code> и потеряться.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="why-while" data-freq="3">
+      <h3>Почему wait() вызывают в цикле while, а не в if?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Потому что к моменту возврата из <code>wait()</code> условие может снова стать ложным. <code>notify</code> только переводит поток в очередь за монитором. Пока он дождётся монитора, другой поток может успеть забрать то, чего он ждал. Вторая причина — spurious wakeup: спецификация разрешает выйти из <code>wait()</code> без уведомления. Цикл перепроверяет условие в обоих случаях.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>synchronized String take() { if (queue.isEmpty()) wait(); return queue.removeFirst(); } — производитель вызывает notifyAll(). Что не так?</summary>
+          <p><code>if</code> вместо <code>while</code>. <code>notifyAll()</code> будит всех потребителей. Первый забирает элемент, остальные выходят из <code>wait()</code> на пустую очередь и падают с <code>NoSuchElementException</code>. В замере урока с двумя потребителями это случилось в каждом из трёх запусков. Нужно <code>while (queue.isEmpty()) wait();</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="notify-vs-notifyall" data-freq="2">
+      <h3>Чем notify() отличается от notifyAll()? Что выбрать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>notify()</code> будит один произвольный поток из ожидающих, <code>notifyAll()</code> — все. <code>notify()</code> безопасен, только если все ожидающие ждут одного и того же условия и достаточно разбудить любого. Иначе он может разбудить поток с другим условием: тот снова уснёт, и сигнал потеряется. По умолчанию выбирают <code>notifyAll()</code>, а в новом коде — <code>BlockingQueue</code> или <code>Condition</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Буфер на один элемент, два производителя и два потребителя, while-циклы, notify(). Что произойдёт?</summary>
+          <p>Система может встать навсегда. Потребитель освобождает слот и будит второго потребителя вместо производителя. Тот видит пустой слот и снова ждёт, и в какой-то момент все четыре потока оказываются в wait set. В замере урока так было в каждом запуске после 5–10 передач. В дампе все в <code>WAITING (on object monitor)</code>, а deadlock JVM не находит: никто не держит замок, которого ждёт другой.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="lock-object-q" data-freq="2">
+      <h3>На каком объекте лучше синхронизироваться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>На приватном <code>final</code>-поле: <code>private final Object lock = new Object()</code>. На <code>this</code> может синхронизироваться и чужой код, и тогда он блокирует ваши методы. Нельзя синхронизироваться на строках, <code>Integer</code> и других value-based объектах: они бывают общими на всю JVM, а при переприсваивании поле указывает на новый объект. Нельзя и на поле, которое меняется, — потоки будут захватывать разные мониторы.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>static Integer count; ... synchronized (count) { count++; } — javac выдаёт предупреждение. Работает ли защита?</summary>
+          <p>Нет. <code>count++</code> кладёт в поле новый объект <code>Integer</code>, и потоки захватывают мониторы разных объектов. В замере урока 8 потоков по 100 000 увеличений получили 654 090 вместо 800 000. javac предупреждает: <code>attempt to synchronize on an instance of a value-based class</code>. Нужен отдельный <code>private static final Object</code> для замка или <code>AtomicInteger</code>.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html">JLS 21, глава 17: Threads and Locks</a> — основа урока: мониторы, wait sets, notify, spurious wakeup.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html#wait(long,int)">Object.wait (JDK 21)</a> — javadoc требует вызывать wait в цикле.</li>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 14 «Building Custom Synchronizers» — условные очереди, notify и notifyAll.</li>
+      <li><a href="https://openjdk.org/jeps/374">JEP 374: Deprecate and Disable Biased Locking</a> и <a href="https://openjdk.org/jeps/491">JEP 491: Synchronize Virtual Threads without Pinning</a> — как менялась реализация мониторов.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
