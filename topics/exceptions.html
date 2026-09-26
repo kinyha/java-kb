@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Exceptions · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="exceptions">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Exceptions</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="finally-return">
+      <h2>Списание сверх лимита «прошло успешно» — исключение съел finally</h2>
+      <p>Метод списания бросает исключение, если сумма больше лимита. В <code>finally</code> кто-то добавил запись в аудит и «гарантированный ответ клиенту»:</p>
+      <pre><code class="language-java">public class FinallyReturn {
+    static boolean charge(long amount) {
+        try {
+            if (amount &gt; 10_000) throw new IllegalStateException("превышен лимит");   // списание не прошло
+            return true;
+        } finally {
+            System.out.println("  аудит: попытка списания " + amount);
+            return true;                                                  // «всегда отвечаем клиенту»
+        }
+    }
+
+    static int counter() {
+        int x = 1;
+        try {
+            return x;                                                     // значение возврата уже вычислено
+        } finally {
+            x = 100;                                                      // не влияет на результат
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println("списание 50 000: " + charge(50_000));
+        System.out.println("counter() = " + counter());
+    }
+}</code></pre>
+      <pre class="out">  аудит: попытка списания 50000
+списание 50 000: true
+counter() = 1</pre>
+      <p>Исключение исчезло без следа: <code>return</code> в <code>finally</code> отменяет и исключение, и возврат из <code>try</code>. Вызывающий получил <code>true</code>. javac умеет об этом предупредить, но только с флагом <code>-Xlint:finally</code>:</p>
+      <pre><code class="language-text">$ javac -Xlint:finally FinallyReturn.java
+FinallyReturn.java:9: warning: [finally] finally clause cannot complete normally</code></pre>
+      <p>Вторая функция показывает обратное: присваивание в <code>finally</code> не меняет уже вычисленное значение <code>return x</code>. Правило — в <code>finally</code> только освобождение ресурсов, без <code>return</code> и без исключений.</p>
+      <p>В этой теме — иерархия исключений, checked и unchecked, try-with-resources и подавленные исключения, сохранение причины при переводе исключений, стоимость исключений и то, как JIT «теряет» stack trace. И главное практическое правило: где исключения ловить.</p>
+    </section>
+
+    <section class="step" id="hierarchy">
+      <h2>Всё, что бросается, — Throwable, и компилятор проверяет только одну ветку</h2>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Иерархия исключений. Throwable делится на Error и Exception. Error — сбои JVM, например OutOfMemoryError и StackOverflowError, их не проверяет компилятор. Exception — проверяемые исключения, например IOException и SQLException, их компилятор требует поймать или объявить. RuntimeException наследует Exception, но не проверяется: NullPointerException, IllegalArgumentException, IllegalStateException.">
+            <defs>
+              <marker id="eh-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="275" y="16" width="170" height="40" rx="8" class="dg-box"/>
+            <text x="360" y="41" class="dg-t" text-anchor="middle">Throwable</text>
+
+            <rect x="40" y="96" width="260" height="56" rx="8" class="dg-cell miss"/>
+            <text x="52" y="118" class="dg-t">Error — unchecked</text>
+            <text x="52" y="138" class="dg-n">OutOfMemoryError, StackOverflowError</text>
+            <rect x="420" y="96" width="260" height="56" rx="8" class="dg-cell"/>
+            <text x="432" y="118" class="dg-t">Exception — checked</text>
+            <text x="432" y="138" class="dg-n">IOException, SQLException</text>
+            <rect x="420" y="184" width="260" height="56" rx="8" class="dg-cell hit"/>
+            <text x="432" y="206" class="dg-t">RuntimeException — unchecked</text>
+            <text x="432" y="226" class="dg-n">NPE, IllegalArgument, IllegalState</text>
+
+            <path d="M330 56 L 200 92" class="dg-line" marker-end="url(#eh-n)"/>
+            <path d="M390 56 L 520 92" class="dg-line" marker-end="url(#eh-n)"/>
+            <path d="M550 152 L 550 180" class="dg-line" marker-end="url(#eh-n)"/>
+
+            <text x="40" y="184" class="dg-n">сбои JVM и среды:</text>
+            <text x="40" y="202" class="dg-n">ловить не нужно</text>
+            <text x="560" y="172" class="dg-n">наследует</text>
+          </svg>
+        </div>
+        <figcaption>Проверяемыми (checked) компилятор считает всё под <code>Exception</code>, кроме ветки <code>RuntimeException</code>.</figcaption>
+      </figure>
+      <table class="mx">
+        <thead><tr><th>Ветка</th><th>Что означает</th><th>Что с ней делать</th></tr></thead>
+        <tbody>
+          <tr><td><code>Error</code></td><td>сбой JVM или среды: нет памяти, переполнен стек, не найден класс</td><td>не ловить; процесс обычно не в состоянии продолжать (тема Diagnostics)</td></tr>
+          <tr><td>checked <code>Exception</code></td><td>ожидаемый сбой внешнего мира: файл, сеть, база</td><td>компилятор требует <code>catch</code> или <code>throws</code></td></tr>
+          <tr><td><code>RuntimeException</code></td><td>ошибка программиста или нарушенный контракт: <code>null</code>, неверный аргумент, недопустимое состояние</td><td>исправлять код; на границе — превращать в ответ с ошибкой</td></tr>
+        </tbody>
+      </table>
+      <p>Checked-исключения — особенность Java, и их спорность видна в лямбдах. Функциональные интерфейсы вроде <code>Consumer</code> не объявляют <code>throws</code>, поэтому метод с checked-исключением внутри стрима или <code>forEach</code> не компилируется:</p>
+      <pre><code class="language-java">import java.nio.file.*;
+import java.util.*;
+
+public class Statements {
+    public static void main(String[] args) {
+        List&lt;Path&gt; files = List.of(Path.of("sber.csv"), Path.of("vtb.csv"));
+        files.forEach(f -&gt; System.out.println(Files.readString(f)));   // readString бросает IOException
+    }
+}</code></pre>
+      <pre><code class="language-text">Statements.java:7: error: unreported exception IOException; must be caught or declared to be thrown
+        files.forEach(f -&gt; System.out.println(Files.readString(f)));   // readString бросает IOException
+                                                              ^</code></pre>
+      <p>Приходится ловить внутри лямбды и оборачивать в unchecked — для ввода-вывода в JDK есть <code>UncheckedIOException</code>. Поэтому современные библиотеки, включая Spring (<code>DataAccessException</code>), бросают только unchecked. Свои исключения в прикладном коде обычно тоже делают unchecked, наследуя от <code>RuntimeException</code>.</p>
+    </section>
+
+    <section class="step" id="resources">
+      <h2>try-with-resources закрывает ресурсы и не теряет исходную ошибку</h2>
+      <p>Классический <code>try/finally</code> с закрытием ресурса в <code>finally</code> имеет изъян: если бросили и тело, и <code>close()</code>, исключение из <code>finally</code> заменяет исходное:</p>
+      <pre><code class="language-java">public class Suppressed {
+    static class BankConnection implements AutoCloseable {
+        void transfer() { throw new IllegalStateException("перевод отклонён банком"); }
+        @Override public void close() { throw new IllegalStateException("соединение оборвалось при закрытии"); }
+    }
+
+    static void manual() {
+        BankConnection c = new BankConnection();
+        try {
+            c.transfer();
+        } finally {
+            c.close();                                                   // исключение из finally заменяет исходное
+        }
+    }
+
+    static void withResources() {
+        try (BankConnection c = new BankConnection()) {
+            c.transfer();
+        }                                                                // close() вызван автоматически
+    }
+
+    public static void main(String[] args) {
+        try { manual(); } catch (Exception e) {
+            System.out.println("try/finally:        " + e.getMessage() + ", suppressed: " + e.getSuppressed().length);
+        }
+        try { withResources(); } catch (Exception e) {
+            System.out.println("try-with-resources: " + e.getMessage());
+            for (Throwable s : e.getSuppressed()) System.out.println("  suppressed:       " + s.getMessage());
+        }
+    }
+}</code></pre>
+      <pre class="out">try/finally:        соединение оборвалось при закрытии, suppressed: 0
+try-with-resources: перевод отклонён банком
+  suppressed:       соединение оборвалось при закрытии</pre>
+      <p>После <code>try/finally</code> в логе окажется «соединение оборвалось», а настоящая причина — отказ банка — потеряна. <code>try-with-resources</code> (Java 7) бросает исходное исключение, а ошибку <code>close()</code> прикрепляет к нему как <b>подавленную</b> (<code>getSuppressed()</code>). В stack trace она печатается строкой <code>Suppressed:</code>.</p>
+      <ul>
+        <li>Ресурс — любой <code>AutoCloseable</code>: потоки, соединения, <code>ExecutorService</code> с Java 19 (тема Executors), свои классы.</li>
+        <li>Несколько ресурсов закрываются в обратном порядке объявления, и каждый закрывается, даже если предыдущий бросил.</li>
+        <li><code>close()</code> вызывается до <code>catch</code> и <code>finally</code> этого же оператора.</li>
+        <li>С Java 9 можно указать уже существующую effectively final переменную: <code>try (connection) { … }</code>.</li>
+      </ul>
+    </section>
+
+    <section class="step" id="translate">
+      <h2>Переводя исключение на язык своего слоя, передавайте причину</h2>
+      <p>Слою бизнес-логики не нужно знать про <code>FileNotFoundException</code> или <code>SQLException</code>. Их переводят в исключение своего уровня — <b>exception translation</b>. Главное при этом — не потерять исходную ошибку:</p>
+      <pre><code class="language-java">import java.io.*;
+
+public class Translate {
+    static class PaymentException extends RuntimeException {             // исключение своего слоя
+        PaymentException(String message, Throwable cause) { super(message, cause); }
+        PaymentException(String message) { super(message); }
+    }
+
+    static String readStatement(String bank) throws IOException {
+        throw new FileNotFoundException("/data/" + bank + ".csv (No such file or directory)");
+    }
+
+    static void importLost(String bank) {
+        try { readStatement(bank); }
+        catch (IOException e) { throw new PaymentException("не удалось загрузить выписку " + bank); }        // причина потеряна
+    }
+
+    static void importKept(String bank) {
+        try { readStatement(bank); }
+        catch (IOException e) { throw new PaymentException("не удалось загрузить выписку " + bank, e); }     // причина сохранена
+    }
+
+    public static void main(String[] args) {
+        try { importLost("sber"); } catch (PaymentException e) {
+            System.out.println("без cause: " + e.getMessage() + " | причина: " + e.getCause());
+        }
+        try { importKept("sber"); } catch (PaymentException e) {
+            System.out.println("с cause:   " + e.getMessage() + " | причина: " + e.getCause());
+        }
+    }
+}</code></pre>
+      <pre class="out">без cause: не удалось загрузить выписку sber | причина: null
+с cause:   не удалось загрузить выписку sber | причина: java.io.FileNotFoundException: /data/sber.csv (No such file or directory)</pre>
+      <p>Без <code>cause</code> на дежурстве будут знать только, что «не удалось загрузить выписку», но не почему: нет файла, нет прав или битая кодировка. С <code>cause</code> полный stack trace содержит обе части, связанные строкой <code>Caused by:</code>. Свои исключения всегда объявляют с конструктором <code>(String message, Throwable cause)</code>.</p>
+      <p>Когда своё исключение действительно нужно: если вызывающий должен различать эту ситуацию — «недостаточно средств» и «счёт заблокирован» дают разные ответы клиенту. В остальных случаях хватает стандартных: <code>IllegalArgumentException</code> для неверного аргумента, <code>IllegalStateException</code> для недопустимого состояния, <code>UnsupportedOperationException</code>.</p>
+    </section>
+
+    <section class="step" id="cost">
+      <h2>Исключение дорого из-за стека, а JIT может этот стек выбросить</h2>
+      <p>Конструктор <code>Throwable</code> вызывает <code>fillInStackTrace</code> — обходит стек и сохраняет его. Цена растёт с глубиной. Сравним обычное исключение и лёгкое — без стека, через защищённый конструктор <code>(message, cause, enableSuppression, writableStackTrace)</code>:</p>
+      <pre><code class="language-java">public class Cost {
+    static class NotFound extends RuntimeException {                     // обычное: собирает стек
+        NotFound(String m) { super(m); }
+    }
+    static class LightNotFound extends RuntimeException {                // без стека: для потока управления
+        LightNotFound(String m) { super(m, null, false, false); }
+    }
+
+    static int depth(int n, boolean light) {                            // исключение на глубине n кадров
+        if (n == 0) throw light ? new LightNotFound("нет платежа") : new NotFound("нет платежа");
+        return depth(n - 1, light) + 1;
+    }
+
+    static long run(boolean light, int stack) {
+        long start = System.nanoTime();
+        for (int i = 0; i &lt; 200_000; i++) {
+            try { depth(stack, light); } catch (RuntimeException e) { }
+        }
+        return (System.nanoTime() - start) / 200_000;
+    }
+
+    public static void main(String[] args) {
+        run(false, 50); run(true, 50);                                    // прогрев
+        for (int stack : new int[]{10, 100})
+            System.out.printf("глубина %3d: со стеком %,5d нс, без стека %,4d нс на исключение%n", stack, run(false, stack), run(true, stack));
+    }
+}</code></pre>
+      <pre><code class="language-text">глубина  10: со стеком   775 нс, без стека  430 нс на исключение
+глубина 100: со стеком 5,680 нс, без стека 4,167 нс на исключение</code></pre>
+      <p>Сбор стека на глубине 100 стоит около 1,5 мкс, а сама раскрутка стека через 100 кадров — ещё 4 мкс. Для ошибок это неважно. Для штатного потока управления — «платёж не найден» тысячи раз в секунду — это уже заметно, и там лучше возвращать <code>Optional</code> или результат-объект. В типичном стеке Spring глубина запросов около сотни кадров.</p>
+      <p>Обратная сторона оптимизации — пропадающий stack trace. Если одно и то же место часто бросает NPE, <code>ArithmeticException</code> или <code>ArrayIndexOutOfBoundsException</code>, C2 перестаёт создавать исключение и бросает заранее созданное, без сообщения и без стека:</p>
+      <pre><code class="language-java">public class FastThrow {
+    record Payment(String currency) { }
+
+    static int codeLength(Payment p) {
+        return p.currency().length();                                   // NPE, если валюта не заполнена
+    }
+
+    public static void main(String[] args) {
+        Payment broken = new Payment(null);
+        for (int i = 1; i &lt;= 200_000; i++) {
+            try {
+                codeLength(broken);
+            } catch (NullPointerException e) {
+                if (i == 1 || i == 200_000)
+                    System.out.printf("NPE №%,d: message = %s, кадров стека = %d%n", i, e.getMessage(), e.getStackTrace().length);
+            }
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java FastThrow
+NPE №1: message = Cannot invoke "String.length()" because the return value of "FastThrow$Payment.currency()" is null, кадров стека = 2
+NPE №200,000: message = null, кадров стека = 0
+$ java -XX:-OmitStackTraceInFastThrow FastThrow
+NPE №1: message = Cannot invoke "String.length()" because the return value of "FastThrow$Payment.currency()" is null, кадров стека = 2
+NPE №200,000: message = Cannot invoke "String.length()" because the return value of "FastThrow$Payment.currency()" is null, кадров стека = 2</code></pre>
+      <p>В проде это выглядит так: в логах тысячи строк <code>java.lang.NullPointerException</code> без единого кадра, и непонятно, где ошибка. Полный стек был только у первых исключений, до компиляции метода C2. Их ищут в начале лога после старта или отключают оптимизацию флагом <code>-XX:-OmitStackTraceInFastThrow</code>.</p>
+    </section>
+
+    <section class="step" id="where-to-catch">
+      <h2>Ловят там, где могут что-то сделать, а превращают в ответ — на границе</h2>
+      <p>Исключение ловят в одном из двух мест:</p>
+      <ul>
+        <li><b>Там, где можно восстановиться</b>: повторить запрос, взять запасное значение из кеша, перевести в исключение своего слоя с причиной.</li>
+        <li><b>На границе приложения</b>: в обработчике HTTP-запроса (<code>@ControllerAdvice</code> в Spring), в слушателе сообщений, в фоновой задаче. Там исключение логируют один раз со стеком и превращают в ответ: код 4xx или 5xx, сообщение в DLQ, метрику.</li>
+      </ul>
+      <p>Всё остальное — антипаттерны:</p>
+      <table class="mx">
+        <thead><tr><th>Антипаттерн</th><th>Чем плох</th></tr></thead>
+        <tbody>
+          <tr><td><code>catch (Exception e) { }</code></td><td>ошибка исчезает, система продолжает работать в неверном состоянии</td></tr>
+          <tr><td><code>catch (Exception e) { log.error(e); throw e; }</code> на каждом уровне</td><td>одна ошибка — пять записей в логе, непонятно, где она произошла</td></tr>
+          <tr><td><code>catch (Exception e) { return null; }</code></td><td>NPE появится в другом месте, без связи с причиной</td></tr>
+          <tr><td><code>throw new X(e.getMessage())</code></td><td>теряется тип и стек причины, шаг 4</td></tr>
+          <tr><td><code>catch (Throwable t)</code> в прикладном коде</td><td>ловит <code>OutOfMemoryError</code> и <code>StackOverflowError</code>, после которых продолжать нельзя</td></tr>
+          <tr><td><code>return</code> или <code>throw</code> в <code>finally</code></td><td>подменяет исходное исключение, шаг 1</td></tr>
+          <tr><td>пустой <code>catch (InterruptedException e)</code></td><td>ломает отмену потоков (тема Threads)</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Checked-исключения надёжнее: компилятор заставляет их обработать.</p>
+        <p class="fact">Компилятор заставляет их упомянуть, а не обработать. Чаще всего checked-исключение ловят там, где сделать с ним нечего, и глушат пустым <code>catch</code> или оборачивают. Надёжность даёт продуманное место обработки на границе, а не проверка компилятора.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>Throwable</code> → <code>Error</code> (сбои JVM, не ловить) и <code>Exception</code>. Checked — всё под <code>Exception</code>, кроме <code>RuntimeException</code>.</li>
+        <li><code>return</code> или <code>throw</code> в <code>finally</code> молча отменяет исходное исключение. javac предупреждает с <code>-Xlint:finally</code>.</li>
+        <li>try-with-resources закрывает ресурсы в обратном порядке и сохраняет исходную ошибку, прикрепляя ошибку <code>close()</code> как suppressed.</li>
+        <li>При переводе исключений передают <code>cause</code>, иначе причина теряется.</li>
+        <li>Исключение со стеком стоит микросекунды на глубоком стеке. Для штатных ситуаций — <code>Optional</code> или результат-объект.</li>
+        <li>После частых NPE C2 бросает исключение без сообщения и стека. Лечится флагом <code>-XX:-OmitStackTraceInFastThrow</code> или поиском первых исключений в логе.</li>
+        <li>Ловят там, где можно восстановиться, или на границе — один раз, с логом и ответом.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="checked-unchecked" data-freq="3">
+      <h3>Чем checked-исключения отличаются от unchecked?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Checked — наследники <code>Exception</code>, кроме <code>RuntimeException</code>. Компилятор требует поймать их или объявить в <code>throws</code>. Это ожидаемые сбои внешнего мира: файл, сеть, база. Unchecked — <code>RuntimeException</code> и <code>Error</code>, компилятор их не проверяет. <code>RuntimeException</code> обычно означает ошибку в программе или нарушенный контракт, <code>Error</code> — сбой JVM.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Checked-исключения плохо сочетаются с лямбдами: функциональные интерфейсы не объявляют <code>throws</code>. Поэтому Spring и современные библиотеки используют unchecked, а JDK предлагает <code>UncheckedIOException</code>.</li>
+            <li>Проверка на уровне компилятора: в байткоде различий нет, и Kotlin, например, checked-исключения не требует.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="finally-q" data-freq="3">
+      <h3>Всегда ли выполняется finally? Что будет, если в finally есть return?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>finally</code> выполняется при любом выходе из <code>try</code>: нормальном, через <code>return</code>, <code>break</code> или исключение. Не выполнится, если JVM остановилась — <code>System.exit</code>, <code>kill -9</code>, падение процесса — или если поток завис навсегда внутри <code>try</code>. <code>return</code> в <code>finally</code> отменяет и исключение, и значение из <code>try</code>: исключение пропадает без следа.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>int x = 1; try { return x; } finally { x = 100; } — что вернёт метод?</summary>
+          <p>1. Выражение <code>return x</code> вычислено до выполнения <code>finally</code>, и значение сохранено. Присваивание в <code>finally</code> меняет только переменную. Проверено запуском.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>try { charge(); return true; } finally { audit(); return true; } — что не так?</summary>
+          <p><code>return</code> в <code>finally</code> глушит исключение из <code>charge()</code>: вызывающий получит <code>true</code> даже при отказе. В замере урока списание сверх лимита «прошло». <code>return</code> из <code>finally</code> убрать; javac покажет такие места с <code>-Xlint:finally</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="twr" data-freq="2">
+      <h3>Как работает try-with-resources? Что такое suppressed-исключения?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ресурсы, объявленные в скобках, — любые <code>AutoCloseable</code> — закрываются автоматически после блока, в обратном порядке объявления, до <code>catch</code> и <code>finally</code>. Если бросили и тело, и <code>close()</code>, наружу уходит исключение тела, а исключение <code>close()</code> добавляется к нему как suppressed (<code>getSuppressed()</code>). В ручном <code>try/finally</code> исключение из <code>close()</code> заменило бы исходное, и причина потерялась бы.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="exception-cost" data-freq="2">
+      <h3>Дорого ли бросать исключения? Почему в логах бывают NPE без stack trace?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Основная цена — сбор стека в конструкторе и раскрутка стека при броске: в замере урока около 0,8 мкс на глубине 10 и 5,7 мкс на глубине 100. Для ошибок это неважно, для штатного потока управления в горячем коде — заметно. Там возвращают <code>Optional</code> или результат-объект, либо используют исключение без стека (конструктор с <code>writableStackTrace = false</code>).</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Если одно место часто бросает NPE или <code>ArithmeticException</code>, C2 заменяет его заранее созданным исключением без сообщения и стека. Флаг <code>-XX:-OmitStackTraceInFastThrow</code> отключает оптимизацию, а полный стек есть у первых исключений после старта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="handling" data-freq="2">
+      <h3>Где и как правильно обрабатывать исключения?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ловить там, где можно что-то сделать: повторить, подставить запасное значение, перевести в исключение своего слоя с сохранением причины. Всё остальное пробрасывать до границы — обработчика HTTP-запроса, слушателя сообщений, фоновой задачи. Там исключение логируют один раз со стеком и превращают в ответ. Не глушить пустым <code>catch</code>, не логировать на каждом уровне, не ловить <code>Throwable</code>, не терять <code>cause</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>catch (IOException e) { throw new ImportException("ошибка импорта: " + e.getMessage()); } — что не так?</summary>
+          <p>Причина потеряна: у нового исключения нет <code>cause</code>, поэтому пропали тип исходной ошибки и её стек. В замере урока <code>getCause()</code> вернул <code>null</code>. Нужно <code>new ImportException("ошибка импорта", e)</code>.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-11.html">JLS 21, глава 11: Exceptions</a> — основа урока: checked и unchecked, проверка компилятором.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-14.html#jls-14.20.3">JLS 21, 14.20.3: try-with-resources</a> — порядок закрытия и suppressed-исключения.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Throwable.html">Throwable (JDK 21)</a> — cause, suppressed и конструктор без стека.</li>
+      <li>Joshua Bloch, <i>Effective Java</i>, 3-е изд., гл. 10 «Exceptions», Items 69–77.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
