@@ -413,7 +413,7 @@ window.KB_TREE = [
             scope: 'deadlock, livelock, starvation, порядок захвата блокировок, поиск по thread dump' },
         ] },
         { id: 'juc', title: 'java.util.concurrent', items: [
-          { id: 'locks', freq: 2, status: 'empty', title: 'Locks',
+          { id: 'locks', freq: 2, status: 'draft', title: 'Locks',
             scope: 'ReentrantLock, tryLock, Condition, fairness, ReadWriteLock, StampedLock' },
           { id: 'atomics', freq: 2, status: 'empty', title: 'Atomics & CAS',
             scope: 'CAS, AtomicInteger, LongAdder, ABA, lock-free' },

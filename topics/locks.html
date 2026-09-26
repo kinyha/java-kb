@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Locks · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="locks">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Locks</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="no-finally">
+      <h2>Одно исключение без finally — и замок занят навсегда</h2>
+      <p>Списание со счёта переписали с <code>synchronized</code> на <code>ReentrantLock</code>. Первый запрос пытается списать больше, чем есть на счёте, и получает исключение. Второй запрос, на 10 рублей, не отвечает:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+public class NoFinally {
+    static final ReentrantLock lock = new ReentrantLock();
+    static long balance = 100;
+
+    static void withdraw(long amount) {
+        lock.lock();
+        if (amount &gt; balance) throw new IllegalStateException("недостаточно средств");  // выход без unlock
+        balance -= amount;
+        lock.unlock();
+    }
+
+    public static void main(String[] args) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        Future&lt;?&gt; first = pool.submit(() -&gt; withdraw(500));
+        try { first.get(); } catch (ExecutionException e) { System.out.println("первый запрос: " + e.getCause().getMessage()); }
+
+        Future&lt;?&gt; second = pool.submit(() -&gt; withdraw(10));
+        try {
+            second.get(2, TimeUnit.SECONDS);
+            System.out.println("второй запрос прошёл");
+        } catch (TimeoutException e) {
+            System.out.println("второй запрос завис, замок занят: " + lock.isLocked()
+                + ", ждут в очереди: " + lock.getQueueLength());
+        }
+        System.exit(0);
+    }
+}</code></pre>
+      <pre class="out">первый запрос: недостаточно средств
+второй запрос завис, замок занят: true, ждут в очереди: 1</pre>
+      <p><code>synchronized</code> отпускает монитор при любом выходе из блока. <code>Lock</code> — обычный объект, и <code>unlock()</code> вызывается, только если до него дошло выполнение. Исключение вылетело между <code>lock()</code> и <code>unlock()</code>, и замок остался за потоком пула навсегда. Поэтому у <code>Lock</code> одна обязательная идиома:</p>
+      <pre><code class="language-java">lock.lock();                     // до try: если lock() бросит, unlock вызывать нельзя
+try {
+    // работа с общим состоянием
+} finally {
+    lock.unlock();               // при любом выходе
+}</code></pre>
+      <p>Зачем тогда <code>Lock</code>, если <code>synchronized</code> безопаснее? Он умеет то, чего не умеет монитор: ждать с таймаутом, прерываться, держать несколько очередей ожидания, разделять чтение и запись. В этой теме — <code>ReentrantLock</code> и его возможности, <code>Condition</code>, <code>ReadWriteLock</code> и <code>StampedLock</code>. И замеры, которые показывают, что «более продвинутый» замок бывает медленнее простого.</p>
+    </section>
+
+    <section class="step" id="vs-synchronized">
+      <h2>ReentrantLock делает то же, что synchronized, плюс таймауты, прерывание и условия</h2>
+      <table class="mx">
+        <thead><tr><th>Возможность</th><th><code>synchronized</code></th><th><code>ReentrantLock</code></th></tr></thead>
+        <tbody>
+          <tr><td>повторный вход тем же потоком</td><td>да</td><td>да, <code>getHoldCount()</code> показывает глубину</td></tr>
+          <tr><td>освобождение при исключении</td><td>автоматически</td><td>только в <code>finally</code></td></tr>
+          <tr><td>попытка без ожидания или с таймаутом</td><td>нет</td><td><code>tryLock()</code>, <code>tryLock(time, unit)</code></td></tr>
+          <tr><td>ожидание, которое можно прервать</td><td>нет</td><td><code>lockInterruptibly()</code></td></tr>
+          <tr><td>справедливая очередь</td><td>нет</td><td><code>new ReentrantLock(true)</code></td></tr>
+          <tr><td>несколько условий ожидания</td><td>одно на монитор (<code>wait/notify</code>)</td><td>сколько угодно <code>newCondition()</code></td></tr>
+          <tr><td>наблюдение</td><td><code>Thread.holdsLock</code></td><td><code>isLocked()</code>, <code>getQueueLength()</code>, <code>hasQueuedThreads()</code></td></tr>
+          <tr><td>видимость (happens-before)</td><td>unlock → lock</td><td>то же</td></tr>
+        </tbody>
+      </table>
+      <p>Разницу в прерывании видно на двух потоках, которые ждут один и тот же занятый замок:</p>
+      <pre><code class="language-java">import java.util.concurrent.locks.*;
+
+public class Interruptible {
+    public static void main(String[] args) throws Exception {
+        ReentrantLock lock = new ReentrantLock();
+        lock.lock();                                             // main держит замок и не отпускает
+
+        Thread plain = new Thread(() -&gt; {
+            lock.lock();                                         // ждёт, прерывание игнорирует
+            try { System.out.println("plain: получил замок"); } finally { lock.unlock(); }
+        });
+        Thread polite = new Thread(() -&gt; {
+            try {
+                lock.lockInterruptibly();                        // ждёт, но слышит interrupt()
+                try { System.out.println("polite: получил замок"); } finally { lock.unlock(); }
+            } catch (InterruptedException e) {
+                System.out.println("polite: ожидание прервано");
+            }
+        });
+        plain.start(); polite.start();
+        Thread.sleep(200);
+        plain.interrupt(); polite.interrupt();
+        Thread.sleep(200);
+        System.out.println("plain: " + plain.getState() + ", polite: " + polite.getState());
+        lock.unlock();
+        plain.join();
+    }
+}</code></pre>
+      <pre class="out">polite: ожидание прервано
+plain: WAITING, polite: TERMINATED
+plain: получил замок</pre>
+      <p>Поток с <code>lock()</code> проигнорировал прерывание и получил замок, только когда <code>main</code> его отпустил. <code>lockInterruptibly()</code> сразу вышел с <code>InterruptedException</code> — такой поток можно отменить через <code>shutdownNow()</code> или <code>Future.cancel(true)</code>. Состояние ждущего потока — <code>WAITING</code>, а не <code>BLOCKED</code>: замки пакета <code>java.util.concurrent</code> паркуют поток через <code>LockSupport.park()</code>.</p>
+      <p>Устроены <code>ReentrantLock</code>, <code>Semaphore</code>, <code>CountDownLatch</code> и <code>ReentrantReadWriteLock</code> одинаково — на <b>AbstractQueuedSynchronizer</b> (AQS). Это одно целое число <code>state</code>, которое меняют через CAS, и очередь ждущих потоков, которых паркуют и будят. Для <code>ReentrantLock</code> <code>state</code> — число повторных входов, для <code>Semaphore</code> — число свободных разрешений. Поэтому в дампе потоков все они выглядят одинаково: <code>parking to wait for &lt;...&gt; (a ...ReentrantLock$NonfairSync)</code>.</p>
+      <p>Что выбирать? Для простой взаимной блокировки — <code>synchronized</code>: его невозможно забыть отпустить. Под сильной конкуренцией <code>ReentrantLock</code> в замере оказался быстрее: 8 потоков по миллиону захватов с увеличением счётчика — 65–73 мс против 177–211 мс у <code>synchronized</code>, в трёх запусках. Но если замок так горяч, сначала уменьшают конкуренцию, а не меняют вид замка. <code>ReentrantLock</code> — когда нужна одна из возможностей из таблицы. И в Java 21 с виртуальными потоками, если под замком есть блокирующий ввод-вывод: <code>synchronized</code> там закрепляет виртуальный поток за носителем (тема Virtual Threads).</p>
+    </section>
+
+    <section class="step" id="trylock">
+      <h2>tryLock с таймаутом превращает взаимную блокировку в повтор</h2>
+      <p>В теме Deadlocks &amp; Liveness встречные переводы <code>A→B</code> и <code>B→A</code> на <code>synchronized</code> зависали навсегда. С <code>tryLock(timeout)</code> поток, который не дождался второго счёта, отпускает первый и пробует снова после случайной паузы:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.locks.*;
+
+public class TryTransfer {
+    static final class Account {
+        final String id;
+        final ReentrantLock lock = new ReentrantLock();
+        long balance = 1_000;
+        Account(String id) { this.id = id; }
+    }
+
+    static final long START = System.nanoTime();
+    static void log(String msg) {
+        System.out.printf("%4d мс %s: %s%n", (System.nanoTime() - START) / 1_000_000, Thread.currentThread().getName(), msg);
+    }
+
+    // встречные переводы берут замки в разном порядке — как в теме Deadlocks
+    static void transfer(Account from, Account to, long amount) throws InterruptedException {
+        for (int attempt = 1; ; attempt++) {
+            from.lock.lock();
+            try {
+                Thread.sleep(50);                                            // успевает начаться встречный перевод
+                if (to.lock.tryLock(100 + ThreadLocalRandom.current().nextInt(100), TimeUnit.MILLISECONDS)) {
+                    try {
+                        from.balance -= amount;
+                        to.balance += amount;
+                        log("перевод " + from.id + "→" + to.id + " выполнен с попытки " + attempt);
+                        return;
+                    } finally { to.lock.unlock(); }
+                }
+                log("не дождался счёта " + to.id + ", отпускаю " + from.id);
+            } finally {
+                from.lock.unlock();
+            }
+            Thread.sleep(ThreadLocalRandom.current().nextInt(50));           // случайная пауза перед повтором
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Account a = new Account("A"), b = new Account("B");
+        Thread t1 = new Thread(() -&gt; { try { transfer(a, b, 10); } catch (InterruptedException e) { } }, "T1");
+        Thread t2 = new Thread(() -&gt; { try { transfer(b, a, 20); } catch (InterruptedException e) { } }, "T2");
+        t1.start(); t2.start(); t1.join(); t2.join();
+        System.out.println("балансы: A=" + a.balance + ", B=" + b.balance);
+    }
+}</code></pre>
+      <pre><code class="language-text"> 174 мс T2: не дождался счёта A, отпускаю B
+ 174 мс T1: не дождался счёта B, отпускаю A
+ 406 мс T2: не дождался счёта A, отпускаю B
+ 415 мс T1: перевод A→B выполнен с попытки 2
+ 502 мс T2: перевод B→A выполнен с попытки 3
+балансы: A=1010, B=990</code></pre>
+      <p>Оба перевода выполнены, суммы сошлись. Но посмотрите на цену: в этом запуске оба потока сначала отступили одновременно, и понадобилось пять попыток и полсекунды. В других запусках было от трёх до пяти. Без случайных таймаутов и пауз потоки отступали бы в такт — это livelock из темы Deadlocks &amp; Liveness.</p>
+      <p>Поэтому <code>tryLock</code> — не замена единому порядку захвата, а страховка там, где порядок обеспечить нельзя. Другое его применение — бюджет времени: «если за 50 мс не получили замок, вернуть клиенту ошибку, а не держать запрос». <code>tryLock()</code> без аргументов не ждёт вовсе и, в отличие от версии с таймаутом, захватывает замок в обход справедливой очереди.</p>
+    </section>
+
+    <section class="step" id="conditions">
+      <h2>Condition даёт отдельную очередь ожидания на каждое условие</h2>
+      <p>В теме synchronized &amp; wait/notify буфер на один платёж с двумя производителями и двумя потребителями зависал с <code>notify()</code>: потребитель будил потребителя, и сигнал терялся. У монитора одна очередь ожидания на всех. У <code>Lock</code> очередей может быть сколько угодно — по одной <code>Condition</code> на условие:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.*;
+
+public class OneSlotLock {
+    private final Lock lock = new ReentrantLock();
+    private final Condition notFull = lock.newCondition();       // ждут производители
+    private final Condition notEmpty = lock.newCondition();      // ждут потребители
+    private String slot;
+    static final AtomicLong moved = new AtomicLong();
+
+    void put(String p) throws InterruptedException {
+        lock.lock();
+        try {
+            while (slot != null) notFull.await();
+            slot = p;
+            notEmpty.signal();                                   // будим именно потребителя
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    String take() throws InterruptedException {
+        lock.lock();
+        try {
+            while (slot == null) notEmpty.await();
+            String p = slot;
+            slot = null;
+            notFull.signal();                                    // будим именно производителя
+            return p;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        OneSlotLock buf = new OneSlotLock();
+        for (int i = 0; i &lt; 2; i++) {
+            Thread producer = new Thread(() -&gt; { try { while (true) buf.put("p"); } catch (InterruptedException e) { } });
+            Thread consumer = new Thread(() -&gt; { try { while (true) { buf.take(); moved.incrementAndGet(); } } catch (InterruptedException e) { } });
+            producer.setDaemon(true); consumer.setDaemon(true);
+            producer.start(); consumer.start();
+        }
+        for (int sec = 1; sec &lt;= 3; sec++) {
+            Thread.sleep(1000);
+            System.out.printf("%d с: передано %,d%n", sec, moved.get());
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">1 с: передано 201,914
+2 с: передано 424,375
+3 с: передано 649,363</code></pre>
+      <p>Та же конфигурация, что зависала на 5–10 передачах, работает с одиночным <code>signal()</code>. Производители ждут в <code>notFull</code>, потребители — в <code>notEmpty</code>, и сигнал всегда достаётся потоку с нужным условием. Так устроен <code>ArrayBlockingQueue</code> в JDK.</p>
+      <p>Правила те же, что у <code>wait/notify</code>: <code>await()</code> вызывают, держа замок, и всегда в цикле <code>while</code>. <code>await()</code> отпускает замок, а вернувшись, снова его держит. Spurious wakeup возможен и здесь. Есть версии с таймаутом: <code>await(time, unit)</code>, <code>awaitNanos</code>.</p>
+    </section>
+
+    <section class="step" id="read-write">
+      <h2>ReadWriteLock ускоряет только долгие чтения, а на коротких проигрывает</h2>
+      <p><code>ReentrantReadWriteLock</code> пускает много читателей одновременно, а писателя — одного и без читателей. Кажется, что для данных, которые в основном читают, это всегда выигрыш. Проверим на котировке — паре цен <code>bid</code> и <code>ask</code>, которую нужно читать согласованно. Восемь читателей, один писатель обновляет пару раз в миллисекунду. Два варианта: чтение без дополнительной работы и чтение, после которого под замком ещё 2 мкс обработки:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.*;
+
+public class Quotes {
+    // котировка: две связанные цены, читать нужно согласованную пару
+    static double bid = 89.9, ask = 90.1;
+    static int work;                                             // нс «обработки» внутри чтения
+
+    static double spread() {                                     // чтение пары + обработка
+        double s = ask - bid;
+        long until = System.nanoTime() + work;
+        while (work &gt; 0 &amp;&amp; System.nanoTime() &lt; until) Thread.onSpinWait();
+        return s;
+    }
+    static void update() { double mid = 90 + Math.random(); bid = mid - 0.1; ask = mid + 0.1; }
+
+    interface Guard { double read(); void write(); }
+    static final Object monitor = new Object();
+    static final Guard SYNC = new Guard() {
+        public double read() { synchronized (monitor) { return spread(); } }
+        public void write() { synchronized (monitor) { update(); } }
+    };
+    static final ReadWriteLock rw = new ReentrantReadWriteLock();
+    static final Guard RW = new Guard() {
+        public double read() { rw.readLock().lock(); try { return spread(); } finally { rw.readLock().unlock(); } }
+        public void write() { rw.writeLock().lock(); try { update(); } finally { rw.writeLock().unlock(); } }
+    };
+    static final StampedLock sl = new StampedLock();
+    static final Guard STAMPED = new Guard() {
+        public double read() {
+            long stamp = sl.tryOptimisticRead();                 // не блокирует: запоминает версию
+            double b = bid, a = ask;                             // читаем поля в локальные переменные
+            if (!sl.validate(stamp)) {                           // была запись — пара могла порваться
+                stamp = sl.readLock();
+                try { b = bid; a = ask; } finally { sl.unlockRead(stamp); }
+            }
+            double s = a - b;                                    // обработка уже без замка
+            long until = System.nanoTime() + work;
+            while (work &gt; 0 &amp;&amp; System.nanoTime() &lt; until) Thread.onSpinWait();
+            return s;
+        }
+        public void write() { long s = sl.writeLock(); try { update(); } finally { sl.unlockWrite(s); } }
+    };
+
+    static long run(Guard g) throws InterruptedException {
+        LongAdder reads = new LongAdder();
+        long[] torn = new long[1];
+        long end = System.nanoTime() + 1_000_000_000L;
+        List&lt;Thread&gt; ts = new ArrayList&lt;&gt;();
+        for (int r = 0; r &lt; 8; r++) ts.add(new Thread(() -&gt; {
+            while (System.nanoTime() &lt; end) {
+                double s = g.read();
+                if (Math.abs(s - 0.2) &gt; 1e-9) torn[0]++;         // пара из разных обновлений
+                reads.increment();
+            }
+        }));
+        ts.add(new Thread(() -&gt; {
+            while (System.nanoTime() &lt; end) {
+                g.write();
+                try { Thread.sleep(1); } catch (InterruptedException e) { }
+            }
+        }));
+        ts.forEach(Thread::start);
+        for (Thread t : ts) t.join();
+        if (torn[0] &gt; 0) System.out.println("  порванных пар: " + torn[0]);
+        return reads.sum();
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int w : new int[]{0, 2_000}) {
+            work = w;
+            run(SYNC); run(RW); run(STAMPED);                    // прогрев
+            System.out.printf("чтение + %d нс работы:%n", w);
+            System.out.printf("  synchronized:           %,12d чтений за 1 с%n", run(SYNC));
+            System.out.printf("  ReentrantReadWriteLock: %,12d%n", run(RW));
+            System.out.printf("  StampedLock optimistic: %,12d%n", run(STAMPED));
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">чтение + 0 нс работы:
+  synchronized:              8,802,878 чтений за 1 с
+  ReentrantReadWriteLock:    3,511,000
+  StampedLock optimistic:   15,330,253
+чтение + 2000 нс работы:
+  synchronized:                407,898 чтений за 1 с
+  ReentrantReadWriteLock:    2,421,813
+  StampedLock optimistic:    3,026,607</code></pre>
+      <p>Строки «порванных пар» нет ни в одном варианте: все три защищают пару. Без защиты за секунду набралось 59 чтений, где <code>bid</code> взят из одного обновления, а <code>ask</code> — из другого.</p>
+      <ul>
+        <li><b>Короткое чтение:</b> <code>ReadWriteLock</code> в 2,5 раза <i>медленнее</i> <code>synchronized</code>. Каждый захват и освобождение чтения — CAS по общему счётчику читателей. Восемь ядер перекидывают друг другу одну строку кеша, и эти накладные расходы больше самого чтения.</li>
+        <li><b>Долгое чтение, 2 мкс:</b> <code>synchronized</code> пропускает читателей по одному, и восемь ядер работают как одно. <code>ReadWriteLock</code> пускает их параллельно и выигрывает в шесть раз.</li>
+      </ul>
+      <p>Вывод: <code>ReadWriteLock</code> имеет смысл, когда чтения действительно долгие и параллельные, а писатели редки. Для коротких чтений лучше неизменяемый снимок в <code>volatile</code>-поле или <code>StampedLock</code>. Решают замером, а не по названию.</p>
+      <p>Ещё две особенности <code>ReentrantReadWriteLock</code>:</p>
+      <pre><code class="language-java">import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.*;
+
+public class Upgrade {
+    public static void main(String[] args) throws Exception {
+        ReentrantReadWriteLock rw = new ReentrantReadWriteLock();
+
+        rw.writeLock().lock();
+        rw.readLock().lock();                                    // понижение: запись → чтение — можно
+        rw.writeLock().unlock();
+        System.out.println("понижение: держим только чтение — " + (rw.getReadHoldCount() == 1));
+        rw.readLock().unlock();
+
+        rw.readLock().lock();
+        boolean upgraded = rw.writeLock().tryLock(1, TimeUnit.SECONDS);   // повышение: чтение → запись
+        System.out.println("повышение за 1 с: " + upgraded + " — с lock() поток ждал бы сам себя вечно");
+    }
+}</code></pre>
+      <pre class="out">понижение: держим только чтение — true
+повышение за 1 с: false — с lock() поток ждал бы сам себя вечно</pre>
+      <p>Понизить запись до чтения можно, повысить чтение до записи — нет. Писатель ждёт, пока уйдут все читатели, включая его самого. Частая ошибка — «проверить под чтением, при необходимости взять запись», не отпустив чтение. Правильно — отпустить чтение, взять запись и перепроверить условие.</p>
+    </section>
+
+    <section class="step" id="stamped">
+      <h2>StampedLock читает оптимистично: без замка, с проверкой версии после</h2>
+      <p><code>StampedLock</code> (Java 8) добавляет третий режим — <b>оптимистичное чтение</b>. Читатель ничего не захватывает, а только запоминает номер версии, копирует поля в локальные переменные и проверяет, не менялась ли версия. Если не менялась — данные согласованы. Если менялась — читает заново, уже под обычной блокировкой чтения:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Оптимистичное чтение StampedLock. Версия равна 8, записи нет. Читатель получает штамп 8 и копирует bid 89,9. Писатель берёт блокировку записи, версия меняется, он записывает новые bid 90,4 и ask 90,6 и отпускает, версия становится другой. Читатель копирует ask 90,6 — пара порвана, 89,9 и 90,6. Проверка validate штампа 8 возвращает false, читатель берёт блокировку чтения и перечитывает согласованную пару 90,4 и 90,6.">
+            <defs>
+              <marker id="sl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ЧИТАТЕЛЬ</text>
+            <text x="290" y="24" class="dg-cap">ВЕРСИЯ ЗАМКА</text>
+            <text x="480" y="24" class="dg-cap">ПИСАТЕЛЬ</text>
+            <text x="706" y="24" class="dg-n" text-anchor="end">время ↓</text>
+
+            <rect x="290" y="38" width="140" height="32" rx="6" class="dg-box"/>
+            <text x="360" y="59" class="dg-in" text-anchor="middle">v1, записи нет</text>
+
+            <g data-s="1-">
+              <rect x="20" y="82" width="220" height="32" rx="6" class="dg-cell"/>
+              <text x="32" y="103" class="dg-in">stamp = v1; b = 89,9</text>
+              <rect x="290" y="82" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="103" class="dg-in" text-anchor="middle">v1</text>
+              <path d="M290 98 L 244 98" class="dg-line" marker-end="url(#sl-n)"/>
+            </g>
+            <g data-s="2-">
+              <rect x="480" y="126" width="220" height="32" rx="6" class="dg-cell"/>
+              <text x="492" y="147" class="dg-in">bid = 90,4; ask = 90,6</text>
+              <rect x="290" y="126" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="147" class="dg-in" text-anchor="middle">v2 (была запись)</text>
+              <path d="M480 142 L 434 142" class="dg-line" marker-end="url(#sl-n)"/>
+            </g>
+            <g data-s="3-">
+              <rect x="20" y="170" width="220" height="32" rx="6" class="dg-cell miss"/>
+              <text x="32" y="191" class="dg-in">a = 90,6 → 89,9 / 90,6</text>
+            </g>
+            <g data-s="4-">
+              <rect x="20" y="214" width="220" height="32" rx="6" class="dg-cell hit"/>
+              <text x="32" y="235" class="dg-in">validate(v1) = false</text>
+              <rect x="290" y="214" width="140" height="32" rx="6" class="dg-box"/>
+              <text x="360" y="235" class="dg-in" text-anchor="middle">v2 ≠ v1</text>
+              <path d="M290 230 L 244 230" class="dg-line bad" marker-end="url(#sl-bad)"/>
+            </g>
+            <g data-s="5">
+              <text x="480" y="235" class="dg-ok">readLock: 90,4 / 90,6</text>
+            </g>
+
+            <text data-s="1" x="20" y="274" class="dg-in">tryOptimisticRead(): ничего не захватил, запомнил версию</text>
+            <text data-s="2" x="20" y="274" class="dg-in">писатель взял writeLock и сменил обе цены — версия другая</text>
+            <text data-s="3" x="20" y="274" class="dg-bad">читатель дочитал ask уже новый: пара порвана</text>
+            <text data-s="4" x="20" y="274" class="dg-ok">validate видит, что версия сменилась: копия негодна</text>
+            <text data-s="5" x="20" y="274" class="dg-ok">перечитать под readLock — пара согласована</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>tryOptimisticRead()</code> возвращает штамп — номер версии замка. Ни CAS, ни записи в общую память: это обычное чтение поля. Читатель копирует <code>bid</code>.</li>
+          <li>Писатель берёт <code>writeLock()</code> и меняет обе цены. Каждый захват записи меняет версию.</li>
+          <li>Читатель копирует <code>ask</code> — уже новый. В его локальных переменных пара из разных обновлений: 89,9 и 90,6.</li>
+          <li><code>validate(stamp)</code> сравнивает версии и видит, что между штампом и проверкой была запись. Скопированным данным верить нельзя.</li>
+          <li>Читатель берёт обычную блокировку чтения и перечитывает. Писатели редки, поэтому этот путь выполняется редко, а обычное чтение обходится без записи в общую память. Отсюда 15,3 млн чтений в замере против 8,8 у <code>synchronized</code>.</li>
+        </ol>
+      </figure>
+      <p>Ограничения, из-за которых <code>StampedLock</code> не заменяет всё остальное:</p>
+      <ul>
+        <li><b>Не реентерабелен.</b> Повторный <code>writeLock()</code> тем же потоком — взаимная блокировка с самим собой.</li>
+        <li><b>Нет <code>Condition</code></b>, ожидание условия не построить.</li>
+        <li><b>Оптимистичный участок должен переживать любые данные.</b> До <code>validate</code> можно только копировать поля в локальные переменные. Нельзя ходить по ссылкам, делить на прочитанное значение или вызывать методы: объект может быть в промежуточном состоянии.</li>
+        <li>Штамп — число, а не владелец. Отпустить замок можно из другого потока, и ошибиться со штампом тоже просто.</li>
+      </ul>
+      <p>Место <code>StampedLock</code> — небольшие структуры из нескольких примитивных полей, которые часто читают и редко пишут: координаты, котировки, счётчики с несколькими полями. В остальных случаях проще неизменяемый объект в <code>volatile</code>-поле.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>Lock</code> освобождают только в <code>finally</code>: <code>lock()</code> до <code>try</code>, <code>unlock()</code> в <code>finally</code>. Иначе исключение оставит замок занятым навсегда.</li>
+        <li><code>ReentrantLock</code> добавляет к <code>synchronized</code> <code>tryLock</code> с таймаутом, <code>lockInterruptibly</code>, справедливость, несколько <code>Condition</code> и методы наблюдения. Для простого случая хватает <code>synchronized</code>.</li>
+        <li><code>tryLock(timeout)</code> превращает взаимную блокировку в повтор, но ценой задержек. Нужны случайные паузы; единый порядок захвата надёжнее.</li>
+        <li><code>Condition</code> — отдельная очередь ожидания на условие. С ней одиночный <code>signal()</code> безопасен там, где <code>notify()</code> вешал систему.</li>
+        <li><code>ReadWriteLock</code> выигрывает на долгих параллельных чтениях (в 6 раз в замере) и проигрывает на коротких (в 2,5 раза). Повышать чтение до записи нельзя.</li>
+        <li><code>StampedLock</code> читает оптимистично, с проверкой версии, и быстрее всех на редких записях. Но он не реентерабелен и не имеет <code>Condition</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="lock-vs-synchronized" data-freq="3">
+      <h3>Чем ReentrantLock отличается от synchronized?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Оба дают взаимное исключение, реентерабельность и одинаковую видимость. <code>ReentrantLock</code> добавляет попытку захвата без ожидания или с таймаутом (<code>tryLock</code>), прерываемое ожидание (<code>lockInterruptibly</code>), справедливый режим, несколько условий ожидания (<code>newCondition</code>) и методы наблюдения — <code>isLocked</code>, <code>getQueueLength</code>. Цена — ручное освобождение: <code>unlock()</code> обязательно в <code>finally</code>. Для простого случая выбирают <code>synchronized</code>, <code>ReentrantLock</code> — когда нужна одна из этих возможностей.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>ReentrantLock</code> сделан на AbstractQueuedSynchronizer, как <code>Semaphore</code> и <code>CountDownLatch</code>. Под сильной конкуренцией он в замере урока был быстрее <code>synchronized</code> в 2,5–3 раза.</li>
+            <li>В Java 21 блокирующий ввод-вывод под <code>synchronized</code> закрепляет виртуальный поток за носителем, под <code>ReentrantLock</code> — нет. В JDK 24 это ограничение сняли.</li>
+            <li>Ждущий на <code>ReentrantLock</code> поток в дампе — <code>WAITING (parking)</code>, на мониторе — <code>BLOCKED</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>lock.lock(); if (amount &gt; balance) throw new IllegalStateException(); balance -= amount; lock.unlock(); — что не так?</summary>
+          <p>Исключение выходит из метода, минуя <code>unlock()</code>, и замок остаётся занятым навсегда: все следующие вызовы зависнут. В замере урока второй запрос на 10 рублей ждал бесконечно. Нужно <code>lock.lock(); try { ... } finally { lock.unlock(); }</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="condition-q" data-freq="2">
+      <h3>Что такое Condition и зачем он нужен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Очередь ожидания, привязанная к <code>Lock</code>, — аналог <code>wait/notify</code> у монитора. Но у одного замка может быть несколько условий, например <code>notFull</code> и <code>notEmpty</code> в ограниченной очереди. Тогда производители и потребители ждут в разных очередях, и <code>signal()</code> будит поток с нужным условием. Правила те же: <code>await()</code> только под замком и в цикле <code>while</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему с двумя Condition можно использовать signal(), а с одним монитором notify() опасен?</summary>
+          <p>В одной очереди ожидания монитора ждут потоки с разными условиями, и <code>notify()</code> может разбудить не того — сигнал потеряется. С отдельной <code>Condition</code> на каждое условие все ждущие в очереди ждут одного и того же, и любого из них достаточно разбудить. В замере урока конфигурация, которая с <code>notify()</code> зависала после 5–10 передач, с двумя <code>Condition</code> передала 650 тысяч платежей за 3 секунды.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="read-write-lock" data-freq="2">
+      <h3>Когда использовать ReadWriteLock?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда данные в основном читают, чтения длинные и могут идти параллельно, а записи редки. Тогда читатели не мешают друг другу, и выигрыш большой: в замере урока при 2 мкс работы в чтении — в 6 раз против <code>synchronized</code>. На коротких чтениях он проигрывает: каждый захват чтения — CAS по общему счётчику, и в замере было в 2,5 раза медленнее <code>synchronized</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Понижение записи до чтения разрешено, повышение чтения до записи — нет: поток будет ждать сам себя.</li>
+            <li>Альтернативы для коротких чтений — неизменяемый снимок в <code>volatile</code>-поле или оптимистичное чтение <code>StampedLock</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Кеш: под readLock проверили, что значения нет, затем внутри той же секции взяли writeLock, чтобы положить. Что произойдёт?</summary>
+          <p>Поток зависнет навсегда: <code>writeLock</code> ждёт, пока уйдут все читатели, а один из них — сам этот поток. Нужно отпустить readLock, взять writeLock и перепроверить условие — за это время значение мог положить другой поток. Проще взять <code>ConcurrentHashMap.computeIfAbsent</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stamped-lock" data-freq="2">
+      <h3>Что такое StampedLock и оптимистичное чтение?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Замок с тремя режимами: запись, чтение и оптимистичное чтение. Оптимистичное чтение ничего не захватывает. <code>tryOptimisticRead()</code> возвращает номер версии, поля копируют в локальные переменные, затем <code>validate(stamp)</code> проверяет, не было ли записи. Если была — перечитывают под обычной блокировкой чтения. При редких записях это быстрее всех: в замере урока 15 млн чтений против 8,8 млн у <code>synchronized</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Не реентерабелен, нет <code>Condition</code>. До <code>validate</code> можно только копировать поля: ходить по ссылкам и вызывать методы на возможно порванных данных нельзя.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/package-summary.html">java.util.concurrent.locks (JDK 21)</a> — основа урока: Lock, Condition, ReadWriteLock, StampedLock.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/StampedLock.html">StampedLock (JDK 21)</a> — пример оптимистичного чтения и ограничения.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/ReentrantReadWriteLock.html">ReentrantReadWriteLock (JDK 21)</a> — понижение блокировки и политика очереди.</li>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 13 «Explicit Locks» и 14 «Building Custom Synchronizers».</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
