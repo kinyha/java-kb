@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Concurrent Collections · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="concurrent-collections">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Concurrent Collections</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="broken-hashmap">
+      <h2>HashMap в восьми потоках: потери, исключение или вечный цикл</h2>
+      <p>Кеш платежей на обычном <code>HashMap</code>, и восемь потоков кладут в него записи. Ключи у потоков не пересекаются, так что, казалось бы, мешать друг другу им нечем:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class BrokenMap {
+    public static void main(String[] args) throws Exception {
+        Map&lt;Integer, Integer&gt; map = new HashMap&lt;&gt;();                 // не потокобезопасна
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        List&lt;Future&lt;?&gt;&gt; fs = new ArrayList&lt;&gt;();
+        for (int t = 0; t &lt; 8; t++) {
+            int base = t * 100_000;
+            fs.add(pool.submit(() -&gt; { for (int i = 0; i &lt; 100_000; i++) map.put(base + i, i); }));  // ключи не пересекаются
+        }
+        try {
+            for (Future&lt;?&gt; f : fs) f.get(10, TimeUnit.SECONDS);
+            System.out.println("ожидали 800000, size = " + map.size());
+        } catch (ExecutionException e) {
+            System.out.println("исключение внутри HashMap: " + e.getCause());
+        } catch (TimeoutException e) {
+            System.out.println("за 10 с не закончили — потоки зациклились внутри HashMap");
+        }
+        System.exit(0);
+    }
+}</code></pre>
+      <p>Шесть запусков подряд:</p>
+      <pre><code class="language-text">за 10 с не закончили — потоки зациклились внутри HashMap
+исключение внутри HashMap: java.lang.ClassCastException: class java.util.HashMap$Node cannot be cast to class java.util.HashMap$TreeNode
+ожидали 800000, size = 292054
+за 10 с не закончили — потоки зациклились внутри HashMap
+за 10 с не закончили — потоки зациклились внутри HashMap
+ожидали 800000, size = 353228</code></pre>
+      <p>Три разных исхода, и ни одного правильного. Потерянные записи — ещё не худшее. Дамп потоков зависшего запуска показал два потока, которые больше минуты занимали по ядру на 100% внутри самой карты:</p>
+      <pre><code class="language-text">"pool-1-thread-5" ... cpu=64155.02ms elapsed=64.23s ... runnable
+   java.lang.Thread.State: RUNNABLE
+	at java.util.HashMap$TreeNode.treeify(java.base@21.0.11/HashMap.java:2107)
+	at java.util.HashMap.treeifyBin(java.base@21.0.11/HashMap.java:778)
+	at java.util.HashMap.putVal(java.base@21.0.11/HashMap.java:650)</code></pre>
+      <p>Одновременные вставки и перестройка таблицы испортили внутренние ссылки, и в структуре появился цикл. В проде это выглядит как «CPU 100%, запросы висят», и лечится только перезапуском. Причина — в том, что <code>HashMap</code> не рассчитана на несколько потоков вообще, даже на «безобидные» записи в разные ключи.</p>
+      <p>В этой теме — три способа сделать коллекцию потокобезопасной. Обёртки <code>Collections.synchronized*</code>, как устроен <code>ConcurrentHashMap</code> и почему он быстрее в 20 раз, копирование при записи в <code>CopyOnWriteArrayList</code> и блокирующие очереди, которые связывают производителей и потребителей.</p>
+    </section>
+
+    <section class="step" id="synchronized-wrappers">
+      <h2>Collections.synchronized* защищает методы, но не обход и не составные действия</h2>
+      <p><code>Collections.synchronizedMap(map)</code>, <code>synchronizedList</code> и остальные оборачивают коллекцию: каждый метод выполняется под одним общим замком. Это исправляет <code>BrokenMap</code>, но оставляет две проблемы.</p>
+      <p>Первая — <b>обход</b>. Итератор обращается к коллекции много раз, и между шагами другой поток может её изменить:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class IterateSync {
+    public static void main(String[] args) throws Exception {
+        List&lt;String&gt; payments = Collections.synchronizedList(new ArrayList&lt;&gt;());
+        for (int i = 0; i &lt; 1000; i++) payments.add("p" + i);
+        Thread adder = new Thread(() -&gt; {
+            for (int i = 0; i &lt; 1_000_000; i++) payments.add("new" + i);   // каждый add под замком списка
+        });
+        adder.start();
+        try {
+            long sum = 0;
+            for (String p : payments) sum += p.length();                   // итерация — нет
+            System.out.println("обход прошёл");
+        } catch (ConcurrentModificationException e) {
+            System.out.println("synchronizedList: " + e);
+        }
+        adder.join();
+
+        List&lt;String&gt; listeners = new CopyOnWriteArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 1000; i++) listeners.add("l" + i);
+        Iterator&lt;String&gt; it = listeners.iterator();                        // обход начался
+        Thread adder2 = new Thread(() -&gt; { for (int i = 0; i &lt; 1000; i++) listeners.add("new" + i); });
+        adder2.start();
+        adder2.join();                                                     // пока обход идёт, добавили ещё 1000
+        int seen = 0;
+        while (it.hasNext()) { it.next(); seen++; }
+        System.out.println("CopyOnWriteArrayList: обход увидел " + seen + ", в списке уже " + listeners.size());
+    }
+}</code></pre>
+      <pre class="out">synchronizedList: java.util.ConcurrentModificationException
+CopyOnWriteArrayList: обход увидел 1000, в списке уже 2000</pre>
+      <p>Итератор обёртки — это итератор исходного <code>ArrayList</code>, и он fail-fast: заметил изменение и бросил <code>ConcurrentModificationException</code>. Javadoc требует обходить такую коллекцию внутри <code>synchronized (payments) { ... }</code>. Тогда на всё время обхода остальные потоки встают. Вторая часть вывода — к шагу 5.</p>
+      <p>Вторая проблема — <b>составные действия</b> вроде «если нет — положить». Каждый метод атомарен, а их сочетание — нет, как в теме Thread Safety. И третья, практическая, — <b>один замок на всё</b>. Замер: восемь потоков, случайные ключи, 90% чтений и 10% записей, одна секунда:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.LongAdder;
+
+public class Throughput {
+    static volatile boolean stop;
+
+    static long ops(Map&lt;Integer, Integer&gt; map, int threads) throws Exception {
+        for (int i = 0; i &lt; 100_000; i++) map.put(i, i);
+        LongAdder done = new LongAdder();
+        stop = false;
+        Thread[] ts = new Thread[threads];
+        for (int t = 0; t &lt; threads; t++) {
+            ts[t] = new Thread(() -&gt; {
+                ThreadLocalRandom rnd = ThreadLocalRandom.current();
+                long n = 0;
+                while (!stop) {
+                    int key = rnd.nextInt(100_000);
+                    if (rnd.nextInt(10) == 0) map.put(key, key);         // 10% записей
+                    else map.get(key);                                   // 90% чтений
+                    n++;
+                }
+                done.add(n);
+            });
+            ts[t].start();
+        }
+        Thread.sleep(1000);
+        stop = true;
+        for (Thread t : ts) t.join();
+        return done.sum();
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int round = 0; round &lt; 2; round++) {                        // первый круг — прогрев
+            for (int threads : new int[]{1, 8}) {
+                long s = ops(Collections.synchronizedMap(new HashMap&lt;&gt;()), threads);
+                long c = ops(new ConcurrentHashMap&lt;&gt;(), threads);
+                if (round == 1) System.out.printf("%d потоков: synchronizedMap %,12d операций/с, ConcurrentHashMap %,12d%n", threads, s, c);
+            }
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">1 потоков: synchronizedMap  111,433,388 операций/с, ConcurrentHashMap  135,795,155
+8 потоков: synchronizedMap   20,529,268 операций/с, ConcurrentHashMap  429,439,826</code></pre>
+      <p>Восемь потоков с <code>synchronizedMap</code> сделали в пять раз <i>меньше</i> операций, чем один. Они стоят в очереди за одним замком и перекидывают друг другу строку кеша с ним. <code>ConcurrentHashMap</code> на тех же восьми потоках в 21 раз быстрее. Второй запуск дал те же числа с точностью до 5%.</p>
+    </section>
+
+    <section class="step" id="chm">
+      <h2>ConcurrentHashMap блокирует одну корзину, а читает без блокировок</h2>
+      <p>С Java 8 <code>ConcurrentHashMap</code> — массив корзин, как у <code>HashMap</code>, но каждая операция трогает только свою корзину:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Таблица ConcurrentHashMap из восьми корзин. Вставка в пустую корзину два делается через CAS без блокировки. Вставка второго ключа в ту же корзину захватывает монитор первого узла корзины и дописывает узел в цепочку. Чтение идёт без блокировок, а запись в другую корзину выполняется параллельно. При расширении таблица удваивается, перенесённые корзины помечаются ForwardingNode, и потоки, пришедшие с записью, помогают переносу.">
+            <defs>
+              <marker id="ch-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ch-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">TABLE: NODE[8]</text>
+            <!-- корзины -->
+            <g>
+              <rect x="20" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="106" y="36" width="78" height="36" rx="5" class="dg-box"/>
+              <rect x="192" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="278" y="36" width="78" height="36" rx="5" class="dg-box"/>
+              <rect x="364" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="450" y="36" width="78" height="36" rx="5" class="dg-box"/>
+              <rect x="536" y="36" width="78" height="36" rx="5" class="dg-box"/><rect x="622" y="36" width="78" height="36" rx="5" class="dg-box"/>
+            </g>
+            <g text-anchor="middle">
+              <text x="59" y="86" class="dg-n">0</text><text x="145" y="86" class="dg-n">1</text><text x="231" y="86" class="dg-n">2</text><text x="317" y="86" class="dg-n">3</text>
+              <text x="403" y="86" class="dg-n">4</text><text x="489" y="86" class="dg-n">5</text><text x="575" y="86" class="dg-n">6</text><text x="661" y="86" class="dg-n">7</text>
+            </g>
+            <text data-s="1" x="360" y="140" class="dg-n" text-anchor="middle">все корзины пусты (null)</text>
+
+            <!-- шаг 2+: k1 в корзине 2 -->
+            <rect data-s="2" x="192" y="36" width="78" height="36" rx="5" class="dg-cell hit"/>
+            <rect data-s="3" x="192" y="36" width="78" height="36" rx="5" class="dg-cell miss"/>
+            <rect data-s="4-" x="192" y="36" width="78" height="36" rx="5" class="dg-cell"/>
+            <text data-s="2-" x="231" y="59" class="dg-in" text-anchor="middle">k1</text>
+            <text data-s="2" x="280" y="130" class="dg-ok">put(k1): корзина пуста — CAS, без блокировки</text>
+
+            <!-- шаг 3+: k2 в цепочке -->
+            <g data-s="3-">
+              <path d="M206 72 L 206 100" class="dg-line" marker-end="url(#ch-n)"/>
+              <rect x="192" y="104" width="78" height="32" rx="5" class="dg-cell"/>
+              <text x="231" y="125" class="dg-in" text-anchor="middle">k2</text>
+            </g>
+            <g data-s="3">
+              <text x="290" y="125" class="dg-bad">put(k2): коллизия — synchronized на узле k1</text>
+            </g>
+
+            <!-- шаг 4: параллельные операции -->
+            <rect data-s="4" x="450" y="36" width="78" height="36" rx="5" class="dg-cell hit"/>
+            <rect data-s="5" x="450" y="36" width="78" height="36" rx="5" class="dg-cell"/>
+            <text data-s="4-" x="489" y="59" class="dg-in" text-anchor="middle">k3</text>
+            <g data-s="4">
+              <text x="290" y="125" class="dg-ok">get(k2): без блокировки, volatile-чтение</text>
+              <text x="420" y="160" class="dg-ok">put(k3) в корзину 5 — одновременно</text>
+            </g>
+
+            <!-- шаг 5: расширение -->
+            <g data-s="5">
+              <rect x="536" y="36" width="78" height="36" rx="5" class="dg-cell miss"/>
+              <rect x="622" y="36" width="78" height="36" rx="5" class="dg-cell miss"/>
+              <text x="575" y="59" class="dg-n" text-anchor="middle">FWD</text>
+              <text x="661" y="59" class="dg-n" text-anchor="middle">FWD</text>
+              <text x="20" y="172" class="dg-cap">NEXTTABLE: NODE[16]</text>
+              <rect x="20" y="182" width="680" height="30" rx="5" class="dg-box"/>
+              <text x="360" y="202" class="dg-n" text-anchor="middle">корзины 6 и 7 уже перенесены сюда, остальные — по очереди, от конца к началу</text>
+              <path d="M600 76 C 600 140, 560 150, 560 178" class="dg-line ok" marker-end="url(#ch-ok)"/>
+            </g>
+
+            <text data-s="1" x="20" y="250" class="dg-in">массив корзин, как у HashMap; ссылки читают через volatile</text>
+            <text data-s="2" x="20" y="250" class="dg-ok">пустая корзина: новый узел кладут одной CAS</text>
+            <text data-s="3" x="20" y="250" class="dg-bad">занятая корзина: замок только на её первый узел</text>
+            <text data-s="4" x="20" y="250" class="dg-ok">чтения не блокируются, записи в разные корзины не мешают</text>
+            <text data-s="5" x="20" y="250" class="dg-in">расширение: пишущие потоки помогают переносить корзины</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Массив корзин (<code>table</code>) — как у <code>HashMap</code>. Ссылки на корзины читают и пишут как <code>volatile</code>, поэтому любой поток видит опубликованные узлы.</li>
+          <li><code>put(k1)</code> попал в пустую корзину 2. Узел кладут одной операцией CAS: «если в корзине null, записать узел». Блокировки нет.</li>
+          <li><code>put(k2)</code> попал в ту же корзину. Теперь нужна блокировка, но только одной корзины: <code>synchronized</code> на её первом узле. Узел дописывается в цепочку. Остальные корзины свободны.</li>
+          <li><code>get</code> не блокируется вовсе: читает корзину и идёт по цепочке, видя узлы через <code>volatile</code>-поля. Запись в другую корзину выполняется одновременно. Отсюда масштабирование в замере: 430 млн операций в секунду на восьми потоках.</li>
+          <li>Когда элементов становится больше 0,75 размера таблицы, она удваивается. Перенос идёт по корзинам: перенесённую помечают узлом <code>ForwardingNode</code>. Чтение в такой корзине уходит в новую таблицу, а поток с записью помогает переносить остальные корзины, а не ждёт.</li>
+        </ol>
+      </figure>
+      <p>Ещё детали, которые спрашивают на собеседовании:</p>
+      <ul>
+        <li>Цепочка длиннее 8 узлов (<code>TREEIFY_THRESHOLD</code>) при таблице от 64 корзин превращается в красно-чёрное дерево, как в <code>HashMap</code>. Если таблица меньше, она вместо этого расширяется.</li>
+        <li><code>size()</code> считают как в <code>LongAdder</code>: базовый счётчик и массив <code>CounterCell</code>. При параллельных изменениях результат приблизителен. Для больших карт есть <code>mappingCount()</code>, возвращающий <code>long</code>.</li>
+        <li>Итераторы <b>слабо согласованные</b>: не бросают <code>ConcurrentModificationException</code> и видят какое-то состояние карты между началом и концом обхода.</li>
+        <li><code>null</code> нельзя ни в ключ, ни в значение. Если <code>get</code> вернул <code>null</code>, это однозначно значит «ключа нет». В <code>HashMap</code> для этого нужен второй вызов <code>containsKey</code>, а между двумя вызовами в многопоточной карте всё может измениться.</li>
+        <li>В Java 7 карта делилась на 16 сегментов, каждый со своим <code>ReentrantLock</code> (lock striping). В Java 8 сегменты заменили блокировкой отдельной корзины и CAS.</li>
+      </ul>
+    </section>
+
+    <section class="step" id="compute">
+      <h2>compute-методы атомарны, потому что держат замок корзины — их функция должна быть короткой</h2>
+      <p>Составные действия у <code>ConcurrentHashMap</code> есть готовые: <code>putIfAbsent</code>, <code>computeIfAbsent</code>, <code>compute</code>, <code>merge</code>. Для отсутствующего ключа <code>computeIfAbsent</code> вызывает функцию ровно один раз — в отличие от <code>AtomicLong.updateAndGet</code>, которая может повторяться. Цена этой гарантии: функция выполняется, пока держится замок корзины. Отсюда два правила. Функция должна быть быстрой, иначе ждут все, кто пришёл в эту корзину. И она не должна менять ту же карту:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class Recursive {
+    static final Map&lt;Integer, Long&gt; cache = new ConcurrentHashMap&lt;&gt;();
+
+    // числа Фибоначчи с кешем «по-умному»: вычисление само пишет в тот же кеш
+    static long fib(int n) {
+        if (n &lt; 2) return n;
+        return cache.computeIfAbsent(n, k -&gt; fib(k - 1) + fib(k - 2));
+    }
+
+    public static void main(String[] args) {
+        try {
+            System.out.println("fib(40) = " + fib(40));
+        } catch (IllegalStateException e) {
+            System.out.println("computeIfAbsent: " + e);
+        }
+    }
+}</code></pre>
+      <pre class="out">computeIfAbsent: java.lang.IllegalStateException: Recursive update</pre>
+      <p>Функция для ключа 40 вызвала <code>computeIfAbsent</code> для 39 и 38 внутри той же карты. JDK с Java 9 распознаёт такое рекурсивное изменение и бросает исключение. В Java 8 тот же код мог зависнуть навсегда. Кеш для рекурсивных вычислений заполняют снаружи: сначала посчитать, потом <code>putIfAbsent</code>.</p>
+      <div class="note warn">
+        <p>Частая ошибка — долгий вызов внутри <code>computeIfAbsent</code>: запрос в базу или HTTP-клиент для «ленивой загрузки в кеш». Пока идёт вызов, корзина заблокирована, и все ключи, попавшие в неё, ждут. Для загрузок с задержкой используют кеш, который умеет асинхронную загрузку, например <code>Caffeine.buildAsync</code>. Или кладут в карту <code>CompletableFuture</code>, а саму загрузку выполняют вне замка.</p>
+      </div>
+    </section>
+
+    <section class="step" id="cow">
+      <h2>CopyOnWriteArrayList копирует массив на каждую запись, зато обход не блокируется</h2>
+      <p>У <code>CopyOnWriteArrayList</code> внутри неизменяемый массив. Каждая запись копирует массив целиком, меняет копию и публикует её одной <code>volatile</code>-записью. Итератор берёт ссылку на массив в момент создания и обходит этот снимок — поэтому в шаге 2 он увидел 1000 элементов, хотя в списке их уже было 2000. Блокировок при чтении и обходе нет, <code>ConcurrentModificationException</code> не бывает.</p>
+      <p>Цена — запись. Каждый <code>add</code> копирует весь массив, поэтому заполнение списка из N элементов стоит O(N²):</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class CowCost {
+    public static void main(String[] args) {
+        for (int round = 0; round &lt; 2; round++) {                        // первый круг — прогрев
+            List&lt;Integer&gt; sync = Collections.synchronizedList(new ArrayList&lt;&gt;());
+            List&lt;Integer&gt; cow = new CopyOnWriteArrayList&lt;&gt;();
+            long start = System.nanoTime();
+            for (int i = 0; i &lt; 50_000; i++) sync.add(i);
+            long syncMs = (System.nanoTime() - start) / 1_000_000;
+            start = System.nanoTime();
+            for (int i = 0; i &lt; 50_000; i++) cow.add(i);                   // каждый add копирует весь массив
+            long cowMs = (System.nanoTime() - start) / 1_000_000;
+            if (round == 1) System.out.printf("50 000 add: synchronizedList %d мс, CopyOnWriteArrayList %d мс%n", syncMs, cowMs);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">50 000 add: synchronizedList 0 мс, CopyOnWriteArrayList 142 мс</code></pre>
+      <p>Меньше миллисекунды против 142 мс, и разница растёт квадратично. Поэтому <code>CopyOnWriteArrayList</code> — для коллекций, которые читают постоянно, а меняют редко: слушатели событий, обработчики, конфигурация маршрутов. Классический случай — список слушателей. Его обходят при каждом событии, а подписываются редко, и слушатель может отписаться прямо во время обхода. Для множества есть <code>CopyOnWriteArraySet</code>.</p>
+    </section>
+
+    <section class="step" id="queues">
+      <h2>BlockingQueue связывает производителей и потребителей и даёт противодавление</h2>
+      <p>Блокирующая очередь — основа передачи работы между потоками: производитель кладёт, потребитель забирает, и оба ждут, когда нужно. У неё четыре варианта каждой операции:</p>
+      <table class="mx">
+        <thead><tr><th></th><th>исключение</th><th>особое значение</th><th>ждёт</th><th>ждёт с таймаутом</th></tr></thead>
+        <tbody>
+          <tr><td>положить</td><td><code>add(e)</code></td><td><code>offer(e)</code> → <code>false</code></td><td><code>put(e)</code></td><td><code>offer(e, time, unit)</code></td></tr>
+          <tr><td>забрать</td><td><code>remove()</code></td><td><code>poll()</code> → <code>null</code></td><td><code>take()</code></td><td><code>poll(time, unit)</code></td></tr>
+        </tbody>
+      </table>
+      <table class="mx">
+        <thead><tr><th>Реализация</th><th>Устройство</th><th>Где встречается</th></tr></thead>
+        <tbody>
+          <tr><td><code>ArrayBlockingQueue(n)</code></td><td>кольцевой массив, один замок и две <code>Condition</code></td><td>ограниченный буфер между этапами</td></tr>
+          <tr><td><code>LinkedBlockingQueue</code></td><td>связный список, отдельные замки на голову и хвост. Без аргумента ёмкость <code>Integer.MAX_VALUE</code></td><td><code>Executors.newFixedThreadPool</code></td></tr>
+          <tr><td><code>SynchronousQueue</code></td><td>ёмкость ноль: <code>put</code> ждёт, пока кто-то сделает <code>take</code></td><td><code>Executors.newCachedThreadPool</code></td></tr>
+          <tr><td><code>PriorityBlockingQueue</code></td><td>куча по приоритету, без ограничения</td><td>задачи с приоритетами</td></tr>
+          <tr><td><code>DelayQueue</code></td><td>элемент доступен после задержки</td><td>отложенные задачи, таймауты</td></tr>
+          <tr><td><code>LinkedTransferQueue</code></td><td><code>transfer</code> ждёт, пока элемент заберут</td><td>передача из рук в руки с буфером</td></tr>
+        </tbody>
+      </table>
+      <p>Самое важное свойство ограниченной очереди — <b>противодавление</b> (backpressure). Если потребитель медленнее производителя, полная очередь заставляет производителя ждать. Неограниченная растёт, пока не кончится память. Производитель принимает платежи из сети, потребитель медленно пишет их в базу:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Backpressure {
+    public static void main(String[] args) throws Exception {
+        BlockingQueue&lt;byte[]&gt; queue = args[0].equals("bounded")
+            ? new ArrayBlockingQueue&lt;&gt;(1_000)                            // не больше 1000 элементов
+            : new LinkedBlockingQueue&lt;&gt;();                               // ёмкость Integer.MAX_VALUE
+        Thread producer = new Thread(() -&gt; {                             // принимает платежи из сети: быстро
+            try { while (true) queue.put(new byte[1024]); } catch (InterruptedException e) { }
+        });
+        Thread consumer = new Thread(() -&gt; {                             // пишет в базу: медленно
+            try { while (true) { queue.take(); Thread.sleep(0, 100_000); } } catch (InterruptedException e) { }
+        });
+        producer.setDaemon(true); consumer.setDaemon(true);
+        producer.start(); consumer.start();
+        Runtime rt = Runtime.getRuntime();
+        for (int step = 1; step &lt;= 5; step++) {
+            Thread.sleep(200);
+            System.out.printf("%4d мс: в очереди %,9d, heap занят %,5d МБ%n",
+                step * 200, queue.size(), (rt.totalMemory() - rt.freeMemory()) &gt;&gt; 20);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Xmx1g Backpressure unbounded
+ 200 мс: в очереди   789,408, heap занят   847 МБ
+ 400 мс: в очереди   996,057, heap занят 1,014 МБ
+
+Exception: java.lang.OutOfMemoryError thrown from the UncaughtExceptionHandler in thread "Thread-0"
+
+Exception: java.lang.OutOfMemoryError thrown from the UncaughtExceptionHandler in thread "main"
+$ java -Xmx1g Backpressure bounded
+ 200 мс: в очереди     1,000, heap занят     6 МБ
+ 400 мс: в очереди     1,000, heap занят     9 МБ
+ 600 мс: в очереди     1,000, heap занят    10 МБ
+ 800 мс: в очереди     1,000, heap занят    12 МБ
+1000 мс: в очереди     1,000, heap занят    13 МБ</code></pre>
+      <p>Неограниченная очередь съела гигабайт heap меньше чем за полсекунды, и процесс упал: памяти не хватило даже на то, чтобы напечатать стек. Так было в каждом из четырёх запусков, в одном — ещё до первой строки. Ограниченная держит 1000 элементов и 6–13 МБ: производитель просто ждёт в <code>put()</code>, пока потребитель освободит место. В реальном сервисе это ожидание дойдёт до входа — сервис перестанет принимать новые запросы быстрее, чем может их обработать, вместо того чтобы упасть.</p>
+      <p>Отсюда главное правило для очередей между потоками: <b>ограничивать ёмкость</b> и решать, что делать при переполнении, — ждать, отказать через <code>offer</code> или сбросить старое. Та же ловушка скрыта в <code>Executors.newFixedThreadPool</code>: его очередь задач — неограниченная <code>LinkedBlockingQueue</code> (тема Executors).</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>HashMap</code> под несколькими потоками теряет записи, бросает исключения изнутри и может зациклиться со 100% CPU.</li>
+        <li><code>Collections.synchronized*</code> ставят каждый метод под один замок. Обход требует внешнего <code>synchronized</code>, составные действия не атомарны, а масштабирования нет: в замере 8 потоков сделали в 5 раз меньше, чем один.</li>
+        <li><code>ConcurrentHashMap</code>: CAS в пустую корзину, <code>synchronized</code> на первом узле занятой, чтение без блокировок, совместное расширение. В замере в 21 раз быстрее обёртки. <code>null</code> запрещён, итераторы слабо согласованные, <code>size()</code> приблизителен.</li>
+        <li><code>computeIfAbsent</code> вызывает функцию один раз, но под замком корзины: функция короткая и не трогает ту же карту — иначе <code>Recursive update</code>.</li>
+        <li><code>CopyOnWriteArrayList</code> копирует массив на каждую запись и обходит снимок. Подходит, когда читают часто, а меняют редко.</li>
+        <li><code>BlockingQueue</code> связывает производителей и потребителей. Ограниченная ёмкость даёт противодавление, неограниченная растёт до <code>OutOfMemoryError</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="chm-internals" data-freq="3">
+      <h3>Как устроен ConcurrentHashMap?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>С Java 8 — массив корзин, как у <code>HashMap</code>. Вставка в пустую корзину идёт одной CAS без блокировки. Если корзина занята, поток захватывает <code>synchronized</code> на её первом узле, и блокируется только эта корзина. Чтение не блокируется вообще: ссылки на узлы читаются как <code>volatile</code>. Длинные цепочки превращаются в дерево. При расширении таблицы перенесённые корзины помечаются <code>ForwardingNode</code>, и пишущие потоки помогают переносу. Ключи и значения не могут быть <code>null</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Java 7 было 16 сегментов со своими <code>ReentrantLock</code> — lock striping.</li>
+            <li>Размер считается по схеме <code>LongAdder</code> (<code>CounterCell</code>), поэтому <code>size()</code> при параллельных изменениях приблизителен.</li>
+            <li>Итераторы слабо согласованные: без <code>ConcurrentModificationException</code>, но и без снимка.</li>
+            <li><code>compute</code>-методы держат замок корзины на время функции; рекурсивное изменение той же карты даёт <code>IllegalStateException: Recursive update</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему ConcurrentHashMap не допускает null, а HashMap допускает?</summary>
+          <p>Чтобы <code>get</code> был однозначным. В <code>HashMap</code> <code>null</code> из <code>get</code> может значить и «ключа нет», и «значение null», а различают их вторым вызовом <code>containsKey</code>. В многопоточной карте между двумя вызовами состояние может измениться, и ответ станет ложным. Запрет <code>null</code> делает одиночный <code>get</code> достаточным.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="sync-vs-concurrent" data-freq="3">
+      <h3>Чем Collections.synchronizedMap отличается от ConcurrentHashMap?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>synchronizedMap</code> — обёртка, где каждый метод выполняется под одним общим замком. Все операции, включая чтение, идут по очереди. Обход нужно делать под внешним <code>synchronized</code>, иначе <code>ConcurrentModificationException</code>. <code>ConcurrentHashMap</code> блокирует только одну корзину при записи, читает без блокировок, итераторы не бросают исключений, и у него есть атомарные составные операции: <code>putIfAbsent</code>, <code>compute</code>, <code>merge</code>. В замере урока на 8 потоках он был в 21 раз быстрее.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>static Map&lt;String, Rate&gt; cache = new HashMap&lt;&gt;(); — кеш курсов, который обновляет планировщик и читают потоки запросов. «Записи редкие, ничего страшного». Что скажешь?</summary>
+          <p>Даже редкие записи параллельно с чтениями и между собой ломают <code>HashMap</code>: потери, исключения изнутри, зацикливание со 100% CPU — всё это случилось в замере урока. Ещё без синхронизации читатели могут не увидеть обновления. Нужен <code>ConcurrentHashMap</code>, а если кеш обновляется целиком — неизменяемый <code>Map.copyOf</code> в <code>volatile</code>-поле.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cow-q" data-freq="2">
+      <h3>Когда использовать CopyOnWriteArrayList?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда читают и обходят часто, а меняют редко: слушатели событий, обработчики, конфигурация. Каждая запись копирует весь массив, зато чтение и обход идут без блокировок по снимку и никогда не бросают <code>ConcurrentModificationException</code>. На частых записях он неприменим: в замере урока 50 000 <code>add</code> заняли 142 мс против долей миллисекунды у <code>synchronizedList</code>, и разница растёт квадратично.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="blocking-queue-q" data-freq="2">
+      <h3>Какие бывают BlockingQueue и чем они отличаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>ArrayBlockingQueue</code> — ограниченная, на массиве, с одним замком. <code>LinkedBlockingQueue</code> — на связном списке, с отдельными замками на голову и хвост, по умолчанию фактически неограниченная. <code>SynchronousQueue</code> — без ёмкости, передача из рук в руки. <code>PriorityBlockingQueue</code> — по приоритету, <code>DelayQueue</code> — с задержкой. Методы: <code>put/take</code> ждут, <code>offer/poll</code> возвращают особое значение или ждут с таймаутом, <code>add/remove</code> бросают исключение.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ограниченная очередь даёт противодавление: быстрый производитель ждёт медленного потребителя. Неограниченная в замере урока съела гигабайт heap за полсекунды.</li>
+            <li><code>newFixedThreadPool</code> использует неограниченную <code>LinkedBlockingQueue</code>, <code>newCachedThreadPool</code> — <code>SynchronousQueue</code>.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html">ConcurrentHashMap (JDK 21)</a> — основа урока: гарантии операций, слабо согласованные итераторы, compute-методы.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Collections.html#synchronizedList(java.util.List)">Collections.synchronizedList (JDK 21)</a> — требование обходить под внешним synchronized.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/BlockingQueue.html">BlockingQueue (JDK 21)</a> — таблица методов и семантика.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CopyOnWriteArrayList.html">CopyOnWriteArrayList (JDK 21)</a> — снимок при обходе и цена записи.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
