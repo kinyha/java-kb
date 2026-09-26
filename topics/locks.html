@@ -237,7 +237,7 @@ public class OneSlotLock {
 
     <section class="step" id="read-write">
       <h2>ReadWriteLock ускоряет только долгие чтения, а на коротких проигрывает</h2>
-      <p><code>ReentrantReadWriteLock</code> пускает много читателей одновременно, а писателя — одного и без читателей. Кажется, что для данных, которые в основном читают, это всегда выигрыш. Проверим на котировке — паре цен <code>bid</code> и <code>ask</code>, которую нужно читать согласованно. Восемь читателей, один писатель обновляет пару раз в миллисекунду. Два варианта: чтение без дополнительной работы и чтение, после которого под замком ещё 2 мкс обработки:</p>
+      <p><code>ReentrantReadWriteLock</code> пускает много читателей одновременно, а писателя — одного и без читателей. Кажется, что для данных, которые в основном читают, это всегда выигрыш. Проверим на котировке — паре цен <code>bid</code> и <code>ask</code>, которую нужно читать согласованно. Восемь читателей, один писатель обновляет пару раз в миллисекунду. Два варианта: чтение без дополнительной работы и чтение, после которого под замком ещё около 1,5 мкс вычислений. Замер останавливает флаг, а не часы: <code>System.nanoTime()</code> на каждой операции сам стал бы узким местом — на этой машине 8 потоков вместе вызывают его лишь 30 млн раз в секунду.</p>
       <pre><code class="language-java">import java.util.*;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.*;
@@ -245,14 +245,14 @@ import java.util.concurrent.locks.*;
 public class Quotes {
     // котировка: две связанные цены, читать нужно согласованную пару
     static double bid = 89.9, ask = 90.1;
-    static int work;                                             // нс «обработки» внутри чтения
+    static int work;                                             // «обработка» внутри чтения, в итерациях
+    static volatile boolean stop;                                // флаг остановки замера
 
-    static double spread() {                                     // чтение пары + обработка
-        double s = ask - bid;
-        long until = System.nanoTime() + work;
-        while (work &gt; 0 &amp;&amp; System.nanoTime() &lt; until) Thread.onSpinWait();
+    static double process(double s) {                            // обработка без обращения к часам
+        for (int i = 0; i &lt; work; i++) s = s * 1.000001 - 0.0000002;
         return s;
     }
+    static double spread() { return process(ask - bid); }        // чтение пары + обработка
     static void update() { double mid = 90 + Math.random(); bid = mid - 0.1; ask = mid + 0.1; }
 
     interface Guard { double read(); void write(); }
@@ -275,10 +275,7 @@ public class Quotes {
                 stamp = sl.readLock();
                 try { b = bid; a = ask; } finally { sl.unlockRead(stamp); }
             }
-            double s = a - b;                                    // обработка уже без замка
-            long until = System.nanoTime() + work;
-            while (work &gt; 0 &amp;&amp; System.nanoTime() &lt; until) Thread.onSpinWait();
-            return s;
+            return process(a - b);                               // обработка уже без замка
         }
         public void write() { long s = sl.writeLock(); try { update(); } finally { sl.unlockWrite(s); } }
     };
@@ -286,50 +283,55 @@ public class Quotes {
     static long run(Guard g) throws InterruptedException {
         LongAdder reads = new LongAdder();
         long[] torn = new long[1];
-        long end = System.nanoTime() + 1_000_000_000L;
+        stop = false;
         List&lt;Thread&gt; ts = new ArrayList&lt;&gt;();
         for (int r = 0; r &lt; 8; r++) ts.add(new Thread(() -&gt; {
-            while (System.nanoTime() &lt; end) {
+            long n = 0;
+            while (!stop) {
                 double s = g.read();
-                if (Math.abs(s - 0.2) &gt; 1e-9) torn[0]++;         // пара из разных обновлений
-                reads.increment();
+                if (work == 0 &amp;&amp; Math.abs(s - 0.2) &gt; 1e-9) torn[0]++;   // пара из разных обновлений
+                n++;
             }
+            reads.add(n);
         }));
         ts.add(new Thread(() -&gt; {
-            while (System.nanoTime() &lt; end) {
+            while (!stop) {
                 g.write();
                 try { Thread.sleep(1); } catch (InterruptedException e) { }
             }
         }));
         ts.forEach(Thread::start);
+        Thread.sleep(1000);
+        stop = true;
         for (Thread t : ts) t.join();
         if (torn[0] &gt; 0) System.out.println("  порванных пар: " + torn[0]);
         return reads.sum();
     }
 
     public static void main(String[] args) throws Exception {
-        for (int w : new int[]{0, 2_000}) {
+        for (int w : new int[]{0, 1_000}) {
             work = w;
             run(SYNC); run(RW); run(STAMPED);                    // прогрев
-            System.out.printf("чтение + %d нс работы:%n", w);
+            System.out.printf("чтение + %d итераций обработки:%n", w);
             System.out.printf("  synchronized:           %,12d чтений за 1 с%n", run(SYNC));
             System.out.printf("  ReentrantReadWriteLock: %,12d%n", run(RW));
             System.out.printf("  StampedLock optimistic: %,12d%n", run(STAMPED));
         }
     }
 }</code></pre>
-      <pre><code class="language-text">чтение + 0 нс работы:
-  synchronized:              8,802,878 чтений за 1 с
-  ReentrantReadWriteLock:    3,511,000
-  StampedLock optimistic:   15,330,253
-чтение + 2000 нс работы:
-  synchronized:                407,898 чтений за 1 с
-  ReentrantReadWriteLock:    2,421,813
-  StampedLock optimistic:    3,026,607</code></pre>
-      <p>Строки «порванных пар» нет ни в одном варианте: все три защищают пару. Без защиты за секунду набралось 59 чтений, где <code>bid</code> взят из одного обновления, а <code>ask</code> — из другого.</p>
+      <pre><code class="language-text">чтение + 0 итераций обработки:
+  synchronized:             62,025,988 чтений за 1 с
+  ReentrantReadWriteLock:    4,311,580
+  StampedLock optimistic: 3,038,391,793
+чтение + 1000 итераций обработки:
+  synchronized:                653,084 чтений за 1 с
+  ReentrantReadWriteLock:    4,967,936
+  StampedLock optimistic:    7,196,892</code></pre>
+      <p>Строки «порванных пар» нет ни в одном варианте: все три защищают пару. Без защиты за секунду набралось от 254 до 768 чтений, где <code>bid</code> взят из одного обновления, а <code>ask</code> — из другого. Повторный запуск дал те же числа с точностью до 5%.</p>
       <ul>
-        <li><b>Короткое чтение:</b> <code>ReadWriteLock</code> в 2,5 раза <i>медленнее</i> <code>synchronized</code>. Каждый захват и освобождение чтения — CAS по общему счётчику читателей. Восемь ядер перекидывают друг другу одну строку кеша, и эти накладные расходы больше самого чтения.</li>
-        <li><b>Долгое чтение, 2 мкс:</b> <code>synchronized</code> пропускает читателей по одному, и восемь ядер работают как одно. <code>ReadWriteLock</code> пускает их параллельно и выигрывает в шесть раз.</li>
+        <li><b>Короткое чтение:</b> <code>ReadWriteLock</code> в 14 раз <i>медленнее</i> <code>synchronized</code>. Каждый захват и освобождение чтения — CAS по общему счётчику читателей. Восемь ядер перекидывают друг другу одну строку кеша, и эти накладные расходы больше самого чтения.</li>
+        <li><b>Долгое чтение:</b> <code>synchronized</code> пропускает читателей по одному, и восемь ядер работают как одно. <code>ReadWriteLock</code> пускает их параллельно и выигрывает в 7,6 раза.</li>
+        <li><b>StampedLock</b> на коротком чтении не пишет в общую память вовсе и делает почти 3 млрд чтений в секунду — в 50 раз больше <code>synchronized</code>. На долгом он тоже впереди: вычисления идут вне замка.</li>
       </ul>
       <p>Вывод: <code>ReadWriteLock</code> имеет смысл, когда чтения действительно долгие и параллельные, а писатели редки. Для коротких чтений лучше неизменяемый снимок в <code>volatile</code>-поле или <code>StampedLock</code>. Решают замером, а не по названию.</p>
       <p>Ещё две особенности <code>ReentrantReadWriteLock</code>:</p>
@@ -415,7 +417,7 @@ public class Upgrade {
           <li>Писатель берёт <code>writeLock()</code> и меняет обе цены. Каждый захват записи меняет версию.</li>
           <li>Читатель копирует <code>ask</code> — уже новый. В его локальных переменных пара из разных обновлений: 89,9 и 90,6.</li>
           <li><code>validate(stamp)</code> сравнивает версии и видит, что между штампом и проверкой была запись. Скопированным данным верить нельзя.</li>
-          <li>Читатель берёт обычную блокировку чтения и перечитывает. Писатели редки, поэтому этот путь выполняется редко, а обычное чтение обходится без записи в общую память. Отсюда 15,3 млн чтений в замере против 8,8 у <code>synchronized</code>.</li>
+          <li>Читатель берёт обычную блокировку чтения и перечитывает. Писатели редки, поэтому этот путь выполняется редко, а обычное чтение обходится без записи в общую память. Отсюда почти 3 млрд чтений в секунду в замере против 62 млн у <code>synchronized</code>.</li>
         </ol>
       </figure>
       <p>Ограничения, из-за которых <code>StampedLock</code> не заменяет всё остальное:</p>
@@ -434,7 +436,7 @@ public class Upgrade {
         <li><code>ReentrantLock</code> добавляет к <code>synchronized</code> <code>tryLock</code> с таймаутом, <code>lockInterruptibly</code>, справедливость, несколько <code>Condition</code> и методы наблюдения. Для простого случая хватает <code>synchronized</code>.</li>
         <li><code>tryLock(timeout)</code> превращает взаимную блокировку в повтор, но ценой задержек. Нужны случайные паузы; единый порядок захвата надёжнее.</li>
         <li><code>Condition</code> — отдельная очередь ожидания на условие. С ней одиночный <code>signal()</code> безопасен там, где <code>notify()</code> вешал систему.</li>
-        <li><code>ReadWriteLock</code> выигрывает на долгих параллельных чтениях (в 6 раз в замере) и проигрывает на коротких (в 2,5 раза). Повышать чтение до записи нельзя.</li>
+        <li><code>ReadWriteLock</code> выигрывает на долгих параллельных чтениях (в 7,6 раза в замере) и проигрывает на коротких (в 14 раз). Повышать чтение до записи нельзя.</li>
         <li><code>StampedLock</code> читает оптимистично, с проверкой версии, и быстрее всех на редких записях. Но он не реентерабелен и не имеет <code>Condition</code>.</li>
       </ul>
     </div>
@@ -484,7 +486,7 @@ public class Upgrade {
       <h3>Когда использовать ReadWriteLock?</h3>
       <div class="answer">
         <div data-level="middle">
-          <p>Когда данные в основном читают, чтения длинные и могут идти параллельно, а записи редки. Тогда читатели не мешают друг другу, и выигрыш большой: в замере урока при 2 мкс работы в чтении — в 6 раз против <code>synchronized</code>. На коротких чтениях он проигрывает: каждый захват чтения — CAS по общему счётчику, и в замере было в 2,5 раза медленнее <code>synchronized</code>.</p>
+          <p>Когда данные в основном читают, чтения длинные и могут идти параллельно, а записи редки. Тогда читатели не мешают друг другу, и выигрыш большой: в замере урока при 1,5 мкс работы в чтении — в 7,6 раза против <code>synchronized</code>. На коротких чтениях он проигрывает: каждый захват чтения — CAS по общему счётчику, и в замере было в 14 раз медленнее <code>synchronized</code>.</p>
         </div>
         <div data-level="senior">
           <ul>
@@ -505,7 +507,7 @@ public class Upgrade {
       <h3>Что такое StampedLock и оптимистичное чтение?</h3>
       <div class="answer">
         <div data-level="middle">
-          <p>Замок с тремя режимами: запись, чтение и оптимистичное чтение. Оптимистичное чтение ничего не захватывает. <code>tryOptimisticRead()</code> возвращает номер версии, поля копируют в локальные переменные, затем <code>validate(stamp)</code> проверяет, не было ли записи. Если была — перечитывают под обычной блокировкой чтения. При редких записях это быстрее всех: в замере урока 15 млн чтений против 8,8 млн у <code>synchronized</code>.</p>
+          <p>Замок с тремя режимами: запись, чтение и оптимистичное чтение. Оптимистичное чтение ничего не захватывает. <code>tryOptimisticRead()</code> возвращает номер версии, поля копируют в локальные переменные, затем <code>validate(stamp)</code> проверяет, не было ли записи. Если была — перечитывают под обычной блокировкой чтения. При редких записях это быстрее всех: в замере урока почти 3 млрд коротких чтений в секунду против 62 млн у <code>synchronized</code>.</p>
         </div>
         <div data-level="senior">
           <ul>
