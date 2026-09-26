@@ -423,7 +423,7 @@ window.KB_TREE = [
             scope: 'устройство ConcurrentHashMap, CopyOnWriteArrayList, BlockingQueue, Collections.synchronized*' },
         ] },
         { id: 'async', title: 'Async', items: [
-          { id: 'executors', freq: 3, status: 'empty', title: 'Executors',
+          { id: 'executors', freq: 3, status: 'draft', title: 'Executors',
             scope: 'ExecutorService, параметры ThreadPoolExecutor, очереди, rejection policy, размер пула, shutdown, ForkJoinPool' },
           { id: 'completable-future', freq: 3, status: 'empty', title: 'CompletableFuture',
             scope: 'Future и CompletableFuture, thenApply и thenCompose, allOf, обработка ошибок, на каком пуле выполняется' },

@@ -1,0 +1,475 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Executors · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="executors">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Executors</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="max-ignored">
+      <h2>Пул «от 2 до 10 потоков» под нагрузкой так и работает двумя</h2>
+      <p>Сервис ходит в банк через пул: два потока в обычное время, до десяти под нагрузкой. Так задумано. Приходит всплеск из 100 запросов, каждый ждёт банк полсекунды. Сравним пул с неограниченной очередью и с очередью на 20 задач:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class MaxIgnored {
+    static void load(String name, ThreadPoolExecutor pool) throws Exception {
+        int rejected = 0;
+        for (int i = 0; i &lt; 100; i++) {
+            try {
+                pool.execute(() -&gt; { try { Thread.sleep(500); } catch (InterruptedException e) { } });  // запрос к банку
+            } catch (RejectedExecutionException e) {
+                rejected++;
+            }
+        }
+        System.out.printf("%-26s потоков %2d, в очереди %2d, отклонено %2d%n",
+            name, pool.getPoolSize(), pool.getQueue().size(), rejected);
+        pool.shutdownNow();
+    }
+
+    public static void main(String[] args) throws Exception {
+        // «2 потока обычно, до 10 под нагрузкой» — так задумано
+        load("LinkedBlockingQueue():", new ThreadPoolExecutor(2, 10, 60, TimeUnit.SECONDS, new LinkedBlockingQueue&lt;&gt;()));
+        load("ArrayBlockingQueue(20):", new ThreadPoolExecutor(2, 10, 60, TimeUnit.SECONDS, new ArrayBlockingQueue&lt;&gt;(20)));
+    }
+}</code></pre>
+      <pre class="out">LinkedBlockingQueue():     потоков  2, в очереди 98, отклонено  0
+ArrayBlockingQueue(20):    потоков 10, в очереди 20, отклонено 70</pre>
+      <p>С неограниченной очередью пул так и остался на двух потоках, а 98 запросов встали в очередь: последний дождётся ответа через 25 секунд. <code>maximumPoolSize = 10</code> не сработал ни разу. С ограниченной очередью пул вырос до десяти, но 70 запросов получили отказ. Оба результата удивляют, пока не знаешь порядок, в котором <code>ThreadPoolExecutor</code> принимает решения.</p>
+      <p>В этой теме — параметры <code>ThreadPoolExecutor</code> и этот порядок, ловушки фабрик <code>Executors</code>, политики отказа, как выбрать размер пула, куда пропадают исключения задач, как остановить пул и почему нельзя блокироваться в <code>ForkJoinPool.commonPool()</code>.</p>
+    </section>
+
+    <section class="step" id="tpe">
+      <h2>ThreadPoolExecutor сначала заполняет очередь, и только потом создаёт потоки сверх core</h2>
+      <table class="mx">
+        <thead><tr><th>Параметр</th><th>Что задаёт</th></tr></thead>
+        <tbody>
+          <tr><td><code>corePoolSize</code></td><td>сколько потоков держать всегда, даже без работы</td></tr>
+          <tr><td><code>maximumPoolSize</code></td><td>потолок числа потоков; сверх core они создаются, только когда очередь полна</td></tr>
+          <tr><td><code>keepAliveTime</code></td><td>через сколько простоя лишние потоки сверх core завершаются</td></tr>
+          <tr><td><code>workQueue</code></td><td>очередь задач: ограниченная, неограниченная или <code>SynchronousQueue</code></td></tr>
+          <tr><td><code>threadFactory</code></td><td>как создавать потоки: имена, daemon, обработчик исключений</td></tr>
+          <tr><td><code>handler</code></td><td>что делать с задачей, когда нет ни места в очереди, ни права на новый поток</td></tr>
+        </tbody>
+      </table>
+      <p>Порядок решений при <code>execute(task)</code> — на пуле из шага 1 с очередью на 20:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Порядок решений ThreadPoolExecutor. Если потоков меньше core — создаётся новый поток. Иначе задача предлагается очереди; если место есть — встаёт в очередь. Если очередь полна и потоков меньше max — создаётся поток сверх core. Иначе задачу получает обработчик отказа. На пуле core 2, max 10, очередь 20 первые две задачи создают потоки, следующие 20 встают в очередь, ещё 8 создают потоки до 10, остальные 70 отклоняются. С неограниченной очередью третья проверка не наступает никогда.">
+            <defs>
+              <marker id="tp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="tp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="tp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- проверки -->
+            <rect x="20" y="40" width="150" height="50" rx="8" class="dg-box"/>
+            <text x="95" y="62" class="dg-t" text-anchor="middle">потоков &lt; core?</text>
+            <text x="95" y="80" class="dg-n" text-anchor="middle">1</text>
+            <rect x="200" y="40" width="150" height="50" rx="8" class="dg-box"/>
+            <text x="275" y="62" class="dg-t" text-anchor="middle">очередь примет?</text>
+            <text x="275" y="80" class="dg-n" text-anchor="middle">2 · offer()</text>
+            <rect data-s="1-4" x="380" y="40" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="5" x="380" y="40" width="150" height="50" rx="8" class="dg-sep" fill="none"/>
+            <text x="455" y="62" class="dg-t" text-anchor="middle">потоков &lt; max?</text>
+            <text x="455" y="80" class="dg-n" text-anchor="middle">3</text>
+            <rect x="560" y="40" width="140" height="50" rx="8" class="dg-cell miss"/>
+            <text x="630" y="62" class="dg-t" text-anchor="middle">отказ</text>
+            <text x="630" y="80" class="dg-n" text-anchor="middle">handler</text>
+            <!-- «нет» вправо -->
+            <path d="M170 65 L 196 65" class="dg-line" marker-end="url(#tp-n)"/>
+            <path d="M350 65 L 376 65" class="dg-line" marker-end="url(#tp-n)"/>
+            <path d="M530 65 L 556 65" class="dg-line" marker-end="url(#tp-n)"/>
+            <text x="172" y="58" class="dg-n">нет</text><text x="352" y="58" class="dg-n">нет</text><text x="532" y="58" class="dg-n">нет</text>
+            <!-- «да» вниз -->
+            <path d="M95 90 L 95 136" class="dg-line" marker-end="url(#tp-n)"/>
+            <path d="M275 90 L 275 136" class="dg-line" marker-end="url(#tp-n)"/>
+            <path d="M455 90 L 455 136" class="dg-line" marker-end="url(#tp-n)"/>
+            <text x="101" y="116" class="dg-n">да</text><text x="281" y="116" class="dg-n">да</text><text x="461" y="116" class="dg-n">да</text>
+            <rect x="20" y="140" width="150" height="44" rx="8" class="dg-box"/>
+            <text x="95" y="167" class="dg-in" text-anchor="middle">новый поток</text>
+            <rect x="200" y="140" width="150" height="44" rx="8" class="dg-box"/>
+            <text x="275" y="167" class="dg-in" text-anchor="middle">в очередь</text>
+            <rect x="380" y="140" width="150" height="44" rx="8" class="dg-box"/>
+            <text x="455" y="167" class="dg-in" text-anchor="middle">поток сверх core</text>
+
+            <!-- подсветка шагов -->
+            <g data-s="1">
+              <path d="M95 90 L 95 136" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <rect x="20" y="140" width="150" height="44" rx="8" class="dg-cell hit"/>
+              <text x="95" y="167" class="dg-in" text-anchor="middle">новый поток</text>
+            </g>
+            <g data-s="2">
+              <path d="M170 65 L 196 65" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <path d="M275 90 L 275 136" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <rect x="200" y="140" width="150" height="44" rx="8" class="dg-cell hit"/>
+              <text x="275" y="167" class="dg-in" text-anchor="middle">в очередь</text>
+            </g>
+            <g data-s="3">
+              <path d="M170 65 L 196 65" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <path d="M350 65 L 376 65" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <path d="M455 90 L 455 136" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <rect x="380" y="140" width="150" height="44" rx="8" class="dg-cell hit"/>
+              <text x="455" y="167" class="dg-in" text-anchor="middle">поток сверх core</text>
+            </g>
+            <g data-s="4">
+              <path d="M170 65 L 196 65" class="dg-line bad" marker-end="url(#tp-bad)"/>
+              <path d="M350 65 L 376 65" class="dg-line bad" marker-end="url(#tp-bad)"/>
+              <path d="M530 65 L 556 65" class="dg-line bad" marker-end="url(#tp-bad)"/>
+            </g>
+            <g data-s="5">
+              <path d="M170 65 L 196 65" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <path d="M275 90 L 275 136" class="dg-line ok" marker-end="url(#tp-ok)"/>
+              <rect x="200" y="140" width="150" height="44" rx="8" class="dg-cell hit"/>
+              <text x="275" y="167" class="dg-in" text-anchor="middle">в очередь</text>
+              <text x="455" y="210" class="dg-bad" text-anchor="middle">сюда не доходит никогда</text>
+            </g>
+
+            <text data-s="1" x="20" y="252" class="dg-in">задачи 1–2: потоков меньше core — создаём. Потоков 2</text>
+            <text data-s="2" x="20" y="252" class="dg-in">задачи 3–22: core занят — в очередь. В очереди 20</text>
+            <text data-s="3" x="20" y="252" class="dg-ok">задачи 23–30: очередь полна — потоки сверх core. Потоков 10</text>
+            <text data-s="4" x="20" y="252" class="dg-bad">задачи 31–100: всё занято — отказ. Отклонено 70</text>
+            <text data-s="5" x="20" y="252" class="dg-bad">неограниченная очередь всегда принимает: max не работает</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Пока потоков меньше <code>corePoolSize</code>, каждая новая задача создаёт поток, даже если остальные свободны. Первые две задачи — два потока.</li>
+          <li>Потоков уже <code>corePoolSize</code>. Задача предлагается очереди через <code>offer()</code> и встаёт в неё. Следующие 20 задач заполнили очередь.</li>
+          <li>Очередь полна, <code>offer()</code> вернул <code>false</code>. Только теперь пул создаёт потоки сверх core — до <code>maximumPoolSize</code>. Ещё 8 задач, потоков стало 10.</li>
+          <li>Потоков максимум, очередь полна — задачу получает обработчик отказа. По умолчанию это <code>AbortPolicy</code>, и <code>execute</code> бросает <code>RejectedExecutionException</code>. Отклонено 70.</li>
+          <li>С неограниченной очередью <code>offer()</code> всегда успешен, до третьей проверки дело не доходит, и пул никогда не растёт выше core. Это первая строка вывода в шаге 1.</li>
+        </ol>
+      </figure>
+      <p>Почему очередь раньше новых потоков? Пул рассчитан на короткие всплески: очередь сглаживает их без затрат на создание потоков, а лишние потоки нужны, только если очередь не справилась. Если нужно наоборот — сначала расти до max, потом в очередь, — используют <code>SynchronousQueue</code> с ограниченным max или <code>allowCoreThreadTimeOut(true)</code> с <code>core = max</code>.</p>
+    </section>
+
+    <section class="step" id="factories">
+      <h2>Фабрики Executors прячут неограниченную очередь или неограниченное число потоков</h2>
+      <p>Статические методы <code>Executors</code> — это готовые конфигурации <code>ThreadPoolExecutor</code>. Их удобство скрывает параметры:</p>
+      <table class="mx">
+        <thead><tr><th>Фабрика</th><th>Что внутри</th><th>Чем опасна</th></tr></thead>
+        <tbody>
+          <tr><td><code>newFixedThreadPool(n)</code></td><td>core = max = n, <code>LinkedBlockingQueue()</code></td><td>неограниченная очередь: при медленной обработке задачи копятся до <code>OutOfMemoryError</code></td></tr>
+          <tr><td><code>newSingleThreadExecutor()</code></td><td>то же с n = 1</td><td>то же</td></tr>
+          <tr><td><code>newCachedThreadPool()</code></td><td>core 0, max <code>Integer.MAX_VALUE</code>, <code>SynchronousQueue</code>, простой 60 с</td><td>поток на каждую задачу, если свободных нет</td></tr>
+          <tr><td><code>newScheduledThreadPool(n)</code></td><td>n потоков, очередь с задержками</td><td>исключение в периодической задаче молча отменяет её повторы</td></tr>
+          <tr><td><code>newWorkStealingPool()</code></td><td><code>ForkJoinPool</code> на число ядер</td><td>шаг 7</td></tr>
+          <tr><td><code>newVirtualThreadPerTaskExecutor()</code></td><td>виртуальный поток на задачу (Java 21)</td><td>тема Virtual Threads</td></tr>
+        </tbody>
+      </table>
+      <p>Как <code>newCachedThreadPool</code> ведёт себя под всплеском из 10 000 задач, каждая из которых ждёт банк секунду:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Cached {
+    public static void main(String[] args) throws Exception {
+        ThreadPoolExecutor pool = (ThreadPoolExecutor) Executors.newCachedThreadPool();
+        long start = System.nanoTime();
+        for (int i = 0; i &lt; 10_000; i++) {
+            pool.execute(() -&gt; { try { Thread.sleep(1_000); } catch (InterruptedException e) { } });  // банк отвечает секунду
+        }
+        System.out.printf("за %d мс создано потоков: %,d%n", (System.nanoTime() - start) / 1_000_000, pool.getPoolSize());
+        pool.shutdown();
+        pool.awaitTermination(1, TimeUnit.MINUTES);
+        System.out.println("максимум одновременно: " + pool.getLargestPoolSize());
+    }
+}</code></pre>
+      <pre><code class="language-text">за 958 мс создано потоков: 10,000
+максимум одновременно: 10000</code></pre>
+      <p>Десять тысяч потоков ОС за секунду. По замеру из темы Threads это около 700 МБ памяти одних стеков. А банк получил 10 000 одновременных запросов. В проде такой пул превращает задержку внешней системы в падение сервиса.</p>
+      <p>Поэтому для серверного кода пул создают явно: <code>new ThreadPoolExecutor(...)</code> с ограниченной очередью, осознанной политикой отказа и фабрикой потоков, которая даёт им имена. Имена вроде <code>bank-client-3</code> вместо <code>pool-7-thread-3</code> окупаются при первом же чтении дампа потоков.</p>
+    </section>
+
+    <section class="step" id="rejection">
+      <h2>Политика отказа решает, что станет с лишней задачей, — и одна из них теряет её молча</h2>
+      <p>Четыре встроенные политики на пуле из двух потоков с очередью на три задачи. Двадцать задач по 50 мс приходят сразу:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Policies {
+    static void run(String name, RejectedExecutionHandler policy) throws Exception {
+        AtomicInteger done = new AtomicInteger(), onCaller = new AtomicInteger();
+        ThreadPoolExecutor pool = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS, new ArrayBlockingQueue&lt;&gt;(3), policy);
+        Thread caller = Thread.currentThread();
+        int exceptions = 0;
+        long start = System.nanoTime();
+        for (int i = 0; i &lt; 20; i++) {
+            try {
+                pool.execute(() -&gt; {
+                    if (Thread.currentThread() == caller) onCaller.incrementAndGet();
+                    try { Thread.sleep(50); } catch (InterruptedException e) { }
+                    done.incrementAndGet();
+                });
+            } catch (RejectedExecutionException e) {
+                exceptions++;
+            }
+        }
+        pool.shutdown();
+        pool.awaitTermination(10, TimeUnit.SECONDS);
+        System.out.printf("%-20s выполнено %2d из 20, исключений %2d, в потоке вызывающего %2d, %4d мс%n",
+            name, done.get(), exceptions, onCaller.get(), (System.nanoTime() - start) / 1_000_000);
+    }
+
+    public static void main(String[] args) throws Exception {
+        run("AbortPolicy", new ThreadPoolExecutor.AbortPolicy());               // по умолчанию
+        run("CallerRunsPolicy", new ThreadPoolExecutor.CallerRunsPolicy());
+        run("DiscardPolicy", new ThreadPoolExecutor.DiscardPolicy());
+        run("DiscardOldestPolicy", new ThreadPoolExecutor.DiscardOldestPolicy());
+    }
+}</code></pre>
+      <pre><code class="language-text">AbortPolicy          выполнено  5 из 20, исключений 15, в потоке вызывающего  0,  164 мс
+CallerRunsPolicy     выполнено 20 из 20, исключений  0, в потоке вызывающего  6,  383 мс
+DiscardPolicy        выполнено  5 из 20, исключений  0, в потоке вызывающего  0,  159 мс
+DiscardOldestPolicy  выполнено  5 из 20, исключений  0, в потоке вызывающего  0,  157 мс</code></pre>
+      <ul>
+        <li><b><code>AbortPolicy</code></b> (по умолчанию) бросает <code>RejectedExecutionException</code>. Вызывающий узнаёт об отказе и может вернуть клиенту 503.</li>
+        <li><b><code>CallerRunsPolicy</code></b> выполняет задачу в потоке вызывающего. Все 20 выполнены, 6 из них — самим вызывающим, и пока он их выполнял, новых задач не подавал. Получается естественное противодавление: вход замедляется до скорости обработки.</li>
+        <li><b><code>DiscardPolicy</code></b> молча выбрасывает задачу: 15 из 20 пропали без единого следа. Для платежей — худший выбор.</li>
+        <li><b><code>DiscardOldestPolicy</code></b> выбрасывает самую старую задачу из очереди и ставит новую. Годится для «важно только последнее значение», например обновления котировок.</li>
+      </ul>
+      <p>Своя политика — это реализация <code>RejectedExecutionHandler</code>: записать метрику и лог, сохранить задачу в хранилище для повтора, вернуть понятную ошибку.</p>
+    </section>
+
+    <section class="step" id="sizing">
+      <h2>Для вычислений хватает пула по числу ядер, для ожидания нужно больше</h2>
+      <p>Размер пула зависит от того, что делают задачи. Одинаковый объём работы — 720 задач — на пулах разного размера, 18 ядер:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class Sizing {
+    static double cpuTask() {                                    // ~2 мс чистых вычислений
+        double x = 1;
+        for (int i = 0; i &lt; 2_000_000; i++) x = x * 1.0000001 + 1e-9;
+        return x;
+    }
+
+    static long run(int threads, Callable&lt;Object&gt; task, int count) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        long start = System.nanoTime();
+        for (Future&lt;Object&gt; f : pool.invokeAll(Collections.nCopies(count, task))) f.get();
+        pool.shutdown();
+        return (System.nanoTime() - start) / 1_000_000;
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("ядер: " + Runtime.getRuntime().availableProcessors());
+        run(18, Sizing::cpuTask, 200);                              // прогрев
+        System.out.print("CPU-задачи (720 шт.):");
+        for (int t : new int[]{1, 4, 9, 18, 36, 144})
+            System.out.printf("  %d → %d мс", t, run(t, Sizing::cpuTask, 720));
+        System.out.println();
+        System.out.print("IO-задачи по 20 мс (720 шт.):");
+        for (int t : new int[]{1, 18, 36, 144, 720})
+            System.out.printf("  %d → %d мс", t, run(t, () -&gt; { Thread.sleep(20); return null; }, 720));
+        System.out.println();
+    }
+}</code></pre>
+      <pre><code class="language-text">ядер: 18
+CPU-задачи (720 шт.):  1 → 1760 мс  4 → 448 мс  9 → 206 мс  18 → 113 мс  36 → 111 мс  144 → 113 мс
+IO-задачи по 20 мс (720 шт.):  1 → 17307 мс  18 → 947 мс  36 → 478 мс  144 → 124 мс  720 → 48 мс</code></pre>
+      <p>Вычисления ускоряются до 18 потоков — по числу ядер — и дальше не ускоряются: ядер больше нет. Задачи, которые ждут, ускоряются с каждым новым потоком: ожидающий поток ядро не занимает. Классическая оценка из Java Concurrency in Practice:</p>
+      <pre><code class="language-text">потоков ≈ ядер × (1 + время ожидания / время вычислений)</code></pre>
+      <p>Для сервиса, который 90 мс ждёт базу и 10 мс считает, на 8 ядрах это 8 × (1 + 9) = 80 потоков. Формула даёт стартовую точку, а не ответ. Реальный предел часто ставит не CPU, а внешний ресурс. Пул из 200 потоков бессмыслен перед пулом соединений к базе на 20: 180 потоков будут ждать соединение. Размеры связанных пулов согласуют между собой и проверяют нагрузочным тестом.</p>
+      <p>В контейнере <code>availableProcessors()</code> возвращает лимит CPU пода, а не число ядер машины. Пул, посчитанный по нему, автоматически подстраивается под лимиты — как и эргономика JVM из темы Choosing a Collector.</p>
+    </section>
+
+    <section class="step" id="errors-shutdown">
+      <h2>submit() прячет исключение в Future, а незакрытый пул не даёт JVM завершиться</h2>
+      <p>Одна и та же ошибка в задаче, отправленной через <code>submit</code> и через <code>execute</code>:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Lost {
+    public static void main(String[] args) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(1);
+        pool.submit(() -&gt; { throw new IllegalStateException("submit: платёж не проведён"); });  // Future никто не спросил
+        pool.execute(() -&gt; { throw new IllegalStateException("execute: платёж не проведён"); });
+        pool.shutdown();
+        pool.awaitTermination(1, TimeUnit.SECONDS);
+        System.out.println("пул завершён");
+    }
+}</code></pre>
+      <pre><code class="language-text">Exception in thread "pool-1-thread-1" java.lang.IllegalStateException: execute: платёж не проведён
+	at Lost.lambda$main$1(Lost.java:7)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	...
+пул завершён</code></pre>
+      <p>Ошибки из <code>submit</code> нет нигде: она лежит в <code>Future</code>, который никто не спросил. <code>execute</code> доводит исключение до обработчика потока, и оно хотя бы попадает в <code>stderr</code>. Рабочий поток при этом умирает, и пул создаёт новый. Правила: результат <code>submit</code> всегда проверяют через <code>get()</code>, а задачи, которые запускают «и забывают», оборачивают в <code>try/catch</code> с логированием. Централизованно это делает переопределённый <code>afterExecute</code> в своём <code>ThreadPoolExecutor</code>.</p>
+      <p>Остановка пула:</p>
+      <ul>
+        <li><code>shutdown()</code> — больше не принимать задачи, но выполнить уже принятые, включая очередь.</li>
+        <li><code>shutdownNow()</code> — прервать работающие задачи через <code>interrupt()</code> и вернуть список невыполненных из очереди. Задача, которая глотает прерывание, не остановится (тема Threads).</li>
+        <li><code>awaitTermination(timeout)</code> — дождаться завершения. Стандартная последовательность: <code>shutdown</code>, ожидание, при таймауте — <code>shutdownNow</code>.</li>
+      </ul>
+      <p>Потоки пула по умолчанию не daemon, поэтому забытый пул не даёт JVM завершиться. С Java 19 <code>ExecutorService</code> реализует <code>AutoCloseable</code>, и <code>close()</code> делает <code>shutdown</code> и ждёт все задачи:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Close {
+    public static void main(String[] args) {
+        long start = System.nanoTime();
+        try (ExecutorService pool = Executors.newFixedThreadPool(4)) {   // Java 19+: ExecutorService — AutoCloseable
+            for (int i = 0; i &lt; 8; i++) pool.submit(() -&gt; { Thread.sleep(100); return null; });
+        }                                                                // close(): shutdown() и ожидание всех задач
+        System.out.printf("все задачи выполнены до выхода из try: %d мс%n", (System.nanoTime() - start) / 1_000_000);
+    }
+}</code></pre>
+      <pre><code class="language-text">все задачи выполнены до выхода из try: 213 мс</code></pre>
+      <p>Восемь задач по 100 мс на четырёх потоках — две волны, 213 мс. Блок <code>try</code> не отпустил поток, пока все не закончились. В Spring пулы-бины закрывает контейнер при остановке, но свои пулы, созданные в коде, нужно закрывать самим.</p>
+    </section>
+
+    <section class="step" id="forkjoin">
+      <h2>ForkJoinPool крадёт работу у соседей, а блокирующий код в commonPool тормозит всех</h2>
+      <p><code>ForkJoinPool</code> устроен иначе, чем <code>ThreadPoolExecutor</code>. У каждого потока своя двусторонняя очередь задач. Поток кладёт подзадачи в свою очередь и берёт из неё сам, а освободившийся поток <b>крадёт</b> задачи из чужих очередей с другого конца. Это эффективно для рекурсивного деления работы (fork/join): задача делится на подзадачи, а <code>join()</code> не простаивает, а выполняет другие задачи из очереди.</p>
+      <p>В JVM есть общий экземпляр — <code>ForkJoinPool.commonPool()</code>. На нём по умолчанию работают параллельные стримы и все методы <code>CompletableFuture.*Async</code> без явного пула. Его размер — число ядер минус один. Он рассчитан на вычисления, и блокирующий код в нём мешает всем остальным пользователям:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.stream.IntStream;
+
+public class CommonPool {
+    public static void main(String[] args) throws Exception {
+        System.out.println("parallelism commonPool: " + ForkJoinPool.commonPool().getParallelism());
+
+        long start = System.nanoTime();
+        CompletableFuture.supplyAsync(() -&gt; 42).get();                    // быстрая задача, пул свободен
+        System.out.printf("supplyAsync на свободном пуле: %.1f мс%n", (System.nanoTime() - start) / 1e6);
+
+        Thread report = new Thread(() -&gt;                                  // отчёт: 200 «запросов в банк» параллельным стримом
+            IntStream.range(0, 200).parallel().forEach(i -&gt; {
+                try { Thread.sleep(100); } catch (InterruptedException e) { }
+            }));
+        report.start();
+        Thread.sleep(50);                                                 // отчёт занял commonPool
+
+        start = System.nanoTime();
+        CompletableFuture.supplyAsync(() -&gt; 42).get();                    // та же быстрая задача
+        System.out.printf("supplyAsync, пока идёт отчёт: %.1f мс%n", (System.nanoTime() - start) / 1e6);
+        report.join();
+    }
+}</code></pre>
+      <pre><code class="language-text">parallelism commonPool: 17
+supplyAsync на свободном пуле: 1.1 мс
+supplyAsync, пока идёт отчёт: 771.8 мс</code></pre>
+      <p>Задача, которая возвращает константу, ждала 772 мс: все 17 потоков общего пула спали в «запросах к банку» из чужого отчёта. В сервисе так один эндпоинт с <code>parallelStream()</code> и HTTP-вызовами внутри замедляет всё, что использует <code>supplyAsync</code> без своего пула. Правила: в <code>commonPool</code> — только короткие вычисления; блокирующие задачи — в отдельный пул нужного размера, который явно передают вторым аргументом <code>supplyAsync(task, executor)</code>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>ThreadPoolExecutor</code> решает так: потоки до core, затем очередь, затем потоки до max, затем отказ. С неограниченной очередью max не работает.</li>
+        <li>Фабрики <code>Executors</code> прячут опасные параметры: у fixed и single — неограниченная очередь, у cached — неограниченное число потоков (10 000 за секунду в замере). В серверном коде пул создают явно, с ограниченной очередью и именами потоков.</li>
+        <li>Политики отказа: Abort бросает исключение, CallerRuns даёт противодавление, Discard теряет задачи молча, DiscardOldest выбрасывает старые.</li>
+        <li>Для вычислений — пул по числу ядер, для ожидания — больше: ядра × (1 + ожидание/вычисления), с поправкой на внешние лимиты.</li>
+        <li><code>submit()</code> прячет исключение в <code>Future</code>. Пул закрывают: <code>shutdown</code>, <code>awaitTermination</code>, <code>shutdownNow</code> или <code>close()</code> с Java 19.</li>
+        <li><code>ForkJoinPool</code> — очереди на поток и кража работы. <code>commonPool</code> обслуживает параллельные стримы и <code>*Async</code>. Блокирующий код в нём тормозит всех.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="tpe-params" data-freq="3">
+      <h3>Какие параметры у ThreadPoolExecutor и как он принимает задачу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Параметры: <code>corePoolSize</code>, <code>maximumPoolSize</code>, <code>keepAliveTime</code>, очередь задач, фабрика потоков и обработчик отказа. Задача обрабатывается так. Если потоков меньше core — создаётся новый поток. Иначе задача идёт в очередь. Если очередь полна и потоков меньше max — создаётся поток сверх core. Иначе срабатывает обработчик отказа, по умолчанию он бросает <code>RejectedExecutionException</code>. Потоки сверх core завершаются после <code>keepAliveTime</code> простоя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С неограниченной очередью пул никогда не вырастет выше core: в замере урока пул «2–10» под 100 задачами остался на двух потоках с 98 задачами в очереди.</li>
+            <li><code>allowCoreThreadTimeOut(true)</code> позволяет завершать и core-потоки, <code>prestartAllCoreThreads()</code> — создать их заранее.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>ThreadPoolExecutor(2, 10, 60 с, ArrayBlockingQueue(20)), приходят 100 долгих задач сразу. Сколько будет потоков, сколько в очереди, сколько отказов?</summary>
+          <p>Первые 2 задачи создадут core-потоки, следующие 20 встанут в очередь, ещё 8 создадут потоки до 10. Оставшиеся 70 получат отказ. Итого 10 потоков, 20 в очереди, 70 отказов — в замере урока ровно так.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="executors-pitfalls" data-freq="3">
+      <h3>Почему не рекомендуют Executors.newFixedThreadPool и newCachedThreadPool в сервисах?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>У <code>newFixedThreadPool</code> неограниченная очередь: если задачи приходят быстрее, чем выполняются, очередь растёт до <code>OutOfMemoryError</code>, а задержка растёт без предела. У <code>newCachedThreadPool</code> неограниченное число потоков: при медленной внешней системе он создаёт поток на каждую задачу — в замере урока 10 000 потоков за секунду. В сервисах пул создают явно через <code>ThreadPoolExecutor</code>: ограниченная очередь, понятная политика отказа, фабрика с именами потоков.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rejection-q" data-freq="2">
+      <h3>Какие бывают политики отказа?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>AbortPolicy</code> (по умолчанию) бросает <code>RejectedExecutionException</code>. <code>CallerRunsPolicy</code> выполняет задачу в потоке вызывающего и тем самым замедляет поступление задач. <code>DiscardPolicy</code> молча выбрасывает задачу. <code>DiscardOldestPolicy</code> выбрасывает самую старую задачу из очереди. Можно написать свою реализацию <code>RejectedExecutionHandler</code> — с метрикой, логом и сохранением для повтора.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Пул отправки уведомлений о платежах настроен с DiscardPolicy, «чтобы не падать под нагрузкой». Что скажешь?</summary>
+          <p>Под нагрузкой уведомления будут пропадать без единого следа: ни исключения, ни лога. В замере урока 15 из 20 задач исчезли молча. Лучше <code>AbortPolicy</code> с обработкой отказа или своя политика, которая пишет метрику и сохраняет уведомление для повторной отправки. Если важна скорость входа — <code>CallerRunsPolicy</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pool-size" data-freq="2">
+      <h3>Как выбрать размер пула потоков?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для вычислительных задач — по числу ядер (<code>availableProcessors()</code>, в контейнере это лимит CPU пода): больше потоков не ускорит, в замере урока выигрыш кончился на 18 потоках на 18 ядрах. Для задач, которые ждут ввод-вывод, — больше, по оценке «ядра × (1 + ожидание / вычисления)». Затем учитывают внешние лимиты — пул соединений к базе, лимиты партнёров — и проверяют нагрузочным тестом.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="submit-vs-execute" data-freq="2">
+      <h3>Чем submit() отличается от execute()?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>execute(Runnable)</code> ничего не возвращает, и исключение задачи уходит в обработчик потока: печатается в <code>stderr</code>, поток пула заменяется новым. <code>submit</code> принимает <code>Runnable</code> или <code>Callable</code> и возвращает <code>Future</code>, в котором хранится результат или исключение. Если <code>get()</code> никто не вызовет, ошибка пропадёт бесследно.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="forkjoin-q" data-freq="2">
+      <h3>Что такое ForkJoinPool и commonPool?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Пул с очередью задач на каждый поток и кражей работы: освободившийся поток забирает задачи из чужих очередей. Рассчитан на рекурсивное деление вычислений. <code>commonPool</code> — общий экземпляр размером «ядра минус один». На нём по умолчанию работают параллельные стримы и <code>CompletableFuture.*Async</code>. Блокирующие операции в нём занимают потоки и замедляют всех остальных, поэтому для ввода-вывода используют свой пул.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему один эндпоинт с parallelStream() и HTTP-вызовами внутри может замедлить весь сервис?</summary>
+          <p>Параллельный стрим выполняется в <code>commonPool</code>, и его потоки спят в HTTP-вызовах. Все <code>supplyAsync</code> без своего пула ждут свободный поток. В замере урока задача, возвращающая константу, ждала 772 мс вместо 1 мс, пока параллельный стрим «ходил в банк».</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html">ThreadPoolExecutor (JDK 21)</a> — основа урока: правила создания потоков и постановки в очередь, политики отказа, хуки.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ExecutorService.html">ExecutorService (JDK 21)</a> — остановка пула и <code>close()</code>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinPool.html">ForkJoinPool (JDK 21)</a> — кража работы и общий пул.</li>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 8 «Applying Thread Pools» — размер пула и насыщение.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
