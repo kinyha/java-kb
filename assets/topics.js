@@ -29,7 +29,7 @@ window.KB_TREE = [
         { id: 'sorting', title: 'Sorting',
           source: 'Sedgewick & Wayne, Algorithms: Sorting; JDK 21 Arrays и Comparator; согласованное разделение обзорной темы',
           items: [
-            { id: 'sorting-basics', freq: 2, status: 'empty', title: 'Basics',
+            { id: 'sorting-basics', freq: 2, status: 'draft', title: 'Basics',
               scope: 'порядок и Comparator, стабильность, сравнения и нижняя граница, время и память, выбор сортировки' },
             { id: 'merge-sort', freq: 2, status: 'empty', title: 'Merge Sort',
               scope: 'слияние отсортированных частей, рекурсивная и итеративная сортировка, стабильность, подсчёт инверсий' },
