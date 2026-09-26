@@ -401,7 +401,7 @@ window.KB_TREE = [
       ] },
       { id: 'concurrency', title: 'Concurrency', source: 'Java Concurrency in Practice; enhorse/java-interview: Многопоточность', items: [
         { id: 'basics', title: 'Basics', items: [
-          { id: 'threads', freq: 3, status: 'empty', title: 'Threads',
+          { id: 'threads', freq: 3, status: 'draft', title: 'Threads',
             scope: 'Thread, Runnable и Callable, состояния потока, interrupt, join, daemon, ThreadLocal' },
           { id: 'thread-safety', freq: 3, status: 'empty', title: 'Thread Safety',
             scope: 'race condition, атомарность, check-then-act, неизменяемость, thread confinement' },

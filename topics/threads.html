@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Threads · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="threads">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Threads</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="swallowed">
+      <h2>shutdownNow() не остановил задачу — прерывание проглотили</h2>
+      <p>Фоновая задача раз в секунду проверяет статус платежа, пока её не отменят. При остановке сервиса пул вызывает <code>shutdownNow()</code> и ждёт три секунды:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Stubborn {
+    // «повторять раз в секунду, пока не отменят»
+    static void pollStatus() {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                Thread.sleep(1000);                              // ждём следующей проверки
+            } catch (InterruptedException e) {
+                System.out.println("прерывание пришло — и проглочено");
+            }
+        }
+        System.out.println("задача остановлена");
+    }
+
+    public static void main(String[] args) throws Exception {
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        pool.submit(Stubborn::pollStatus);
+        Thread.sleep(300);
+        pool.shutdownNow();                                      // прерывает рабочие потоки
+        boolean done = pool.awaitTermination(3, TimeUnit.SECONDS);
+        System.out.println("пул остановился за 3 с: " + done);
+        System.exit(0);
+    }
+}</code></pre>
+      <pre class="out">прерывание пришло — и проглочено
+пул остановился за 3 с: false</pre>
+      <p>Цикл проверяет флаг прерывания, <code>shutdownNow()</code> прерывание послал — и всё равно задача крутится дальше. Без <code>System.exit</code> процесс бы не завершился вовсе. Причина в одной строке <code>catch</code>, и чтобы её увидеть, нужно знать, как устроено прерывание.</p>
+      <p>В этой теме — что такое поток в Java и сколько он стоит, как запускать задачи, какие бывают состояния, как правильно останавливать поток, что такое daemon-потоки, куда деваются исключения и как работает <code>ThreadLocal</code>.</p>
+    </section>
+
+    <section class="step" id="create">
+      <h2>Поток Java — это поток ОС, и start() создаёт его, а run() — нет</h2>
+      <p>Каждый объект <code>Thread</code> после <code>start()</code> получает свой поток операционной системы со своим стеком. Планирует его ОС, а не JVM. Код для потока передают как <code>Runnable</code>. Наследоваться от <code>Thread</code> можно, но не нужно: задача и механизм её выполнения — разные вещи.</p>
+      <pre><code class="language-java">public class StartRun {
+    public static void main(String[] args) throws Exception {
+        Runnable task = () -&gt; System.out.println("выполняет: " + Thread.currentThread().getName());
+        Thread t = new Thread(task, "worker");
+        t.run();                                                 // обычный вызов метода
+        t.start();                                               // новый поток
+        t.join();
+        try {
+            t.start();                                           // второй раз
+        } catch (IllegalThreadStateException e) {
+            System.out.println("повторный start(): " + e);
+        }
+    }
+}</code></pre>
+      <pre class="out">выполняет: main
+выполняет: worker
+повторный start(): java.lang.IllegalThreadStateException</pre>
+      <p><code>run()</code> — просто метод: код выполнился в вызывающем потоке <code>main</code>. Новый поток создаёт только <code>start()</code>, и только один раз. Закончивший поток перезапустить нельзя.</p>
+      <p><code>Runnable</code> ничего не возвращает и не может бросить checked-исключение. Если нужен результат, используют <code>Callable</code> и отдают задачу пулу, который вернёт <code>Future</code>:</p>
+      <pre><code class="language-java">import java.io.IOException;
+import java.util.concurrent.*;
+
+public class Calls {
+    public static void main(String[] args) throws Exception {
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+
+        Future&lt;?&gt; log = pool.submit(() -&gt; System.out.println("Runnable: ничего не возвращает"));
+        System.out.println("Runnable вернул: " + log.get());
+
+        Future&lt;Integer&gt; fee = pool.submit(() -&gt; 1_000 * 3 / 100);          // Callable: возвращает значение
+        System.out.println("комиссия: " + fee.get());
+
+        Future&lt;Integer&gt; bank = pool.submit(() -&gt; {                          // Callable может бросить checked
+            throw new IOException("банк недоступен");
+        });
+        try {
+            bank.get();
+        } catch (ExecutionException e) {                                    // исключение задачи — внутри
+            System.out.println("get() бросил: " + e.getCause());
+        }
+        pool.shutdown();
+    }
+}</code></pre>
+      <pre class="out">Runnable: ничего не возвращает
+Runnable вернул: null
+комиссия: 30
+get() бросил: java.io.IOException: банк недоступен</pre>
+      <p>Исключение из задачи не теряется: <code>get()</code> бросает его, обёрнутое в <code>ExecutionException</code>. Но только если кто-то вызовет <code>get()</code>. Об этом шаг 6.</p>
+      <h3>Сколько стоит поток</h3>
+      <p>Поток ОС — дорогой ресурс. Замер на JDK 21, macOS, 10 000 повторов после прогрева:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Cost {
+    public static void main(String[] args) throws Exception {
+        int n = 10_000;
+        for (int round = 0; round &lt; 3; round++) {                // первые круги — прогрев
+            long start = System.nanoTime();
+            for (int i = 0; i &lt; n; i++) {
+                Thread t = new Thread(() -&gt; { });
+                t.start();
+                t.join();
+            }
+            long perThread = (System.nanoTime() - start) / n;
+
+            ExecutorService pool = Executors.newFixedThreadPool(1);
+            start = System.nanoTime();
+            for (int i = 0; i &lt; n; i++) pool.submit(() -&gt; { }).get();
+            long perTask = (System.nanoTime() - start) / n;
+            pool.shutdown();
+            System.out.printf("новый поток: %d мкс, задача в пуле: %d мкс%n", perThread / 1000, perTask / 1000);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">новый поток: 28 мкс, задача в пуле: 8 мкс
+новый поток: 27 мкс, задача в пуле: 5 мкс
+новый поток: 27 мкс, задача в пуле: 5 мкс</code></pre>
+      <p>Создать и дождаться поток — около 27 мкс, передать задачу готовому потоку пула — 5 мкс, в пять раз дешевле. Вторая цена — память. Под стек каждого потока JVM резервирует <code>ThreadStackSize</code>: на macOS arm64 это 2 МБ, на Linux x86_64 — 1 МБ. Реально занята только использованная часть. Замер RSS процесса, где потоки просто ждут на <code>CountDownLatch</code>:</p>
+      <table class="mx">
+        <thead><tr><th>Ждущих потоков</th><th>RSS процесса</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>57 МБ</td></tr>
+          <tr><td>1 000</td><td>145 МБ</td></tr>
+          <tr><td>5 000</td><td>357 МБ</td></tr>
+        </tbody>
+      </table>
+      <p>Около 60–90 КБ реальной памяти на простаивающий поток, плюс резерв адресов. Поэтому потоки не создают на каждый запрос, а держат в пуле ограниченного размера (тема Executors). А если задачи в основном ждут ввода-вывода, есть виртуальные потоки — тема Virtual Threads.</p>
+    </section>
+
+    <section class="step" id="states">
+      <h2>У потока шесть состояний, и три из них — разные виды ожидания</h2>
+      <p>Состояние возвращает <code>getState()</code>, и его же показывает дамп потоков. Проведём один поток через все шесть состояний:</p>
+      <pre><code class="language-java">public class States {
+    static final Object LOCK = new Object();
+
+    public static void main(String[] args) throws Exception {
+        Thread t = new Thread(() -&gt; {
+            synchronized (LOCK) { }                              // 1) ждёт монитор
+            synchronized (LOCK) {
+                try { LOCK.wait(); } catch (InterruptedException e) { }   // 2) ждёт notify
+            }
+            try { Thread.sleep(200); } catch (InterruptedException e) { } // 3) спит с таймаутом
+            for (long i = 0; i &lt; 3_000_000_000L; i++) { }        // 4) считает
+        }, "worker");
+        System.out.println("до start():        " + t.getState());
+        synchronized (LOCK) {
+            t.start();
+            Thread.sleep(100);
+            System.out.println("монитор занят:     " + t.getState());
+        }
+        Thread.sleep(100);
+        System.out.println("в wait():          " + t.getState());
+        synchronized (LOCK) { LOCK.notify(); }
+        Thread.sleep(100);
+        System.out.println("в sleep(200):      " + t.getState());
+        Thread.sleep(200);
+        System.out.println("считает:           " + t.getState());
+        t.join();
+        System.out.println("после join():      " + t.getState());
+    }
+}</code></pre>
+      <pre class="out">до start():        NEW
+монитор занят:     BLOCKED
+в wait():          WAITING
+в sleep(200):      TIMED_WAITING
+считает:           RUNNABLE
+после join():      TERMINATED</pre>
+      <p>Главный поток ждёт по 100 мс между проверками, чтобы <code>worker</code> успел дойти до нужного места. Результат проверен в пяти запусках подряд. Переходы между состояниями:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Состояния потока. NEW переходит в RUNNABLE вызовом start. Из RUNNABLE поток уходит в BLOCKED, когда монитор synchronized занят, в WAITING при wait, join или park, в TIMED_WAITING при sleep или wait с таймаутом, и возвращается в RUNNABLE, когда условие выполнено. Когда run завершился, поток переходит в TERMINATED.">
+            <defs>
+              <marker id="st-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="st-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- состояния -->
+            <rect x="20" y="40" width="120" height="44" rx="8" class="dg-box"/>
+            <rect data-s="1" x="20" y="40" width="120" height="44" rx="8" class="dg-cell hit"/>
+            <text x="80" y="67" class="dg-t" text-anchor="middle">NEW</text>
+            <rect x="290" y="40" width="140" height="44" rx="8" class="dg-box"/>
+            <rect data-s="2" x="290" y="40" width="140" height="44" rx="8" class="dg-cell hit"/>
+            <rect data-s="6" x="290" y="40" width="140" height="44" rx="8" class="dg-cell hit"/>
+            <text x="360" y="67" class="dg-t" text-anchor="middle">RUNNABLE</text>
+            <rect x="580" y="40" width="120" height="44" rx="8" class="dg-box"/>
+            <rect data-s="7" x="580" y="40" width="120" height="44" rx="8" class="dg-cell hit"/>
+            <text x="640" y="67" class="dg-t" text-anchor="middle">TERMINATED</text>
+
+            <rect x="90" y="190" width="170" height="44" rx="8" class="dg-box"/>
+            <rect data-s="3" x="90" y="190" width="170" height="44" rx="8" class="dg-cell miss"/>
+            <text x="175" y="217" class="dg-t" text-anchor="middle">BLOCKED</text>
+            <rect x="285" y="190" width="150" height="44" rx="8" class="dg-box"/>
+            <rect data-s="4" x="285" y="190" width="150" height="44" rx="8" class="dg-cell miss"/>
+            <text x="360" y="217" class="dg-t" text-anchor="middle">WAITING</text>
+            <rect x="460" y="190" width="180" height="44" rx="8" class="dg-box"/>
+            <rect data-s="5" x="460" y="190" width="180" height="44" rx="8" class="dg-cell miss"/>
+            <text x="550" y="217" class="dg-t" text-anchor="middle">TIMED_WAITING</text>
+
+            <!-- переходы -->
+            <path d="M140 62 L 286 62" class="dg-line" marker-end="url(#st-n)"/>
+            <text x="180" y="54" class="dg-n">start()</text>
+            <path d="M430 62 L 576 62" class="dg-line" marker-end="url(#st-n)"/>
+            <text x="440" y="54" class="dg-n">run() закончился</text>
+            <path d="M320 88 L 190 186" class="dg-line" marker-start="url(#st-n)" marker-end="url(#st-n)"/>
+            <text x="150" y="130" class="dg-n">synchronized</text>
+            <text x="150" y="144" class="dg-n">занят</text>
+            <path d="M360 88 L 360 186" class="dg-line" marker-start="url(#st-n)" marker-end="url(#st-n)"/>
+            <text x="368" y="130" class="dg-n">wait()</text>
+            <text x="368" y="144" class="dg-n">join(), park()</text>
+            <path d="M400 88 L 530 186" class="dg-line" marker-start="url(#st-n)" marker-end="url(#st-n)"/>
+            <text x="490" y="126" class="dg-n">sleep(ms)</text>
+            <text x="490" y="140" class="dg-n">wait(ms)</text>
+
+            <!-- подсветка перехода -->
+            <path data-s="2" d="M140 62 L 286 62" class="dg-line ok" marker-end="url(#st-ok)"/>
+            <path data-s="3" d="M320 88 L 190 186" class="dg-line ok" marker-end="url(#st-ok)"/>
+            <path data-s="4" d="M360 88 L 360 186" class="dg-line ok" marker-end="url(#st-ok)"/>
+            <path data-s="5" d="M400 88 L 530 186" class="dg-line ok" marker-end="url(#st-ok)"/>
+            <path data-s="6" d="M400 88 L 530 186" class="dg-line ok" marker-start="url(#st-ok)"/>
+            <path data-s="7" d="M430 62 L 576 62" class="dg-line ok" marker-end="url(#st-ok)"/>
+
+            <text data-s="1" x="20" y="270" class="dg-in">new Thread(...): объект есть, потока ОС ещё нет</text>
+            <text data-s="2" x="20" y="270" class="dg-ok">start(): поток ОС создан, готов выполняться</text>
+            <text data-s="3" x="20" y="270" class="dg-bad">монитор держит main — поток ждёт входа в synchronized</text>
+            <text data-s="4" x="20" y="270" class="dg-bad">LOCK.wait(): ждёт notify без ограничения по времени</text>
+            <text data-s="5" x="20" y="270" class="dg-bad">sleep(200): ждёт, но проснётся сам</text>
+            <text data-s="6" x="20" y="270" class="dg-ok">таймаут вышел — снова RUNNABLE, считает</text>
+            <text data-s="7" x="20" y="270" class="dg-in">run() закончился — TERMINATED, перезапустить нельзя</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><b>NEW</b> — объект <code>Thread</code> создан, но поток ОС ещё не существует.</li>
+          <li><b>RUNNABLE</b> после <code>start()</code>. Это состояние включает и «выполняется на ядре», и «готов, ждёт своей очереди у планировщика ОС» — Java их не различает.</li>
+          <li><b>BLOCKED</b> — поток хочет войти в <code>synchronized</code>, а монитор держит другой поток. Выйдет сам, когда монитор освободят.</li>
+          <li><b>WAITING</b> — поток сам решил ждать без таймаута: <code>wait()</code>, <code>join()</code>, <code>LockSupport.park()</code>. Нужен кто-то, кто разбудит: <code>notify</code>, завершение потока, <code>unpark</code>.</li>
+          <li><b>TIMED_WAITING</b> — то же ожидание, но с таймаутом: <code>sleep(ms)</code>, <code>wait(ms)</code>, <code>join(ms)</code>, <code>parkNanos</code>.</li>
+          <li>Таймаут вышел, поток снова <b>RUNNABLE</b> и считает.</li>
+          <li><b>TERMINATED</b> — <code>run()</code> закончился, нормально или исключением. Объект остался, поток ОС уже нет.</li>
+        </ol>
+      </figure>
+      <div class="trap">
+        <p class="myth">Поток, который ждёт ответа от базы, находится в состоянии WAITING.</p>
+        <p class="fact">Обычно нет: чтение из сокета — системный вызов, и Java показывает такой поток как <code>RUNNABLE</code>. В дампе потоков его выдаёт стек: в JDK 21 верхний кадр — <code>sun.nio.ch.SocketDispatcher.read0</code>. Проверено: поток, который читает из сокета без данных, показывает <code>RUNNABLE</code> и остаётся в нём после <code>interrupt()</code>. Поэтому сотня потоков в <code>RUNNABLE</code> ещё не значит, что CPU занят.</p>
+      </div>
+      <p>Замки из <code>java.util.concurrent</code> (<code>ReentrantLock</code>, очереди) ждут через <code>park()</code>, поэтому поток, который ждёт такой замок, будет в <code>WAITING</code>, а не в <code>BLOCKED</code>. <code>BLOCKED</code> бывает только у <code>synchronized</code>.</p>
+    </section>
+
+    <section class="step" id="interrupt">
+      <h2>Прерывание — это просьба остановиться, а не приказ</h2>
+      <p>Остановить поток силой в Java нельзя: <code>Thread.stop()</code> в Java 21 бросает <code>UnsupportedOperationException</code>. Вместо этого есть кооперативный механизм. <code>t.interrupt()</code> поднимает у потока флаг, а поток сам решает, когда и как завершиться. Как ведёт себя флаг:</p>
+      <pre><code class="language-java">public class Interrupts {
+    static final Object LOCK = new Object();
+
+    public static void main(String[] args) throws Exception {
+        Thread self = Thread.currentThread();
+
+        self.interrupt();                                         // флаг поднят заранее
+        try {
+            Thread.sleep(10_000);                                 // бросает сразу, не ждёт 10 с
+        } catch (InterruptedException e) {
+            System.out.println("sleep бросил сразу, флаг после catch: " + self.isInterrupted());
+        }
+
+        self.interrupt();
+        System.out.println("interrupted(): " + Thread.interrupted() + ", второй вызов: " + Thread.interrupted());
+
+        Thread blocked = new Thread(() -&gt; {
+            synchronized (LOCK) { System.out.println("вошёл в монитор, флаг: " + Thread.currentThread().isInterrupted()); }
+        });
+        synchronized (LOCK) {
+            blocked.start();
+            Thread.sleep(100);
+            blocked.interrupt();                                  // поток в BLOCKED
+            Thread.sleep(100);
+            System.out.println("после interrupt() состояние: " + blocked.getState());
+        }
+        blocked.join();
+    }
+}</code></pre>
+      <pre class="out">sleep бросил сразу, флаг после catch: false
+interrupted(): true, второй вызов: false
+после interrupt() состояние: BLOCKED
+вошёл в монитор, флаг: true</pre>
+      <p>Три правила, которые видны в выводе:</p>
+      <ul>
+        <li><b>Блокирующие методы отвечают на прерывание исключением</b>: <code>sleep</code>, <code>wait</code>, <code>join</code>, <code>BlockingQueue.take</code>, <code>Future.get</code>. Если флаг уже поднят, исключение летит сразу.</li>
+        <li><b>Бросая <code>InterruptedException</code>, метод сбрасывает флаг.</b> После <code>catch</code> поток выглядит непрерванным. <code>Thread.interrupted()</code> тоже сбрасывает флаг, а <code>isInterrupted()</code> — нет.</li>
+        <li><b>Не всё прерывается.</b> Ожидание входа в <code>synchronized</code> прерыванием не отменить: поток остался в <code>BLOCKED</code> и узнал о флаге, только войдя в монитор. Чтение из <code>java.net.Socket</code> в обычном потоке тоже не прерывается — для него ставят таймаут <code>setSoTimeout</code> или закрывают сокет.</li>
+      </ul>
+      <p>Теперь понятно, что случилось в шаге 1. <code>shutdownNow()</code> прервал поток посреди <code>sleep</code>. Исключение сбросило флаг, <code>catch</code> его проглотил, и условие цикла снова увидело «не прерван». Исправление — одна строка:</p>
+      <pre><code class="language-java">            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();              // восстановить флаг: цикл увидит его и выйдет
+            }</code></pre>
+      <pre><code class="language-text">задача остановлена
+пул остановился за 3 с: true</code></pre>
+      <p>Если метод не может обработать прерывание сам, у него два честных варианта. Можно объявить <code>throws InterruptedException</code> и отдать решение вызывающему. А если сигнатуру менять нельзя, например в <code>Runnable.run()</code>, — восстановить флаг, как выше. Пустой <code>catch</code> — ошибка: он ломает отмену для всего кода выше по стеку.</p>
+    </section>
+
+    <section class="step" id="join-daemon">
+      <h2>JVM ждёт все обычные потоки, а daemon-потоки обрывает без finally</h2>
+      <p><code>t.join()</code> ждёт завершения потока <code>t</code>. Кроме ожидания, он даёт гарантию видимости: всё, что поток записал до завершения, вызывающий увидит после <code>join()</code>. Подробно — в теме Java Memory Model.</p>
+      <p>JVM завершается, когда закончились все <b>не-daemon</b> потоки. Daemon-поток — фоновый, JVM его не ждёт. Разница видна на потоке, который в <code>finally</code> сбрасывает буфер:</p>
+      <pre><code class="language-java">public class Daemon {
+    public static void main(String[] args) {
+        Thread flusher = new Thread(() -&gt; {
+            try {
+                while (true) Thread.sleep(100);                  // «сбрасывает буфер на диск»
+            } catch (InterruptedException e) {
+            } finally {
+                System.out.println("finally: буфер сброшен");     // выполнится?
+            }
+        });
+        flusher.setDaemon(Boolean.parseBoolean(args[0]));
+        flusher.start();
+        System.out.println("main закончился");
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java Daemon true
+main закончился                   # JVM вышла сразу, finally не выполнен
+$ java Daemon false
+main закончился                   # процесс не завершается, пока поток жив; пришлось убить через kill</code></pre>
+      <p>Daemon-поток при выходе JVM просто исчезает: ни <code>finally</code>, ни закрытия ресурсов. Поэтому в daemon-потоках не делают ничего, что нельзя бросить на полуслове, — например, запись в файл. Обычный поток, наоборот, держит JVM живой: забытый не-daemon поток — частая причина того, что утилита «не завершается». Признак daemon наследуется от создающего потока и задаётся до <code>start()</code>.</p>
+      <p>Для действий при штатной остановке есть <code>Runtime.getRuntime().addShutdownHook(thread)</code>. Хук выполняется при <code>System.exit</code>, конце последнего обычного потока и по сигналу <code>SIGTERM</code>, но не при <code>kill -9</code>.</p>
+    </section>
+
+    <section class="step" id="exceptions">
+      <h2>Исключение в потоке убивает только этот поток, и его легко не заметить</h2>
+      <pre><code class="language-java">public class Crash {
+    public static void main(String[] args) throws Exception {
+        Thread t = new Thread(() -&gt; { throw new IllegalStateException("баланс отрицательный"); }, "payment-1");
+        t.start();
+        t.join();
+        System.out.println("main жив, поток " + t.getName() + ": " + t.getState());
+
+        Thread.setDefaultUncaughtExceptionHandler((th, e) -&gt;
+            System.out.println("handler: " + th.getName() + " упал с " + e.getMessage()));
+        Thread t2 = new Thread(() -&gt; { throw new IllegalStateException("таймаут банка"); }, "payment-2");
+        t2.start();
+        t2.join();
+    }
+}</code></pre>
+      <pre class="out">Exception in thread "payment-1" java.lang.IllegalStateException: баланс отрицательный
+	at Crash.lambda$main$0(Crash.java:3)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+main жив, поток payment-1: TERMINATED
+handler: payment-2 упал с таймаут банка</pre>
+      <p>Исключение, которое никто не поймал, завершает только свой поток. По умолчанию стек печатается в <code>System.err</code>, а в проде <code>stderr</code> часто никто не читает. <code>UncaughtExceptionHandler</code> — для одного потока через <code>setUncaughtExceptionHandler</code> или для всех через <code>setDefaultUncaughtExceptionHandler</code> — позволяет хотя бы залогировать падение.</p>
+      <p>С пулом всё ещё тише. <code>submit()</code> ловит исключение задачи и кладёт его в <code>Future</code>, как в шаге 2. Handler не вызывается, в <code>stderr</code> ничего не печатается. Если результат <code>get()</code> никто не спрашивает, ошибка пропадает бесследно. <code>execute()</code> ведёт себя иначе: исключение уходит в handler потока пула. Подробнее — в теме Executors.</p>
+    </section>
+
+    <section class="step" id="threadlocal">
+      <h2>ThreadLocal даёт каждому потоку свою копию значения</h2>
+      <p><code>ThreadLocal</code> хранит значение отдельно для каждого потока. Два применения: дать каждому потоку свой экземпляр непотокобезопасного объекта и неявно передавать контекст запроса вниз по стеку. Первое — на классическом примере <code>SimpleDateFormat</code>, у которого общее изменяемое состояние:</p>
+      <pre><code class="language-java">import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.*;
+
+public class Tl {
+    static final SimpleDateFormat SHARED = new SimpleDateFormat("yyyy-MM-dd");          // не потокобезопасен
+    static final ThreadLocal&lt;SimpleDateFormat&gt; LOCAL =
+        ThreadLocal.withInitial(() -&gt; new SimpleDateFormat("yyyy-MM-dd"));              // свой у каждого потока
+
+    static long errors(boolean local) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        List&lt;Future&lt;Boolean&gt;&gt; results = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 10_000; i++) {
+            String date = String.format("2026-%02d-%02d", i % 12 + 1, i % 28 + 1);
+            results.add(pool.submit(() -&gt; {
+                SimpleDateFormat f = local ? LOCAL.get() : SHARED;
+                try { return f.format(f.parse(date)).equals(date); } catch (Exception e) { return false; }
+            }));
+        }
+        long bad = 0;
+        for (Future&lt;Boolean&gt; r : results) if (!r.get()) bad++;
+        pool.shutdown();
+        return bad;
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("общий SimpleDateFormat: ошибок " + errors(false) + " из 10000");
+        System.out.println("ThreadLocal:            ошибок " + errors(true) + " из 10000");
+    }
+}</code></pre>
+      <pre><code class="language-text">общий SimpleDateFormat: ошибок 8752 из 10000
+ThreadLocal:            ошибок 0 из 10000</code></pre>
+      <p>С общим экземпляром восемь потоков портят друг другу разбор, и неверных дат тысячи. Число меняется от запуска к запуску: 8752, 8451, 8767. С <code>ThreadLocal</code> ошибок нет. В новом коде ту же задачу решает неизменяемый <code>DateTimeFormatter</code>, которому <code>ThreadLocal</code> не нужен.</p>
+      <p>Второе применение встречается чаще, чем кажется. На <code>ThreadLocal</code> держатся MDC в логах, <code>SecurityContextHolder</code> в Spring Security и текущая транзакция в Spring. Отсюда классическая ловушка: код, запущенный в другом потоке — <code>@Async</code>, <code>CompletableFuture.supplyAsync</code>, свой пул, — не видит ни пользователя, ни транзакции вызывающего потока.</p>
+      <ul>
+        <li>В пуле потоки живут долго, и значение переживает задачу. Без <code>remove()</code> в <code>finally</code> следующая задача увидит чужой контекст, а память не освободится. Как именно течёт <code>ThreadLocalMap</code> — в теме References.</li>
+        <li><code>InheritableThreadLocal</code> копирует значение в дочерний поток при его создании. С пулами это не работает: потоки пула созданы заранее.</li>
+        <li>В Java 21 в статусе preview есть <code>ScopedValue</code> — неизменяемый контекст с ограниченной областью жизни, рассчитанный на виртуальные потоки.</li>
+      </ul>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Поток Java — поток ОС: около 27 мкс на создание и 60–90 КБ памяти в простое. Потоки держат в пулах, задачи передают как <code>Runnable</code> или <code>Callable</code>.</li>
+        <li><code>start()</code> создаёт поток, и только один раз; <code>run()</code> — обычный вызов в текущем потоке.</li>
+        <li>Состояния: NEW, RUNNABLE (в том числе чтение из сокета), BLOCKED (только вход в <code>synchronized</code>), WAITING, TIMED_WAITING, TERMINATED.</li>
+        <li>Прерывание — кооперативный флаг. <code>InterruptedException</code> сбрасывает его, поэтому его пробрасывают или восстанавливают через <code>interrupt()</code>, но не глотают.</li>
+        <li>JVM ждёт все не-daemon потоки. Daemon-потоки обрываются без <code>finally</code>.</li>
+        <li>Непойманное исключение убивает только свой поток. В пуле после <code>submit()</code> оно живёт в <code>Future</code> и теряется, если не вызвать <code>get()</code>.</li>
+        <li><code>ThreadLocal</code> — копия на поток. На нём живут MDC, security-контекст и транзакции Spring, поэтому они не переходят в другие потоки. В пуле его очищают через <code>remove()</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="start-vs-run" data-freq="3">
+      <h3>Чем start() отличается от run()?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>start()</code> создаёт новый поток ОС, и уже в нём JVM вызывает <code>run()</code>. Прямой вызов <code>run()</code> — обычный вызов метода: код выполнится в текущем потоке, синхронно. Повторный <code>start()</code> у того же объекта бросает <code>IllegalThreadStateException</code>: закончившийся поток перезапустить нельзя.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В коде: new Thread(this::sendReport).run(); — «отправляем отчёт в фоне». Что не так?</summary>
+          <p>Вызван <code>run()</code>, а не <code>start()</code>, поэтому отчёт отправляется синхронно в текущем потоке, и запрос ждёт отправки. Нужен <code>start()</code>, а лучше — отдать задачу пулу, чтобы не создавать поток на каждый отчёт и не терять исключения.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="thread-states" data-freq="3">
+      <h3>Какие состояния бывают у потока?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Шесть, из <code>Thread.State</code>. NEW — создан, не запущен. RUNNABLE — выполняется или готов выполняться. BLOCKED — ждёт входа в <code>synchronized</code>. WAITING — ждёт без таймаута: <code>wait()</code>, <code>join()</code>, <code>park()</code>. TIMED_WAITING — то же с таймаутом: <code>sleep</code>, <code>wait(ms)</code>. TERMINATED — <code>run()</code> закончился.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Чтение из сокета — это RUNNABLE, а не WAITING: Java не различает «на CPU» и «в системном вызове».</li>
+            <li>Ожидание <code>ReentrantLock</code> — WAITING через <code>park()</code>. BLOCKED бывает только у <code>synchronized</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем BLOCKED отличается от WAITING?</summary>
+          <p>BLOCKED — поток хочет войти в <code>synchronized</code>, но монитор занят. Он выйдет из этого состояния сам, когда монитор освободят, и прерывание на это не влияет. WAITING — поток сам вызвал ожидание (<code>wait</code>, <code>join</code>, <code>park</code>) и ждёт, пока его разбудят. Это ожидание можно прервать через <code>interrupt()</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stop-thread" data-freq="3">
+      <h3>Как правильно остановить поток?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через прерывание. Вызывающий делает <code>interrupt()</code>. Поток проверяет флаг <code>isInterrupted()</code> в цикле и завершается сам; блокирующие вызовы вроде <code>sleep</code>, <code>wait</code> и <code>take</code> в ответ бросают <code>InterruptedException</code>. Главное — не глотать это исключение: оно сбрасывает флаг, поэтому его пробрасывают дальше или восстанавливают флаг через <code>Thread.currentThread().interrupt()</code>.</p>
+          <p><code>Thread.stop()</code> использовать нельзя: он бросал исключение в произвольном месте и оставлял объекты в сломанном состоянии, а в Java 21 просто бросает <code>UnsupportedOperationException</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Не прерываются ожидание входа в <code>synchronized</code> и чтение из <code>java.net.Socket</code> в платформенном потоке. Для сокета ставят таймауты или закрывают его из другого потока.</li>
+            <li><code>ExecutorService.shutdownNow()</code> и <code>Future.cancel(true)</code> работают через тот же <code>interrupt()</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>while (!isInterrupted()) { try { Thread.sleep(1000); } catch (InterruptedException e) { log.warn("interrupted"); } } — что не так?</summary>
+          <p><code>InterruptedException</code> сбрасывает флаг, а <code>catch</code> его не восстанавливает. Цикл снова видит «не прерван» и продолжает работу, так что поток нельзя остановить ни <code>interrupt()</code>, ни <code>shutdownNow()</code>. В замере урока пул не остановился за 3 секунды. Нужно добавить в <code>catch</code> <code>Thread.currentThread().interrupt()</code> или выйти из цикла через <code>return</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="runnable-callable" data-freq="2">
+      <h3>Чем Runnable отличается от Callable?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>Runnable.run()</code> ничего не возвращает и не может бросать checked-исключения. <code>Callable.call()</code> возвращает значение и может бросать любые исключения. <code>Callable</code> отдают пулу через <code>submit()</code> и получают <code>Future</code>. <code>get()</code> вернёт результат или бросит <code>ExecutionException</code> с исходным исключением внутри.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="daemon" data-freq="2">
+      <h3>Что такое daemon-поток?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Фоновый поток, которого JVM не ждёт при завершении: процесс заканчивается, когда не осталось обычных потоков. При выходе daemon-поток обрывается сразу, без <code>finally</code>, поэтому ничего важного в нём не делают. Признак задают <code>setDaemon(true)</code> до <code>start()</code>, и он наследуется от создающего потока.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Утилита печатает результат, но процесс не завершается. Что проверить?</summary>
+          <p>Остался живой не-daemon поток: пул, который не закрыли через <code>shutdown()</code>, таймер, клиент с собственными потоками. Дамп потоков (<code>jcmd &lt;pid&gt; Thread.print</code>) покажет, какой поток жив и где он стоит.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="threadlocal-q" data-freq="3">
+      <h3>Что такое ThreadLocal и какие с ним проблемы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Переменная, у которой своё значение в каждом потоке. Используют, чтобы дать каждому потоку свой экземпляр непотокобезопасного объекта или чтобы передавать контекст запроса неявно: MDC, пользователь в Spring Security, текущая транзакция.</p>
+          <p>Проблемы. В пуле потоки переиспользуются, и без <code>remove()</code> в <code>finally</code> значение переходит к следующей задаче и держит память. Контекст не переходит в другие потоки: <code>@Async</code> и <code>CompletableFuture</code> его не видят.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Значения хранятся в <code>ThreadLocalMap</code> самого потока: ключ — слабая ссылка на <code>ThreadLocal</code>, значение — сильная.</li>
+            <li><code>InheritableThreadLocal</code> копирует значение только при создании потока, поэтому с пулами не помогает.</li>
+            <li><code>ScopedValue</code> (preview в Java 21) — неизменяемая альтернатива с ограниченной областью жизни.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему @Transactional-метод, вызванный через CompletableFuture.supplyAsync, не видит транзакцию вызывающего?</summary>
+          <p>Spring привязывает транзакцию к текущему потоку через <code>ThreadLocal</code>. <code>supplyAsync</code> выполняет код в потоке <code>ForkJoinPool.commonPool()</code>, где этого значения нет. Там либо откроется новая транзакция, либо её не будет вовсе.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.html">Thread (JDK 21)</a> — основа урока: жизненный цикл, прерывание, daemon, обработчики исключений.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.State.html">Thread.State (JDK 21)</a> — точные определения шести состояний.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/doc-files/threadPrimitiveDeprecation.html">Java Thread Primitive Deprecation</a> — почему stop, suspend и resume убраны и как останавливать потоки.</li>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 7 «Cancellation and Shutdown» — прерывание, отмена и остановка сервисов.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
