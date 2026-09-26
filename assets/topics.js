@@ -409,7 +409,7 @@ window.KB_TREE = [
             scope: 'монитор, reentrancy, synchronized метод и блок, wait, notify и notifyAll, spurious wakeup' },
           { id: 'jmm', freq: 3, status: 'draft', title: 'Java Memory Model',
             scope: 'happens-before, volatile, видимость и переупорядочивание, безопасная публикация, double-checked locking' },
-          { id: 'deadlocks', freq: 3, status: 'empty', title: 'Deadlocks & Liveness',
+          { id: 'deadlocks', freq: 3, status: 'draft', title: 'Deadlocks & Liveness',
             scope: 'deadlock, livelock, starvation, порядок захвата блокировок, поиск по thread dump' },
         ] },
         { id: 'juc', title: 'java.util.concurrent', items: [

@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Deadlocks &amp; Liveness · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="deadlocks">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Deadlocks &amp; Liveness</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="pool-deadlock">
+      <h2>Два заказа одновременно — и пул из двух потоков завис навсегда</h2>
+      <p>Обработка заказа считает скидку отдельной задачей в том же пуле и ждёт её результат. На одном заказе всё работает. Под нагрузкой сервис перестаёт отвечать:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class PoolDeadlock {
+    static final ExecutorService pool = Executors.newFixedThreadPool(2);   // общий пул сервиса
+
+    static long discount(long orderId) { return orderId % 10; }
+
+    static long processOrder(long orderId) throws Exception {
+        Future&lt;Long&gt; d = pool.submit(() -&gt; discount(orderId));   // подзадача в тот же пул
+        return 1_000 - d.get();                                  // ждём её результат
+    }
+
+    public static void main(String[] args) throws Exception {
+        for (int n : new int[]{1, 2}) {
+            long start = System.nanoTime();
+            Future&lt;?&gt;[] orders = new Future&lt;?&gt;[n];
+            for (int i = 0; i &lt; n; i++) {
+                long id = i;
+                orders[i] = pool.submit(() -&gt; processOrder(id));
+            }
+            try {
+                for (Future&lt;?&gt; f : orders) f.get(2, TimeUnit.SECONDS);
+                System.out.printf("%d заказ(а) одновременно: готово за %d мс%n", n, (System.nanoTime() - start) / 1_000_000);
+            } catch (TimeoutException e) {
+                System.out.printf("%d заказа одновременно: за 2 с не готово — пул завис%n", n);
+            }
+        }
+        System.exit(0);
+    }
+}</code></pre>
+      <pre><code class="language-text">1 заказ(а) одновременно: готово за 2 мс
+2 заказа одновременно: за 2 с не готово — пул завис</code></pre>
+      <p>Оба потока пула заняты заказами, и каждый ждёт скидку. Задачи скидок стоят в очереди того же пула, и взять их некому. Дамп потоков показывает обоих рабочих в <code>WAITING (parking)</code> внутри <code>FutureTask.get</code>. Строки <code>Found one Java-level deadlock</code> нет: JVM ищет циклы только на замках, а здесь ресурс — потоки пула.</p>
+      <pre><code class="language-text">"pool-1-thread-1" #28 ... waiting on condition
+   java.lang.Thread.State: WAITING (parking)
+	- parking to wait for  &lt;0x00000079b0292240&gt; (a java.util.concurrent.FutureTask)
+	at java.util.concurrent.FutureTask.get(java.base@21.0.11/FutureTask.java:190)
+	at PoolDeadlock.processOrder(PoolDeadlock.java:10)</code></pre>
+      <p>Это <b>deadlock</b> — взаимная блокировка: каждый участник держит ресурс и ждёт ресурс, который держит другой. Здесь ресурс — место в пуле, а бывают замки, соединения из пула базы, строки таблицы. В этой теме — четыре условия, при которых возникает deadlock, как его предотвратить порядком захвата и как найти. А ещё два родственных вида отказа: livelock, когда потоки активны, но не продвигаются, и starvation, когда поток годами ждёт своей очереди.</p>
+      <p>Исправления для пула: не блокироваться в задаче на результате подзадачи того же ограниченного пула. Можно считать скидку синхронно, вынести подзадачи в отдельный пул или собрать цепочку без блокировок через <code>CompletableFuture.thenCompose</code> (тема CompletableFuture).</p>
+    </section>
+
+    <section class="step" id="conditions">
+      <h2>Deadlock возможен только при четырёх условиях сразу, и цикл — главное из них</h2>
+      <p>Условия Коффмана — deadlock возникает, только когда выполнены все четыре:</p>
+      <table class="mx">
+        <thead><tr><th>Условие</th><th>Что значит</th><th>Как нарушить</th></tr></thead>
+        <tbody>
+          <tr><td>взаимное исключение</td><td>ресурс в каждый момент у одного потока</td><td>неизменяемые данные, атомики вместо замков</td></tr>
+          <tr><td>удержание и ожидание</td><td>держит один ресурс и ждёт второй</td><td>брать все ресурсы разом или не брать ни одного</td></tr>
+          <tr><td>нет принудительного освобождения</td><td>отнять ресурс у потока нельзя</td><td><code>tryLock</code> с таймаутом: не дождался — отпусти своё</td></tr>
+          <tr><td>циклическое ожидание</td><td>T1 ждёт T2, T2 ждёт T1</td><td>единый глобальный порядок захвата</td></tr>
+        </tbody>
+      </table>
+      <p>На практике чаще всего разрывают последнее условие. Как возникает цикл и как порядок захвата его убирает — на двух встречных переводах:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Граф ожидания. Поток T1 переводит со счёта A на счёт B, поток T2 — с B на A. T1 захватил A, T2 захватил B. T1 ждёт B, который держит T2, а T2 ждёт A, который держит T1: получился цикл, и оба стоят навсегда. С единым порядком оба потока сначала берут счёт с меньшим id, A. T2 ждёт A, ничего не держа, T1 берёт B, делает перевод и отпускает оба замка, после чего T2 продолжает.">
+            <defs>
+              <marker id="dl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dl-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="dl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- потоки -->
+            <rect x="40" y="40" width="180" height="50" rx="25" class="dg-cell"/>
+            <text x="130" y="62" class="dg-t" text-anchor="middle">T1</text>
+            <text data-s="1-2" x="130" y="80" class="dg-n" text-anchor="middle">transfer(A, B)</text>
+            <text data-s="3-" x="130" y="80" class="dg-n" text-anchor="middle">сначала min(id)</text>
+            <rect x="40" y="170" width="180" height="50" rx="25" class="dg-cell"/>
+            <text x="130" y="192" class="dg-t" text-anchor="middle">T2</text>
+            <text data-s="1-2" x="130" y="210" class="dg-n" text-anchor="middle">transfer(B, A)</text>
+            <text data-s="3-" x="130" y="210" class="dg-n" text-anchor="middle">сначала min(id)</text>
+            <!-- ресурсы -->
+            <rect x="480" y="40" width="200" height="50" rx="6" class="dg-box"/>
+            <text x="580" y="70" class="dg-t" text-anchor="middle">счёт A (id 1)</text>
+            <rect x="480" y="170" width="200" height="50" rx="6" class="dg-box"/>
+            <text x="580" y="200" class="dg-t" text-anchor="middle">счёт B (id 2)</text>
+
+            <!-- шаг 1-2: T1 держит A, T2 держит B -->
+            <g data-s="1-2">
+              <path d="M476 65 L 224 65" class="dg-line" marker-end="url(#dl-n)"/>
+              <text x="300" y="57" class="dg-n">держит T1</text>
+              <path d="M476 195 L 224 195" class="dg-line" marker-end="url(#dl-n)"/>
+              <text x="300" y="187" class="dg-n">держит T2</text>
+            </g>
+            <!-- шаг 2: встречное ожидание -->
+            <g data-s="2">
+              <path d="M220 80 L 476 182" class="dg-line bad" marker-end="url(#dl-bad)"/>
+              <text x="300" y="112" class="dg-bad">T1 ждёт B</text>
+              <path d="M220 180 L 476 78" class="dg-line bad" marker-end="url(#dl-bad)"/>
+              <text x="300" y="160" class="dg-bad">T2 ждёт A</text>
+            </g>
+            <!-- шаг 3: оба за A -->
+            <g data-s="3">
+              <path d="M476 65 L 224 65" class="dg-line" marker-end="url(#dl-n)"/>
+              <text x="300" y="57" class="dg-n">держит T1</text>
+              <path d="M220 180 L 476 78" class="dg-line bad" marker-end="url(#dl-bad)"/>
+              <path d="M476 195 L 224 90" class="dg-line ok" marker-end="url(#dl-ok)"/>
+              <text x="490" y="160" class="dg-ok">B свободен — T1 берёт</text>
+            </g>
+            <!-- шаг 4: T1 закончил, T2 идёт -->
+            <g data-s="4">
+              <path d="M476 65 L 224 180" class="dg-line ok" marker-end="url(#dl-ok)"/>
+              <path d="M476 195 L 224 200" class="dg-line ok" marker-end="url(#dl-ok)"/>
+              <text x="300" y="112" class="dg-ok">T1 отпустил A и B — T2 берёт оба</text>
+            </g>
+
+            <text data-s="1" x="20" y="252" class="dg-in">встречные переводы: T1 взял A, T2 взял B</text>
+            <text data-s="2" x="20" y="252" class="dg-bad">цикл ожидания: T1 → B → T2 → A → T1. Оба стоят навсегда</text>
+            <text data-s="3" x="20" y="252" class="dg-ok">единый порядок: оба начинают с A, T2 ждёт, ничего не держа</text>
+            <text data-s="4" x="20" y="252" class="dg-ok">цикла нет: T1 закончил, T2 выполняет свой перевод</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>T1 переводит с A на B и захватил A. T2 одновременно переводит с B на A и захватил B. Каждый держит свой первый замок.</li>
+          <li>T1 хочет B, но его держит T2. T2 хочет A, но его держит T1. В графе ожидания цикл, и выйти из него никто не может: <code>synchronized</code> не отдаёт замок и не имеет таймаута.</li>
+          <li>Единый порядок: замки всегда берут по возрастанию id, независимо от направления перевода. Оба потока начинают с A. T2 ждёт A, ничего не держа, поэтому B свободен, и T1 берёт его.</li>
+          <li>T1 делает перевод и отпускает оба замка, T2 получает A, затем B. Цикл невозможен: чтобы его замкнуть, кто-то должен ждать меньший id, держа больший, а порядок это запрещает.</li>
+        </ol>
+      </figure>
+    </section>
+
+    <section class="step" id="lock-ordering">
+      <h2>Порядок захвата по id убирает deadlock из переводов</h2>
+      <p>Восемь потоков делают по миллиону переводов между десятью случайными счетами. Первый вариант берёт замки в порядке аргументов, второй — по возрастанию id. После пяти секунд ожидания программа спрашивает у JVM, есть ли взаимные блокировки:</p>
+      <pre><code class="language-java">import java.lang.management.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class Transfers {
+    static final class Account {
+        final long id;
+        long balance = 1_000_000;
+        Account(long id) { this.id = id; }
+    }
+
+    static void transfer(Account from, Account to, long amount) {
+        synchronized (from) {                                    // порядок захвата зависит от аргументов
+            synchronized (to) {
+                from.balance -= amount;
+                to.balance += amount;
+            }
+        }
+    }
+
+    static void orderedTransfer(Account from, Account to, long amount) {
+        Account first = from.id &lt; to.id ? from : to;              // всегда сначала меньший id
+        Account second = first == from ? to : from;
+        synchronized (first) {
+            synchronized (second) {
+                from.balance -= amount;
+                to.balance += amount;
+            }
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        boolean ordered = args[0].equals("ordered");
+        Account[] accounts = new Account[10];
+        for (int i = 0; i &lt; accounts.length; i++) accounts[i] = new Account(i);
+        AtomicLong done = new AtomicLong();
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        for (int t = 0; t &lt; 8; t++) {
+            pool.submit(() -&gt; {
+                ThreadLocalRandom rnd = ThreadLocalRandom.current();
+                for (int i = 0; i &lt; 1_000_000; i++) {
+                    Account a = accounts[rnd.nextInt(10)], b = accounts[rnd.nextInt(10)];
+                    if (a == b) continue;
+                    if (ordered) orderedTransfer(a, b, 1); else transfer(a, b, 1);
+                    done.incrementAndGet();
+                }
+            });
+        }
+        pool.shutdown();
+        boolean finished = pool.awaitTermination(5, TimeUnit.SECONDS);
+        System.out.printf("переводов: %,d, все потоки закончили: %s%n", done.get(), finished);
+
+        ThreadMXBean threads = ManagementFactory.getThreadMXBean();
+        long[] stuck = threads.findDeadlockedThreads();          // то же, что ищет jstack
+        if (stuck != null)
+            for (ThreadInfo info : threads.getThreadInfo(stuck))
+                System.out.println("  " + info.getThreadName() + " ждёт " + info.getLockName() + ", который держит " + info.getLockOwnerName());
+        System.exit(0);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java Transfers plain
+переводов: 382, все потоки закончили: false
+  pool-1-thread-1 ждёт Transfers$Account@16b98e56, который держит pool-1-thread-2
+  pool-1-thread-2 ждёт Transfers$Account@34c45dca, который держит pool-1-thread-1
+$ java Transfers ordered
+переводов: 7,199,736, все потоки закончили: true</code></pre>
+      <p>Без порядка система встала после 382 переводов, во втором запуске — после 150. Два потока образовали цикл, остальные шесть встали за ними в очередь на те же счета. С порядком по id — 7,2 млн переводов без единого зависания. Добавилось две строки кода.</p>
+      <p>Если у объектов нет естественного уникального ключа, порядок строят по <code>System.identityHashCode</code>. Он может совпасть у двух объектов, поэтому для равных хешей берут третий, общий замок-«разрешитель» — так описано в Java Concurrency in Practice. Для замков из <code>java.util.concurrent</code> есть и другой путь — <code>tryLock(timeout)</code>: не дождался второго замка — отпусти первый и попробуй позже (тема Locks).</p>
+      <p>Самые коварные циклы возникают, когда замок держат, вызывая чужой код: слушателя, колбэк, метод другого сервиса. Этот код может взять свой замок и через цепочку вызовов прийти к вашему в обратном порядке. Правило <b>открытых вызовов</b> (open calls): под замком только работа с собственным состоянием. Список слушателей копируют под замком, а вызывают их после выхода.</p>
+      <div class="note tip">
+        <p>В базе данных всё то же самое. Две транзакции обновляют строки счетов в разном порядке — PostgreSQL находит цикл и откатывает одну из них с ошибкой <code>deadlock detected</code>. Лечится так же: обновлять строки в одном порядке (например, <code>ORDER BY id</code> в <code>SELECT ... FOR UPDATE</code>) и повторять откатанную транзакцию.</p>
+      </div>
+    </section>
+
+    <section class="step" id="detect">
+      <h2>JVM находит циклы на замках, но не видит ожидание ресурсов</h2>
+      <p>Взаимную блокировку на мониторах и на замках <code>java.util.concurrent</code> JVM находит сама. Так делает <code>jcmd &lt;pid&gt; Thread.print</code> в конце дампа (тема Diagnostics), и то же доступно из кода через <code>ThreadMXBean.findDeadlockedThreads()</code>, как в шаге 3. На этом строят сторожей, которые раз в минуту проверяют процесс и пишут алерт.</p>
+      <p>Чего JVM не найдёт — ожидания, в котором нет цикла на замках:</p>
+      <ul>
+        <li><b>Голодание пула</b>, как в шаге 1: потоки ждут <code>Future</code>, а не замок.</li>
+        <li><b>Потерянный сигнал</b> <code>wait/notify</code>: все в wait set, никто не держит замок (тема synchronized &amp; wait/notify).</li>
+        <li><b>Внешние ресурсы</b>: пул соединений к базе исчерпан потоками, каждый из которых ждёт второе соединение. Или deadlock между двумя сервисами, которые синхронно вызывают друг друга.</li>
+      </ul>
+      <p>Признак у всех один: потоки есть, CPU простаивает, работа не движется. В дампе видно, где стоят рабочие потоки и чего они ждут. Защита — таймауты на всех ожиданиях: <code>get(timeout)</code>, таймаут получения соединения, <code>tryLock(timeout)</code>. Зависание превращается в ошибку, которую видно в логах и метриках.</p>
+    </section>
+
+    <section class="step" id="livelock">
+      <h2>Livelock: потоки работают, но вежливо уступают друг другу по кругу</h2>
+      <p>Попробуем обойти deadlock «вежливо»: взять первый замок, попытаться взять второй через <code>tryLock()</code>, а при неудаче отпустить первый и начать заново. Два потока берут одни и те же замки в разном порядке:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.*;
+
+public class Polite {
+    static final Lock a = new ReentrantLock(), b = new ReentrantLock();
+    static final AtomicLong retries = new AtomicLong();
+
+    // взять оба замка; если второй занят — вежливо отпустить первый и попробовать снова
+    static void both(Lock first, Lock second, boolean randomPause) throws InterruptedException {
+        while (true) {
+            first.lock();
+            try {
+                if (second.tryLock()) {
+                    try { return; } finally { second.unlock(); }  // работа с двумя ресурсами
+                }
+            } finally {
+                first.unlock();
+            }
+            retries.incrementAndGet();
+            if (randomPause) Thread.sleep(0, ThreadLocalRandom.current().nextInt(1000));
+            else Thread.onSpinWait();
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        boolean random = args[0].equals("random");
+        int n = 200_000;
+        long start = System.nanoTime();
+        Thread t1 = new Thread(() -&gt; { try { for (int i = 0; i &lt; n; i++) both(a, b, random); } catch (InterruptedException e) { } });
+        Thread t2 = new Thread(() -&gt; { try { for (int i = 0; i &lt; n; i++) both(b, a, random); } catch (InterruptedException e) { } });
+        t1.start(); t2.start(); t1.join(); t2.join();
+        System.out.printf("%s: %,d операций, %,d повторов, %d мс%n", args[0], 2 * n, retries.get(), (System.nanoTime() - start) / 1_000_000);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java Polite spin
+spin: 400,000 операций, 824,963 повторов, 81 мс
+$ java Polite random
+random: 400,000 операций, 3,708 повторов, 16 мс</code></pre>
+      <p>Deadlock ушёл, но при немедленном повторе на каждую полезную операцию пришлось два холостых круга. Потоки одновременно берут свой первый замок, одновременно не получают второй, одновременно отпускают и снова начинают в такт. Это <b>livelock</b>: потоки не заблокированы, CPU занят, а работа почти не движется. В худшем случае — не движется совсем. Случайная пауза перед повтором ломает синхронность: повторов стало в 200 раз меньше, время — в пять раз меньше.</p>
+      <p>Тот же принцип работает далеко за пределами потоков. Клиенты, которые повторяют запросы к упавшему сервису с одинаковой паузой, приходят к нему синхронными волнами. Поэтому ретраи делают с экспоненциальной паузой и случайным разбросом (jitter).</p>
+    </section>
+
+    <section class="step" id="starvation">
+      <h2>Starvation: несправедливый замок может надолго обделить поток</h2>
+      <p><b>Starvation</b> (голодание) — поток готов работать, но постоянно проигрывает борьбу за ресурс. Четыре потока одну секунду по очереди берут замок на 10 мкс работы. Сравним обычный <code>ReentrantLock</code> и справедливый, <code>new ReentrantLock(true)</code>:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.locks.*;
+
+public class Starve {
+    public static void main(String[] args) throws Exception {
+        for (boolean fair : new boolean[]{false, true}) {
+            Lock lock = new ReentrantLock(fair);
+            long[] got = new long[4];
+            long end = System.nanoTime() + 1_000_000_000L;
+            Thread[] ts = new Thread[4];
+            for (int t = 0; t &lt; 4; t++) {
+                int id = t;
+                ts[t] = new Thread(() -&gt; {
+                    while (System.nanoTime() &lt; end) {
+                        lock.lock();
+                        try {
+                            got[id]++;
+                            long until = System.nanoTime() + 10_000;         // 10 мкс работы под замком
+                            while (System.nanoTime() &lt; until) Thread.onSpinWait();
+                        } finally {
+                            lock.unlock();
+                        }
+                    }
+                });
+                ts[t].start();
+            }
+            for (Thread t : ts) t.join();
+            long total = Arrays.stream(got).sum();
+            System.out.printf("%-9s всего %,6d, по потокам: %s%n", fair ? "fair:" : "unfair:", total, Arrays.toString(got));
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">unfair:   всего 94,317, по потокам: [6044, 41520, 17235, 29518]
+fair:     всего 87,444, по потокам: [21864, 21861, 21860, 21859]</code></pre>
+      <p>Несправедливый замок отдал одному потоку в семь раз больше, чем другому: 41 520 против 6 044. Поток, который только что отпустил замок, уже работает на ядре и успевает схватить его снова раньше, чем проснётся ждущий. Справедливый замок раздаёт строго по очереди, но пропускная способность ниже на 7%: каждую передачу приходится будить спящий поток. <code>synchronized</code> тоже несправедлив, и порядок входа не гарантирует.</p>
+      <p>Другие источники голодания:</p>
+      <ul>
+        <li>длинные критические секции: пока один держит замок секунды, остальные ждут;</li>
+        <li><code>ReadWriteLock</code> с постоянным потоком читателей может не пустить писателя (тема Locks);</li>
+        <li>приоритеты потоков — подсказка ОС, а не гарантия, и полагаться на них нельзя;</li>
+        <li>общий пул, где медленные задачи одного типа занимают все потоки, а быстрые ждут в очереди. Лечится разделением пулов (bulkhead).</li>
+      </ul>
+      <p>Справедливость нужна редко: обычно важнее общая пропускная способность, а голодание при коротких критических секциях не критично. Справедливый замок берут, когда задержка одного потока недопустима и измерена.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Deadlock — цикл ожидания: каждый держит ресурс и ждёт чужой. Нужны все четыре условия Коффмана; на практике разрывают циклическое ожидание.</li>
+        <li>Единый порядок захвата — по id, по <code>identityHashCode</code> с замком-разрешителем — убирает deadlock. В замере урока: 382 перевода до зависания без порядка и 7,2 млн с порядком.</li>
+        <li>Под замком не вызывают чужой код (open calls). В базе те же правила: обновлять строки в одном порядке и повторять транзакцию после <code>deadlock detected</code>.</li>
+        <li>JVM находит циклы на замках (<code>jstack</code>, <code>findDeadlockedThreads</code>), но не голодание пула, потерянный <code>notify</code> и внешние ресурсы. От них защищают таймауты.</li>
+        <li>Задача не должна блокироваться на подзадаче того же ограниченного пула.</li>
+        <li>Livelock — потоки активны, но уступают друг другу в такт. Лечится случайной паузой.</li>
+        <li>Starvation — поток постоянно проигрывает. Справедливый замок раздаёт по очереди ценой пропускной способности.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-deadlock" data-freq="3">
+      <h3>Что такое deadlock и как его избежать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ситуация, когда потоки ждут друг друга по кругу: каждый держит ресурс и ждёт ресурс, который держит другой. Нужны четыре условия: взаимное исключение, удержание с ожиданием, невозможность отнять ресурс и циклическое ожидание. Чаще всего разрывают цикл единым порядком захвата: например, замки счетов всегда берут по возрастанию id. Ещё помогают <code>tryLock</code> с таймаутом, правило не вызывать чужой код под замком и минимум вложенных блокировок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без уникального ключа порядок строят по <code>System.identityHashCode</code> с дополнительным замком для равных хешей.</li>
+            <li>Deadlock бывает не только на замках: голодание пула, исчерпанный пул соединений, синхронные взаимные вызовы сервисов. Защита — таймауты на всех ожиданиях.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Напишите transfer(from, to, amount) на synchronized без deadlock при встречных переводах.</summary>
+          <p>Брать замки в порядке, не зависящем от направления: <code>Account first = from.id &lt; to.id ? from : to; Account second = first == from ? to : from; synchronized (first) { synchronized (second) { ... } }</code>. В замере урока такой вариант сделал 7,2 млн переводов, а вариант с порядком аргументов завис после 382.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="find-deadlock" data-freq="3">
+      <h3>Как найти deadlock в работающем приложении?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Снять дамп потоков: <code>jcmd &lt;pid&gt; Thread.print</code> или <code>jstack</code>. JVM сама ищет циклы на мониторах и замках <code>java.util.concurrent</code> и в конце дампа пишет <code>Found one Java-level deadlock</code>: какие потоки, какие замки держат и каких ждут, на каких строках. Из кода то же даёт <code>ThreadMXBean.findDeadlockedThreads()</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JVM не найдёт ожидание без цикла на замках: голодание пула, потерянный <code>notify</code>, внешние ресурсы. Тогда смотрят, где стоят рабочие потоки и чего ждут: <code>FutureTask.get</code>, получение соединения, <code>Object.wait</code>.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pool-deadlock-q" data-freq="2">
+      <h3>Может ли deadlock возникнуть без явных замков?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Может. Классика — голодание пула: задача в фиксированном пуле отправляет подзадачу в тот же пул и ждёт её <code>get()</code>. Когда все потоки заняты такими задачами, подзадачи стоят в очереди, и исполнить их некому. В замере урока пул из двух потоков завис на двух одновременных заказах. То же бывает с пулом соединений базы, если поток держит одно соединение и ждёт второе.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В обработчике запроса: var a = executor.submit(this::loadUser); var b = executor.submit(this::loadOrders); return merge(a.get(), b.get()); — обработчик сам выполняется в executor. Что не так?</summary>
+          <p>Обработчик блокирует поток пула в ожидании подзадач того же пула. Под нагрузкой все потоки займут обработчики, подзадачи будут ждать в очереди, и сервис встанет. Нужен отдельный пул для подзадач, или цепочка без блокировок на <code>CompletableFuture</code>, или синхронные вызовы. А <code>get</code> всегда с таймаутом.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="livelock-starvation" data-freq="2">
+      <h3>Чем deadlock отличается от livelock и starvation?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При deadlock потоки заблокированы и ждут друг друга, CPU простаивает. При livelock потоки активны, но реагируют друг на друга так, что работа не движется. Например, оба уступают ресурс и повторяют в такт — лечится случайной паузой. Starvation — поток готов работать, но постоянно проигрывает борьбу за ресурс. Причины — несправедливый замок, длинные критические секции, читатели, не пускающие писателя.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему ReentrantLock по умолчанию несправедлив, если справедливость лучше?</summary>
+          <p>Справедливость дорогая: каждую передачу замка приходится будить спящий поток, а поток, который уже работает на ядре, взять замок без очереди не может. В замере урока справедливый замок дал на 7% меньше операций, зато поровну: около 21 860 на поток против разброса от 6 044 до 41 520 у несправедливого.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 10 «Avoiding Liveness Hazards» — основа урока: порядок захвата, open calls, голодание пула, livelock.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.management/java/lang/management/ThreadMXBean.html#findDeadlockedThreads()">ThreadMXBean.findDeadlockedThreads (JDK 21)</a> — поиск взаимных блокировок из кода.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/locks/ReentrantLock.html">ReentrantLock (JDK 21)</a> — справедливость и tryLock.</li>
+      <li><a href="https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-DEADLOCKS">PostgreSQL: Deadlocks</a> — как база обнаруживает и разрывает взаимные блокировки.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
