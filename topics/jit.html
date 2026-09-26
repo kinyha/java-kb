@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: JIT · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jit">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: JIT</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="first-requests">
+      <h2>Первые запросы после старта в двадцать раз медленнее</h2>
+      <p>После деплоя метрики задержки несколько секунд выглядят плохо, потом выравниваются. Код тот же, данные те же — меняется то, <i>чем</i> исполняется код. Посмотрим на это в миниатюре: «запрос» считает комиссию для 100 платежей, и мы засекаем каждый из 10 000 запросов:</p>
+      <pre><code class="language-java">public class Warmup {
+    // «бизнес-логика»: комиссия по сумме платежа
+    static long fee(long amount) {
+        long f = amount * 3 / 100;
+        if (f &lt; 10) f = 10;
+        if (f &gt; 5_000) f = 5_000;
+        return f;
+    }
+
+    // «запрос»: посчитать комиссии для 100 платежей
+    static long handle(long seed) {
+        long sum = 0;
+        for (int i = 0; i &lt; 100; i++) sum += fee(seed + i * 37L);
+        return sum;
+    }
+
+    public static void main(String[] args) {
+        int requests = 10_000;
+        long[] ns = new long[requests];
+        long sink = 0;
+        for (int r = 0; r &lt; requests; r++) {                     // печать — после, чтобы не мешала замеру
+            long start = System.nanoTime();
+            sink += handle(r);
+            ns[r] = System.nanoTime() - start;
+        }
+        int[][] ranges = {{1, 1}, {2, 10}, {11, 100}, {101, 300}, {301, 1000}, {1001, 3000}, {3001, 10000}};
+        for (int[] g : ranges) {
+            long sum = 0;
+            for (int r = g[0]; r &lt;= g[1]; r++) sum += ns[r - 1];
+            System.out.printf("запросы %5d–%-5d: %7.0f нс на запрос%n", g[0], g[1], (double) sum / (g[1] - g[0] + 1));
+        }
+        System.out.println("sink " + sink % 10);
+    }
+}</code></pre>
+      <pre class="out">запросы     1–1    :    3375 нс на запрос
+запросы     2–10   :    4338 нс на запрос
+запросы    11–100  :    1717 нс на запрос
+запросы   101–300  :     542 нс на запрос
+запросы   301–1000 :     242 нс на запрос
+запросы  1001–3000 :     210 нс на запрос
+запросы  3001–10000:     148 нс на запрос
+sink 8</pre>
+      <p>От запуска к запуску числа гуляют на 5–10%, картина — нет. Первые запросы — 3–4 мкс, последние — 0,15 мкс. Разница больше чем в двадцать раз. Никакого кеша в программе нет. Сначала байткод исполняет интерпретатор, потом метод компилирует быстрый компилятор C1, потом оптимизирующий C2. Весь этот путь занял 17 миллисекунд, но на реальном сервисе с тысячами методов прогрев растягивается на секунды и минуты.</p>
+      <p>В этой теме — как JVM решает, что и когда компилировать, что умеют C1 и C2, почему inlining — главная оптимизация, и как спекуляции C2 откатываются деоптимизацией. В конце — что делать с прогревом в проде.</p>
+    </section>
+
+    <section class="step" id="tiers">
+      <h2>Метод поднимается по уровням: интерпретатор, C1 с профилем, C2</h2>
+      <p>Схема называется <b>tiered compilation</b> и включена по умолчанию с Java 8. Для каждого метода JVM считает вызовы и итерации циклов и по порогам переводит его на следующий уровень:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Уровни компиляции. Уровень 0 — интерпретатор, считает вызовы и итерации. После 200 вызовов метод компилирует C1 с профилированием, уровень 3. После 5000 вызовов или горячего цикла метод компилирует C2, уровень 4, по собранному профилю. Если спекуляция C2 не подтвердилась, происходит деоптимизация, и метод возвращается в интерпретатор. Тривиальные методы, например геттеры, компилируются сразу на уровне 1 — C1 без профиля.">
+            <defs>
+              <marker id="tr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="tr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="tr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- уровни -->
+            <rect data-s="1-3" x="20" y="60" width="150" height="60" rx="8" class="dg-box"/>
+            <rect data-s="4" x="20" y="60" width="150" height="60" rx="8" class="dg-cell miss"/>
+            <rect data-s="5" x="20" y="60" width="150" height="60" rx="8" class="dg-box"/>
+            <text x="95" y="86" class="dg-t" text-anchor="middle">уровень 0</text>
+            <text x="95" y="106" class="dg-s" text-anchor="middle">интерпретатор</text>
+
+            <rect data-s="1" x="285" y="60" width="150" height="60" rx="8" class="dg-box"/>
+            <rect data-s="2" x="285" y="60" width="150" height="60" rx="8" class="dg-cell hit"/>
+            <rect data-s="3-" x="285" y="60" width="150" height="60" rx="8" class="dg-box"/>
+            <text x="360" y="86" class="dg-t" text-anchor="middle">уровень 3</text>
+            <text x="360" y="106" class="dg-s" text-anchor="middle">C1 + профиль</text>
+
+            <rect data-s="1-2" x="550" y="60" width="150" height="60" rx="8" class="dg-box"/>
+            <rect data-s="3" x="550" y="60" width="150" height="60" rx="8" class="dg-cell hit"/>
+            <rect data-s="4-" x="550" y="60" width="150" height="60" rx="8" class="dg-box"/>
+            <text x="625" y="86" class="dg-t" text-anchor="middle">уровень 4</text>
+            <text x="625" y="106" class="dg-s" text-anchor="middle">C2</text>
+
+            <rect data-s="1-4" x="285" y="170" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="5" x="285" y="170" width="150" height="50" rx="8" class="dg-cell hit"/>
+            <text x="360" y="192" class="dg-t" text-anchor="middle">уровень 1</text>
+            <text x="360" y="210" class="dg-s" text-anchor="middle">C1 без профиля</text>
+
+            <!-- переходы -->
+            <path d="M170 90 L 281 90" class="dg-line" marker-end="url(#tr-n)"/>
+            <text x="180" y="82" class="dg-n">200 вызовов</text>
+            <path d="M435 90 L 546 90" class="dg-line" marker-end="url(#tr-n)"/>
+            <text x="445" y="82" class="dg-n">5000 вызовов</text>
+            <text x="445" y="108" class="dg-n">или горячий цикл</text>
+            <path d="M625 56 C 625 16, 95 16, 95 56" class="dg-line" marker-end="url(#tr-n)"/>
+            <text x="360" y="46" class="dg-n" text-anchor="middle">деоптимизация</text>
+            <path d="M95 120 L 95 195 L 281 195" class="dg-line" marker-end="url(#tr-n)"/>
+            <text x="105" y="188" class="dg-n">тривиальный метод</text>
+
+            <!-- подсветка перехода на шаге -->
+            <path data-s="2" d="M170 90 L 281 90" class="dg-line ok" marker-end="url(#tr-ok)"/>
+            <path data-s="3" d="M435 90 L 546 90" class="dg-line ok" marker-end="url(#tr-ok)"/>
+            <path data-s="4" d="M625 56 C 625 16, 95 16, 95 56" class="dg-line bad" marker-end="url(#tr-bad)"/>
+            <path data-s="5" d="M95 120 L 95 195 L 281 195" class="dg-line ok" marker-end="url(#tr-ok)"/>
+
+            <text data-s="1" x="20" y="250" class="dg-in">старт: байткод исполняет интерпретатор и считает вызовы и итерации</text>
+            <text data-s="2" x="20" y="250" class="dg-ok">200 вызовов: C1 быстро компилирует и собирает профиль</text>
+            <text data-s="3" x="20" y="250" class="dg-ok">профиль собран: C2 компилирует медленно, но код быстрый</text>
+            <text data-s="4" x="20" y="250" class="dg-bad">спекуляция C2 не подтвердилась: назад в интерпретатор</text>
+            <text data-s="5" x="20" y="250" class="dg-ok">геттер: C2 нечего улучшать, сразу C1 без профиля</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Метод стартует в интерпретаторе, уровень 0. Интерпретатор медленный, зато начинает сразу. Он считает вызовы метода и итерации циклов в нём.</li>
+          <li>После 200 вызовов (<code>Tier3InvocationThreshold</code>) метод компилирует <b>C1</b>. Компилирует быстро, код в несколько раз быстрее интерпретатора. На уровне 3 C1 встраивает в код счётчики — <b>профиль</b>: какие ветки выполнялись, объекты каких классов приходили в каждый вызов.</li>
+          <li>После 5000 вызовов (<code>Tier4InvocationThreshold</code>) или горячего цикла метод компилирует <b>C2</b>. Он использует профиль: встраивает вызываемые методы, выкидывает ветки, которые ни разу не выполнялись, рассчитывает на конкретные типы. Компилирует долго, но код самый быстрый.</li>
+          <li>Если предположение C2 не подтвердилось — пришёл объект другого класса или выполнилась «мёртвая» ветка, — код <b>деоптимизируется</b>. Метод возвращается в интерпретатор, собирает новый профиль и компилируется заново.</li>
+          <li>Для тривиальных методов вроде геттеров JVM сразу выбирает уровень 1 — C1 без профиля. C2 там нечего улучшать, а счётчики только замедлили бы код.</li>
+        </ol>
+      </figure>
+      <p>Путь конкретных методов виден с флагом <code>-XX:+PrintCompilation</code>. Для программы из шага 1:</p>
+      <pre><code class="language-text">$ java -XX:+PrintCompilation Warmup | grep Warmup::
+16    5       3       Warmup::fee (36 bytes)                   # мс от старта, id, уровень 3
+16    6       4       Warmup::fee (36 bytes)                   # уровень 4: C2
+16    8       3       Warmup::handle (35 bytes)
+16    5       3       Warmup::fee (36 bytes)   made not entrant  # версию C1 заменили на C2
+16    9 %     4       Warmup::handle @ 5 (35 bytes)            # % — OSR-компиляция цикла, шаг 6
+17   10       4       Warmup::handle (35 bytes)
+17    8       3       Warmup::handle (35 bytes)   made not entrant</code></pre>
+      <p><code>made not entrant</code> значит: новые вызовы в эту версию больше не заходят. Так бывает в двух случаях — версию заменили на лучшую, как здесь, или её деоптимизировали, как в шаге 5. Уровень 2 (C1 с частичным профилем) JVM выбирает редко, когда очередь C2 перегружена.</p>
+    </section>
+
+    <section class="step" id="c1-c2">
+      <h2>C1 компилирует быстро, C2 — медленно, но его код быстрее</h2>
+      <p>Зачем два компилятора? Можно включить каждый по отдельности и посмотреть на ту же программу:</p>
+      <div class="tbl"><table class="mx">
+        <thead><tr><th>Запросы</th><th>по умолчанию</th><th><code>-Xint</code></th><th><code>-XX:TieredStopAtLevel=1</code></th><th><code>-XX:-TieredCompilation</code></th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>3 375</td><td>3 833</td><td>3 250</td><td>3 417</td></tr>
+          <tr><td>2–10</td><td>4 338</td><td>2 945</td><td>2 963</td><td>2 481</td></tr>
+          <tr><td>11–100</td><td>1 717</td><td>2 641</td><td>1 233</td><td>2 702</td></tr>
+          <tr><td>101–300</td><td>542</td><td>2 544</td><td>398</td><td>1 545</td></tr>
+          <tr><td>301–1000</td><td>242</td><td>2 529</td><td>182</td><td>1 160</td></tr>
+          <tr><td>1001–3000</td><td>210</td><td>2 496</td><td>184</td><td>281</td></tr>
+          <tr><td>3001–10000</td><td>148</td><td>2 335</td><td>182</td><td>71</td></tr>
+        </tbody>
+      </table></div>
+      <p>Наносекунды на запрос, по одному запуску на режим:</p>
+      <ul>
+        <li><b><code>-Xint</code></b> — только интерпретатор: в 15 раз медленнее прогретого кода, навсегда.</li>
+        <li><b>Только C1</b> (<code>TieredStopAtLevel=1</code>) быстро выходит на плато, но плато выше: 182 против 148 нс. Нет inlining по профилю и спекуляций.</li>
+        <li><b>Только C2</b> (<code>-TieredCompilation</code>) долго сидит в интерпретаторе: C2 компилирует после 10 000 вызовов (<code>CompileThreshold</code>). На запросах 301–1000 он в пять раз медленнее режима по умолчанию. В конце он оказался быстрее, 71 нс. Прогретый код C2 здесь отличается от версии в tiered-режиме, но такие отличия — единицы наносекунд, а прогрев дольше в разы.</li>
+      </ul>
+      <p>Tiered-режим берёт лучшее из обоих: C1 быстро убирает интерпретатор, C2 догоняет по профилю. Компилируют они в фоновых потоках, число которых зависит от CPU. На 18 ядрах <code>CICompilerCount</code> = 12. В контейнере с одним-двумя CPU потоков компиляции мало, и прогрев идёт заметно дольше.</p>
+      <table class="mx">
+        <thead><tr><th>Порог</th><th>JDK 21</th><th>Что считает</th></tr></thead>
+        <tbody>
+          <tr><td><code>Tier3InvocationThreshold</code></td><td>200</td><td>вызовов до C1</td></tr>
+          <tr><td><code>Tier4InvocationThreshold</code></td><td>5 000</td><td>вызовов до C2</td></tr>
+          <tr><td><code>Tier4BackEdgeThreshold</code></td><td>40 000</td><td>итераций цикла до OSR-компиляции C2</td></tr>
+          <tr><td><code>CompileThreshold</code></td><td>10 000</td><td>вызовов до C2, если tiered выключен</td></tr>
+        </tbody>
+      </table>
+      <p><code>-XX:TieredStopAtLevel=1</code> полезен для коротких процессов: CLI-утилит, тестов, сборки. Им важен быстрый старт, а до C2 они просто не доживают.</p>
+    </section>
+
+    <section class="step" id="inlining">
+      <h2>Inlining — главная оптимизация, потому что открывает все остальные</h2>
+      <p><b>Inlining</b> — подстановка тела вызываемого метода в место вызова. Сам по себе он экономит немного: пару инструкций на вызов. Главное в другом: после подстановки компилятор видит код вызывающего и вызываемого вместе. Он может вынести проверки из цикла, свернуть константы, убрать лишние выделения памяти. Без inlining каждая такая оптимизация ограничена одним методом.</p>
+      <p>Решения компилятора видно с диагностическими флагами <code>-XX:+UnlockDiagnosticVMOptions -XX:+PrintInlining</code>. Для <code>Warmup</code>:</p>
+      <pre><code class="language-text">17    8       3       Warmup::handle (35 bytes)                      # C1
+                              @ 22   Warmup::fee (36 bytes)   callee is too large
+17    9 %     4       Warmup::handle @ 5 (35 bytes)                  # C2
+                              @ 22   Warmup::fee (36 bytes)   inline (hot)</code></pre>
+      <p>Метод <code>fee</code> занимает 36 байт байткода — на байт больше лимита C1 (<code>C1MaxInlineSize</code> = 35). Поэтому C1 его не встроил. C2 смотрит на частоту: горячие методы он встраивает до 325 байт (<code>FreqInlineSize</code>), холодные — до 35 (<code>MaxInlineSize</code>). Отсюда практический вывод: маленькие методы, геттеры и цепочки мелких вызовов в горячем коде ничего не стоят. Разбивать код на методы ради читаемости можно без оглядки на производительность.</p>
+      <p>Одна из оптимизаций, которую открывает inlining, — <b>escape analysis</b>. Если объект не выходит за пределы скомпилированного кода, C2 может не создавать его в heap, а разложить поля по регистрам (scalar replacement). Проверим по счётчику выделенных байт потока:</p>
+      <pre><code class="language-java">import java.lang.management.ManagementFactory;
+
+public class Escape {
+    record Money(long amount, String currency) {
+        Money plus(Money o) { return new Money(amount + o.amount, currency); }
+    }
+
+    static long total(long[] amounts) {
+        Money sum = new Money(0, "RUB");
+        for (long a : amounts) sum = sum.plus(new Money(a, "RUB"));   // два new на итерацию
+        return sum.amount();
+    }
+
+    public static void main(String[] args) {
+        var threads = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        long[] amounts = new long[1_000];
+        for (int i = 0; i &lt; amounts.length; i++) amounts[i] = i;
+        long sink = 0;
+        for (int i = 0; i &lt; 20_000; i++) sink += total(amounts);          // прогрев
+        long before = threads.getCurrentThreadAllocatedBytes();
+        for (int i = 0; i &lt; 10_000; i++) sink += total(amounts);          // 20 млн Money в коде
+        long after = threads.getCurrentThreadAllocatedBytes();
+        System.out.printf("выделено в heap: %d МБ (%d)%n", (after - before) &gt;&gt; 20, sink % 10);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java Escape
+выделено в heap: 229 МБ (0)
+$ java -XX:-DoEscapeAnalysis Escape
+выделено в heap: 457 МБ (0)</code></pre>
+      <p>В коде 20 млн объектов по 24 байта — 457 МБ. С escape analysis выделено ровно вдвое меньше. Аргумент <code>new Money(a, "RUB")</code> после встраивания <code>plus</code> никуда не уходит, и C2 его убрал. А <code>sum</code> переходит из итерации в итерацию, и этот объект C2 здесь не разложил. Escape analysis помогает, но полагаться на него вслепую нельзя: проверяют замером.</p>
+      <div class="note warn">
+        <p>Эта же оптимизация ломает наивные бенчмарки. В теме References первая версия замера <code>finalize()</code> показала одинаковое время с ним и без. JIT просто убрал выделение объектов, которые никуда не сохранялись. Для замеров производительности есть JMH: он защищает результат от удаления и отделяет прогрев от измерения.</p>
+      </div>
+    </section>
+
+    <section class="step" id="deopt">
+      <h2>C2 делает ставку на профиль, а деоптимизация откатывает проигравшую ставку</h2>
+      <p>Самые сильные оптимизации C2 — спекулятивные. Если в вызов <code>fee.of(x)</code> по профилю всегда приходил один класс, C2 встраивает его метод с дешёвой проверкой класса. Если приходило два — встраивает оба. На случай «вдруг придёт другой» он оставляет ловушку (uncommon trap), которая деоптимизирует код. Проверим на одном месте вызова, куда постепенно добавляются новые классы:</p>
+      <pre><code class="language-java">public class Deopt {
+    interface Fee { long of(long amount); }
+    static final class Card implements Fee { public long of(long a) { return a * 3 / 100; } }
+    static final class Sbp implements Fee { public long of(long a) { return a * 4 / 1000; } }
+    static final class Crypto implements Fee { public long of(long a) { return a / 50; } }
+
+    static long total(Fee[] fees, int n) {
+        long sum = 0;
+        for (int i = 0; i &lt; n; i++) sum += fees[i % fees.length].of(i);  // один call site
+        return sum;
+    }
+
+    static void phase(String name, Fee... fees) {
+        long sink = 0, best = Long.MAX_VALUE;
+        for (int round = 0; round &lt; 200; round++) {
+            long start = System.nanoTime();
+            sink += total(fees, 100_000);
+            best = Math.min(best, System.nanoTime() - start);
+        }
+        System.out.printf("%-22s %.2f нс на вызов (%d)%n", name, best / 100_000.0, sink % 7);
+    }
+
+    public static void main(String[] args) {
+        phase("только Card", new Card());
+        phase("Card и Sbp", new Card(), new Sbp());
+        phase("Card, Sbp и Crypto", new Card(), new Sbp(), new Crypto());
+        phase("снова только Card", new Card());
+    }
+}</code></pre>
+      <pre class="out">только Card            0.54 нс на вызов (6)
+Card и Sbp             0.57 нс на вызов (5)
+Card, Sbp и Crypto     1.59 нс на вызов (4)
+снова только Card      1.45 нс на вызов (6)</pre>
+      <p>С флагом <code>-Xlog:deoptimization=debug</code> видно, что происходило на переходах между фазами (строки сокращены):</p>
+      <pre><code class="language-text">[0.047s][debug][deoptimization] cid=  16 level=4 Deopt.total(...) trap_bci=22 class_check maybe_recompile
+[0.063s][debug][deoptimization] cid= 143 level=4 Deopt.total(...) trap_bci=22 bimorphic_or_optimized_type_check maybe_recompile</code></pre>
+      <ul>
+        <li><b>Один класс</b> — мономорфный вызов. C2 встроил <code>Card.of</code> с проверкой класса: 0,54 нс.</li>
+        <li><b>Появился <code>Sbp</code></b> — проверка класса не прошла (<code>class_check</code>), код деоптимизирован на инструкции 22, то есть на <code>invokeinterface</code>. C2 перекомпилировал метод и встроил обе реализации — биморфный вызов, почти так же быстро.</li>
+        <li><b>Третий класс</b> — снова деоптимизация (<code>bimorphic_or_optimized_type_check</code>). Для трёх и больше типов C2 не встраивает, а делает настоящий виртуальный вызов через таблицу методов. Мегаморфный вызов в три раза медленнее.</li>
+        <li><b>Снова только <code>Card</code></b> — а быстрее не стало. Профиль уже «видел» три класса, и C2 не возвращается к оптимистичной версии. Код остаётся медленным до конца жизни процесса.</li>
+      </ul>
+      <p>Деоптимизация сама по себе дешёвая и нормальная: при прогреве таких событий десятки. Проблема — когда она повторяется в цикле: компиляция, деоптимизация, компиляция. Это видно в <code>-XX:+PrintCompilation</code> по многократным <code>made not entrant</code> одного метода.</p>
+      <div class="trap">
+        <p class="myth">Интерфейс с одной реализацией медленнее прямого вызова, поэтому интерфейсы в горячем коде вредны.</p>
+        <p class="fact">Мономорфный и биморфный вызовы C2 встраивает, и стоят они как прямой вызов. Цена появляется на трёх и больше реализациях в одном месте вызова. И даже тогда это наносекунда на вызов, заметная только в очень горячих циклах.</p>
+      </div>
+    </section>
+
+    <section class="step" id="osr">
+      <h2>OSR переключает уже идущий цикл на скомпилированный код</h2>
+      <p>Компиляция по числу вызовов не помогает методу, который вызван один раз и крутит длинный цикл, — например, <code>main</code> или обработчику пакетного задания. Следующий вызов, который мог бы попасть в скомпилированную версию, не случится. Для этого есть <b>on-stack replacement</b>: JVM считает итерации цикла, компилирует метод с точкой входа посреди цикла и переносит кадр стека из интерпретатора в скомпилированный код прямо на ходу.</p>
+      <pre><code class="language-java">public class Osr {
+    public static void main(String[] args) {
+        long start = System.nanoTime(), sum = 0;
+        for (int i = 0; i &lt; 500_000_000; i++) sum += i % 7;       // main вызывается один раз
+        System.out.printf("%d мс (%d)%n", (System.nanoTime() - start) / 1_000_000, sum % 10);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java Osr
+254 мс (4)
+$ java -XX:-UseOnStackReplacement Osr
+2086 мс (4)
+$ java -XX:+PrintCompilation Osr | grep Osr
+17    5 %     3       Osr::main @ 9 (71 bytes)                 # OSR: вход на инструкции 9, начале цикла
+17    6       3       Osr::main (71 bytes)
+17    7 %     4       Osr::main @ 9 (71 bytes)
+18    5 %     3       Osr::main @ 9 (71 bytes)   made not entrant
+272    7 %     4       Osr::main @ 9 (71 bytes)   made not entrant  # цикл закончился — код после него не был в профиле</code></pre>
+      <p>Без OSR цикл в восемь раз медленнее. Знак <code>%</code> в логе — OSR-компиляция, <code>@ 9</code> — номер инструкции байткода, где цикл проверяет условие. Последняя строка — ещё одна деоптимизация: C2 не компилировал код после цикла, потому что за время профилирования тот ни разу не выполнялся. Когда цикл закончился, OSR-версия ушла в ловушку, и печать выполнил интерпретатор.</p>
+      <p>OSR объясняет, почему микробенчмарк с одним большим циклом в <code>main</code> меряет не тот код, что работает в проде: OSR-версия компилируется иначе, чем обычный вызов метода.</p>
+    </section>
+
+    <section class="step" id="warmup-prod">
+      <h2>Прогрев в проде решают до того, как под получит трафик</h2>
+      <p>Для сервиса прогрев значит: первые секунды или минуты после старта задержки выше, а CPU занят компиляцией. Если под сразу получает полную долю трафика, p99 после каждого деплоя подпрыгивает. Что с этим делают:</p>
+      <table class="mx">
+        <thead><tr><th>Подход</th><th>Как</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>прогрев перед readiness</td><td>при старте прогнать типичные запросы и только потом отдать <code>ready</code></td><td>дольше старт; нужны реалистичные запросы</td></tr>
+          <tr><td>плавный ввод трафика</td><td>балансировщик даёт новому поду сначала малую долю (slow start)</td><td>нужна поддержка балансировщика</td></tr>
+          <tr><td>запас CPU при старте</td><td>потоки компиляции конкурируют с запросами; в поде с 1 CPU прогрев идёт дольше</td><td>ресурсы</td></tr>
+          <tr><td>AOT-кеш Project Leyden</td><td>JDK 24: классы загружены и слинкованы заранее (JEP 483); JDK 25: сохранённые профили методов (JEP 515)</td><td>тренировочный прогон при сборке, новая версия JDK</td></tr>
+          <tr><td>native image, CRaC</td><td>GraalVM компилирует заранее; CRaC восстанавливает прогретый процесс из снимка</td><td>ограничения на рефлексию, отдельные сборки JDK</td></tr>
+        </tbody>
+      </table>
+      <p>Скомпилированный код хранится в <b>code cache</b> вне heap (по умолчанию 240 МБ, <code>ReservedCodeCacheSize</code>). Если он заполнится, JVM выключает компилятор, и всё новое остаётся в интерпретаторе. Проверено с искусственно маленьким кешем:</p>
+      <pre><code class="language-text">$ java -XX:ReservedCodeCacheSize=3m -XX:-SegmentedCodeCache Warmup
+[0.037s][warning][codecache] CodeCache is full. Compiler has been disabled.
+[0.037s][warning][codecache] Try increasing the code cache size using -XX:ReservedCodeCacheSize=</code></pre>
+      <p>В проде с настройками по умолчанию это редкость, но такое сообщение в логе объясняет внезапную деградацию после нескольких часов работы. Состояние кеша на живом процессе показывает <code>jcmd &lt;pid&gt; Compiler.codecache</code>.</p>
+      <p>Флаги JIT в проде обычно не трогают. Пороги, размеры inlining и число потоков компиляции подобраны под типичную нагрузку. Их изменение — эксперимент с замером через JMH или нагрузочный тест, а не строчка из статьи.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Код начинает в интерпретаторе. После 200 вызовов его компилирует C1 с профилем, после 5000 или горячего цикла — C2 по профилю. Тривиальные методы сразу идут в C1 без профиля.</li>
+        <li>C1 компилирует быстро, C2 — медленно, но даёт самый быстрый код. Tiered-режим совмещает оба. <code>TieredStopAtLevel=1</code> ускоряет старт коротких процессов.</li>
+        <li>Inlining — главная оптимизация: он открывает остальные, включая escape analysis. C2 встраивает горячие методы до 325 байт байткода, C1 — до 35.</li>
+        <li>C2 спекулирует по профилю: встраивает один или два типа в месте вызова. Если спекуляция не подтвердилась, код деоптимизируется. Три и больше типов — мегаморфный вызов, и обратно C2 не откатывается.</li>
+        <li>OSR переключает уже идущий цикл на скомпилированный код. В логе это знак <code>%</code>.</li>
+        <li>Прогрев в проде — прогрев перед readiness, плавный ввод трафика, запас CPU, AOT-кеш Leyden. Флаги JIT без замеров не трогают.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-is-jit" data-freq="3">
+      <h3>Что такое JIT и как работает tiered compilation?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JIT компилирует байткод в машинный код во время работы программы, и только горячие методы. Метод стартует в интерпретаторе, который считает вызовы и итерации циклов. После 200 вызовов его компилирует C1 — быстро, со встроенным профилированием. После 5000 вызовов или горячего цикла — C2, оптимизирующий компилятор, который использует собранный профиль. Поэтому Java-сервис после старта какое-то время работает медленнее — прогрев.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Уровни: 0 — интерпретатор, 1 — C1 без профиля для тривиальных методов, 2 — C1 с частичным профилем, 3 — C1 с полным, 4 — C2.</li>
+            <li><code>-XX:+PrintCompilation</code> показывает переходы. <code>%</code> — OSR, <code>made not entrant</code> — версия заменена или деоптимизирована.</li>
+            <li>Потоки компиляции зависят от CPU. В поде с одним CPU прогрев заметно дольше.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Зачем два компилятора, если C2 генерирует код быстрее?</summary>
+          <p>C2 компилирует медленно и нуждается в профиле, который собирает C1. Без C1 метод 10 000 вызовов сидит в интерпретаторе. В замере урока с <code>-XX:-TieredCompilation</code> запросы 301–1000 шли в пять раз медленнее, чем в режиме по умолчанию. C1 быстро убирает интерпретатор, C2 потом догоняет.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="jit-optimizations" data-freq="2">
+      <h3>Какие оптимизации делает JIT?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Главная — inlining: подстановка тела метода в место вызова. Она открывает остальные: свёртку констант, вынос проверок из циклов, удаление мёртвого кода. Escape analysis позволяет не создавать в heap объекты, которые не выходят за пределы метода. Ещё есть спекулятивные оптимизации по профилю: встраивание конкретного типа в виртуальный вызов, выкидывание веток, которые не выполнялись. Если спекуляция неверна — деоптимизация.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>C2 встраивает горячие методы до 325 байт байткода (<code>FreqInlineSize</code>), остальные — до 35 (<code>MaxInlineSize</code>). Решения видно в <code>-XX:+PrintInlining</code>.</li>
+            <li>Escape analysis не всесилен: в замере урока объект, который переходит между итерациями цикла, остался в heap — убрано ровно одно выделение из двух.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Метод fee занимает 36 байт байткода и вызывается в горячем цикле. Встроит ли его C1? А C2?</summary>
+          <p>C1 — нет: его лимит <code>C1MaxInlineSize</code> = 35 байт, в логе будет <code>callee is too large</code>. C2 — да: метод горячий, а для горячих лимит 325 байт, в логе <code>inline (hot)</code>. Проверено на программе урока.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="deoptimization" data-freq="2">
+      <h3>Что такое деоптимизация и когда она происходит?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Откат скомпилированного C2 кода обратно в интерпретатор, когда не подтвердилось предположение, на котором построена оптимизация. Например, C2 встроил метод единственного класса, который приходил в вызов, и тут пришёл объект другого класса. Или выполнилась ветка, которая по профилю была мёртвой. Метод снова собирает профиль и перекомпилируется.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Один или два типа в месте вызова C2 встраивает, три и больше — мегаморфный вызов через таблицу методов. В замере урока это 0,54 против 1,59 нс на вызов.</li>
+            <li>Профиль не «забывает» типы: после мегаморфной фазы код остался медленным, даже когда снова приходил один класс.</li>
+            <li>Причины деоптимизаций видны в <code>-Xlog:deoptimization=debug</code>: <code>class_check</code>, <code>bimorphic_or_optimized_type_check</code>, <code>unstable_if</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Для «чистоты» в горячем обработчике добавили третью реализацию интерфейса, который раньше имел две. После релиза CPU вырос на 5%. Как такое могло случиться?</summary>
+          <p>Место вызова стало мегаморфным: с двумя типами C2 встраивал обе реализации, с тремя — делает виртуальный вызов и теряет inlining, а с ним и оптимизации вокруг. Проверить можно через <code>-XX:+PrintInlining</code> или профилировщиком. Если место действительно горячее, можно разнести типы по разным местам вызова или вынести общую логику.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="warmup" data-freq="2">
+      <h3>Что такое прогрев JVM и как с ним бороться в проде?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>После старта код идёт через интерпретатор и C1, пока горячие методы не скомпилирует C2. Первые запросы медленнее, в замере урока — в двадцать раз. В проде прогревают до готовности: прогоняют типичные запросы перед тем, как отдать readiness, вводят трафик плавно и дают поду запас CPU на компиляцию.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Долгий цикл в одном вызове компилируется через OSR — это знак <code>%</code> в <code>PrintCompilation</code>.</li>
+            <li>В JDK 24–25 появился AOT-кеш Project Leyden: заранее загруженные классы (JEP 483) и сохранённые профили методов (JEP 515). Другие варианты — CRaC и GraalVM native image.</li>
+            <li>Заполненный code cache выключает компилятор: <code>CodeCache is full. Compiler has been disabled</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему бенчмарк на System.nanoTime() в main может показать ерунду?</summary>
+          <p>JIT может убрать код, результат которого не используется. Первые итерации идут в интерпретаторе, а длинный цикл в <code>main</code> компилируется через OSR, не так, как обычный вызов. Для замеров используют JMH: он отделяет прогрев, защищает результат от удаления и запускает измерения в отдельных процессах.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/vm/java-hotspot-virtual-machine-performance-enhancements.html">Java HotSpot VM Performance Enhancements (JDK 21)</a> — основа урока: tiered compilation, escape analysis, compressed oops.</li>
+      <li><a href="https://wiki.openjdk.org/display/HotSpot/PerformanceTechniques">HotSpot Performance Techniques</a> — список оптимизаций C2 от авторов HotSpot: inlining, спекуляции, деоптимизация.</li>
+      <li><a href="https://openjdk.org/jeps/483">JEP 483: Ahead-of-Time Class Loading &amp; Linking</a> и <a href="https://openjdk.org/jeps/515">JEP 515: Ahead-of-Time Method Profiling</a> — Project Leyden против прогрева.</li>
+      <li><a href="https://github.com/openjdk/jmh">JMH</a> — как правильно мерить производительность Java-кода.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

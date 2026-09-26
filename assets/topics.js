@@ -462,7 +462,7 @@ window.KB_TREE = [
           { id: 'gc-references', freq: 2, status: 'draft', title: 'References',
             scope: 'strong, soft, weak, phantom, ReferenceQueue, WeakHashMap, Cleaner вместо finalize' },
         ] },
-        { id: 'jit', freq: 1, status: 'empty', title: 'JIT',
+        { id: 'jit', freq: 1, status: 'draft', title: 'JIT',
           scope: 'tiered compilation, C1 и C2, inlining, деоптимизация, OSR, прогрев' },
         { id: 'jvm-diagnostics', freq: 2, status: 'empty', title: 'Diagnostics',
           scope: 'jcmd, jstack, jmap, jstat, thread dump, heap dump, HeapDumpOnOutOfMemoryError, JFR, поиск утечек памяти' },
