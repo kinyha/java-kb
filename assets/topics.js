@@ -24,7 +24,7 @@ window.KB_TREE = [
       { id: 'foundations', title: 'Foundations', items: [
         { id: 'complexity', freq: 3, status: 'draft', title: 'Big O',
           scope: 'O-нотация, лучший и худший случай, амортизированная сложность, память, как оценить решение' },
-        { id: 'recursion', freq: 1, status: 'empty', title: 'Recursion',
+        { id: 'recursion', freq: 1, status: 'draft', title: 'Recursion',
           scope: 'стек вызовов, базовый случай, мемоизация, рекурсия против цикла' },
         { id: 'sorting', freq: 2, status: 'empty', title: 'Sorting',
           scope: 'quicksort, mergesort, heapsort, стабильность, TimSort и dual-pivot quicksort в Java' },
