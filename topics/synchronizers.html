@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Synchronizers · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="synchronizers">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Synchronizers</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="bank-limit">
+      <h2>Банк держит три запроса одновременно, а сервис шлёт девять</h2>
+      <p>Платёжный шлюз банка обрабатывает не больше трёх запросов одновременно, остальным отвечает 429 Too Many Requests. У сервиса десять потоков обработки платежей, и каждый ходит в банк сам. Сравним вызовы без ограничения и через <code>Semaphore</code> на три разрешения:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+
+public class BankLimit {
+    // банк принимает не больше 3 запросов одновременно, остальным отвечает 429
+    static final AtomicInteger inFlight = new AtomicInteger();
+    static final AtomicInteger rejected = new AtomicInteger(), maxSeen = new AtomicInteger();
+
+    static void callBank() throws InterruptedException {
+        int now = inFlight.incrementAndGet();
+        maxSeen.accumulateAndGet(now, Math::max);
+        try {
+            if (now &gt; 3) { rejected.incrementAndGet(); return; }     // 429 Too Many Requests
+            Thread.sleep(20);                                        // банк отвечает 20 мс
+        } finally {
+            inFlight.decrementAndGet();
+        }
+    }
+
+    static void run(String name, Callable&lt;Void&gt; payment) throws Exception {
+        rejected.set(0); maxSeen.set(0);
+        ExecutorService pool = Executors.newFixedThreadPool(10);     // 10 потоков обработки платежей
+        long start = System.nanoTime();
+        for (Future&lt;Void&gt; f : pool.invokeAll(java.util.Collections.nCopies(100, payment))) f.get();
+        pool.shutdown();
+        System.out.printf("%-10s отказов банка: %2d, одновременно у банка до %2d, %4d мс%n",
+            name, rejected.get(), maxSeen.get(), (System.nanoTime() - start) / 1_000_000);
+    }
+
+    public static void main(String[] args) throws Exception {
+        run("без лимита:", () -&gt; { callBank(); return null; });
+
+        Semaphore permits = new Semaphore(3);                        // 3 разрешения — 3 запроса к банку
+        run("Semaphore:", () -&gt; {
+            permits.acquire();                                       // ждём свободное разрешение
+            try { callBank(); } finally { permits.release(); }       // вернуть при любом исходе
+            return null;
+        });
+    }
+}</code></pre>
+      <pre><code class="language-text">без лимита: отказов банка: 97, одновременно у банка до  9,   26 мс
+Semaphore: отказов банка:  0, одновременно у банка до  3,  791 мс</code></pre>
+      <p>Без лимита почти все 100 платежей получили отказ — «быстро» только потому, что отказ приходит мгновенно. С семафором у банка никогда не бывает больше трёх запросов, и все платежи прошли. Семь потоков из десяти просто ждут своей очереди на разрешение.</p>
+      <p><code>Semaphore</code> — один из <b>синхронизаторов</b>: объектов, которые координируют потоки через общее состояние. Кроме него в <code>java.util.concurrent</code> есть <code>CountDownLatch</code>, <code>CyclicBarrier</code>, <code>Phaser</code> и <code>Exchanger</code>. В этой теме — как устроен каждый, чем защёлка отличается от барьера и на каких ошибках все они ломаются.</p>
+    </section>
+
+    <section class="step" id="semaphore">
+      <h2>Semaphore — счётчик разрешений, у которого нет владельца</h2>
+      <p>Семафор хранит число разрешений. <code>acquire()</code> забирает одно или ждёт, пока появится, <code>release()</code> возвращает. Устроен он, как и замки, на AQS: число разрешений — это <code>state</code>. Главное отличие от замка — у разрешения нет владельца. Вернуть его может любой поток, и семафор не проверяет, брали ли у него что-то. Отсюда характерная ошибка:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class ExtraPermit {
+    public static void main(String[] args) throws Exception {
+        Semaphore permits = new Semaphore(3);
+        permits.acquire(3);                                      // все разрешения заняты
+
+        Thread waiter = new Thread(() -&gt; {
+            try {
+                permits.acquire();                               // ждёт разрешение...
+                System.out.println("получил разрешение");
+            } catch (InterruptedException e) {
+                System.out.println("ожидание прервано, разрешения нет");
+            } finally {
+                permits.release();                               // ...но возвращает в любом случае
+            }
+        });
+        waiter.start();
+        Thread.sleep(100);
+        waiter.interrupt();                                      // например, запрос отменён по таймауту
+        waiter.join();
+        permits.release(3);                                      // остальные вернули свои
+        System.out.println("разрешений теперь: " + permits.availablePermits() + " вместо 3");
+    }
+}</code></pre>
+      <pre class="out">ожидание прервано, разрешения нет
+разрешений теперь: 4 вместо 3</pre>
+      <p>Поток не получил разрешение, но в <code>finally</code> вернул его. Лимит тихо вырос до четырёх, и после нескольких отмен банк снова начнёт отвечать 429. Правило то же, что у <code>Lock</code>: <code>acquire()</code> — до <code>try</code>, <code>release()</code> — в <code>finally</code>, как в шаге 1.</p>
+      <ul>
+        <li><code>tryAcquire(timeout)</code> — ждать разрешение ограниченное время и вернуть ошибку клиенту, а не держать запрос вечно.</li>
+        <li><code>new Semaphore(n, true)</code> — справедливая очередь, как у <code>ReentrantLock</code>.</li>
+        <li>Семафор на одно разрешение похож на мьютекс, но им не является. Он нереентерабелен: повторный <code>acquire()</code> тем же потоком повиснет. Отпустить его может чужой поток.</li>
+      </ul>
+      <p>Ограничение одновременных вызовов внешнего ресурса называют <b>bulkhead</b> — переборка, как в корпусе корабля. Если банк замедлится, заняты окажутся только три потока, а не весь пул. В Resilience4j основная реализация bulkhead — <code>SemaphoreBulkhead</code>, на семафоре.</p>
+    </section>
+
+    <section class="step" id="latch">
+      <h2>CountDownLatch открывается один раз, когда счётчик дошёл до нуля</h2>
+      <p>Защёлка ждёт, пока N событий произойдут. <code>countDown()</code> уменьшает счётчик, <code>await()</code> ждёт нуля. Классический сценарий — сервис при старте загружает три кеша параллельно и объявляет готовность, когда загружены все:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Startup {
+    static void load(String cache, int ms, boolean fail) throws InterruptedException {
+        Thread.sleep(ms);
+        if (fail) throw new IllegalStateException(cache + ": база недоступна");
+        System.out.println("  " + cache + " загружен за " + ms + " мс");
+    }
+
+    static void start(boolean countDownInFinally) throws InterruptedException {
+        CountDownLatch ready = new CountDownLatch(3);               // ждём три кеша
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        String[] caches = {"курсы валют", "тарифы", "справочник банков"};
+        int[] times = {120, 80, 150};
+        for (int i = 0; i &lt; 3; i++) {
+            int n = i;
+            pool.submit(() -&gt; {
+                try {
+                    load(caches[n], times[n], n == 2);              // третий падает
+                    if (!countDownInFinally) ready.countDown();      // только при успехе
+                } catch (Exception e) {
+                    System.out.println("  ошибка: " + e.getMessage());
+                } finally {
+                    if (countDownInFinally) ready.countDown();       // при любом исходе
+                }
+                return null;
+            });
+        }
+        long start = System.nanoTime();
+        boolean ok = ready.await(2, TimeUnit.SECONDS);              // сервис ждёт готовности
+        System.out.printf("готовность: %s, счётчик %d, ждали %d мс%n", ok, ready.getCount(), (System.nanoTime() - start) / 1_000_000);
+        pool.shutdown();
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("countDown только при успехе:");
+        start(false);
+        System.out.println("countDown в finally:");
+        start(true);
+    }
+}</code></pre>
+      <pre class="out">countDown только при успехе:
+  тарифы загружен за 80 мс
+  курсы валют загружен за 120 мс
+  ошибка: справочник банков: база недоступна
+готовность: false, счётчик 1, ждали 2005 мс
+countDown в finally:
+  тарифы загружен за 80 мс
+  курсы валют загружен за 120 мс
+  ошибка: справочник банков: база недоступна
+готовность: true, счётчик 0, ждали 152 мс</pre>
+      <p>В первом варианте упавшая загрузка не уменьшила счётчик, и без таймаута старт висел бы вечно. Во втором <code>countDown()</code> стоит в <code>finally</code> — зависания нет. Но защёлка открылась, хотя справочник банков не загружен: она считает события, а не успехи. Сервис объявит себя готовым со сломанным кешем. Результат задач нужно проверять отдельно: хранить ошибки или собирать <code>Future</code>. А для «дождаться N асинхронных результатов и узнать об ошибке» удобнее <code>CompletableFuture.allOf</code> (тема CompletableFuture).</p>
+      <ul>
+        <li>Защёлка <b>одноразовая</b>: дойдя до нуля, она открыта навсегда, и следующие <code>await()</code> проходят сразу. Сбросить её нельзя.</li>
+        <li>Всё, что поток сделал до <code>countDown()</code>, видно потоку после возврата из <code>await()</code> — это ребро happens-before из темы Java Memory Model. Поэтому загруженные кеши можно читать без дополнительной синхронизации.</li>
+        <li>Второй частый сценарий — обратный: <code>new CountDownLatch(1)</code> как стартовый пистолет, чтобы N потоков начали одновременно. Так пишут нагрузочные тесты.</li>
+      </ul>
+    </section>
+
+    <section class="step" id="barrier">
+      <h2>CyclicBarrier заставляет потоки ждать друг друга и открывается снова</h2>
+      <p>На собеседовании часто спрашивают, чем защёлка отличается от барьера. Разница в том, <i>кто</i> ждёт:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Слева CountDownLatch на 3: три рабочих потока вызывают countDown и сразу идут дальше, счётчик уменьшается с трёх до нуля, и только тогда проходит ждущий main. Защёлка остаётся открытой навсегда. Справа CyclicBarrier на 3: потоки приходят к барьеру и ждут друг друга. Когда пришёл третий, выполняется действие барьера, все трое идут дальше, и барьер сбрасывается для следующего раунда.">
+            <text x="20" y="24" class="dg-cap">COUNTDOWNLATCH(3)</text>
+            <text x="380" y="24" class="dg-cap">CYCLICBARRIER(3)</text>
+            <path d="M360 36 L 360 232" class="dg-sep" fill="none"/>
+
+            <!-- защёлка: счётчик -->
+            <rect x="20" y="36" width="320" height="34" rx="6" class="dg-box"/>
+            <text data-s="1" x="180" y="58" class="dg-in" text-anchor="middle">count = 3</text>
+            <text data-s="2" x="180" y="58" class="dg-in" text-anchor="middle">count = 2</text>
+            <text data-s="3" x="180" y="58" class="dg-in" text-anchor="middle">count = 1</text>
+            <text data-s="4-" x="180" y="58" class="dg-in" text-anchor="middle">count = 0 — открыта</text>
+            <!-- рабочие -->
+            <rect data-s="1" x="20" y="84" width="120" height="30" rx="15" class="dg-cell"/>
+            <rect data-s="2-" x="20" y="84" width="120" height="30" rx="15" class="dg-cell hit"/>
+            <text x="80" y="104" class="dg-in" text-anchor="middle">W1</text>
+            <text data-s="2-" x="150" y="104" class="dg-n">countDown(), дальше</text>
+            <rect data-s="1-2" x="20" y="124" width="120" height="30" rx="15" class="dg-cell"/>
+            <rect data-s="3-" x="20" y="124" width="120" height="30" rx="15" class="dg-cell hit"/>
+            <text x="80" y="144" class="dg-in" text-anchor="middle">W2</text>
+            <text data-s="3-" x="150" y="144" class="dg-n">countDown(), дальше</text>
+            <rect data-s="1-3" x="20" y="164" width="120" height="30" rx="15" class="dg-cell"/>
+            <rect data-s="4-" x="20" y="164" width="120" height="30" rx="15" class="dg-cell hit"/>
+            <text x="80" y="184" class="dg-in" text-anchor="middle">W3</text>
+            <text data-s="4-" x="150" y="184" class="dg-n">countDown(), дальше</text>
+            <!-- ждущий -->
+            <rect data-s="1-3" x="20" y="204" width="120" height="30" rx="15" class="dg-cell miss"/>
+            <rect data-s="4-" x="20" y="204" width="120" height="30" rx="15" class="dg-cell hit"/>
+            <text x="80" y="224" class="dg-in" text-anchor="middle">main</text>
+            <text data-s="1-3" x="150" y="224" class="dg-n">await(): ждёт</text>
+            <text data-s="4" x="150" y="224" class="dg-n">await() вернул</text>
+            <text data-s="5" x="150" y="224" class="dg-n">новый await() — сразу</text>
+
+            <!-- барьер -->
+            <rect x="380" y="36" width="320" height="34" rx="6" class="dg-box"/>
+            <text data-s="1" x="540" y="58" class="dg-in" text-anchor="middle">пришли 0 из 3</text>
+            <text data-s="2" x="540" y="58" class="dg-in" text-anchor="middle">пришли 1 из 3</text>
+            <text data-s="3" x="540" y="58" class="dg-in" text-anchor="middle">пришли 2 из 3</text>
+            <text data-s="4" x="540" y="58" class="dg-in" text-anchor="middle">пришли 3 из 3 — открыт</text>
+            <text data-s="5" x="540" y="58" class="dg-in" text-anchor="middle">сброшен: пришли 0 из 3</text>
+            <path d="M590 80 L 590 198" class="dg-line bad"/>
+            <text x="598" y="92" class="dg-n">барьер</text>
+            <!-- T1 -->
+            <rect data-s="1" x="380" y="84" width="120" height="30" rx="15" class="dg-cell"/>
+            <rect data-s="2-3" x="460" y="84" width="120" height="30" rx="15" class="dg-cell miss"/>
+            <rect data-s="4" x="600" y="100" width="100" height="30" rx="15" class="dg-cell hit"/>
+            <rect data-s="5" x="380" y="84" width="120" height="30" rx="15" class="dg-cell"/>
+            <text data-s="1" x="440" y="104" class="dg-in" text-anchor="middle">T1</text>
+            <text data-s="2-3" x="520" y="104" class="dg-in" text-anchor="middle">T1 ждёт</text>
+            <text data-s="4" x="650" y="120" class="dg-in" text-anchor="middle">T1</text>
+            <text data-s="5" x="440" y="104" class="dg-in" text-anchor="middle">T1</text>
+            <!-- T2 -->
+            <rect data-s="1-2" x="380" y="124" width="120" height="30" rx="15" class="dg-cell"/>
+            <rect data-s="3" x="460" y="124" width="120" height="30" rx="15" class="dg-cell miss"/>
+            <rect data-s="4" x="600" y="140" width="100" height="30" rx="15" class="dg-cell hit"/>
+            <rect data-s="5" x="380" y="124" width="120" height="30" rx="15" class="dg-cell"/>
+            <text data-s="1-2" x="440" y="144" class="dg-in" text-anchor="middle">T2</text>
+            <text data-s="3" x="520" y="144" class="dg-in" text-anchor="middle">T2 ждёт</text>
+            <text data-s="4" x="650" y="160" class="dg-in" text-anchor="middle">T2</text>
+            <text data-s="5" x="440" y="144" class="dg-in" text-anchor="middle">T2</text>
+            <!-- T3 -->
+            <rect data-s="1-3" x="380" y="164" width="120" height="30" rx="15" class="dg-cell"/>
+            <rect data-s="4" x="600" y="180" width="100" height="30" rx="15" class="dg-cell hit"/>
+            <rect data-s="5" x="380" y="164" width="120" height="30" rx="15" class="dg-cell"/>
+            <text data-s="1-3" x="440" y="184" class="dg-in" text-anchor="middle">T3</text>
+            <text data-s="4" x="650" y="200" class="dg-in" text-anchor="middle">T3</text>
+            <text data-s="5" x="440" y="184" class="dg-in" text-anchor="middle">T3</text>
+            <text data-s="4" x="380" y="228" class="dg-ok">действие барьера: итог раунда</text>
+            <text data-s="5" x="380" y="228" class="dg-n">следующий раунд с тем же барьером</text>
+
+            <text data-s="1" x="20" y="258" class="dg-in">слева ждёт main, справа ждать будут сами рабочие</text>
+            <text data-s="2" x="20" y="258" class="dg-in">W1 отметился и работает дальше; T1 встал у барьера</text>
+            <text data-s="3" x="20" y="258" class="dg-in">W2 тоже дальше; у барьера ждут уже двое</text>
+            <text data-s="4" x="20" y="258" class="dg-ok">ноль — main проходит; третий пришёл — барьер пропускает всех</text>
+            <text data-s="5" x="20" y="258" class="dg-in">защёлка открыта навсегда; барьер снова закрыт для нового раунда</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Слева три рабочих потока и <code>main</code>, который ждёт в <code>await()</code>. Справа три потока, которые будут ждать <i>друг друга</i>.</li>
+          <li>W1 вызвал <code>countDown()</code> и сразу работает дальше: счётчик 2. T1 вызвал <code>barrier.await()</code> и встал: ему нужны остальные.</li>
+          <li>W2 тоже отметился и не ждёт. У барьера ждут двое.</li>
+          <li>Счётчик защёлки дошёл до нуля — <code>main</code> выходит из <code>await()</code>. К барьеру пришёл третий — выполняется действие барьера, и все трое идут дальше.</li>
+          <li>Защёлка остаётся открытой навсегда: новый <code>await()</code> проходит сразу. Барьер сбрасывается, и те же потоки могут встретиться у него в следующем раунде.</li>
+        </ol>
+      </figure>
+      <p>Барьер удобен для пошаговых вычислений: каждый поток делает свою часть шага, ждёт остальных, и шаг заканчивается общим действием. Сверка платежей по дням — три потока, каждый сверяет свою часть, итог дня считает действие барьера. На четвёртый день один поток падает:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLongArray;
+
+public class Reconcile {
+    public static void main(String[] args) throws Exception {
+        int workers = 3;
+        AtomicLongArray partial = new AtomicLongArray(workers);
+        // действие барьера выполняет последний пришедший поток, пока остальные ждут
+        CyclicBarrier dayDone = new CyclicBarrier(workers, () -&gt; {
+            long sum = 0;
+            for (int i = 0; i &lt; workers; i++) sum += partial.get(i);
+            System.out.println("  итог дня: " + sum);
+        });
+        Thread[] ts = new Thread[workers];
+        for (int w = 0; w &lt; workers; w++) {
+            int id = w;
+            ts[w] = new Thread(() -&gt; {
+                try {
+                    for (int day = 1; day &lt;= 3; day++) {                 // один барьер на все дни
+                        partial.set(id, day * 100L + id);                // сверили свою часть платежей
+                        dayDone.await();                                 // ждём остальных
+                    }
+                    if (id == 0) {                                       // день 4: один поток падает
+                        System.out.println("  сверка-0: файл банка повреждён, к барьеру не пришёл");
+                        return;
+                    }
+                    dayDone.await(1, TimeUnit.SECONDS);
+                } catch (BrokenBarrierException e) {
+                    System.out.println("  " + Thread.currentThread().getName() + ": барьер сломан");
+                } catch (TimeoutException | InterruptedException e) {
+                    System.out.println("  " + Thread.currentThread().getName() + ": не дождался — " + e.getClass().getSimpleName());
+                }
+            }, "сверка-" + w);
+            ts[w].start();
+        }
+        for (Thread t : ts) t.join();
+        System.out.println("барьер сломан: " + dayDone.isBroken());
+    }
+}</code></pre>
+      <pre><code class="language-text">  итог дня: 303
+  итог дня: 603
+  итог дня: 903
+  сверка-0: файл банка повреждён, к барьеру не пришёл
+  сверка-1: барьер сломан
+  сверка-2: не дождался — TimeoutException
+барьер сломан: true</code></pre>
+      <p>Три дня один и тот же барьер открывался и сбрасывался. На четвёртый день поток <code>сверка-0</code> не пришёл. Один из ждущих вышел по таймауту и <b>сломал барьер</b>, второй тут же получил <code>BrokenBarrierException</code>. Какой поток получит какое исключение, от запуска к запуску меняется. Сломанный барьер не ждёт вечно: всех участников выбрасывает сразу. Но после этого он бесполезен, пока не вызвать <code>reset()</code>. Без таймаута на <code>await</code> оставшиеся двое ждали бы вечно — таймаут и здесь обязателен.</p>
+    </section>
+
+    <section class="step" id="phaser-exchanger">
+      <h2>Phaser — барьер с меняющимся числом участников, Exchanger — встреча двоих</h2>
+      <p><b>Phaser</b> обобщает оба синхронизатора: фаз может быть сколько угодно, а участники регистрируются и уходят на ходу. Сверка выписок трёх банков в две фазы. У ВТБ выписка пустая, и после первой фазы он выходит из игры:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Phases {
+    public static void main(String[] args) throws Exception {
+        Phaser phaser = new Phaser(1) {                          // 1 — сам main
+            @Override protected boolean onAdvance(int phase, int parties) {
+                System.out.println("фаза " + phase + " завершена, участников: " + parties);
+                return parties == 0;                             // true — фазер закончил работу
+            }
+        };
+        String[] banks = {"Сбер", "ВТБ", "Тинькофф"};
+        for (String bank : banks) {
+            phaser.register();                                   // участник добавляется на ходу
+            new Thread(() -&gt; {
+                phaser.arriveAndAwaitAdvance();                  // фаза 0: скачать выписку
+                if (bank.equals("ВТБ")) {                        // у ВТБ выписка пустая — дальше не участвует
+                    phaser.arriveAndDeregister();
+                    return;
+                }
+                phaser.arriveAndAwaitAdvance();                  // фаза 1: сверить
+                phaser.arriveAndDeregister();                    // фаза 2: закончил
+            }).start();
+        }
+        phaser.arriveAndAwaitAdvance();                          // main проходит фазу 0 вместе со всеми
+        phaser.arriveAndAwaitAdvance();                          // и фазу 1
+        phaser.arriveAndDeregister();                            // main выходит
+        while (!phaser.isTerminated()) Thread.sleep(10);
+    }
+}</code></pre>
+      <pre class="out">фаза 0 завершена, участников: 4
+фаза 1 завершена, участников: 3
+фаза 2 завершена, участников: 0</pre>
+      <p>В <code>CyclicBarrier</code> число участников задают в конструкторе навсегда. <code>Phaser</code> позволяет добавить участника через <code>register()</code>, уйти через <code>arriveAndDeregister()</code> и отметиться без ожидания через <code>arrive()</code>. <code>onAdvance</code> выполняется при смене фазы и решает, закончить ли работу.</p>
+      <p><b>Exchanger</b> — точка встречи ровно двух потоков: каждый отдаёт объект и получает объект другого. Классический сценарий — двойная буферизация: один поток наполняет буфер, другой опустошает, и в точке встречи они меняются буферами без копирования:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class Swap {
+    public static void main(String[] args) throws Exception {
+        Exchanger&lt;List&lt;String&gt;&gt; exchanger = new Exchanger&lt;&gt;();
+        Thread reader = new Thread(() -&gt; {                           // читает платежи из сети в буфер
+            List&lt;String&gt; buffer = new ArrayList&lt;&gt;();
+            try {
+                for (int batch = 1; batch &lt;= 3; batch++) {
+                    for (int i = 1; i &lt;= 2; i++) buffer.add("p" + batch + "." + i);
+                    buffer = exchanger.exchange(buffer);                 // отдали полный, получили пустой
+                }
+            } catch (InterruptedException e) { }
+        });
+        Thread writer = new Thread(() -&gt; {                           // пишет буфер в базу
+            List&lt;String&gt; buffer = new ArrayList&lt;&gt;();
+            try {
+                for (int batch = 1; batch &lt;= 3; batch++) {
+                    buffer = exchanger.exchange(buffer);                 // отдали пустой, получили полный
+                    System.out.println("записал в базу: " + buffer);
+                    buffer.clear();
+                }
+            } catch (InterruptedException e) { }
+        });
+        reader.start(); writer.start(); reader.join(); writer.join();
+    }
+}</code></pre>
+      <pre class="out">записал в базу: [p1.1, p1.2]
+записал в базу: [p2.1, p2.2]
+записал в базу: [p3.1, p3.2]</pre>
+      <p>Список безопасно переходит между потоками без <code>volatile</code> и блокировок: обмен даёт happens-before, как и остальные синхронизаторы. В прикладном коде <code>Phaser</code> и <code>Exchanger</code> встречаются редко, но на собеседовании их спрашивают, чтобы проверить, знает ли кандидат весь набор.</p>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>Выбор синхронизатора сводится к вопросу «кто кого ждёт»</h2>
+      <table class="mx">
+        <thead><tr><th>Задача</th><th>Инструмент</th><th>Главная ловушка</th></tr></thead>
+        <tbody>
+          <tr><td>не больше N одновременно</td><td><code>Semaphore(N)</code></td><td><code>release()</code> без <code>acquire()</code> увеличивает лимит</td></tr>
+          <tr><td>один или несколько ждут N событий, один раз</td><td><code>CountDownLatch(N)</code></td><td><code>countDown()</code> не в <code>finally</code> — вечное ожидание; считает события, а не успехи</td></tr>
+          <tr><td>N потоков ждут друг друга, много раундов</td><td><code>CyclicBarrier(N)</code></td><td>участник не пришёл — остальные ждут, пока не сработает таймаут</td></tr>
+          <tr><td>фазы с меняющимся составом</td><td><code>Phaser</code></td><td>забытый <code>arriveAndDeregister</code> держит фазу</td></tr>
+          <tr><td>два потока обмениваются данными</td><td><code>Exchanger</code></td><td>второй не пришёл — нужен таймаут в <code>exchange</code></td></tr>
+          <tr><td>дождаться N асинхронных результатов с ошибками</td><td><code>CompletableFuture.allOf</code></td><td>тема CompletableFuture</td></tr>
+        </tbody>
+      </table>
+      <p>У всех синхронизаторов общее: ожидание без таймаута превращает любую ошибку в зависание. В проде используют версии с таймаутом — <code>tryAcquire</code>, <code>await(time, unit)</code>, <code>exchange(x, time, unit)</code> — и логируют, кто не дождался.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>Semaphore</code> — счётчик разрешений без владельца. Ограничивает одновременные вызовы (bulkhead). <code>acquire()</code> до <code>try</code>, <code>release()</code> в <code>finally</code>, иначе лимит растёт.</li>
+        <li><code>CountDownLatch</code> — одноразовая защёлка: ждущие проходят, когда счётчик дошёл до нуля. <code>countDown()</code> — в <code>finally</code>, а успех задач проверяют отдельно.</li>
+        <li><code>CyclicBarrier</code> — потоки ждут друг друга, действие барьера выполняется в конце раунда, барьер сбрасывается. Опоздавший ломает барьер для всех.</li>
+        <li>Защёлка: рабочие отмечаются и идут дальше, ждёт кто-то другой. Барьер: ждут сами участники.</li>
+        <li><code>Phaser</code> — фазы с динамическим составом, <code>Exchanger</code> — обмен между двумя потоками.</li>
+        <li>Все синхронизаторы дают happens-before, и все требуют таймаутов в проде.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="latch-vs-barrier" data-freq="3">
+      <h3>Чем CountDownLatch отличается от CyclicBarrier?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В защёлке ждёт кто-то один или несколько, а рабочие потоки вызывают <code>countDown()</code> и идут дальше. Когда счётчик дошёл до нуля, ждущие проходят, и защёлка остаётся открытой навсегда — она одноразовая. В барьере ждут сами участники: каждый вызывает <code>await()</code> и стоит, пока не придут все N. Затем выполняется необязательное действие барьера, все идут дальше, и барьер сбрасывается для следующего раунда.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Если участник барьера не пришёл, прервался или вышел по таймауту, барьер ломается: все ждущие получают <code>BrokenBarrierException</code>, и нужен <code>reset()</code>.</li>
+            <li>Число событий у защёлки не обязано совпадать с числом потоков: один поток может вызвать <code>countDown()</code> несколько раз.</li>
+            <li>Для динамического состава есть <code>Phaser</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сервис при старте грузит 3 кеша параллельно. Как дождаться всех и не зависнуть, если один упадёт?</summary>
+          <p><code>CountDownLatch(3)</code>, <code>countDown()</code> в <code>finally</code> каждой загрузки, <code>await</code> с таймаутом. Но защёлка считает события, а не успехи — ошибки нужно собрать отдельно и проверить после <code>await</code>. Иначе сервис станет готовым со сломанным кешем, как в замере урока. Проще — <code>CompletableFuture.allOf(...)</code>: он завершится исключением, если упала любая загрузка.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="semaphore-q" data-freq="2">
+      <h3>Что такое Semaphore и где его применяют?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Счётчик разрешений. <code>acquire()</code> забирает разрешение или ждёт, <code>release()</code> возвращает. Применяют, чтобы ограничить число одновременных обращений к ресурсу: внешний API с лимитом параллельных запросов, тяжёлые отчёты, пул дорогих объектов. В замере урока семафор на 3 разрешения убрал все 97 отказов банка. Такой шаблон называют bulkhead.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>У разрешения нет владельца: вернуть может любой поток, и лишний <code>release()</code> увеличивает лимит. Поэтому <code>acquire()</code> ставят до <code>try</code>.</li>
+            <li>Семафор на одно разрешение — не мьютекс: он нереентерабелен и не привязан к потоку.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>try { permits.acquire(); callBank(); } finally { permits.release(); } — что не так?</summary>
+          <p>Если <code>acquire()</code> прервали, разрешение не получено, а <code>finally</code> всё равно его возвращает. Лимит растёт: в замере урока после одной отмены стало 4 разрешения вместо 3. Правильно — <code>permits.acquire(); try { callBank(); } finally { permits.release(); }</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="phaser-q" data-freq="1">
+      <h3>Зачем нужен Phaser, если есть CyclicBarrier?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>У <code>CyclicBarrier</code> число участников фиксировано в конструкторе. <code>Phaser</code> позволяет участникам регистрироваться (<code>register</code>) и уходить (<code>arriveAndDeregister</code>) между фазами, отмечаться без ожидания (<code>arrive</code>) и решать в <code>onAdvance</code>, когда закончить. Он нужен для многофазных вычислений, где состав меняется.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/package-summary.html">java.util.concurrent (JDK 21)</a> — основа урока: раздел Synchronizers и гарантии видимости.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CyclicBarrier.html">CyclicBarrier (JDK 21)</a> — действие барьера и модель «сломанного» барьера.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/Phaser.html">Phaser (JDK 21)</a> — регистрация, фазы, завершение.</li>
+      <li>Brian Goetz et al., <i>Java Concurrency in Practice</i>, гл. 5.5 «Synchronizers».</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -417,7 +417,7 @@ window.KB_TREE = [
             scope: 'ReentrantLock, tryLock, Condition, fairness, ReadWriteLock, StampedLock' },
           { id: 'atomics', freq: 2, status: 'draft', title: 'Atomics & CAS',
             scope: 'CAS, AtomicInteger, LongAdder, ABA, lock-free' },
-          { id: 'synchronizers', freq: 2, status: 'empty', title: 'Synchronizers',
+          { id: 'synchronizers', freq: 2, status: 'draft', title: 'Synchronizers',
             scope: 'CountDownLatch, CyclicBarrier, Semaphore, Phaser, Exchanger' },
           { id: 'concurrent-collections', freq: 3, status: 'empty', title: 'Concurrent Collections',
             scope: 'устройство ConcurrentHashMap, CopyOnWriteArrayList, BlockingQueue, Collections.synchronized*' },
