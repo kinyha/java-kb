@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: Diagnostics · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jvm-diagnostics">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: Diagnostics</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="deadlock">
+      <h2>Сервис завис, CPU на нуле — ответ в дампе потоков</h2>
+      <p>Платёжный сервис перестал отвечать на переводы. Процесс жив, CPU почти ноль, в логах тишина. Перезапуск поможет на час, но причину уничтожит. Правильный первый шаг — снять дамп потоков: одна команда, процесс не останавливается. Вот упрощённый код переводов:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class Stuck {
+    static class Account {
+        final String id;
+        long balance = 1_000;
+        Account(String id) { this.id = id; }
+    }
+
+    // перевод блокирует счета в порядке «откуда, куда»
+    static void transfer(Account from, Account to, long amount) throws InterruptedException {
+        synchronized (from) {
+            Thread.sleep(50);                                    // успеваем получить встречный перевод
+            synchronized (to) {
+                from.balance -= amount;
+                to.balance += amount;
+            }
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        Account a = new Account("A"), b = new Account("B");
+        new Thread(() -&gt; { try { transfer(a, b, 10); } catch (InterruptedException e) { } }, "transfer-1").start();
+        new Thread(() -&gt; { try { transfer(b, a, 20); } catch (InterruptedException e) { } }, "transfer-2").start();
+
+        BlockingQueue&lt;String&gt; queue = new LinkedBlockingQueue&lt;&gt;();
+        new Thread(() -&gt; { try { queue.take(); } catch (InterruptedException e) { } }, "consumer").start();
+
+        Thread.sleep(Long.MAX_VALUE);
+    }
+}</code></pre>
+      <p>Снимаем дамп и смотрим конец — JVM сама ищет взаимные блокировки на мониторах:</p>
+      <pre><code class="language-text">$ jcmd Stuck Thread.print
+...
+Found one Java-level deadlock:
+=============================
+"transfer-1":
+  waiting to lock monitor 0x000000782d140e00 (object 0x0000007030016010, a Stuck$Account),
+  which is held by "transfer-2"
+
+"transfer-2":
+  waiting to lock monitor 0x000000782d140d20 (object 0x0000007030015ff8, a Stuck$Account),
+  which is held by "transfer-1"
+
+Java stack information for the threads listed above:
+===================================================
+"transfer-1":
+	at Stuck.transfer(Stuck.java:15)
+	- waiting to lock &lt;0x0000007030016010&gt; (a Stuck$Account)
+	- locked &lt;0x0000007030015ff8&gt; (a Stuck$Account)
+	at Stuck.lambda$main$0(Stuck.java:23)
+...
+Found 1 deadlock.</code></pre>
+      <p>Диагноз готов без отладчика и без гипотез: <code>transfer-1</code> держит счёт A и ждёт B, <code>transfer-2</code> — наоборот. Строка 15 — внутренний <code>synchronized (to)</code>. Лечится единым порядком блокировок, например по <code>id</code> счёта.</p>
+      <p>Эта тема — про такие инструменты: <code>jcmd</code> и дампы потоков, Java Flight Recorder, статистика GC на лету, гистограммы классов и дампы heap. Главный сценарий в конце — как найти, кто держит утекающую память.</p>
+    </section>
+
+    <section class="step" id="jcmd">
+      <h2>jcmd — одна точка входа во все диагностические команды JVM</h2>
+      <p><code>jcmd</code> подключается к работающей JVM через attach-механизм и выполняет в ней диагностическую команду. Без аргументов он показывает Java-процессы, <code>jcmd &lt;pid&gt; help</code> — доступные команды. Вместо pid можно указать часть имени главного класса, как <code>jcmd Stuck</code> выше.</p>
+      <pre><code class="language-text">$ jcmd
+5739 Service 150 ok 15
+5747 jdk.jcmd/sun.tools.jcmd.JCmd</code></pre>
+      <table class="mx">
+        <thead><tr><th>Команда</th><th>Что даёт</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td><code>Thread.print</code></td><td>дамп потоков: стеки, состояния, блокировки, поиск deadlock</td><td>короткая пауза</td></tr>
+          <tr><td><code>Thread.dump_to_file -format=json</code></td><td>дамп вместе с виртуальными потоками (Java 21)</td><td>короткая пауза</td></tr>
+          <tr><td><code>GC.heap_info</code></td><td>размер heap и регионов, занятость</td><td>ничего</td></tr>
+          <tr><td><code>GC.class_histogram</code></td><td>сколько объектов и байт каждого класса</td><td>полная сборка</td></tr>
+          <tr><td><code>GC.heap_dump</code></td><td>снимок heap в файл <code>.hprof</code></td><td>пауза на всю запись, файл размером с heap</td></tr>
+          <tr><td><code>JFR.start</code>, <code>JFR.dump</code>, <code>JFR.view</code></td><td>запись Flight Recorder</td><td>около 1% CPU</td></tr>
+          <tr><td><code>VM.flags</code>, <code>VM.command_line</code>, <code>VM.system_properties</code></td><td>с какими настройками процесс реально работает</td><td>ничего</td></tr>
+          <tr><td><code>VM.set_flag</code></td><td>поменять manageable-флаг на ходу</td><td>ничего</td></tr>
+          <tr><td><code>VM.log</code>, <code>VM.native_memory</code>, <code>Compiler.codecache</code></td><td>логи, native-память, code cache — в темах GC Logs, Native Memory, JIT</td><td>зависит</td></tr>
+        </tbody>
+      </table>
+      <p>Старые утилиты по-прежнему есть в JDK 21: <code>jstack</code> — то же, что <code>Thread.print</code>, <code>jmap -histo:live</code> и <code>jmap -dump</code> — гистограмма и дамп, <code>jstat</code> — счётчики GC. <code>jcmd</code> умеет всё то же и больше, поэтому начинают с него.</p>
+      <p>Часть флагов помечена <code>manageable</code>, и их можно включить на живом процессе. Самый полезный — дамп при OOM, если его забыли при старте. Проверено:</p>
+      <pre><code class="language-text">$ jcmd 5811 VM.set_flag HeapDumpOnOutOfMemoryError true
+5811:
+Command executed successfully
+$ jcmd 5811 VM.flags -all | grep HeapDumpOnOutOfMemoryError
+     bool HeapDumpOnOutOfMemoryError               = true                                   {manageable} {management}</code></pre>
+      <div class="note warn">
+        <p>Attach работает только от того же пользователя ОС и через общий временный каталог. В Kubernetes <code>jcmd</code> запускают внутри контейнера приложения (<code>kubectl exec</code>), от пользователя, под которым работает JVM. Если в образе только JRE без <code>jcmd</code>, диагностику заранее закладывают в образ или в debug-контейнер. Флаг <code>-XX:+DisableAttachMechanism</code> отключает attach целиком.</p>
+      </div>
+    </section>
+
+    <section class="step" id="thread-dump">
+      <h2>Дамп потоков читают по состоянию, блокировкам и времени CPU</h2>
+      <p>Заголовок каждого потока в дампе уже многое говорит:</p>
+      <pre><code class="language-text">"transfer-1" #28 [27395] prio=5 os_prio=31 cpu=0.58ms elapsed=2.39s tid=0x000000782cceea00 nid=27395 waiting for monitor entry  [0x000000016f9d6000]
+#  имя           id  id в ОС          CPU за жизнь потока   сколько живёт                 id потока в ОС (для top -H)
+   java.lang.Thread.State: BLOCKED (on object monitor)</code></pre>
+      <table class="mx">
+        <thead><tr><th>Состояние</th><th>Что делает поток</th><th>Пример из дампа урока</th></tr></thead>
+        <tbody>
+          <tr><td><code>RUNNABLE</code></td><td>выполняет код или сидит в системном вызове (чтение сокета тоже RUNNABLE)</td><td><code>http-exec</code> в <code>ArrayList.contains</code></td></tr>
+          <tr><td><code>BLOCKED</code></td><td>ждёт входа в <code>synchronized</code></td><td><code>transfer-1</code>: <code>waiting to lock</code></td></tr>
+          <tr><td><code>WAITING</code></td><td>ждёт без таймаута: <code>park</code>, <code>wait()</code>, <code>join()</code></td><td><code>consumer</code> в <code>LinkedBlockingQueue.take</code></td></tr>
+          <tr><td><code>TIMED_WAITING</code></td><td>ждёт с таймаутом: <code>sleep</code>, <code>poll(timeout)</code></td><td><code>main</code> в <code>Thread.sleep</code></td></tr>
+        </tbody>
+      </table>
+      <p>Строки <code>- locked &lt;адрес&gt;</code> и <code>- waiting to lock &lt;адрес&gt;</code> связывают потоки: по адресу видно, кто держит монитор, который ждут остальные. Для <code>ReentrantLock</code> и очередей вместо них будет <code>parking to wait for</code>. Кто держит такой замок, показывает только флаг <code>jstack -l</code> или <code>Thread.print -l</code>.</p>
+      <h3>Горячий поток: два дампа и разница cpu=</h3>
+      <p>Другой частый случай — CPU на 100%. Поток, который его ест, находят по полю <code>cpu=</code>: оно растёт у горячего потока между двумя дампами. Модель — пул обработчиков, один из которых получил большой запрос и ушёл в квадратичный алгоритм:</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class Busy {
+    // убрать повторы, сохранив порядок; contains у ArrayList — полный проход по списку
+    static List&lt;String&gt; dedupe(List&lt;String&gt; ids) {
+        List&lt;String&gt; result = new ArrayList&lt;&gt;();
+        for (String id : ids)
+            if (!result.contains(id)) result.add(id);
+        return result;
+    }
+
+    public static void main(String[] args) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(4, r -&gt; new Thread(r, "http-exec-" + UUID.randomUUID().toString().substring(0, 4)));
+        List&lt;String&gt; small = List.of("p1", "p2", "p1");
+        List&lt;String&gt; big = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; 300_000; i++) big.add("payment-" + i);   // один «большой» запрос
+        for (int i = 0; i &lt; 3; i++) pool.submit(() -&gt; dedupe(small));
+        pool.submit(() -&gt; dedupe(big));
+        Thread.sleep(Long.MAX_VALUE);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ jcmd Busy Thread.print | grep '^"http-exec'        # через 3 секунды после старта
+"http-exec-dadc" #28 [42499] prio=5 os_prio=31 cpu=0.24ms elapsed=3.21s
+"http-exec-4c21" #29 [41987] prio=5 os_prio=31 cpu=0.18ms elapsed=3.21s
+"http-exec-2494" #30 [41731] prio=5 os_prio=31 cpu=0.26ms elapsed=3.21s
+"http-exec-f0c7" #31 [34563] prio=5 os_prio=31 cpu=3203.51ms elapsed=3.21s
+$ jcmd Busy Thread.print                                 # через 5 секунд
+"http-exec-f0c7" #31 [34563] prio=5 os_prio=31 cpu=8274.75ms elapsed=8.29s tid=0x00000076ecd28700 nid=34563 runnable
+   java.lang.Thread.State: RUNNABLE
+	at java.util.ArrayList.indexOfRange(java.base@21.0.11/ArrayList.java:298)
+	at java.util.ArrayList.indexOf(java.base@21.0.11/ArrayList.java:286)
+	at java.util.ArrayList.contains(java.base@21.0.11/ArrayList.java:275)
+	at Busy.dedupe(Busy.java:9)</code></pre>
+      <p>За 5 секунд у потока <code>f0c7</code> прибавилось 5 секунд CPU — он занят на 100%. У остальных ноль. Стек показывает место: <code>contains</code> внутри <code>dedupe</code>. Отсюда правило: снимают несколько дампов с интервалом в несколько секунд. Один дамп — мгновенный снимок, и по нему не отличить «застрял» от «случайно оказался здесь». На Linux то же самое делают через <code>top -H -p &lt;pid&gt;</code>: колонка PID там — это <code>nid</code> потока.</p>
+      <div class="note tip">
+        <p>Виртуальные потоки Java 21 в <code>Thread.print</code> не попадают — их могут быть миллионы. Для них есть <code>jcmd &lt;pid&gt; Thread.dump_to_file -format=json threads.json</code>: он пишет все потоки, сгруппированные по контейнерам — пулам и executor'ам.</p>
+      </div>
+    </section>
+
+    <section class="step" id="jfr">
+      <h2>JFR записывает, что делала JVM, почти бесплатно</h2>
+      <p>Дамп потоков — снимок одного момента. <b>Java Flight Recorder</b> — запись во времени: сэмплы стеков, выделения памяти, паузы GC, блокировки, ввод-вывод, исключения. Он встроен в JVM и по данным Oracle с настройками по умолчанию стоит около 1% производительности. Поэтому его можно держать включённым в проде постоянно, в кольцевом буфере.</p>
+      <pre><code class="language-bash"># с самого старта, в кольцевом буфере: последние 6 часов или 500 МБ
+java -XX:StartFlightRecording=maxage=6h,maxsize=500m,filename=/dumps/app.jfr,dumponexit=true -jar app.jar
+
+# на живом процессе: записать 60 секунд с более подробными настройками
+jcmd &lt;pid&gt; JFR.start name=cpu settings=profile duration=60s filename=/tmp/cpu.jfr</code></pre>
+      <p>С Java 21 файл можно читать прямо в терминале: у утилиты <code>jfr</code> есть команда <code>view</code> с готовыми отчётами. Запись пяти секунд работы программы <code>Busy</code>:</p>
+      <pre><code class="language-text">$ jcmd Busy JFR.start name=cpu duration=5s filename=busy.jfr
+$ jfr view hot-methods busy.jfr
+
+                      Java Methods that Executes the Most
+
+Method                                                          Samples Percent
+--------------------------------------------------------------- ------- -------
+java.util.ArrayList.indexOfRange(Object, int, int)                  198 100.00%</code></pre>
+      <p>Все сэмплы CPU пришлись на один метод. Кроме <code>hot-methods</code>, в JDK 21 есть <code>gc-pauses</code>, <code>allocation-by-site</code>, <code>contention-by-site</code> (где потоки ждут блокировок), <code>exception-by-site</code>, <code>container-cpu-throttling</code> и десятки других. Полный список выводит <code>jfr view</code> без аргументов. Для графического анализа тот же файл открывают в JDK Mission Control.</p>
+      <p>Главное преимущество JFR перед профилировщиком, который подключают по запросу: запись уже шла, когда случилась проблема. После инцидента сохраняют буфер через <code>jcmd &lt;pid&gt; JFR.dump filename=incident.jfr</code> и смотрят, что было за минуты до него.</p>
+    </section>
+
+    <section class="step" id="leak-hunt">
+      <h2>Утечку ищут по шагам: подтвердить, найти класс, найти держателя</h2>
+      <p>Возьмём сервис с утечкой из темы GC Logs &amp; Tuning. Каждый десятый запрос кладёт 4 КБ в статический список <code>AUDIT</code>, из которого ничего не удаляют. Запускаем с heap 2 ГБ и включённым JFR и проходим путь, как в проде.</p>
+      <p><b>1. Подтвердить.</b> Лог GC показывает рост нижней границы, а на лету то же видно через <code>jstat</code> — по строке раз в 2 секунды:</p>
+      <pre><code class="language-text">$ jstat -gcutil 5586 2000 6
+  S0     S1     E      O      M     CCS    YGC     YGCT     FGC    FGCT     CGC    CGCT       GCT
+     - 100.00  31.99  43.07  94.59  73.63     11     0.046     0     0.000     0     0.000     0.046
+     - 100.00  51.64  52.42  94.60  73.63     12     0.059     0     0.000     0     0.000     0.059
+     - 100.00  71.33  60.02  94.60  73.63     13     0.064     0     0.000     0     0.000     0.064
+     - 100.00  91.06  68.28  94.60  73.63     14     0.071     0     0.000     0     0.000     0.071
+     -  99.34  16.62  84.96  94.60  73.63     16     0.081     0     0.000     0     0.000     0.081
+     - 100.00  37.27  90.26  94.60  73.63     17     0.086     0     0.000     0     0.000     0.086</code></pre>
+      <p>Колонки — проценты заполнения: <code>E</code> — eden, <code>O</code> — old, <code>M</code> — metaspace. Дальше счётчики сборок и их суммарное время: <code>YGC</code> — молодые, <code>FGC</code> — полные, <code>CGC</code> — конкурентные циклы. Old растёт на 5–9% за каждую молодую сборку и за 10 секунд прошёл путь с 43 до 90%. Сам по себе рост old — ещё не утечка: мёртвые объекты в old убирает только маркировка. Но вместе с растущей границей в логе GC картина однозначная.</p>
+      <p><b>2. Найти класс.</b> <code>GC.class_histogram</code> считает живые объекты по классам; перед подсчётом выполняется полная сборка. Две гистограммы с интервалом в 10 секунд:</p>
+      <pre><code class="language-text">$ jcmd 5586 GC.class_histogram | head -5
+ num     #instances         #bytes  class name (module)
+-------------------------------------------------------
+   1:       1602668      393274336  [B (java.base@21.0.11)
+   2:       1502813       48090016  java.util.HashMap$Node (java.base@21.0.11)
+   3:       1500140       24002240  java.lang.Integer (java.base@21.0.11)
+# через 10 секунд
+   1:       1652999      600231352  [B (java.base@21.0.11)
+   2:       1502813       48090016  java.util.HashMap$Node (java.base@21.0.11)
+   3:       1500140       24002240  java.lang.Integer (java.base@21.0.11)</code></pre>
+      <p>Растут только <code>byte[]</code> (<code>[B</code>): плюс 50 тысяч объектов и 200 МБ. Узлы <code>HashMap</code> и <code>Integer</code> стоят на месте — кеш здоров. Но <code>byte[]</code> есть везде, и гистограмма не говорит, <i>кто</i> их держит.</p>
+      <p><b>3. Найти держателя.</b> JFR умеет отслеживать выборку долгоживущих объектов вместе с цепочкой ссылок до корня — событие <code>OldObjectSample</code> с опцией <code>path-to-gc-roots=true</code>:</p>
+      <pre><code class="language-text">$ java -Xmx2g -XX:StartFlightRecording=settings=profile,filename=leak.jfr,path-to-gc-roots=true Service 150 leak 40
+$ jfr print --events jdk.OldObjectSample leak.jfr
+jdk.OldObjectSample {
+  allocationTime = 08:41:27.980 (2026-09-26)
+  objectSize = 4.0 kB
+  objectAge = 10.8 s
+  lastKnownHeapUsage = 515.7 MB
+  object =  [
+    byte[4096]                                          # сам объект
+    [75093] : java.lang.Object[160065]                  # лежит в массиве по индексу 75093
+    elementData : java.util.ArrayList Size: 128495      # массив — внутренность ArrayList
+    AUDIT : java.lang.Class Class Name: Service         # список — статическое поле Service.AUDIT
+  ]
+  stackTrace = [
+    Service.main(String[]) line: 19                     # где объект создан
+  ]
+  ...
+}</code></pre>
+      <p>Цепочка отвечает на оба вопроса: кто держит (<code>Service.AUDIT</code>, 128 495 элементов и растёт) и где создаются объекты (строка 19). Для утечки этого достаточно, и дамп heap снимать не пришлось.</p>
+      <p><b>4. Если держатель неочевиден</b> — дамп heap и анализатор: Eclipse MAT, VisualVM или профилировщик IntelliJ. Главный инструмент там — <b>retained size</b> и <b>dominator tree</b>:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Граф объектов из дампа сервиса. Статическое поле AUDIT ссылается на ArrayList размером 24 байта, тот на массив Object из 160065 элементов, 625 килобайт, тот на 128495 массивов byte по 4 килобайта. Статическое поле CACHE ссылается на HashMap 48 байт, тот на таблицу узлов 8 мегабайт и полтора миллиона записей. Собственный размер ArrayList 24 байта, а удерживаемый — около 504 мегабайт, потому что все пути к массиву и байтовым массивам идут через него. HashMap удерживает около 150 мегабайт. Дерево доминаторов сортирует объекты по удерживаемому размеру, и ArrayList из AUDIT оказывается первым.">
+            <defs>
+              <marker id="dm-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">КОРНИ</text>
+            <text x="200" y="22" class="dg-cap">ОБЪЕКТЫ В HEAP</text>
+
+            <!-- ряд AUDIT -->
+            <rect x="20" y="36" width="140" height="50" rx="8" class="dg-box"/>
+            <text x="32" y="58" class="dg-in">static AUDIT</text>
+            <text x="32" y="76" class="dg-n">поле Service</text>
+            <path d="M160 61 L 196 61" class="dg-line" marker-end="url(#dm-n)"/>
+            <rect data-s="1-2" x="200" y="36" width="130" height="50" rx="8" class="dg-box"/>
+            <rect data-s="3-" x="200" y="36" width="130" height="50" rx="8" class="dg-cell miss"/>
+            <text x="212" y="58" class="dg-in">ArrayList</text>
+            <text x="212" y="76" class="dg-n">24 Б</text>
+            <path d="M330 61 L 366 61" class="dg-line" marker-end="url(#dm-n)"/>
+            <rect data-s="1" x="370" y="36" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="2-" x="370" y="36" width="150" height="50" rx="8" class="dg-cell miss"/>
+            <text x="382" y="58" class="dg-in">Object[160065]</text>
+            <text x="382" y="76" class="dg-n">625 КБ</text>
+            <path d="M520 61 L 556 61" class="dg-line" marker-end="url(#dm-n)"/>
+            <rect data-s="1" x="560" y="36" width="140" height="50" rx="8" class="dg-box"/>
+            <rect data-s="2-" x="560" y="36" width="140" height="50" rx="8" class="dg-cell miss"/>
+            <text x="572" y="58" class="dg-in">byte[4096]</text>
+            <text x="572" y="76" class="dg-n">× 128 495, по 4 КБ</text>
+
+            <!-- ряд CACHE -->
+            <rect x="20" y="120" width="140" height="50" rx="8" class="dg-box"/>
+            <text x="32" y="142" class="dg-in">static CACHE</text>
+            <text x="32" y="160" class="dg-n">поле Service</text>
+            <path d="M160 145 L 196 145" class="dg-line" marker-end="url(#dm-n)"/>
+            <rect x="200" y="120" width="130" height="50" rx="8" class="dg-box"/>
+            <text x="212" y="142" class="dg-in">HashMap</text>
+            <text x="212" y="160" class="dg-n">48 Б</text>
+            <path d="M330 145 L 366 145" class="dg-line" marker-end="url(#dm-n)"/>
+            <rect x="370" y="120" width="150" height="50" rx="8" class="dg-box"/>
+            <text x="382" y="142" class="dg-in">Node[2097152]</text>
+            <text x="382" y="160" class="dg-n">8 МБ</text>
+            <path d="M520 145 L 556 145" class="dg-line" marker-end="url(#dm-n)"/>
+            <rect x="560" y="120" width="140" height="50" rx="8" class="dg-box"/>
+            <text x="572" y="142" class="dg-in">1,5 млн записей</text>
+            <text x="572" y="160" class="dg-n">Node+Integer+byte[]</text>
+
+            <!-- подписи по шагам -->
+            <text data-s="2" x="370" y="104" class="dg-bad">retained Object[] ≈ 504 МБ</text>
+            <text data-s="3-" x="200" y="104" class="dg-bad">ArrayList: shallow 24 Б, retained ≈ 504 МБ</text>
+            <g data-s="4">
+              <rect x="200" y="180" width="500" height="58" rx="8" class="dg-box"/>
+              <text x="212" y="198" class="dg-n">dominator tree, по retained size:</text>
+              <text x="212" y="215" class="dg-in" xml:space="preserve">1. ArrayList ← AUDIT     ≈ 504 МБ</text>
+              <text x="212" y="231" class="dg-in" xml:space="preserve">2. HashMap ← CACHE       ≈ 150 МБ</text>
+            </g>
+
+            <text data-s="1" x="20" y="252" class="dg-in">shallow size: собственный размер каждого объекта</text>
+            <text data-s="2" x="20" y="252" class="dg-bad">retained size: что освободится, если объект исчезнет</text>
+            <text data-s="3" x="20" y="252" class="dg-bad">все пути к массиву идут через ArrayList — он доминатор</text>
+            <text data-s="4" x="20" y="252" class="dg-in">сортировка по retained сразу показывает держателя</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><b>Shallow size</b> — собственный размер объекта: заголовок и поля, без того, на что он ссылается. У <code>ArrayList</code> это 24 байта, у его массива — 625 КБ, у каждого <code>byte[4096]</code> — 4 КБ. Гистограмма классов складывает именно shallow-размеры.</li>
+          <li><b>Retained size</b> — сколько памяти освободится, если объект станет недостижим: он сам плюс всё, до чего можно дойти только через него. Массив <code>Object[160065]</code> удерживает себя и 128 495 массивов по 4 КБ — около 504 МБ.</li>
+          <li>Все пути от корней к массиву идут через <code>ArrayList</code>, поэтому <code>ArrayList</code> — его <b>доминатор</b>, и retained у него те же 504 МБ при shallow в 24 байта. Если бы на часть байтовых массивов ссылался ещё и кеш, в retained списка они бы не вошли: без списка они остались бы живы.</li>
+          <li><b>Dominator tree</b> в анализаторе сортирует объекты по retained size. Первой строкой оказывается список из <code>AUDIT</code> на 504 МБ, второй — кеш на ~150 МБ, который и должен столько занимать. Держатель утечки найден за один взгляд.</li>
+        </ol>
+      </figure>
+      <p>Retained-размеры посчитаны по данным запуска: 128 495 × 4 112 байт с заголовками плюс массив 625 КБ. Для кеша — 1,5 млн записей по ~100 байт плюс таблица 8 МБ.</p>
+    </section>
+
+    <section class="step" id="heap-dump">
+      <h2>Дамп heap при OOM настраивают заранее, и он содержит все данные приложения</h2>
+      <p>Самый ценный дамп — снятый в момент <code>OutOfMemoryError</code>: в нём ровно то, что заполнило heap. Его нельзя снять потом, поэтому флаги ставят при старте:</p>
+      <pre><code class="language-text">$ java -Xmx512m -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dumps Service 150 leak 60
+java.lang.OutOfMemoryError: Java heap space
+Dumping heap to /dumps/java_pid5683.hprof ...
+Heap dump file created [601187940 bytes in 0.178 secs]</code></pre>
+      <p>Файл получился 601 МБ при heap 512 МБ: формат <code>hprof</code> хранит у каждого объекта идентификаторы и ссылки, поэтому миллионы мелких объектов делают его больше самого heap. Места на диске под дамп нужно не меньше <code>-Xmx</code>, а лучше с запасом.</p>
+      <p>Снятие дампа вручную на живом процессе:</p>
+      <pre><code class="language-text">$ jcmd 5688 GC.heap_info
+ garbage-first heap   total 888832K, used 577010K [0x0000007000800000, 0x0000007040800000)
+$ jcmd 5688 GC.heap_dump /dumps/live.hprof
+Heap dump file created [221555774 bytes in 0.095 secs]</code></pre>
+      <p>Занято было 577 МБ, а в дампе 221 МБ: <code>GC.heap_dump</code> по умолчанию сначала делает полную сборку и пишет только живые объекты. Флаг <code>-all</code> пишет всё, включая мусор. Иногда это нужно, например чтобы увидеть, что создавалось в больших количествах.</p>
+      <ul>
+        <li><b>Пауза.</b> На время записи JVM стоит целиком. Здесь это доли секунды на быстром диске. На heap в десятки гигабайт — секунды и больше, и балансировщик может снять под с трафика. Поэтому дамп снимают с пода, выведенного из балансировки, или с реплики.</li>
+        <li><b>Данные.</b> В дампе все строки из памяти: токены, пароли из конфигурации, персональные данные клиентов. Обращаются с ним как с базой данных прода — не отправляют в общий чат и не оставляют на ноутбуке.</li>
+        <li><b>Контейнер.</b> <code>HeapDumpPath</code> должен указывать на volume, который переживёт перезапуск контейнера. Иначе дамп исчезнет вместе с ним.</li>
+      </ul>
+      <p>Что делать процессу после OOM? Состояние приложения после <code>OutOfMemoryError</code> непредсказуемо: ошибка могла вылететь в любом потоке посреди любой операции. Флаг <code>-XX:+ExitOnOutOfMemoryError</code> завершает JVM сразу после первой OOM (и после записи дампа), чтобы оркестратор перезапустил под. Это лучше, чем полуживой процесс, который отвечает ошибками.</p>
+      <div class="trap">
+        <p class="myth">Если сервис падает с OutOfMemoryError, нужно увеличить -Xmx.</p>
+        <p class="fact">Сначала нужно понять, что заполнило heap. При утечке больший heap только отложит падение. Дамп при OOM, гистограмма или <code>OldObjectSample</code> в JFR покажут, кто держит память. Увеличивают heap, когда живые данные законно выросли — например, стало больше клиентов в кеше.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li><code>jcmd</code> — главный инструмент: дамп потоков, гистограмма, дамп heap, JFR, флаги, логи на живом процессе. Работает от того же пользователя внутри контейнера.</li>
+        <li>Дамп потоков показывает состояния, блокировки и CPU каждого потока, а deadlock на мониторах JVM находит сама. Снимают несколько дампов с интервалом; горячий поток виден по росту <code>cpu=</code>.</li>
+        <li>JFR пишет события почти бесплатно и может работать в проде постоянно. <code>jfr view</code> в JDK 21 даёт готовые отчёты: <code>hot-methods</code>, <code>gc-pauses</code>, <code>allocation-by-site</code>.</li>
+        <li>Утечку ищут так: подтвердить по логу GC и <code>jstat</code>, найти растущий класс по двум гистограммам, найти держателя через <code>OldObjectSample</code> или dominator tree в дампе.</li>
+        <li>Retained size — сколько освободится без объекта; dominator tree сортирует по нему и показывает держателя.</li>
+        <li><code>HeapDumpOnOutOfMemoryError</code> и <code>HeapDumpPath</code> ставят заранее. Дамп — пауза, файл размером с heap и все данные приложения.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="service-hangs" data-freq="3">
+      <h3>Сервис завис и не отвечает. Что будешь делать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>До перезапуска снимаю несколько дампов потоков с интервалом в несколько секунд: <code>jcmd &lt;pid&gt; Thread.print</code> или <code>jstack</code>. Смотрю, где стоят потоки обработки запросов. Если в конце дампа <code>Found one Java-level deadlock</code>, JVM уже нашла взаимную блокировку. Если потоки в <code>BLOCKED</code> на одном мониторе — ищу, кто его держит, по строке <code>- locked</code>. Если в <code>WAITING</code> на пуле соединений или внешнем вызове — проблема снаружи: база, HTTP-клиент без таймаута.</p>
+          <p>Параллельно смотрю лог GC: процесс может «висеть» в череде full GC перед OOM.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Для <code>ReentrantLock</code> владельца показывает только <code>Thread.print -l</code>.</li>
+            <li>Виртуальные потоки видны только в <code>Thread.dump_to_file -format=json</code>.</li>
+            <li>Если CPU высокий — сравниваю <code>cpu=</code> у потоков в двух дампах или смотрю <code>top -H</code>: там PID потока совпадает с <code>nid</code> в дампе.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>В дампе: поток A — «waiting to lock &lt;0x…6010&gt;», «locked &lt;0x…5ff8&gt;», поток B — наоборот. Что это и как исправить?</summary>
+          <p>Взаимная блокировка: каждый держит монитор, который ждёт другой. Так бывает, когда потоки захватывают одни и те же замки в разном порядке, например переводы A→B и B→A. Исправление — единый порядок захвата, например по id счёта, или <code>tryLock</code> с таймаутом.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="find-leak" data-freq="3">
+      <h3>Как найти утечку памяти в Java-приложении?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала подтверждаю утечку: в логе GC нижняя граница занятости после смешанных или полных сборок растёт от цикла к циклу. На лету это видно через <code>jstat -gcutil</code>. Потом снимаю две гистограммы классов с интервалом (<code>jcmd &lt;pid&gt; GC.class_histogram</code>) и смотрю, какой класс растёт. Чтобы найти держателя, снимаю дамп heap и открываю в MAT: dominator tree по retained size показывает, какой объект удерживает больше всего памяти.</p>
+          <p>В проде заранее включаю <code>-XX:+HeapDumpOnOutOfMemoryError</code> с <code>HeapDumpPath</code> на постоянный volume.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JFR с <code>path-to-gc-roots=true</code> пишет события <code>OldObjectSample</code> с цепочкой ссылок до корня и стеком создания — часто этого хватает без дампа.</li>
+            <li><code>HeapDumpOnOutOfMemoryError</code> — manageable-флаг, его можно включить на живом процессе через <code>jcmd VM.set_flag</code>.</li>
+            <li>Дамп останавливает JVM и содержит все данные приложения, включая секреты и персональные данные.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем retained size отличается от shallow size?</summary>
+          <p>Shallow — собственный размер объекта: заголовок и поля. Retained — сколько освободится, если объект станет недостижим: он сам и всё, до чего можно дойти только через него. У <code>ArrayList</code> из урока shallow 24 байта, а retained около 504 МБ. Утечку ищут по retained.</p>
+        </details>
+        <details data-kind="задача">
+          <summary>В двух гистограммах с интервалом 10 с растёт только [B: 393 → 600 МБ. Что это значит и что дальше?</summary>
+          <p><code>[B</code> — это <code>byte[]</code>. Растут байтовые массивы, остальные классы стабильны. Но <code>byte[]</code> лежат внутри строк, буферов и кешей, поэтому гистограмма не называет держателя. Дальше — <code>OldObjectSample</code> в JFR или дамп heap и dominator tree.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="jfr-question" data-freq="2">
+      <h3>Что такое JFR и когда его использовать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Java Flight Recorder — встроенный в JVM механизм записи событий: сэмплы стеков для профилирования CPU, выделения памяти, паузы GC, блокировки, ввод-вывод, исключения. С настройками по умолчанию стоит около 1%, поэтому его держат включённым в проде в кольцевом буфере и сохраняют при инциденте через <code>jcmd JFR.dump</code>. Запускается флагом <code>-XX:StartFlightRecording</code> или через <code>jcmd JFR.start</code>. Смотрят в JDK Mission Control или, с Java 21, через <code>jfr view</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем JFR лучше подключения профилировщика после жалобы?</summary>
+          <p>Запись уже шла, когда случилась проблема: видно, что происходило за минуты до инцидента. Профилировщик, подключённый потом, увидит только то, что происходит сейчас, — а проблема к этому моменту могла пройти.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="heap-dump-question" data-freq="2">
+      <h3>Как снять дамп heap и чем это опасно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Автоматически при OOM — флагами <code>-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=...</code>. Вручную — <code>jcmd &lt;pid&gt; GC.heap_dump file.hprof</code> или <code>jmap -dump:live,format=b,file=...</code>. По умолчанию перед записью выполняется полная сборка, и в файл идут только живые объекты.</p>
+          <p>Опасности: JVM стоит на всё время записи; файл бывает больше самого heap; в нём все данные из памяти, включая пароли и персональные данные.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В манифесте пода: -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp, emptyDir не подключён. Что не так?</summary>
+          <p><code>/tmp</code> внутри контейнера исчезнет при его перезапуске после OOM, и дамп пропадёт. Нужен volume, который переживёт перезапуск, и места на нём не меньше <code>-Xmx</code> с запасом. Ещё стоит добавить <code>-XX:+ExitOnOutOfMemoryError</code>, чтобы после дампа процесс сразу завершился и под перезапустился.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/diagnostic-tools.html">JDK 21 Troubleshooting Guide: Diagnostic Tools</a> — основа урока: jcmd, JFR, jstack, jmap, jstat.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/troubleshoot/troubleshooting-memory-leaks.html">Troubleshooting Memory Leaks</a> — путь поиска утечки, OldObjectSample, heap dump.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jcmd.html">The jcmd Command</a> — все команды и их параметры.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/jfr.html">The jfr Command</a> — <code>print</code>, <code>summary</code> и <code>view</code>.</li>
+      <li><a href="https://help.eclipse.org/latest/topic/org.eclipse.mat.ui.help/concepts/dominatortree.html">Eclipse MAT: Dominator Tree</a> — retained size и доминаторы.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
