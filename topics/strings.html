@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Strings · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="strings">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Strings</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="currency">
+      <h2>Комиссия за рубли нулевая — но только если «RUB» написан в коде</h2>
+      <p>Платежи в рублях идут без комиссии. Проверка написана через <code>==</code>, и в юнит-тестах, где валюта задана литералом, всё работает. В проде валюта приходит из JSON или из базы:</p>
+      <pre><code class="language-java">public class Currency {
+    static long fee(String currency, long amount) {
+        if (currency == "RUB") return 0;                          // сравнение строк через ==
+        return amount / 100;
+    }
+
+    public static void main(String[] args) {
+        String fromCode = "RUB";                                  // литерал в коде
+        String fromJson = new StringBuilder("RU").append('B').toString();   // как из разобранного JSON
+        String fromDb = "rub".toUpperCase();                      // как после нормализации
+        System.out.println("литерал:   комиссия " + fee(fromCode, 10_000));
+        System.out.println("из JSON:   комиссия " + fee(fromJson, 10_000) + ", equals: " + fromJson.equals("RUB"));
+        System.out.println("из базы:   комиссия " + fee(fromDb, 10_000) + ", intern() == \"RUB\": " + (fromDb.intern() == "RUB"));
+    }
+}</code></pre>
+      <pre class="out">литерал:   комиссия 0
+из JSON:   комиссия 100, equals: true
+из базы:   комиссия 100, intern() == "RUB": true</pre>
+      <p>Клиенты платят комиссию, которой не должно быть. <code>==</code> сравнивает ссылки, а строка, построенная во время работы программы, — новый объект, даже если символы совпадают. Литерал <code>"RUB"</code> в коде и строка из JSON — разные объекты.</p>
+      <p>В этой теме — почему строки неизменяемы и что такое пул строк, как работает <code>intern()</code>, почему конкатенация в цикле квадратичная, как строки хранятся в памяти и что происходит с кодировками. Отдельно — ловушки с эмодзи, пробелами и text blocks.</p>
+    </section>
+
+    <section class="step" id="pool">
+      <h2>Литералы живут в пуле строк, а построенные строки — отдельными объектами</h2>
+      <p><code>String</code> неизменяем: ни один метод не меняет строку, все возвращают новую. Поэтому одинаковые строки можно безопасно разделять между всеми, кто их использует. JVM так и делает с литералами: все одинаковые литералы во всех классах — один объект из <b>пула строк</b>. Какие выражения попадают в пул:</p>
+      <pre><code class="language-java">public class Pool {
+    static final String PREFIX = "RU";                            // константа времени компиляции
+    public static void main(String[] args) {
+        String a = "RUB";
+        String b = "RU" + "B";                                    // склеено компилятором
+        String c = PREFIX + "B";                                  // тоже: PREFIX — final-константа
+        String part = "RU";
+        String d = part + "B";                                    // склеивается во время работы
+        String e = new String("RUB");                             // новый объект в heap
+        System.out.printf("a == b: %s, a == c: %s, a == d: %s, a == e: %s, a == e.intern(): %s%n",
+            a == b, a == c, a == d, a == e, a == e.intern());
+    }
+}</code></pre>
+      <pre class="out">a == b: true, a == c: true, a == d: false, a == e: false, a == e.intern(): true</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Пул строк и обычные объекты. Литерал RUB лежит в пуле, на него ссылается переменная a. Выражения RU плюс B и PREFIX плюс B компилятор склеивает заранее, и b и c ссылаются на тот же объект из пула. Строка part плюс B склеивается во время работы и становится новым объектом вне пула. new String создаёт ещё один объект. intern возвращает ссылку на объект из пула.">
+            <defs>
+              <marker id="sp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ПЕРЕМЕННЫЕ</text>
+            <text x="300" y="24" class="dg-cap">HEAP</text>
+            <rect x="300" y="36" width="210" height="104" rx="8" class="dg-sep" fill="none"/>
+            <text x="310" y="54" class="dg-n">пул строк</text>
+            <rect x="330" y="72" width="150" height="40" rx="6" class="dg-cell hit"/>
+            <text x="405" y="97" class="dg-in" text-anchor="middle">"RUB"</text>
+
+            <!-- переменные -->
+            <text x="20" y="64" class="dg-in">a = "RUB"</text>
+            <path d="M160 60 L 326 86" class="dg-line" marker-end="url(#sp-n)"/>
+            <g data-s="2-">
+              <text x="20" y="98" class="dg-in">b, c</text>
+              <path d="M160 94 L 326 94" class="dg-line" marker-end="url(#sp-n)"/>
+            </g>
+            <g data-s="3-">
+              <text x="20" y="160" class="dg-in">d = part + "B"</text>
+              <rect x="540" y="140" width="150" height="40" rx="6" class="dg-box"/>
+              <text x="615" y="165" class="dg-in" text-anchor="middle">"RUB"</text>
+              <path d="M160 156 L 536 158" class="dg-line" marker-end="url(#sp-n)"/>
+            </g>
+            <g data-s="4-">
+              <text x="20" y="214" class="dg-in">e = new String</text>
+              <rect x="540" y="194" width="150" height="40" rx="6" class="dg-box"/>
+              <text x="615" y="219" class="dg-in" text-anchor="middle">"RUB"</text>
+              <path d="M160 210 L 536 212" class="dg-line" marker-end="url(#sp-n)"/>
+            </g>
+            <g data-s="5">
+              <path d="M690 214 C 714 214, 714 92, 484 92" class="dg-line ok" marker-end="url(#sp-ok)"/>
+              <text x="590" y="84" class="dg-ok">e.intern()</text>
+            </g>
+
+            <text data-s="1" x="20" y="252" class="dg-in">литерал: объект в пуле строк, общий для всех классов</text>
+            <text data-s="2" x="20" y="252" class="dg-ok">"RU" + "B" и PREFIX + "B" склеил компилятор — тот же объект</text>
+            <text data-s="3" x="20" y="252" class="dg-in">part + "B" склеивается при выполнении — новый объект</text>
+            <text data-s="4" x="20" y="252" class="dg-in">new String("RUB") — всегда новый объект</text>
+            <text data-s="5" x="20" y="252" class="dg-ok">intern() возвращает ссылку на объект из пула</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Литерал <code>"RUB"</code> при загрузке класса попадает в пул строк. Переменная <code>a</code> ссылается на объект из пула.</li>
+          <li><code>"RU" + "B"</code> и <code>PREFIX + "B"</code> — выражения из констант времени компиляции. javac склеивает их сам и кладёт в class-файл готовый литерал <code>"RUB"</code>. Поэтому <code>b</code> и <code>c</code> — тот же объект.</li>
+          <li><code>part</code> — обычная переменная, её значение известно только при выполнении. <code>part + "B"</code> собирает новую строку в heap, мимо пула.</li>
+          <li><code>new String("RUB")</code> всегда создаёт новый объект — поэтому такой конструктор в коде почти всегда ошибка.</li>
+          <li><code>intern()</code> ищет строку с таким же содержимым в пуле и возвращает ссылку на неё (если такой нет — кладёт в пул эту). После <code>intern()</code> <code>==</code> работает. Но правильное сравнение строк — всегда <code>equals</code>.</li>
+        </ol>
+      </figure>
+      <p>С Java 7 пул строк лежит в обычном heap и собирается GC, а не в PermGen. <code>intern()</code> иногда используют для экономии памяти, когда в данных миллионы одинаковых строк — коды валют, статусы. Но это ручная работа с глобальной хеш-таблицей, и у G1 есть автоматическая альтернатива: <code>-XX:+UseStringDeduplication</code>. Он объединяет внутренние массивы одинаковых строк, переживших несколько сборок.</p>
+      <p>Неизменяемость даёт строкам и другие свойства. Строку можно безопасно использовать как ключ <code>HashMap</code>, а её хеш вычисляется один раз и кешируется в поле объекта. Строки потокобезопасны без синхронизации (тема Thread Safety). И строку, которую проверили, — путь к файлу, имя пользователя, — никто не подменит после проверки.</p>
+    </section>
+
+    <section class="step" id="concat">
+      <h2>Конкатенация в цикле копирует всю строку на каждой итерации</h2>
+      <p>Раз строка неизменяема, каждое <code>+=</code> создаёт новую строку и копирует в неё всё старое содержимое. Выгрузка платежей в CSV построчно:</p>
+      <pre><code class="language-java">public class Concat {
+    static long plus(int rows) {
+        long start = System.nanoTime();
+        String csv = "";
+        for (int i = 0; i &lt; rows; i++) csv += "payment-" + i + ";1000;RUB\n";   // новая строка на каждой итерации
+        return (System.nanoTime() - start) / 1_000_000 + csv.length() * 0;
+    }
+
+    static long builder(int rows) {
+        long start = System.nanoTime();
+        StringBuilder csv = new StringBuilder();
+        for (int i = 0; i &lt; rows; i++) csv.append("payment-").append(i).append(";1000;RUB\n");
+        String result = csv.toString();
+        return (System.nanoTime() - start) / 1_000_000 + result.length() * 0;
+    }
+
+    public static void main(String[] args) {
+        plus(5_000); builder(5_000);                                             // прогрев
+        for (int rows : new int[]{10_000, 20_000, 40_000})
+            System.out.printf("%,6d строк: += %5d мс, StringBuilder %2d мс%n", rows, plus(rows), builder(rows));
+    }
+}</code></pre>
+      <pre><code class="language-text">10,000 строк: +=    44 мс, StringBuilder  0 мс
+20,000 строк: +=   124 мс, StringBuilder  0 мс
+40,000 строк: +=   461 мс, StringBuilder  1 мс</code></pre>
+      <p>Вдвое больше строк — вчетверо больше времени: сложность квадратичная. На 40 000 строк это полсекунды, на 400 000 — минуты. <code>StringBuilder</code> держит изменяемый массив с запасом и при переполнении увеличивает его вдвое, поэтому добавление в среднем O(1), и весь CSV строится за миллисекунду.</p>
+      <p>При этом <code>+</code> в одном выражении — не проблема. С Java 9 javac компилирует <code>a + b + c</code> в вызов <code>invokedynamic</code> к <code>StringConcatFactory</code>. JVM сама собирает оптимальный код склейки: считает итоговую длину и копирует каждую часть один раз. Писать <code>StringBuilder</code> вместо обычного <code>+</code> в одной строке незачем. Он нужен, когда строка собирается в цикле. Для склейки через разделитель есть <code>String.join</code>, <code>StringJoiner</code> и <code>Collectors.joining</code>.</p>
+      <p><code>StringBuilder</code> не потокобезопасен. Его синхронизированный предок <code>StringBuffer</code> остался для совместимости: строку почти никогда не собирают из нескольких потоков.</p>
+    </section>
+
+    <section class="step" id="memory">
+      <h2>Строка хранит байты: по одному на символ латиницы, по два — на остальное</h2>
+      <p>С Java 9 внутри <code>String</code> лежит <code>byte[]</code> и поле <code>coder</code> (compact strings, JEP 254). Если все символы строки помещаются в Latin-1, каждый занимает один байт. Если есть хоть один символ вне Latin-1 — кириллица, эмодзи, — вся строка хранится в UTF-16, по два байта на <code>char</code>. «payment» занимает 7 байт данных, «платёж» — 12. До Java 9 все строки хранились в <code>char[]</code> по два байта. Для приложений с английскими идентификаторами и JSON переход сэкономил до трети heap.</p>
+      <p>Длина строки при этом — число единиц UTF-16, а не символов. С этим связаны ошибки на эмодзи и на кодировках:</p>
+      <pre><code class="language-java">import java.nio.charset.*;
+
+public class Encoding {
+    public static void main(String[] args) {
+        String purpose = "Оплата 💳";
+        byte[] utf8 = purpose.getBytes(StandardCharsets.UTF_8);
+        System.out.println("length() = " + purpose.length() + ", кодовых точек = " + purpose.codePointCount(0, purpose.length())
+            + ", байт в UTF-8 = " + utf8.length);
+
+        Charset cp1251 = Charset.forName("windows-1251");
+        String wrong = new String(utf8, cp1251);                                 // прочитали UTF-8 как windows-1251
+        System.out.println("не та кодировка: " + wrong);
+        System.out.println("обратно через те же байты: " + new String(wrong.getBytes(cp1251), StandardCharsets.UTF_8));
+        String ascii = new String(utf8, StandardCharsets.US_ASCII);             // ASCII заменяет чужие байты на �
+        System.out.println("ASCII необратимо: " + new String(ascii.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8));
+
+        String cut = purpose.substring(0, 8);                                   // обрезали по длине 8 — посреди эмодзи
+        System.out.println("substring(0, 8) = [" + cut + "], последний char = U+" + Integer.toHexString(cut.charAt(7)).toUpperCase());
+        System.out.println("по кодовым точкам: [" + purpose.substring(0, purpose.offsetByCodePoints(0, 8)) + "]");
+        System.out.println("кодировка по умолчанию: " + Charset.defaultCharset());
+    }
+}</code></pre>
+      <pre class="out">length() = 9, кодовых точек = 8, байт в UTF-8 = 17
+не та кодировка: РћРїР»Р°С‚Р° рџ’і
+обратно через те же байты: Оплата 💳
+ASCII необратимо: ������������ ����
+substring(0, 8) = [Оплата ?], последний char = U+D83D
+по кодовым точкам: [Оплата 💳]
+кодировка по умолчанию: UTF-8</pre>
+      <ul>
+        <li><b>Три разных «длины».</b> 9 единиц UTF-16, 8 символов (кодовых точек), 17 байт в UTF-8. Эмодзи 💳 — это суррогатная пара из двух <code>char</code>, кириллица в UTF-8 — два байта на букву. Лимит «не больше 140 символов» или «не больше 255 байт в колонке базы» нужно считать в тех единицах, в которых он задан.</li>
+        <li><b>Разрезанная суррогатная пара.</b> <code>substring(0, 8)</code> оставил половину эмодзи — одиночный суррогат <code>U+D83D</code>, и на выводе появился <code>?</code>. Обрезать текст безопасно по кодовым точкам: <code>offsetByCodePoints</code>, <code>codePoints()</code>.</li>
+        <li><b>Байты без кодировки — не текст.</b> Одна и та же последовательность байт, прочитанная как windows-1251, даёт знакомые «РћРїР»Р°С‚Р°». Такое повреждение обратимо, пока байты не потеряны. Декодирование в ASCII заменяет всё непонятное на <code>�</code>, и исходные байты уже не вернуть.</li>
+        <li><b>Кодировка по умолчанию</b> с Java 18 — UTF-8 на всех платформах (JEP 400). Раньше она зависела от ОС, и <code>getBytes()</code> без аргумента на Windows давал windows-1251. Кодировку всё равно указывают явно — <code>StandardCharsets.UTF_8</code> — на границах: файлы, сеть, база.</li>
+      </ul>
+    </section>
+
+    <section class="step" id="api">
+      <h2>Text blocks, strip и другие методы, которые появились после Java 8</h2>
+      <pre><code class="language-java">public class Blocks {
+    public static void main(String[] args) {
+        String sql = """
+            SELECT id, amount
+            FROM payments
+            WHERE status = '%s'
+              AND amount &gt; %d\
+            """.formatted("NEW", 1000);                   // общий отступ срезан, \ склеивает строки
+        System.out.println(sql);
+        System.out.println("---");
+
+        String em = "  1000  ";                  // широкие пробелы U+2003 из копипаста
+        System.out.println("trim():  [" + em.trim() + "], strip(): [" + em.strip() + "]");
+        String nbsp = "  1000  ";                // неразрывные пробелы, например из Excel
+        System.out.println("NBSP после strip(): длина " + nbsp.strip().length() + " — не убраны");
+        System.out.println("\"  \".isBlank() = " + "  ".isBlank() + ", \"ab\".repeat(3) = " + "ab".repeat(3));
+    }
+}</code></pre>
+      <pre class="out">SELECT id, amount
+FROM payments
+WHERE status = 'NEW'
+  AND amount &gt; 1000
+---
+trim():  [  1000  ], strip(): [1000]
+NBSP после strip(): длина 8 — не убраны
+"  ".isBlank() = true, "ab".repeat(3) = ababab</pre>
+      <ul>
+        <li><b>Text blocks</b> (Java 15). Общий отступ строк срезается по самой левой строке, включая закрывающие кавычки. Относительный отступ (<code>  AND</code>) сохраняется. <code>\</code> в конце строки склеивает её со следующей. <code>formatted</code> — то же, что <code>String.format</code>. Для SQL с пользовательскими данными подстановка строк — это SQL-инъекция: значения передают параметрами <code>PreparedStatement</code>.</li>
+        <li><b><code>trim()</code> и <code>strip()</code>.</b> <code>trim</code> убирает только символы с кодом до пробела (≤ U+0020). <code>strip</code> (Java 11) убирает всё, что Unicode считает пробелом, например широкий пробел U+2003. Но неразрывный пробел U+00A0 не считается пробелом даже для <code>strip</code>. Данные из Excel и веб-форм чистят явно: <code>replace(' ', ' ')</code>.</li>
+        <li><code>isBlank</code>, <code>repeat</code>, <code>lines</code> (Java 11), <code>indent</code> и <code>transform</code> (Java 12) закрыли большую часть того, за чем раньше шли в Apache Commons.</li>
+      </ul>
+      <div class="note warn">
+        <p>Пароли и секреты по возможности держат в <code>char[]</code>, а не в <code>String</code>. Строку нельзя стереть: она живёт в heap до сборки мусора и попадёт в дамп heap (тема Diagnostics). Массив можно затереть <code>Arrays.fill(password, '\0')</code> сразу после использования. Поэтому <code>JPasswordField.getPassword()</code> и <code>KeyStore</code> работают с <code>char[]</code>.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Строки сравнивают через <code>equals</code>. <code>==</code> сравнивает ссылки и работает только для строк из пула, например литералов.</li>
+        <li>Литералы и константные выражения лежат в пуле строк. Строки, собранные при выполнении, — новые объекты. <code>intern()</code> возвращает объект из пула.</li>
+        <li>Неизменяемость даёт безопасное разделение, кеш хеша, потокобезопасность и защиту от подмены.</li>
+        <li><code>+=</code> в цикле квадратичен: удвоение данных — вчетверо дольше. Для цикла — <code>StringBuilder</code>. Обычный <code>+</code> в одном выражении компилируется через <code>StringConcatFactory</code> и эффективен.</li>
+        <li>Внутри строки — <code>byte[]</code>: Latin-1 по байту, иначе UTF-16 по два. <code>length()</code> считает единицы UTF-16, эмодзи — две.</li>
+        <li>Кодировку указывают явно на границах. По умолчанию с Java 18 — UTF-8.</li>
+        <li><code>strip()</code> убирает Unicode-пробелы, <code>trim()</code> — только ASCII. Неразрывный пробел не убирают оба.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="string-equals" data-freq="3">
+      <h3>Почему строки нельзя сравнивать через ==?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>==</code> сравнивает ссылки, а не содержимое. Литералы и константные выражения лежат в пуле строк, поэтому два одинаковых литерала — один объект, и <code>==</code> для них «работает». Строки, полученные во время работы — из JSON, базы, <code>toUpperCase</code>, склейки переменных, — новые объекты, и <code>==</code> для них даёт <code>false</code>. Строки сравнивают через <code>equals</code>, с возможным <code>null</code> — <code>Objects.equals</code> или <code>"RUB".equals(x)</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>static final String P = "RU"; String part = "RU"; Какие из сравнений "RUB" == P + "B" и "RUB" == part + "B" истинны?</summary>
+          <p>Первое — <code>true</code>: <code>P</code> — константа времени компиляции, и javac склеивает <code>P + "B"</code> в литерал из пула. Второе — <code>false</code>: <code>part</code> не константа, склейка идёт при выполнении и создаёт новый объект. Проверено запуском.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="string-immutable" data-freq="3">
+      <h3>Почему String неизменяем?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Неизменяемость позволяет безопасно разделять одну строку между многими пользователями: пул строк, ключи <code>HashMap</code>, общие константы. Хеш строки вычисляется один раз и кешируется. Строки потокобезопасны без синхронизации. Строку, которую проверили — путь к файлу, URL, имя класса для загрузки, — нельзя подменить после проверки. Цена — каждое изменение создаёт новую строку, поэтому для построения в цикле нужен <code>StringBuilder</code>.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="string-pool-q" data-freq="2">
+      <h3>Что такое пул строк и intern()?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Пул — таблица уникальных строк внутри JVM. Литералы и константные выражения из всех классов попадают в него, и одинаковые литералы — один объект. <code>intern()</code> возвращает строку из пула с тем же содержимым, а если её нет — добавляет текущую. С Java 7 пул лежит в heap и очищается сборщиком. <code>new String("x")</code> всегда создаёт новый объект вне пула.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Для экономии памяти на повторяющихся строках вместо ручного <code>intern()</code> есть <code>-XX:+UseStringDeduplication</code>: G1 объединяет массивы одинаковых долгоживущих строк.</li>
+            <li>С Java 9 строки хранятся в <code>byte[]</code> с кодировкой Latin-1 или UTF-16 (compact strings).</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="stringbuilder-q" data-freq="3">
+      <h3>Когда нужен StringBuilder, а когда хватит +?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда строка собирается в цикле. <code>+=</code> в цикле каждый раз копирует всё накопленное, и время растёт квадратично: в замере урока 40 000 строк CSV собирались 461 мс против 1 мс у <code>StringBuilder</code>. Склейка в одном выражении — <code>a + b + c</code> — с Java 9 компилируется через <code>StringConcatFactory</code>, и вручную заменять её на <code>StringBuilder</code> незачем. <code>StringBuffer</code> — синхронизированный аналог, в новом коде не нужен.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="string-length" data-freq="2">
+      <h3>Что возвращает length() у строки с эмодзи?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Число единиц UTF-16, а не символов. Эмодзи вне базовой плоскости Unicode — суррогатная пара из двух <code>char</code>, поэтому «Оплата 💳» имеет <code>length()</code> 9 при 8 символах и 17 байтах в UTF-8. Символы считают через <code>codePointCount</code>, обрезают через <code>offsetByCodePoints</code>. Иначе <code>substring</code> может разрезать пару, и появится <code>?</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>new String(bytes) и text.getBytes() без аргументов в коде чтения файлов из банка. Что не так?</summary>
+          <p>Используется кодировка по умолчанию. До Java 18 она зависела от ОС: на Windows это windows-1251, и UTF-8 из банка превращался в «РћРїР»Р°С‚Р°». С Java 18 по умолчанию UTF-8, но файл банка может быть и в другой кодировке. Кодировку указывают явно — ту, в которой файл реально пришёл.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/String.html">String (JDK 21)</a> — основа урока: неизменяемость, intern, strip, методы Java 11+.</li>
+      <li><a href="https://openjdk.org/jeps/254">JEP 254: Compact Strings</a> — хранение строк в byte[] с Latin-1 или UTF-16.</li>
+      <li><a href="https://openjdk.org/jeps/280">JEP 280: Indify String Concatenation</a> — конкатенация через invokedynamic.</li>
+      <li><a href="https://openjdk.org/jeps/400">JEP 400: UTF-8 by Default</a> — кодировка по умолчанию с Java 18.</li>
+      <li><a href="https://openjdk.org/jeps/378">JEP 378: Text Blocks</a> — правила отступов и экранирования.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

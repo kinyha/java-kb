@@ -351,7 +351,7 @@ window.KB_TREE = [
       { id: 'core', title: 'Core', source: 'Core Java т. I, гл. 3–8; Baeldung: Type System, Exceptions, Generics, Annotations', items: [
         { id: 'java-types', freq: 3, status: 'draft', title: 'Types & Wrappers',
           scope: 'примитивы и обёртки, autoboxing, кеш Integer, приведение типов и переполнение, pass-by-value' },
-        { id: 'strings', freq: 3, status: 'empty', title: 'Strings',
+        { id: 'strings', freq: 3, status: 'draft', title: 'Strings',
           scope: 'неизменяемость, String pool, intern, StringBuilder, конкатенация, text blocks, кодировки' },
         { id: 'object', freq: 3, status: 'empty', title: 'equals & hashCode',
           scope: 'контракт equals и hashCode, HashMap и изменяемые ключи, toString, clone, Comparable' },
