@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JVM: References · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="gc-references">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>JVM: References</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="weak-cache-leak">
+      <h2>Кеш на WeakHashMap, а записи не исчезают</h2>
+      <p>Задача: хранить сессию, пока жив объект пользователя, и забывать её, когда пользователь больше никому не нужен. Для этого есть <code>WeakHashMap</code> — карта, которая сама удаляет запись, когда ключ перестал быть нужен кому-то, кроме неё. Сессия хранит ссылку на своего пользователя, это естественно:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class SessionCache {
+    record User(String login) { }
+    record Session(User user, byte[] data) { }                // значение держит ключ
+
+    public static void main(String[] args) throws Exception {
+        Map&lt;User, Session&gt; cache = new WeakHashMap&lt;&gt;();
+        for (int i = 0; i &lt; 10_000; i++) {
+            User u = new User("user" + i);
+            cache.put(u, new Session(u, new byte[1024]));      // ссылка на u из значения
+        }
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("записей после GC: " + cache.size());
+
+        Map&lt;User, byte[]&gt; fixed = new WeakHashMap&lt;&gt;();
+        for (int i = 0; i &lt; 10_000; i++) fixed.put(new User("user" + i), new byte[1024]);
+        System.gc();
+        Thread.sleep(100);
+        System.out.println("без ссылки на ключ: " + fixed.size());
+    }
+}</code></pre>
+      <pre class="out">записей после GC: 10000
+без ссылки на ключ: 0</pre>
+      <p>Никто, кроме карты, не держит пользователей. Но первая карта не отдала ни одной записи, а вторая отдала все. Разница — одно поле: <code>Session.user</code>. Карта держит значение обычной ссылкой, значение держит ключ, и ключ остаётся достижимым из самой карты.</p>
+      <p>Чтобы видеть такие вещи сразу, нужно понимать, что такое «слабая» ссылка для сборщика. В этой теме разберём четыре силы ссылок: как GC обращается с каждой, как устроены <code>WeakHashMap</code> и <code>ReferenceQueue</code>, почему кеш на <code>SoftReference</code> — плохая идея и почему <code>finalize()</code> заменили на <code>Cleaner</code>.</p>
+    </section>
+
+    <section class="step" id="reachability">
+      <h2>Сила ссылки решает, когда GC имеет право забрать объект</h2>
+      <p>Обычная ссылка в поле или переменной — <b>сильная</b>: пока до объекта есть путь по сильным ссылкам от корней, GC его не тронет. Остальные три вида — это объекты-обёртки из <code>java.lang.ref</code>. Сама обёртка — обычный объект, на который ссылаются сильно. Но её внутреннее поле <code>referent</code> сборщик при маркировке не считает за сильную ссылку. Поэтому объект, до которого можно дойти только через обёртку, GC может забрать, соблюдая правила её вида.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Стек потока держит объект A обычной ссылкой, а объекты SoftReference, WeakReference и PhantomReference держат объекты B, C и D. Сборщик маркирует A как живой, C и D достижимы только через слабые обёртки. WeakReference очищается, и сама ссылка попадает в ReferenceQueue. D признан недостижимым, PhantomReference попадает в очередь. Soft-ссылку сборщик очищает, только если не хватает памяти или ей давно не пользовались.">
+            <defs>
+              <marker id="rf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rf-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">КОРНИ</text>
+            <text x="200" y="24" class="dg-cap">ОБЁРТКИ</text>
+            <text x="420" y="24" class="dg-cap">ОБЪЕКТЫ</text>
+            <text x="560" y="24" class="dg-cap">ОЧЕРЕДЬ</text>
+
+            <rect x="20" y="40" width="110" height="194" rx="8" class="dg-box"/>
+            <text x="75" y="134" class="dg-t" text-anchor="middle">стек</text>
+            <text x="75" y="152" class="dg-s" text-anchor="middle">потока</text>
+
+            <!-- ряд 1: сильная ссылка -->
+            <path d="M130 60 L 414 60" class="dg-line" marker-end="url(#rf-n)"/>
+            <text x="200" y="53" class="dg-n">обычная ссылка</text>
+            <!-- ряды 2-4: сильные ссылки на обёртки -->
+            <path d="M130 112 L 194 112" class="dg-line" marker-end="url(#rf-n)"/>
+            <path d="M130 164 L 194 164" class="dg-line" marker-end="url(#rf-n)"/>
+            <path d="M130 216 L 194 216" class="dg-line" marker-end="url(#rf-n)"/>
+            <rect x="200" y="95" width="150" height="34" rx="6" class="dg-box"/>
+            <text x="275" y="116" class="dg-in" text-anchor="middle">SoftReference</text>
+            <rect x="200" y="147" width="150" height="34" rx="6" class="dg-box"/>
+            <text x="275" y="168" class="dg-in" text-anchor="middle">WeakReference</text>
+            <rect x="200" y="199" width="150" height="34" rx="6" class="dg-box"/>
+            <text x="275" y="220" class="dg-in" text-anchor="middle">PhantomReference</text>
+
+            <!-- referent: пунктир, пока объект есть -->
+            <path data-s="1-4" d="M350 112 L 416 112" class="dg-sep" fill="none"/>
+            <path data-s="1-2" d="M350 164 L 416 164" class="dg-sep" fill="none"/>
+            <path data-s="1-3" d="M350 216 L 416 216" class="dg-sep" fill="none"/>
+
+            <!-- A -->
+            <rect data-s="1" x="420" y="43" width="90" height="34" rx="6" class="dg-box"/>
+            <rect data-s="2-" x="420" y="43" width="90" height="34" rx="6" class="dg-cell hit"/>
+            <text x="465" y="64" class="dg-in" text-anchor="middle">A</text>
+            <!-- B -->
+            <rect data-s="1-4" x="420" y="95" width="90" height="34" rx="6" class="dg-box"/>
+            <text data-s="1-4" x="465" y="116" class="dg-in" text-anchor="middle">B</text>
+            <rect data-s="5" x="420" y="95" width="90" height="34" rx="6" class="dg-sep" fill="none"/>
+            <!-- C -->
+            <rect data-s="1" x="420" y="147" width="90" height="34" rx="6" class="dg-box"/>
+            <rect data-s="2" x="420" y="147" width="90" height="34" rx="6" class="dg-cell miss"/>
+            <text data-s="1-2" x="465" y="168" class="dg-in" text-anchor="middle">C</text>
+            <rect data-s="3-" x="420" y="147" width="90" height="34" rx="6" class="dg-sep" fill="none"/>
+            <!-- D -->
+            <rect data-s="1" x="420" y="199" width="90" height="34" rx="6" class="dg-box"/>
+            <rect data-s="2-3" x="420" y="199" width="90" height="34" rx="6" class="dg-cell miss"/>
+            <text data-s="1-3" x="465" y="220" class="dg-in" text-anchor="middle">D</text>
+            <rect data-s="4-" x="420" y="199" width="90" height="34" rx="6" class="dg-sep" fill="none"/>
+
+            <!-- очередь -->
+            <rect x="560" y="95" width="140" height="138" rx="8" class="dg-box"/>
+            <text x="630" y="112" class="dg-n" text-anchor="middle">ReferenceQueue</text>
+            <text data-s="3-" x="570" y="140" class="dg-in">WeakReference</text>
+            <text data-s="4-" x="570" y="162" class="dg-in">PhantomReference</text>
+            <text data-s="5" x="570" y="184" class="dg-in">SoftReference</text>
+            <path data-s="3" d="M350 174 L 380 189 L 554 189" class="dg-line bad" marker-end="url(#rf-bad)"/>
+            <path data-s="4" d="M350 226 L 380 241 L 540 241 L 554 228" class="dg-line bad" marker-end="url(#rf-bad)"/>
+            <path data-s="5" d="M350 122 L 380 137 L 554 137" class="dg-line bad" marker-end="url(#rf-bad)"/>
+
+            <text data-s="1" x="20" y="272" class="dg-in">у каждого объекта своя сила достижимости</text>
+            <text data-s="2" x="20" y="272" class="dg-in">маркировка: A достижим сильно, C и D — только через обёртки</text>
+            <text data-s="3" x="20" y="272" class="dg-bad">weak: ссылка очищена, C освобождён, обёртка в очереди</text>
+            <text data-s="4" x="20" y="272" class="dg-bad">phantom: D освобождается, обёртка сообщает об этом через очередь</text>
+            <text data-s="5" x="20" y="272" class="dg-bad">soft: очищается позже — при нехватке памяти или по давности</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Стек потока держит объект A обычной ссылкой и три обёртки — тоже обычными ссылками. Обёртки ссылаются на B, C и D особым полем <code>referent</code> (пунктир).</li>
+          <li>Сборщик маркирует живые объекты от корней по сильным ссылкам. A достижим сильно. До C и D можно дойти только через слабое поле обёртки, поэтому для GC они кандидаты на удаление. B тоже, но soft-ссылки GC по умолчанию не трогает.</li>
+          <li>В этой же сборке GC обнуляет поле <code>referent</code> у WeakReference: <code>get()</code> теперь возвращает <code>null</code>, C освобождается. Если при создании обёртки передали очередь, GC ставит в неё саму обёртку.</li>
+          <li>PhantomReference тоже встаёт в очередь: D недостижим и будет освобождён. Через phantom-ссылку объект нельзя получить никогда, её <code>get()</code> всегда <code>null</code>. Она нужна только как сигнал «объекта больше нет».</li>
+          <li>SoftReference GC очищает позже и реже: когда памяти не хватает (гарантированно до <code>OutOfMemoryError</code>) или когда ссылкой давно не пользовались. Правило давности — в шаге 4.</li>
+        </ol>
+      </figure>
+      <table class="mx">
+        <thead><tr><th>Вид</th><th>Когда GC очищает</th><th><code>get()</code></th><th>Для чего</th></tr></thead>
+        <tbody>
+          <tr><td>сильная</td><td>никогда, пока объект достижим</td><td>—</td><td>всё обычное</td></tr>
+          <tr><td><code>SoftReference</code></td><td>при нехватке памяти или по давности использования</td><td>объект или <code>null</code></td><td>кеши, чувствительные к памяти (на практике лучше без них)</td></tr>
+          <tr><td><code>WeakReference</code></td><td>на первой сборке, которая увидит объект только слабо достижимым</td><td>объект или <code>null</code></td><td>метаданные к чужим объектам, слушатели, <code>WeakHashMap</code></td></tr>
+          <tr><td><code>PhantomReference</code></td><td>когда объект стал недостижим; обёртка встаёт в очередь</td><td>всегда <code>null</code></td><td>освобождение внешних ресурсов после смерти объекта, <code>Cleaner</code></td></tr>
+        </tbody>
+      </table>
+      <p>Проверим на живой JVM. Soft- и weak-ссылки по 10 МБ, heap 64 МБ. Сначала явная сборка, потом заполняем heap до <code>OutOfMemoryError</code>:</p>
+      <pre><code class="language-java">import java.lang.ref.*;
+import java.util.*;
+
+public class Kinds {
+    public static void main(String[] args) {
+        byte[] strongArr = new byte[10 &lt;&lt; 20];
+        SoftReference&lt;byte[]&gt; soft = new SoftReference&lt;&gt;(new byte[10 &lt;&lt; 20]);  // 10 МБ
+        WeakReference&lt;byte[]&gt; weak = new WeakReference&lt;&gt;(new byte[10 &lt;&lt; 20]);
+        System.gc();
+        System.out.printf("после System.gc(): soft=%s weak=%s%n", soft.get() != null, weak.get() != null);
+
+        List&lt;byte[]&gt; hog = new ArrayList&lt;&gt;();
+        try {
+            while (true) hog.add(new byte[1 &lt;&lt; 20]);               // съедаем heap по мегабайту
+        } catch (OutOfMemoryError e) {
+            hog = null;                                            // отпускаем память
+            System.out.printf("после OOM: soft=%s, strong жив: %s%n", soft.get() != null, strongArr.length &gt; 0);
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Xmx64m Kinds</code></pre>
+      <pre class="out">после System.gc(): soft=true weak=false
+после OOM: soft=false, strong жив: true</pre>
+      <p>Weak-ссылку очистила первая же сборка. Soft пережила полную сборку и исчезла, только когда памяти не осталось. Сильную ссылку GC не тронул и перед OOM: <code>OutOfMemoryError</code> — это отказ выделить память, а не разрешение отбирать живое.</p>
+    </section>
+
+    <section class="step" id="weak">
+      <h2>WeakHashMap держит ключи слабо, а значения — сильно</h2>
+      <p>Устройство <code>WeakHashMap</code> объясняет и пример из начала, и все её ловушки. Каждая запись — это <code>WeakReference</code> на ключ с общей очередью; в исходниках JDK это <code>class Entry&lt;K,V&gt; extends WeakReference&lt;Object&gt;</code>. Значение запись хранит обычным полем.</p>
+      <ul>
+        <li>Когда ключ стал слабо достижим, GC очищает ссылку в записи и ставит запись в очередь.</li>
+        <li>Карта не узнаёт об этом сама. При следующем обращении — <code>get</code>, <code>put</code>, <code>size</code> — она вызывает <code>expungeStaleEntries()</code>, вынимает записи из очереди и удаляет их вместе со значениями.</li>
+        <li>В очередь ссылки ставит не сам сборщик, а поток JDK <code>Reference Handler</code>, уже после паузы. Поэтому сразу после <code>System.gc()</code> карта ещё полная. Проверено: 1000 записей сразу после сборки и 0 через 100 мс. Отсюда <code>Thread.sleep(100)</code> в примерах урока.</li>
+      </ul>
+      <p>Отсюда первая ловушка: значение не должно ссылаться на ключ ни прямо, ни через цепочку объектов. Иначе ключ сильно достижим через значение, а значение — через карту. Так было с <code>Session.user</code>. Вторая ловушка — ключи, которые живут вечно сами по себе:</p>
+      <pre><code class="language-java">import java.util.*;
+
+public class CachedKeys {
+    public static void main(String[] args) throws Exception {
+        Map&lt;Object, String&gt; map = new WeakHashMap&lt;&gt;();
+        for (int i = 0; i &lt; 1000; i++) map.put(i, "v");            // автоупаковка: Integer.valueOf(i)
+        map.put("literal", "v");                                  // строковый литерал из пула
+        map.put(new String("copy"), "v");
+        System.gc();
+        Thread.sleep(100);                                         // очередь ссылок наполняется асинхронно
+        System.out.println("осталось: " + map.size() + ", literal: " + map.containsKey("literal"));
+    }
+}</code></pre>
+      <pre class="out">осталось: 129, literal: true</pre>
+      <p>Осталось 129 записей: ключи 0–127 — это закешированные <code>Integer.valueOf</code>, на них всегда ссылается внутренний кеш <code>Integer</code>. Ещё одна — литерал: его держит пул строк класса. Слабый ключ работает только с объектами, у которых есть естественный конец жизни.</p>
+      <p>Третья ловушка — сравнение ключей. <code>WeakHashMap</code> сравнивает через <code>equals</code>. Если ключ — record или строка, другой равный объект найдёт запись, но жизнь записи привязана к конкретному экземпляру. Для метаданных «к этому объекту» обычно нужна идентичность. В Caffeine так и устроено: <code>Caffeine.newBuilder().weakKeys()</code> сравнивает ключи по <code>==</code>.</p>
+      <h3>ThreadLocal: слабый ключ не спасает значение</h3>
+      <p>Внутри каждого потока <code>ThreadLocal</code> хранит значения в карте <code>ThreadLocalMap</code>, где ключ — слабая ссылка на сам <code>ThreadLocal</code>, а значение — обычная. Если <code>ThreadLocal</code> забыт, ключ обнулится, но значение останется в карте потока. Уберёт его только следующее обращение этого потока к своей карте. В пуле потоки живут долго:</p>
+      <pre><code class="language-java">import java.util.concurrent.*;
+
+public class PoolLocals {
+    static long usedMb() {
+        System.gc();
+        Runtime rt = Runtime.getRuntime();
+        return (rt.totalMemory() - rt.freeMemory()) &gt;&gt; 20;
+    }
+
+    static void task(boolean remove) {
+        ThreadLocal&lt;byte[]&gt; ctx = new ThreadLocal&lt;&gt;();              // новый ThreadLocal на задачу
+        ctx.set(new byte[100_000]);                                 // ~100 КБ контекста запроса
+        if (remove) ctx.remove();
+    }
+
+    public static void main(String[] args) throws Exception {
+        boolean remove = args[0].equals("remove");
+        ExecutorService pool = Executors.newSingleThreadExecutor(); // поток живёт между задачами
+        for (int i = 0; i &lt; 1000; i++) pool.submit(() -&gt; task(remove)).get();
+        System.out.println("после 1000 задач и GC: " + usedMb() + " МБ");
+        pool.submit(() -&gt; task(true)).get();                        // поток снова тронул свою карту
+        System.out.println("после ещё одной задачи: " + usedMb() + " МБ");
+        pool.shutdown();
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Xmx1g PoolLocals leak
+после 1000 задач и GC: 33 МБ
+после ещё одной задачи: 2 МБ
+$ java -Xmx1g PoolLocals remove
+после 1000 задач и GC: 2 МБ
+после ещё одной задачи: 2 МБ</code></pre>
+      <p>После полной сборки 33 МБ значений остались жить (в разных запусках от 33 до 43 МБ: часть карта успевает убрать сама между задачами). Ключи обнулены, а значения держит карта потока. Их убрала только следующая задача, которая сама вызвала <code>set</code>. Типичный случай в проде хуже: <code>ThreadLocal</code> лежит в <code>static</code>-поле и не умирает никогда, поэтому слабый ключ вообще не срабатывает. Значение живёт до конца жизни потока, а следующий запрос в этом потоке видит чужой контекст. Правило одно: <code>remove()</code> в <code>finally</code>.</p>
+    </section>
+
+    <section class="step" id="soft">
+      <h2>SoftReference живёт, пока ею пользуются и пока heap свободен</h2>
+      <p>Soft-ссылку HotSpot очищает не «когда памяти мало», а по правилу давности. Ссылку очистят, если к ней не обращались дольше, чем</p>
+      <pre><code class="language-text">свободно в heap, МБ  ×  SoftRefLRUPolicyMSPerMB (по умолчанию 1000 мс)</code></pre>
+      <p>«Свободно» здесь — от максимального heap: <code>-Xmx</code> минус занятое после прошлой сборки. Обращение — это <code>get()</code>: он обновляет метку времени. При heap 256 МБ и 2 МБ занятых порог — 254 МБ × 1000 мс, больше четырёх минут. Если памяти не хватает, до <code>OutOfMemoryError</code> очищаются все soft-ссылки.</p>
+      <p>Проверим правило. Программа создаёт soft-ссылку и раз в 100 мс вызывает полную сборку. Проверяет она ссылку через <code>refersTo(null)</code> (Java 16+): этот метод, в отличие от <code>get()</code>, не обновляет метку времени.</p>
+      <pre><code class="language-java">import java.lang.ref.SoftReference;
+
+public class SoftAge {
+    public static void main(String[] args) throws Exception {
+        SoftReference&lt;byte[]&gt; soft = new SoftReference&lt;&gt;(new byte[1024]);
+        long start = System.currentTimeMillis();
+        while (!soft.refersTo(null) &amp;&amp; System.currentTimeMillis() - start &lt; 5000) {
+            Thread.sleep(100);
+            System.gc();                                  // полная сборка раз в 100 мс
+        }
+        System.out.println(soft.refersTo(null)
+            ? "очищена через " + (System.currentTimeMillis() - start) + " мс"
+            : "жива через 5 с");
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Xmx256m SoftAge                                  # порог 254 × 1000 мс ≈ 4 мин
+жива через 5 с
+$ java -Xmx256m -XX:SoftRefLRUPolicyMSPerMB=10 SoftAge   # порог 254 × 10 мс ≈ 2,5 с
+очищена через 2697 мс
+$ java -Xmx256m -XX:SoftRefLRUPolicyMSPerMB=1 SoftAge    # порог ≈ 0,25 с
+очищена через 445 мс</code></pre>
+      <p>Если в цикле проверять ссылку через <code>get()</code>, она не очищается ни при каком значении флага: каждый вызов делает её «свежей». Проверено тем же запуском.</p>
+      <p>Отсюда понятно, почему кеш на soft-ссылках — плохая идея:</p>
+      <ul>
+        <li><b>Размер кеша задаёт сборщик, а не ты.</b> Пока heap свободен, soft-кеш растёт и держит почти всё. Heap выглядит занятым, и G1 чаще запускает маркировку и смешанные сборки.</li>
+        <li><b>Очистка приходит волной.</b> При нехватке памяти GC сбрасывает все soft-ссылки разом. Кеш пустеет целиком в самый нагруженный момент, и все запросы идут в базу.</li>
+        <li><b>Поведение зависит от <code>-Xmx</code> и флагов.</b> Тот же код ведёт себя по-разному на подах разного размера.</li>
+      </ul>
+      <p>Поэтому кеши ограничивают явно — по числу записей или по весу, например <code>Caffeine.newBuilder().maximumSize(10_000)</code>. Предсказуемо, и видно в метриках.</p>
+    </section>
+
+    <section class="step" id="queue">
+      <h2>ReferenceQueue сообщает, что объект умер, а PhantomReference — только это</h2>
+      <p>Проверять <code>get() == null</code> в цикле неудобно. Если при создании ссылки передать <code>ReferenceQueue</code>, сборщик сам поставит в неё обёртку, когда очистит ссылку. Остаётся забрать её через <code>poll()</code> или ждать через <code>remove()</code>:</p>
+      <pre><code class="language-java">import java.lang.ref.*;
+
+public class Queue {
+    public static void main(String[] args) throws Exception {
+        ReferenceQueue&lt;Object&gt; queue = new ReferenceQueue&lt;&gt;();
+        Object weakTarget = new Object(), phantomTarget = new Object();
+        WeakReference&lt;Object&gt; weak = new WeakReference&lt;&gt;(weakTarget, queue);
+        PhantomReference&lt;Object&gt; phantom = new PhantomReference&lt;&gt;(phantomTarget, queue);
+        System.out.println("phantom.get() = " + phantom.get());   // всегда null
+        System.out.println("в очереди до GC: " + queue.poll());
+
+        weakTarget = null;
+        phantomTarget = null;                                     // объекты стали недостижимы
+        System.gc();
+        for (int i = 0; i &lt; 2; i++) {
+            Reference&lt;?&gt; r = queue.remove(1000);                  // ждём, пока GC положит ссылку
+            System.out.println("из очереди: " + (r == weak ? "weak" : r == phantom ? "phantom" : r)
+                + ", get() = " + r.get());
+        }
+    }
+}</code></pre>
+      <pre class="out">phantom.get() = null
+в очереди до GC: null
+из очереди: weak, get() = null
+из очереди: phantom, get() = null</pre>
+      <p>В очередь попадает обёртка, а не объект: к этому моменту он уже недоступен. Поэтому данные для уборки хранят не в объекте, а рядом с обёрткой — например, в подклассе ссылки или в карте «ссылка → ресурс». Так и работает <code>WeakHashMap</code>: её запись — это и есть подкласс ссылки с ключом и значением.</p>
+      <p>Зачем нужна ссылка, через которую ничего нельзя получить? Чтобы узнать о смерти объекта, не давая возможности его «оживить». Weak-ссылку GC очищает, пока объект ещё может ожить через <code>finalize()</code>. Phantom-ссылка попадает в очередь, только когда объект окончательно недостижим. С Java 9 GC и очищает её сам, как weak, так что память объекта освобождается сразу. На phantom-ссылках построен <code>Cleaner</code> — замена <code>finalize()</code>.</p>
+    </section>
+
+    <section class="step" id="finalize">
+      <h2>finalize() замедляет выделение, воскрешает объекты и копит очередь до OOM</h2>
+      <p>Метод <code>finalize()</code> был первым способом освобождать внешние ресурсы. JVM вызывает его один раз, когда объект стал недостижим. С Java 9 он deprecated, с Java 18 помечен к удалению (JEP 421), и <code>javac</code> предупреждает:</p>
+      <pre><code class="language-text">warning: [removal] finalize() in Object has been deprecated and marked for removal</code></pre>
+      <p>Почему от него отказались — видно по замерам. Три миллиона объектов по 1 КБ, с непустым <code>finalize()</code> и без:</p>
+      <pre><code class="language-java">public class Finalizers {
+    static volatile long finalized;
+    static final Object[] SINK = new Object[1024];                   // чтобы JIT не убрал выделение
+
+    static class Plain { byte[] data = new byte[1024]; }
+
+    static class WithFinalize {
+        byte[] data = new byte[1024];
+        @Override @SuppressWarnings("removal")
+        protected void finalize() { finalized++; }                   // любое непустое тело
+    }
+
+    public static void main(String[] args) {
+        boolean withFinalize = args[0].equals("finalize");
+        long start = System.nanoTime();
+        for (int i = 0; i &lt; 3_000_000; i++)                          // 3 млн объектов по ~1 КБ
+            SINK[i &amp; 1023] = withFinalize ? new WithFinalize() : new Plain();
+        System.out.printf("%s: %d мс, finalize() вызван для %d тыс.%n",
+            args[0], (System.nanoTime() - start) / 1_000_000, finalized / 1000);
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java -Xmx2g Finalizers plain
+plain: 270 мс, finalize() вызван для 0 тыс.
+$ java -Xmx2g Finalizers finalize
+finalize: 1321 мс, finalize() вызван для 2213 тыс.
+$ java -Xmx256m Finalizers finalize
+Exception: java.lang.OutOfMemoryError thrown from the UncaughtExceptionHandler in thread "main"
+$ java --finalization=disabled -Xmx256m Finalizers finalize
+finalize: 239 мс, finalize() вызван для 0 тыс.</code></pre>
+      <p>В пять раз медленнее при 2 ГБ и <code>OutOfMemoryError</code> при 256 МБ, хотя живых объектов — не больше 1024. Причины:</p>
+      <ul>
+        <li><b>Регистрация при создании.</b> Для каждого объекта класса с <code>finalize()</code> JVM создаёт служебную <code>FinalReference</code>. С <code>-Xlog:gc+phases+ref=debug</code> видно, что одна молодая сборка нашла 34 174 таких ссылки: <code>FinalReference Discovered: 34174</code>. На обработку ссылок ушло 6,4 мс паузы.</li>
+        <li><b>Две сборки вместо одной.</b> Мёртвый объект с <code>finalize()</code> нельзя сразу освободить. GC оставляет его живым вместе со всем, на что он ссылается, и ставит в очередь. После вызова метода объект освобождает только следующая сборка.</li>
+        <li><b>Один поток на всех.</b> <code>finalize()</code> вызывает единственный поток <code>Finalizer</code>. Если объекты умирают быстрее, чем он успевает, очередь растёт до OOM. Именно это случилось при 256 МБ.</li>
+      </ul>
+      <p>Любопытная деталь: с пустым <code>finalize() { }</code> замедления нет. HotSpot видит пустое тело и не регистрирует объекты — проверено тем же замером.</p>
+      <p>Ещё одна проблема — <b>воскрешение</b>. В <code>finalize()</code> можно сохранить <code>this</code> в статическое поле, и объект снова станет достижим. Но второй раз метод не вызовется:</p>
+      <pre><code class="language-java">public class Resurrect {
+    static Resurrect saved;
+    static int calls;
+
+    @Override @SuppressWarnings("removal")
+    protected void finalize() {
+        calls++;
+        saved = this;                                  // объект снова достижим
+    }
+
+    public static void main(String[] args) throws Exception {
+        new Resurrect();
+        for (int round = 1; round &lt;= 2; round++) {
+            saved = null;                              // снова недостижим
+            System.gc();
+            Thread.sleep(100);                         // finalize() работает в отдельном потоке
+            System.out.println("раунд " + round + ": finalize вызван " + calls + " раз, объект жив: " + (saved != null));
+        }
+    }
+}</code></pre>
+      <pre class="out">раунд 1: finalize вызван 1 раз, объект жив: true
+раунд 2: finalize вызван 1 раз, объект жив: false</pre>
+      <p>Вдобавок нет гарантии, что <code>finalize()</code> вызовется вообще: JVM может завершиться раньше. А исключение внутри метода молча проглатывается. С Java 18 финализацию можно выключить флагом <code>--finalization=disabled</code> и проверить, не зависит ли от неё приложение.</p>
+    </section>
+
+    <section class="step" id="cleaner">
+      <h2>Cleaner освобождает ресурс, если действие очистки не держит сам объект</h2>
+      <p><code>java.lang.ref.Cleaner</code> (Java 9) решает ту же задачу через phantom-ссылки. Объект регистрируется вместе с действием очистки. Когда объект становится недостижим, отдельный поток Cleaner выполняет действие. Воскресить объект нельзя: действие его не получает. А очистку можно запустить и вручную, через <code>clean()</code>.</p>
+      <p>Правильный шаблон — ресурс с <code>close()</code> для явного освобождения и <code>Cleaner</code> как страховка, если <code>close()</code> забыли:</p>
+      <pre><code class="language-java">import java.lang.ref.Cleaner;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class NativeBuffer implements AutoCloseable {
+    static final Cleaner CLEANER = Cleaner.create();
+    static final AtomicInteger FREED = new AtomicInteger();
+
+    // состояние для очистки: отдельный static-класс без ссылки на NativeBuffer
+    private static final class State implements Runnable {
+        final long address;
+        State(long address) { this.address = address; }
+        public void run() { FREED.incrementAndGet(); }           // здесь был бы free(address)
+    }
+
+    private final Cleaner.Cleanable cleanable;
+
+    NativeBuffer(long address) {
+        this.cleanable = CLEANER.register(this, new State(address));
+    }
+
+    @Override
+    public void close() { cleanable.clean(); }                    // явное освобождение; повторно не выполнится
+
+    public static void main(String[] args) throws Exception {
+        try (NativeBuffer b = new NativeBuffer(1)) { }            // закрыт явно
+        for (int i = 0; i &lt; 1000; i++) new NativeBuffer(i);       // забыли закрыть
+        System.gc();
+        Thread.sleep(200);                                        // поток Cleaner работает асинхронно
+        System.out.println("освобождено: " + FREED.get());
+    }
+}</code></pre>
+      <pre class="out">освобождено: 1001</pre>
+      <p>Один буфер закрыт явно, тысячу подобрал Cleaner. Так устроен и <code>DirectByteBuffer</code> в JDK: при создании он регистрирует <code>Deallocator</code> — record с адресом и размером памяти, без ссылки на сам буфер.</p>
+      <p>Главная ловушка — действие очистки, которое ссылается на объект. Самый частый случай — лямбда, которая захватила <code>this</code>:</p>
+      <pre><code class="language-java">import java.lang.ref.Cleaner;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class LeakyCleaner {
+    static final Cleaner CLEANER = Cleaner.create();
+    static final AtomicInteger FREED = new AtomicInteger();
+    final long address;
+
+    LeakyCleaner(long address) {
+        this.address = address;
+        CLEANER.register(this, () -&gt; free(this.address));          // лямбда захватила this
+    }
+
+    static void free(long address) { FREED.incrementAndGet(); }
+
+    public static void main(String[] args) throws Exception {
+        for (int i = 0; i &lt; 1000; i++) new LeakyCleaner(i);
+        System.gc();
+        Thread.sleep(200);
+        System.out.println("освобождено: " + FREED.get());
+    }
+}</code></pre>
+      <pre class="out">освобождено: 0</pre>
+      <p>Ни одного. Cleaner держит действие сильной ссылкой, действие держит <code>this</code>, и объект никогда не станет недостижимым. Это та же ошибка, что с <code>Session.user</code> в начале урока: путь от «держателя» к объекту через то, что должно было быть независимым. То же случится с анонимным или нестатическим вложенным классом — они тоже держат ссылку на внешний объект.</p>
+      <div class="trap">
+        <p class="myth">Cleaner — это замена close(), можно не закрывать ресурсы явно.</p>
+        <p class="fact">Cleaner срабатывает, только когда GC заметит, что объект недостижим, — через секунды, минуты или никогда, если памяти хватает. Файловые дескрипторы или соединения кончатся раньше. Основной путь — <code>try-with-resources</code>, Cleaner — только страховка.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Сильная ссылка держит объект всегда. Soft, weak и phantom — обёртки, поле <code>referent</code> которых GC не считает сильной ссылкой.</li>
+        <li>Weak очищается первой же сборкой, которая увидит объект только слабо достижимым. Soft — при нехватке памяти или если давно не использовалась: порог — свободные мегабайты × <code>SoftRefLRUPolicyMSPerMB</code>.</li>
+        <li><code>WeakHashMap</code> держит ключ слабо, а значение сильно. Значение не должно ссылаться на ключ. Кешированные <code>Integer</code> и литералы как ключи не умирают.</li>
+        <li><code>ReferenceQueue</code> получает обёртки очищенных ссылок. Phantom-ссылка: <code>get()</code> всегда <code>null</code>, только сигнал о смерти объекта.</li>
+        <li><code>finalize()</code> медленный, воскрешает объекты и может довести до OOM. Замена — <code>close()</code> плюс <code>Cleaner</code>, действие которого не ссылается на объект.</li>
+        <li>Кеш ограничивают размером, а не soft-ссылками. <code>ThreadLocal</code> в пуле очищают через <code>remove()</code> в <code>finally</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="reference-types" data-freq="3">
+      <h3>Какие виды ссылок есть в Java и чем они отличаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Четыре. Сильная — обычная ссылка: пока объект сильно достижим, GC его не тронет. <code>SoftReference</code> очищается, когда памяти не хватает или ссылкой давно не пользовались, и гарантированно до <code>OutOfMemoryError</code>. <code>WeakReference</code> очищается на первой же сборке, где объект достижим только слабо. <code>PhantomReference</code> всегда возвращает <code>null</code> и нужна, чтобы узнать через <code>ReferenceQueue</code>, что объект умер, — на ней построен <code>Cleaner</code>.</p>
+          <p>Примеры: weak — <code>WeakHashMap</code>, ключи <code>ThreadLocalMap</code>, слушатели; phantom — освобождение native-памяти у <code>DirectByteBuffer</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Soft-ссылки HotSpot очищает по давности: порог — свободные МБ heap × <code>SoftRefLRUPolicyMSPerMB</code> (1000 мс). <code>get()</code> обновляет метку времени.</li>
+            <li>С Java 9 phantom-ссылки очищаются автоматически, как weak, и память объекта освобождается без вызова <code>clear()</code>.</li>
+            <li>В очередь ссылки ставит поток <code>Reference Handler</code> после паузы, поэтому сразу после сборки очередь может быть пуста.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Зачем нужна ссылка, у которой get() всегда возвращает null?</summary>
+          <p>Чтобы получить сигнал о смерти объекта без возможности его воскресить. Обёртка попадает в очередь, когда объект окончательно недостижим. Данные для уборки хранят рядом с ней, а не в объекте. Так работают <code>Cleaner</code> и освобождение памяти <code>DirectByteBuffer</code>.</p>
+        </details>
+        <details data-kind="задача">
+          <summary>В WeakHashMap положили ключи 0..999 через автоупаковку и строковый литерал. Сколько записей останется после GC?</summary>
+          <p>129. <code>Integer.valueOf</code> кеширует значения от −128 до 127, на них ссылается кеш, так что 128 ключей живы. Литерал держит пул строк. Остальные 872 ключа умрут. Проверено запуском.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="weakhashmap" data-freq="2">
+      <h3>Как работает WeakHashMap и когда она не очищается?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждая запись — <code>WeakReference</code> на ключ с общей <code>ReferenceQueue</code>, значение хранится обычным полем. Когда ключ становится слабо достижим, GC очищает ссылку и ставит запись в очередь. Карта удаляет такие записи при следующем обращении — <code>get</code>, <code>put</code>, <code>size</code>.</p>
+          <p>Не очищается, если значение прямо или косвенно ссылается на ключ; если ключи живут сами — кешированные <code>Integer</code>, литералы, enum; если ключ где-то ещё держат сильно.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Кеш: Map&lt;User, Session&gt; cache = new WeakHashMap&lt;&gt;(); cache.put(u, new Session(u, data)). Жалуются на рост памяти. Что не так?</summary>
+          <p><code>Session</code> ссылается на <code>User</code>. Карта держит значение сильно, значение держит ключ, и ключ никогда не станет слабо достижимым. Нужно убрать ссылку на ключ из значения или хранить её как <code>WeakReference</code>. А лучше взять кеш с явным ограничением и вытеснением, например Caffeine.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="soft-cache" data-freq="2">
+      <h3>Стоит ли делать кеш на SoftReference?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обычно нет. Размер такого кеша определяет сборщик. Пока heap свободен, кеш держит почти всё, и G1 чаще запускает маркировку. При нехватке памяти GC сбрасывает все soft-ссылки разом, кеш пустеет целиком под нагрузкой, и запросы идут в базу. Поведение зависит от <code>-Xmx</code>. Лучше ограничить кеш явно — по числу записей или весу — и видеть его в метриках.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Soft-ссылка в тесте не очищается, хотя SoftRefLRUPolicyMSPerMB=1 и сборки идут. Почему?</summary>
+          <p>Скорее всего, тест проверяет её через <code>get()</code>. Каждый вызов обновляет метку последнего использования, и ссылка всегда «свежая». Проверять без обновления можно через <code>refersTo(null)</code> (Java 16+).</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="finalize-cleaner" data-freq="2">
+      <h3>Почему finalize() устарел и чем его заменить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>finalize()</code> не гарантирует, что вызов вообще случится и когда. Он замедляет создание объектов: каждый регистрируется через <code>FinalReference</code>. Мёртвый объект живёт на одну сборку дольше. Все вызовы идут в одном потоке, и при быстрой смерти объектов очередь растёт до OOM. Ещё <code>finalize()</code> позволяет воскресить объект. С Java 18 метод помечен к удалению.</p>
+          <p>Замена — явное освобождение через <code>AutoCloseable</code> и <code>try-with-resources</code>, а как страховка — <code>java.lang.ref.Cleaner</code> на phantom-ссылках.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В замере урока 3 млн объектов с непустым <code>finalize()</code> создавались в пять раз дольше, а при heap 256 МБ программа упала с OOM.</li>
+            <li><code>--finalization=disabled</code> (Java 18+) проверяет, не зависит ли приложение от финализации.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>В конструкторе: CLEANER.register(this, () -&gt; free(this.address)). Что не так?</summary>
+          <p>Лямбда захватила <code>this</code>. Cleaner держит действие сильно, действие держит объект, и объект никогда не станет недостижимым: очистка не выполнится ни разу, в замере урока — 0 из 1000. Действие должно быть статическим классом или лямбдой, захватывающей только нужные значения, например локальную копию адреса.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="threadlocal-leak" data-freq="2">
+      <h3>Почему ThreadLocal может течь в пуле потоков?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Значения хранятся в карте самого потока, <code>ThreadLocalMap</code>. Ключ — слабая ссылка на <code>ThreadLocal</code>, значение — сильная. Поток пула живёт долго, и значение живёт вместе с ним, пока его не удалят. Если <code>ThreadLocal</code> статический, ключ не умирает никогда. Если его забыли, значение остаётся до следующего обращения потока к карте. Ещё следующая задача в этом потоке может увидеть чужой контекст. Решение — <code>remove()</code> в <code>finally</code>.</p>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ref/package-summary.html">java.lang.ref (JDK 21)</a> — основа урока: определения достижимости и контракты всех видов ссылок.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ref/Cleaner.html">Cleaner (JDK 21)</a> — шаблон использования и предупреждение о действии, которое ссылается на объект.</li>
+      <li><a href="https://openjdk.org/jeps/421">JEP 421: Deprecate Finalization for Removal</a> — проблемы финализации и путь миграции.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/WeakHashMap.html">WeakHashMap (JDK 21)</a> — предупреждение о значениях, которые ссылаются на ключи.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
