@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Concurrency: Java Memory Model · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jmm">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Concurrency: Java Memory Model</h1>
+  </header>
+
+  <div class="lesson">
+
+    <section class="step" id="stop-flag">
+      <h2>Поток не видит, что флаг уже false, и крутится вечно</h2>
+      <p>Фоновый поток работает, пока флаг <code>running</code> равен <code>true</code>. Главный поток через полсекунды сбрасывает флаг и ждёт остановки:</p>
+      <pre><code class="language-java">public class StopFlag {
+    static boolean running = true;                               // без volatile
+
+    public static void main(String[] args) throws Exception {
+        Thread worker = new Thread(() -&gt; {
+            long loops = 0;
+            while (running) loops++;                             // крутимся, пока не попросят остановиться
+            System.out.println("worker остановился после " + loops + " итераций");
+        });
+        worker.setDaemon(true);
+        worker.start();
+        Thread.sleep(500);
+        running = false;                                         // просим остановиться
+        System.out.println("main: running = false");
+        worker.join(3000);
+        System.out.println("через 3 с worker жив: " + worker.isAlive());
+    }
+}</code></pre>
+      <pre><code class="language-text">$ java StopFlag
+main: running = false
+через 3 с worker жив: true
+
+$ java -Xint StopFlag                              # только интерпретатор
+main: running = false
+worker остановился после 194274565 итераций
+через 3 с worker жив: false</code></pre>
+      <p>С JIT поток не остановился: запись <code>false</code> он не увидел ни через три секунды, ни позже. В интерпретаторе тот же код работает. C2 увидел, что внутри цикла <code>running</code> никто не меняет, прочитал поле один раз до цикла и превратил его в <code>while (true)</code>. Для однопоточной программы такая оптимизация честная. Чтобы запретить её, нужно сообщить компилятору, что поле читают и пишут разные потоки. Хватит одного слова — <code>static volatile boolean running</code>: с ним поток остановился сразу.</p>
+      <p><b>Java Memory Model</b> (JMM, глава 17 JLS) — это договор о том, какие значения поток вправе увидеть при чтении общей переменной. Ни компилятору, ни процессору не нужно показывать записи других потоков немедленно и в исходном порядке. Гарантии появляются только там, где их явно запросили. В этой теме — почему так устроено, что такое happens-before, что даёт <code>volatile</code>, как безопасно опубликовать объект и почему классический double-checked locking сломан.</p>
+    </section>
+
+    <section class="step" id="reordering">
+      <h2>Процессор переставляет запись и чтение, и получается невозможный результат</h2>
+      <p>Компилятор — не единственный источник сюрпризов. Классический тест: два потока одновременно записывают свою переменную и читают чужую. Раунд запускается одновременно для обоих, повторяем миллион раз:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.AtomicInteger;
+
+public class StoreBuffer {
+    static int x, y;                                             // обычные поля
+    static int r1, r2;
+    static volatile int round;                                   // стартовый сигнал для раунда
+    static final AtomicInteger done = new AtomicInteger();
+
+    public static void main(String[] args) throws Exception {
+        int rounds = 1_000_000;
+        Thread a = new Thread(() -&gt; {
+            for (int i = 1; i &lt;= rounds; i++) {
+                while (round != i) Thread.onSpinWait();
+                x = 1;                                           // записал своё
+                r1 = y;                                          // прочитал чужое
+                done.incrementAndGet();
+            }
+        });
+        Thread b = new Thread(() -&gt; {
+            for (int i = 1; i &lt;= rounds; i++) {
+                while (round != i) Thread.onSpinWait();
+                y = 1;
+                r2 = x;
+                done.incrementAndGet();
+            }
+        });
+        a.start(); b.start();
+        long[] outcomes = new long[4];                           // индекс r1 * 2 + r2
+        for (int i = 1; i &lt;= rounds; i++) {
+            x = 0; y = 0;
+            done.set(0);
+            round = i;                                           // старт раунда
+            while (done.get() &lt; 2) Thread.onSpinWait();
+            outcomes[r1 * 2 + r2]++;
+        }
+        a.join(); b.join();
+        System.out.printf("r1=0 r2=0: %,d%nr1=0 r2=1: %,d%nr1=1 r2=0: %,d%nr1=1 r2=1: %,d%n",
+            outcomes[0], outcomes[1], outcomes[2], outcomes[3]);
+    }
+}</code></pre>
+      <pre><code class="language-text">r1=0 r2=0: 997,346
+r1=0 r2=1: 940
+r1=1 r2=0: 1,714
+r1=1 r2=1: 0</code></pre>
+      <p>Если бы операции потоков просто чередовались, первая строка была бы невозможна. Кто-то из потоков записывает первым, и второй обязан прочитать его единицу. Но результат <code>0, 0</code> — это 99,7% раундов. Так же выходит и в интерпретаторе (<code>-Xint</code>: 997 487), значит, дело не в JIT. Каждое ядро кладёт запись в свой <b>store buffer</b> и продолжает работу, не дожидаясь, пока запись дойдёт до общей памяти. Чтение чужой переменной выполняется раньше, чем собственная запись стала видна соседу. Для одного потока это незаметно, для двух — это переупорядочивание «запись, потом чтение».</p>
+      <p>С <code>volatile int x, y</code> результат <code>0, 0</code> не встретился ни разу за миллион раундов. Запуски — на Apple M5 Pro (ARM). Модель памяти x86 тоже разрешает именно это переупорядочивание «запись, потом чтение», у него тоже есть store buffer. А вот две записи x86 не переставляет, ARM — переставляет. Шаг 5 покажет, к чему это приводит.</p>
+      <p>Переставлять операции могут три участника: компилятор javac (редко), JIT и процессор с его буферами и кешами. Каждый из них сохраняет иллюзию последовательного выполнения для <i>одного</i> потока (as-if-serial) и не обязан сохранять её для остальных. JMM не описывает кеши и буферы конкретного процессора. Она задаёт правила, по которым программист может получить гарантии на любом железе.</p>
+    </section>
+
+    <section class="step" id="happens-before">
+      <h2>happens-before — единственный способ гарантировать, что чтение увидит запись</h2>
+      <p>Главное понятие JMM — отношение <b>happens-before</b>. Если действие A happens-before действия B, то всё, что сделано до A включительно, видно в B. Если между записью и чтением такого отношения нет, чтение вправе вернуть и старое значение, и новое. Это и называется data race.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="Два потока. Писатель записывает data равное 42, потом volatile ready равное true. Читатель ждёт, пока ready станет true, потом читает data. Порядок программы связывает операции внутри каждого потока. Запись volatile ready синхронизируется с её чтением. По транзитивности запись data happens-before чтения data, и читатель гарантированно видит 42. Если ready не volatile, ребра между потоками нет, и читатель может увидеть 0.">
+            <defs>
+              <marker id="hb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="hb-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="hb-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="40" y="24" class="dg-cap">ПОТОК-ПИСАТЕЛЬ</text>
+            <text x="420" y="24" class="dg-cap">ПОТОК-ЧИТАТЕЛЬ</text>
+
+            <rect x="40" y="44" width="240" height="40" rx="8" class="dg-box"/>
+            <text x="56" y="69" class="dg-in">data = 42</text>
+            <rect x="40" y="124" width="240" height="40" rx="8" class="dg-box"/>
+            <text x="56" y="149" class="dg-in">ready = true</text>
+            <text data-s="1-4" x="178" y="149" class="dg-n">volatile</text>
+
+            <rect x="420" y="124" width="260" height="40" rx="8" class="dg-box"/>
+            <text x="436" y="149" class="dg-in">while (!ready) {}</text>
+            <rect x="420" y="204" width="260" height="40" rx="8" class="dg-box"/>
+            <text x="436" y="229" class="dg-in">r = data</text>
+
+            <!-- шаг 2+: порядок программы -->
+            <g data-s="2-">
+              <path d="M160 84 L 160 120" class="dg-line" marker-end="url(#hb-n)"/>
+              <path d="M550 164 L 550 200" class="dg-line" marker-end="url(#hb-n)"/>
+              <text x="168" y="106" class="dg-n">порядок программы</text>
+              <text x="558" y="186" class="dg-n">порядок программы</text>
+            </g>
+            <!-- шаг 3-4: synchronizes-with -->
+            <g data-s="3-4">
+              <path d="M280 144 L 416 144" class="dg-line ok" marker-end="url(#hb-ok)"/>
+              <text x="292" y="136" class="dg-ok">запись → чтение</text>
+            </g>
+            <!-- шаг 4: транзитивность -->
+            <g data-s="4">
+              <path d="M280 64 L 700 64 L 700 224 L 684 224" class="dg-line ok" marker-end="url(#hb-ok)"/>
+              <rect x="420" y="204" width="260" height="40" rx="8" class="dg-cell hit"/>
+              <text x="436" y="229" class="dg-in">r = data  → 42</text>
+            </g>
+            <!-- шаг 5: без volatile -->
+            <g data-s="5">
+              <path d="M280 144 L 416 144" class="dg-line bad" marker-end="url(#hb-bad)"/>
+              <text x="306" y="136" class="dg-bad">ребра нет</text>
+              <rect x="420" y="204" width="260" height="40" rx="8" class="dg-cell miss"/>
+              <text x="436" y="229" class="dg-in">r = data  → 42 или 0</text>
+            </g>
+
+            <text data-s="1" x="20" y="268" class="dg-in">писатель готовит данные и поднимает флаг, читатель ждёт флаг</text>
+            <text data-s="2" x="20" y="268" class="dg-in">внутри потока действия упорядочены программой</text>
+            <text data-s="3" x="20" y="268" class="dg-ok">запись volatile happens-before её чтения другим потоком</text>
+            <text data-s="4" x="20" y="268" class="dg-ok">по транзитивности data = 42 happens-before r = data</text>
+            <text data-s="5" x="20" y="268" class="dg-bad">без volatile цепочка рвётся: гарантии нет</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Писатель готовит данные <code>data = 42</code> и поднимает флаг <code>ready</code>. Читатель ждёт флаг и читает данные. Поле <code>ready</code> — <code>volatile</code>, <code>data</code> — обычное.</li>
+          <li>Правило порядка программы: внутри одного потока каждое действие happens-before следующего. Но это ничего не говорит о связи между потоками.</li>
+          <li>Правило volatile: запись в <code>volatile</code>-поле happens-before каждого последующего чтения этого поля. Когда читатель увидел <code>ready == true</code>, между потоками появилось ребро.</li>
+          <li>Отношение транзитивно: <code>data = 42</code> → <code>ready = true</code> → чтение <code>ready</code> → <code>r = data</code>. Читатель гарантированно увидит 42, хотя само поле <code>data</code> обычное. Одно <code>volatile</code>-поле публикует всё, что записано до него.</li>
+          <li>Если <code>ready</code> — обычное поле, ребра между потоками нет. Читатель может увидеть <code>ready == true</code> и <code>data == 0</code>. На ARM это реально происходит — в шаге 5.</li>
+        </ol>
+      </figure>
+      <p>Рёбра между потоками дают не только <code>volatile</code>. Правила из JLS 17.4.5 и гарантии пакета <code>java.util.concurrent</code>:</p>
+      <table class="mx">
+        <thead><tr><th>Действие A</th><th>happens-before действия B</th></tr></thead>
+        <tbody>
+          <tr><td>выход из <code>synchronized</code> (unlock)</td><td>последующий вход в <code>synchronized</code> на том же мониторе</td></tr>
+          <tr><td>запись <code>volatile</code>-поля</td><td>последующее чтение этого поля</td></tr>
+          <tr><td><code>t.start()</code></td><td>любое действие в потоке <code>t</code></td></tr>
+          <tr><td>любое действие в потоке <code>t</code></td><td>возврат из <code>t.join()</code></td></tr>
+          <tr><td>конец конструктора (для <code>final</code>-полей)</td><td>чтение этих полей через ссылку на объект</td></tr>
+          <tr><td>запись до <code>executor.submit(task)</code></td><td>выполнение <code>task</code></td></tr>
+          <tr><td>действия задачи</td><td>возврат из <code>future.get()</code></td></tr>
+          <tr><td>положить в <code>ConcurrentHashMap</code>, <code>BlockingQueue</code></td><td>достать тот же элемент в другом потоке</td></tr>
+          <tr><td><code>latch.countDown()</code>, <code>unlock()</code> у <code>Lock</code></td><td>возврат из <code>await()</code>, последующий <code>lock()</code></td></tr>
+        </tbody>
+      </table>
+      <p>Поэтому код, где потоки общаются только через пулы, очереди и потокобезопасные коллекции, работает без единого <code>volatile</code>. Эти классы дают рёбра happens-before внутри себя.</p>
+    </section>
+
+    <section class="step" id="volatile">
+      <h2>volatile даёт видимость и порядок, но не атомарность</h2>
+      <p>Что гарантирует <code>volatile</code>-поле:</p>
+      <ul>
+        <li><b>Видимость.</b> Чтение видит последнюю запись в это поле из любого потока. JIT не может закешировать значение в регистре, как в шаге 1.</li>
+        <li><b>Порядок.</b> Записи, сделанные до записи в <code>volatile</code>, нельзя перенести после неё. Чтения после чтения <code>volatile</code> нельзя перенести до него. Отсюда публикация через флаг в шаге 3.</li>
+        <li><b>Атомарность одной записи <code>long</code> и <code>double</code>.</b> Без <code>volatile</code> JLS разрешает разрывать 64-битную запись на две половины. На 64-битных JVM этого не бывает, но формально гарантии нет.</li>
+      </ul>
+      <p>Чего <code>volatile</code> не даёт — атомарности составных действий. <code>count++</code> на <code>volatile</code>-поле так же теряет увеличения, как в теме Thread Safety: чтение и запись по отдельности видимы, но между ними вклинивается другой поток.</p>
+      <p>Где <code>volatile</code> — правильный инструмент:</p>
+      <ul>
+        <li>флаг остановки или состояния, который пишет один поток, а читают многие;</li>
+        <li>публикация ссылки на неизменяемый объект: конфигурация, кеш, собранный целиком и подменяемый одной записью;</li>
+        <li>поле, которое пишет только один поток: тогда гонок записи нет, и нужна только видимость.</li>
+      </ul>
+      <p>Цена <code>volatile</code> на современных процессорах — барьер памяти при записи и запрет некоторых оптимизаций. Это дешевле блокировки, но заметно дороже обычного поля в горячем цикле. Если нужна атомарная операция «прочитать и изменить», берут атомики (тема Atomics &amp; CAS).</p>
+    </section>
+
+    <section class="step" id="publication">
+      <h2>Объект, опубликованный без синхронизации, можно увидеть недостроенным</h2>
+      <p>Самое контринтуитивное следствие JMM: поток может получить ссылку на объект раньше, чем увидит значения, записанные в его конструкторе. Проверим на ARM. Писатель 20 млн раз создаёт объект с <code>amount = 42</code> и кладёт в обычное статическое поле, читатель проверяет, что видит:</p>
+      <pre><code class="language-java">public class Publish {
+    static class Payment {
+        long amount;                                             // обычное поле
+        Payment(long amount) { this.amount = amount; }
+    }
+    static class FinalPayment {
+        final long amount;                                       // final-поле
+        FinalPayment(long amount) { this.amount = amount; }
+    }
+
+    static Payment shared;                                       // публикация без синхронизации
+    static FinalPayment sharedFinal;
+
+    public static void main(String[] args) throws Exception {
+        int rounds = 20_000_000;
+        Thread writer = new Thread(() -&gt; {
+            for (int i = 1; i &lt;= rounds; i++) {
+                shared = new Payment(42);
+                sharedFinal = new FinalPayment(42);
+            }
+        });
+        long[] seen = new long[4];                               // [увидел объект, amount=0, final: увидел, amount=0]
+        Thread reader = new Thread(() -&gt; {
+            for (int i = 0; i &lt; rounds; i++) {
+                Payment p = shared;
+                if (p != null) { seen[0]++; if (p.amount == 0) seen[1]++; }
+                FinalPayment f = sharedFinal;
+                if (f != null) { seen[2]++; if (f.amount == 0) seen[3]++; }
+            }
+        });
+        writer.start(); reader.start(); writer.join(); reader.join();
+        System.out.printf("обычное поле: amount=0 в %d из %d прочитанных объектов%n", seen[1], seen[0]);
+        System.out.printf("final-поле:   amount=0 в %d из %d прочитанных объектов%n", seen[3], seen[2]);
+    }
+}</code></pre>
+      <pre><code class="language-text">обычное поле: amount=0 в 23 из 19987895 прочитанных объектов
+final-поле:   amount=0 в 0 из 19980868 прочитанных объектов</code></pre>
+      <p>23 раза читатель получил объект <code>Payment</code>, у которого <code>amount</code> — ноль. Нигде в программе ноль в это поле не пишется: это состояние до конструктора. В трёх запусках — 23, 16 и 42 раза. Процессор ARM вправе сделать запись ссылки в <code>shared</code> видимой раньше, чем запись поля внутри объекта. Раз между потоками нет happens-before, JMM это разрешает.</p>
+      <p>Объект с <code>final</code>-полем недостроенным не встретился ни разу: JMM даёт <code>final</code>-полям особую гарантию. Любой поток, получивший ссылку на объект после конструктора, видит <code>final</code>-поля проинициализированными, даже при гонке. Условие одно — <code>this</code> не должен утечь из конструктора. С <code>static volatile Payment shared</code> ноль тоже не встретился ни разу за три запуска.</p>
+      <p>Способы <b>безопасной публикации</b> — ссылка и состояние объекта становятся видимы вместе:</p>
+      <ul>
+        <li>инициализация в статическом инициализаторе: JVM инициализирует класс под блокировкой;</li>
+        <li>запись в <code>volatile</code>-поле или <code>AtomicReference</code>;</li>
+        <li>запись в <code>final</code>-поле другого объекта, который сам опубликован корректно;</li>
+        <li>запись и чтение под одной блокировкой;</li>
+        <li>передача через потокобезопасную коллекцию, очередь или пул потоков.</li>
+      </ul>
+      <p>На x86 процессор не переставляет записи, и этот тест там, скорее всего, покажет нули. Но это не делает код правильным: JIT вправе переставить записи и на x86, а код, который «работает на моём ноутбуке», сломается на ARM-серверах — Graviton, Ampere — или после обновления JDK.</p>
+    </section>
+
+    <section class="step" id="dcl">
+      <h2>Double-checked locking без volatile публикует недостроенный объект</h2>
+      <p>Классический ленивый синглтон, который хочет не брать блокировку на каждом вызове:</p>
+      <pre><code class="language-java">// СЛОМАНО: instance без volatile
+private static Config instance;
+
+static Config get() {
+    if (instance == null) {                                      // 1. проверка без блокировки
+        synchronized (Config.class) {
+            if (instance == null) instance = new Config();       // 2. создание под блокировкой
+        }
+    }
+    return instance;                                             // 3. ссылка может быть видна раньше полей
+}</code></pre>
+      <p>Проблема та же, что в шаге 5. Поток, который прошёл первую проверку без блокировки, не имеет с создателем никакого happens-before. Он может увидеть ненулевую ссылку и поля конструктора в состоянии по умолчанию. Блокировка защищает только тех, кто в неё вошёл. Исправления:</p>
+      <pre><code class="language-java">import java.util.concurrent.atomic.AtomicInteger;
+
+public class Singletons {
+    static final AtomicInteger created = new AtomicInteger();
+
+    static class Config {
+        final String url;
+        Config() {
+            created.incrementAndGet();
+            url = "jdbc:postgresql://db/payments";
+        }
+    }
+
+    // 1. double-checked locking: работает только с volatile
+    private static volatile Config instance;
+    static Config dcl() {
+        Config c = instance;                                     // одно volatile-чтение на быстром пути
+        if (c == null) {
+            synchronized (Singletons.class) {
+                c = instance;
+                if (c == null) instance = c = new Config();
+            }
+        }
+        return c;
+    }
+
+    // 2. holder: JVM сама инициализирует класс лениво и потокобезопасно
+    private static class Holder {
+        static final Config INSTANCE = new Config();
+    }
+    static Config holder() { return Holder.INSTANCE; }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("до holder(): создано " + created.get());   // Holder ещё не инициализирован
+        holder();
+        System.out.println("после holder(): создано " + created.get());
+        Thread[] ts = new Thread[4];
+        for (int i = 0; i &lt; ts.length; i++) {
+            ts[i] = new Thread(() -&gt; { dcl(); holder(); }, "t" + i);
+            ts[i].start();
+        }
+        for (Thread t : ts) t.join();
+        System.out.println("после 4 потоков: создано " + created.get() + " — по одному на способ");
+        System.out.println("один и тот же объект: " + (dcl() == dcl()) + ", " + (holder() == holder()));
+    }
+}</code></pre>
+      <pre class="out">до holder(): создано 0
+после holder(): создано 1
+после 4 потоков: создано 2 — по одному на способ
+один и тот же объект: true, true</pre>
+      <ul>
+        <li><b>DCL с <code>volatile</code></b> работает с Java 5, когда JMM переписали (JSR-133). Локальная переменная <code>c</code> экономит второе <code>volatile</code>-чтение на быстром пути.</li>
+        <li><b>Holder</b> — вложенный класс со статическим полем. JVM инициализирует класс при первом обращении и сама гарантирует, что это произойдёт один раз, под блокировкой, с публикацией результата всем потокам. Вывод показывает ленивость: до первого вызова <code>holder()</code> объект не создан. Кода синхронизации нет вовсе.</li>
+        <li><b><code>enum</code> с одним элементом</b> — то же, что holder, плюс защита от повторного создания через сериализацию и рефлексию.</li>
+      </ul>
+      <p>В прикладном коде на Spring синглтоны создаёт контейнер, и DCL встречается в основном в библиотеках и на собеседованиях. Но механизм тот же, что у любого ленивого кеша, который сохраняют в обычное поле.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Без синхронизации поток может не увидеть запись другого потока вообще (JIT вынес чтение из цикла) или увидеть записи в другом порядке (store buffer, переупорядочивание записей на ARM).</li>
+        <li>Гарантия видимости есть только при happens-before: unlock → lock, запись <code>volatile</code> → чтение, <code>start</code>, <code>join</code>, <code>final</code>-поля, классы <code>java.util.concurrent</code>. Отношение транзитивно.</li>
+        <li><code>volatile</code> даёт видимость и порядок, но не атомарность <code>count++</code>. Подходит для флагов и публикации неизменяемых объектов.</li>
+        <li>Объект, опубликованный через обычное поле, можно увидеть недостроенным: в замере на ARM — 16–42 раза на 20 млн. <code>final</code>-поля и <code>volatile</code>-ссылка это исключают.</li>
+        <li>Double-checked locking работает только с <code>volatile</code>. Проще — holder-класс или <code>enum</code>.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="happens-before-q" data-freq="3">
+      <h3>Что такое happens-before?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Отношение из Java Memory Model: если действие A happens-before действия B, то результаты A и всё, что было до A, видны в B. Без такого отношения чтение общей переменной может вернуть устаревшее значение, а записи могут стать видны в другом порядке. Основные правила: порядок программы внутри потока, unlock монитора перед последующим lock того же монитора, запись <code>volatile</code> перед последующим чтением, <code>Thread.start()</code> перед действиями потока, действия потока перед возвратом из <code>join()</code>. Отношение транзитивно.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Классы <code>java.util.concurrent</code> документируют свои рёбра: <code>submit</code> → выполнение задачи, задача → <code>Future.get()</code>, <code>put</code> в очередь → <code>take</code>.</li>
+            <li>Data race — конфликтующие доступы (хотя бы одна запись) без happens-before между ними. Программа без data race ведёт себя последовательно согласованно (гарантия DRF-SC).</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Писатель: data = 42; ready = true; (ready — volatile). Читатель: if (ready) print(data). data — обычное поле. Что напечатает читатель, если условие выполнилось?</summary>
+          <p>Гарантированно 42. Запись <code>data</code> идёт раньше записи <code>ready</code> по порядку программы, запись <code>volatile ready</code> happens-before её чтения, а чтение <code>ready</code> — раньше чтения <code>data</code>. По транзитивности запись <code>data</code> видна. Если <code>ready</code> не <code>volatile</code>, может напечатать и 0.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="volatile-q" data-freq="3">
+      <h3>Что делает volatile? Гарантирует ли он атомарность?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>volatile</code> гарантирует видимость: чтение видит последнюю запись из любого потока, и JIT не может закешировать поле в регистре. Ещё он гарантирует порядок: записи до записи в <code>volatile</code>-поле видны тому, кто прочитал это поле. Атомарности составных операций нет: <code>count++</code> на <code>volatile</code> всё равно теряет обновления. Атомарна только сама запись или чтение, в том числе для <code>long</code> и <code>double</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Типичные применения: флаг остановки, публикация неизменяемого объекта, поле с одним писателем, double-checked locking.</li>
+            <li>Цена — барьеры памяти при записи и запрет оптимизаций, дешевле блокировки.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>static boolean stop; поток крутит while (!stop) { work(); }, другой поток ставит stop = true. На стенде поток иногда не останавливается. Почему и как исправить?</summary>
+          <p>Без <code>volatile</code> между записью и чтением нет happens-before. JIT вправе прочитать <code>stop</code> один раз до цикла, и поток не увидит изменение никогда. В замере урока поток с таким флагом не остановился, а в интерпретаторе остановился сразу. Исправление — <code>volatile boolean stop</code> или <code>AtomicBoolean</code>; ещё лучше — прерывание через <code>interrupt()</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="dcl-q" data-freq="3">
+      <h3>Что не так с double-checked locking?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Без <code>volatile</code> поток, который проверяет <code>instance</code> без блокировки, может увидеть ненулевую ссылку на объект, конструктор которого для него ещё не завершён: поля в значениях по умолчанию. Запись ссылки и запись полей могут стать видны в другом порядке. С <code>volatile</code> DCL корректен начиная с Java 5. Проще и надёжнее — holder-класс со статическим полем или <code>enum</code>: JVM сама лениво и потокобезопасно инициализирует класс.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Можно ли увидеть недостроенный объект на практике, или это теория?</summary>
+          <p>Можно. В замере урока на ARM (Apple M5 Pro) читатель получал объект с полем в значении по умолчанию 16–42 раза на 20 млн публикаций через обычное поле. С <code>final</code>-полем или <code>volatile</code>-ссылкой — ни разу. На x86 процессор не переставляет записи, но это вправе сделать JIT.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="safe-publication" data-freq="2">
+      <h3>Что такое безопасная публикация объекта?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Передача ссылки другому потоку так, чтобы вместе со ссылкой он гарантированно увидел и состояние объекта. Способы: статический инициализатор; <code>volatile</code>-поле или <code>AtomicReference</code>; <code>final</code>-поле корректно опубликованного объекта; запись и чтение под одной блокировкой; потокобезопасная коллекция, очередь или пул. Неизменяемые объекты с <code>final</code>-полями безопасны даже при публикации через гонку.</p>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="final-fields" data-freq="2">
+      <h3>Какую гарантию JMM даёт final-полям?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если <code>this</code> не утёк из конструктора, любой поток, получивший ссылку на объект, увидит <code>final</code>-поля проинициализированными, даже без синхронизации. Гарантия распространяется и на объекты, достижимые через <code>final</code>-поле, в состоянии на конец конструктора. На этом держится потокобезопасность неизменяемых классов вроде <code>String</code>.</p>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что значит «this утёк из конструктора» и чем это опасно?</summary>
+          <p>Ссылка на объект стала доступна другому потоку до окончания конструктора: например, конструктор зарегистрировал <code>this</code> как слушателя или запустил поток, который его использует. Такой поток может увидеть даже <code>final</code>-поля неинициализированными — гарантия действует только после конца конструктора.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-17.html">JLS 21, глава 17.4: Memory Model</a> — основа урока: happens-before, volatile, семантика final-полей.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/package-summary.html#MemoryVisibility">java.util.concurrent: Memory Consistency Properties</a> — какие рёбра happens-before дают классы пакета.</li>
+      <li><a href="https://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html">The «Double-Checked Locking is Broken» Declaration</a> — классический разбор DCL.</li>
+      <li><a href="https://shipilev.net/blog/2014/safe-public-construction/">Aleksey Shipilёv: Safe Publication and Safe Initialization in Java</a> — безопасная публикация с замерами на разных архитектурах.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

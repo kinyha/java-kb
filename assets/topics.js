@@ -407,7 +407,7 @@ window.KB_TREE = [
             scope: 'race condition, атомарность, check-then-act, неизменяемость, thread confinement' },
           { id: 'synchronization', freq: 3, status: 'draft', title: 'synchronized & wait/notify',
             scope: 'монитор, reentrancy, synchronized метод и блок, wait, notify и notifyAll, spurious wakeup' },
-          { id: 'jmm', freq: 3, status: 'empty', title: 'Java Memory Model',
+          { id: 'jmm', freq: 3, status: 'draft', title: 'Java Memory Model',
             scope: 'happens-before, volatile, видимость и переупорядочивание, безопасная публикация, double-checked locking' },
           { id: 'deadlocks', freq: 3, status: 'empty', title: 'Deadlocks & Liveness',
             scope: 'deadlock, livelock, starvation, порядок захвата блокировок, поиск по thread dump' },
