@@ -1,7 +1,7 @@
 # Web demos
 
 Запускаемые примеры к темам раздела Spring › Web. Нужны JDK 21 и Maven.
-Зависимости зафиксированы в `pom.xml`: встроенный Tomcat 11.0.26, Spring Framework 7.0.9, Jackson 3.1.5, Spring Boot 4.1.1, Hibernate Validator 9.1.3.
+Зависимости зафиксированы в `pom.xml`: встроенный Tomcat 11.0.26, Spring Framework 7.0.9, Jackson 3.1.5, Spring Boot 4.1.1, Hibernate Validator 9.1.3, Apache HttpClient 5.6.4.
 
 ```bash
 cd examples/web
@@ -23,3 +23,6 @@ cd examples/web
 | `MvcBootDemo.java` | Spring MVC | то же в Spring Boot: ленивый DispatcherServlet, его маппинги, 404 через обработчик статики |
 | `ValidationDemo.java` | Validation & Errors | валидатор и каскад `@Valid`, проверка тела и параметров в MVC, `@Validated` на контроллере и сервисе |
 | `ErrorHandlingDemo.java` | Validation & Errors | `@ExceptionHandler` по ближайшему типу, локальный обработчик, ProblemDetail, исключение фильтра; `naive` — catch-all на Exception |
+| `ClientDemo.java` | HTTP Clients | `RestClient.create()` без таймаутов против билдера Boot, ошибки 4xx и `onStatus`, HTTP-интерфейс `@ImportHttpServices` |
+| `ClientPoolDemo.java` | HTTP Clients | пул Apache HttpClient на 5 соединений к хосту против пула на 20 и JDK HttpClient |
+| `RetryDemo.java` | HTTP Clients | `@Retryable` из Spring 7 с паузами; тройное списание без ключа идемпотентности и одно с ключом |
