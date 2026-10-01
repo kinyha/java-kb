@@ -110,31 +110,43 @@
       <p>Фрагменты <a href="../examples/spring-core/BeansDemo.java">BeansDemo.java</a>, Java 21, Spring 7.0.9. Здесь показаны все три варианта и само сравнение. Imports и оболочка main находятся в полном файле.</p>
       <pre><code class="language-java">static int created, initialized;
 static class Gateway {
-    Gateway() { created++; } // Считаем все созданные объекты, включая лишние.
-    @PostConstruct void init() { initialized++; } // Считает объекты, подготовленные Spring.
+    // Считаем все new, включая объекты вне контейнера.
+    Gateway() { created++; }
+    // Этот метод вызывает Spring при подготовке бина.
+    @PostConstruct void init() { initialized++; }
 }
 record Service(Gateway gateway) {}
 @Configuration
 static class Full {
     @Bean Gateway gateway() { return new Gateway(); }
-    @Bean Service service() { return new Service(gateway()); } // Spring перенаправит gateway() в контейнер.
+    @Bean Service service() {
+        // Spring перенаправит gateway() в контейнер.
+        return new Service(gateway());
+    }
 }
 @Configuration(proxyBeanMethods = false)
 static class Lite {
     @Bean Gateway gateway() { return new Gateway(); }
-    @Bean Service service() { return new Service(gateway()); } // Обычный вызов создаёт лишний объект.
+    @Bean Service service() {
+        // Прямой вызов снова выполнит new Gateway().
+        return new Service(gateway());
+    }
 }
 @Configuration(proxyBeanMethods = false)
 static class Parameters {
     @Bean Gateway gateway() { return new Gateway(); }
-    @Bean Service service(Gateway gateway) { return new Service(gateway); } // Готовую зависимость передаёт Spring.
+    @Bean Service service(Gateway gateway) {
+        // Готовую зависимость передаёт Spring.
+        return new Service(gateway);
+    }
 }
 static void compare(Class&lt;?&gt; config) {
     created = initialized = 0;
     try (var ctx = new AnnotationConfigApplicationContext(config)) {
+        Gateway inService = ctx.getBean(Service.class).gateway();
+        Gateway inContext = ctx.getBean(Gateway.class);
         System.out.printf(&quot;%s: same=%s, created=%d, initialized=%d%n&quot;,
-            config.getSimpleName(), ctx.getBean(Service.class).gateway() == ctx.getBean(Gateway.class),
-            created, initialized);
+            config.getSimpleName(), inService == inContext, created, initialized);
     }
 }
 // В main:
@@ -177,8 +189,10 @@ Parameters: same=true, created=1, initialized=1</pre>
 static class TokenFactory implements FactoryBean&lt;Token&gt; {
     int number;
     public Token getObject() { return new Token(++number); }
-    public Class&lt;?&gt; getObjectType() { return Token.class; } // Тип продукта доступен без его создания.
-    public boolean isSingleton() { return true; } // Spring сохраняет продукт отдельно от экземпляра фабрики.
+    // Тип продукта доступен без его создания.
+    public Class&lt;?&gt; getObjectType() { return Token.class; }
+    // Spring сохраняет продукт отдельно от экземпляра фабрики.
+    public boolean isSingleton() { return true; }
 }
 @Configuration(proxyBeanMethods = false)
 static class Factories {
@@ -186,8 +200,10 @@ static class Factories {
 }
 // В main:
 try (var ctx = new AnnotationConfigApplicationContext(Factories.class)) {
-    System.out.println(&quot;product same: &quot; + (ctx.getBean(&quot;token&quot;) == ctx.getBean(&quot;token&quot;)));
-    System.out.println(&quot;factory: &quot; + ctx.getBean(&quot;&amp;token&quot;).getClass().getSimpleName());
+    Object first = ctx.getBean(&quot;token&quot;); // Получаем продукт.
+    System.out.println(&quot;product same: &quot; + (first == ctx.getBean(&quot;token&quot;)));
+    Object factory = ctx.getBean(&quot;&amp;token&quot;); // Получаем саму фабрику.
+    System.out.println(&quot;factory: &quot; + factory.getClass().getSimpleName());
 }</code></pre>
       <pre class="out">product same: true
 factory: TokenFactory</pre>
