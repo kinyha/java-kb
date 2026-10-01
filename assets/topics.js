@@ -505,7 +505,7 @@ window.KB_TREE = [
       { id: 'core', title: 'Core', source: 'Spring Framework Reference: IoC Container, AOP, Context Events; Spring Start Here, гл. 2–6; порядок от графа объектов к перехвату вызовов', items: [
         { id: 'spring-core', freq: 3, status: 'draft', title: 'IoC & ApplicationContext',
           scope: 'IoC и DI, граф объектов, BeanDefinition и bean, BeanFactory и ApplicationContext, refresh, иерархия контекстов, Spring и Boot' },
-        { id: 'spring-beans', freq: 3, status: 'empty', title: 'Configuration & Beans',
+        { id: 'spring-beans', freq: 3, status: 'draft', title: 'Configuration & Beans',
           scope: 'component scan, stereotypes, @Configuration и @Bean, full и lite mode, @Import, FactoryBean, @Profile и @Conditional' },
         { id: 'spring-di', freq: 3, status: 'empty', title: 'Dependency Resolution',
           scope: 'constructor, setter и field injection, выбор кандидата по типу, @Qualifier, @Primary и @Fallback, generics, коллекции, Optional и ObjectProvider, @Resource' },

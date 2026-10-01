@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Configuration & Beans · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-beans">
+<main class="page">
+  <header class="topic-head"><h1>Spring: Configuration & Beans</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Конфигурация сначала наполняет реестр определений. Scan обнаруживает классы, @Bean задаёт factory methods, @Import подключает модули, условия выбирают состав. Full Configuration перехватывает прямые Bean-вызовы; lite оставляет их обычными Java-вызовами. Явные зависимости в параметрах делают результат понятным в обоих режимах.</p>
+    </div>
+    <section class="step" id="scanning">
+      <h2>Аннотация станет определением только после обнаружения</h2>
+      <p>В проект добавили BankGateway с @Component, но приложение пишет «нет bean такого типа». Аннотация на месте, класс компилируется. Не хватает шага между исходным кодом и графом объектов: этот класс должен попасть в область сканирования или быть зарегистрирован явно. Контейнер не ищет все классы во всех JAR без границ.</p>
+      <p>@ComponentScan задаёт пакеты и фильтры. Если пакеты не указаны, отправная точка — пакет класса с этой аннотацией. В Boot default scan следует расположению @SpringBootApplication, поэтому главный класс в корневом пакете приложения имеет практический смысл. Класс в соседнем дереве пакетов автоматически не попадёт в контекст.</p>
+      <p>Сканер читает metadata class-файлов, в стандартном пути через ASM, и регистрирует BeanDefinition подходящих независимых классов. Для этого не требуется создавать каждый компонент или выполнять его конструктор. Регистрация объясняет, почему сначала можно проверить кандидатов и условия, а уже позже собирать экземпляры.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 235" role="img" aria-label="Component scan, Java-конфигурация и явный import наполняют общий реестр BeanDefinition; только после этого фабрика создаёт экземпляры.">
+            <defs>
+              <marker id="beans-reg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="20" y="30" width="184" height="42" rx="7" class="dg-box"/>
+            <rect x="20" y="94" width="184" height="42" rx="7" class="dg-box"/>
+            <rect x="20" y="158" width="184" height="42" rx="7" class="dg-box"/>
+            <rect x="290" y="42" width="204" height="158" rx="8" class="dg-box"/>
+            <rect x="308" y="90" width="168" height="34" rx="6" class="dg-cell"/>
+            <rect x="308" y="144" width="168" height="34" rx="6" class="dg-cell"/>
+            <rect x="558" y="92" width="144" height="54" rx="7" class="dg-cell hit"/>
+            <path d="M204 51 C248 51 250 107 304 107" class="dg-line" marker-end="url(#beans-reg)"/>
+            <path d="M204 115 L286 115" class="dg-line" marker-end="url(#beans-reg)"/>
+            <path d="M204 179 C248 179 250 161 304 161" class="dg-line" marker-end="url(#beans-reg)"/>
+            <path d="M494 119 L554 119" class="dg-line" marker-end="url(#beans-reg)"/>
+            <text x="32" y="56" class="dg-in">scan: @Service</text>
+            <text x="32" y="120" class="dg-in">config: @Bean</text>
+            <text x="32" y="184" class="dg-in">@Import / XML</text>
+            <text x="310" y="68" class="dg-t">реестр определений</text>
+            <text x="392" y="112" text-anchor="middle" class="dg-in">paymentService</text>
+            <text x="392" y="166" text-anchor="middle" class="dg-in">gateway</text>
+            <text x="630" y="114" text-anchor="middle" class="dg-in">экземпляры</text>
+            <text x="630" y="133" text-anchor="middle" class="dg-n">через BeanFactory</text>
+            <text x="558" y="180" class="dg-s">scope + init + BPP</text>
+          </svg>
+        </div>
+        <figcaption>Способы регистрации сходятся в одном реестре. Component scan не обязан создавать объект, чтобы прочитать его аннотации.</figcaption>
+      </figure>
+      <p>@Service, @Repository и @Controller — специализации @Component; они выражают роль, а не другой DI-контейнер. @Service сам по себе не начинает транзакцию. @Repository служит маркером для перевода persistence exceptions при подключённой инфраструктуре exception translation. Собственная stereotype-аннотация может использовать @Component как meta-аннотацию.</p>
+      <p>Для диагностики сначала проверь границу scan и import, затем condition/profile, и только после этого разрешение зависимости. Сканирование всего com часто затягивает чужие конфигурации и тестовые реализации. Для библиотечного модуля явный import конфигурации обычно делает состав приложения понятнее.</p>
+    </section>
+    
+    <section class="step" id="factory-methods">
+      <h2>Метод @Bean описывает объект, которым дальше управляет Spring</h2>
+      <p>Некоторые классы нельзя или не хочется аннотировать: клиент SDK банка, пул соединений, Clock. Метод @Bean позволяет создать и настроить такой объект обычным Java-кодом, а результат отдать контейнеру. Это полноценный managed bean: к нему применяются scope, callbacks и подходящие BeanPostProcessor.</p>
+      <p>По умолчанию имя bean совпадает с именем метода. Атрибут name позволяет задать основное имя и aliases: несколько имён ведут к одному определению, а не создают несколько объектов. У scanned-компонентов имя по умолчанию берётся из имени класса с правилами JavaBeans decapitalize; URLClient остаётся URLClient. Для внешнего контракта лучше задать имя явно, чем зависеть от необычного сокращения.</p>
+      <p>Параметры @Bean Spring разрешает как зависимости: Gateway gateway в параметрах service означает запрос подходящего bean. Внутри factory method выбираются адрес, таймаут и конструктор, а сам service не узнаёт про Environment или ApplicationContext. Это удобная граница между политикой сборки и бизнес-логикой.</p>
+      <p>Declared return type — важная часть metadata до создания объекта. Если @Bean объявлен как Object, контейнеру труднее заранее распознать его как конкретный клиент или инфраструктурный processor. Возвращай достаточно точный тип: контракт приложения для обычного сервиса, конкретный контракт расширения для BPP/BFPP. Не рассчитывай на удачный порядок создания, чтобы тип стал известен.</p>
+      <div class="trap">
+        <p class="myth">Внутри @Bean всё созданное через new автоматически становится bean.</p>
+        <p class="fact">Управляемым становится результат, возвращённый в путь создания контейнера. Если внутри service() вручную создан вложенный Gateway и его отдельно не зарегистрировали, контейнер не обязан внедрять его поля, вызывать @PostConstruct и оборачивать в AOP.</p>
+      </div>
+    </section>
+    
+    <section class="step" id="configuration">
+      <h2>Full и lite различаются перехватом прямого вызова @Bean</h2>
+      <p>Класс @Configuration по умолчанию использует proxyBeanMethods=true. Spring создаёт CGLIB-подкласс конфигурации и переопределяет подходящие @Bean-методы. Когда один из них вызывается из другого, вызов перенаправляется в BeanFactory. Для singleton это возвращает уже управляемую ссылку, для другого scope соблюдает правила этого scope.</p>
+      <p>Но фабрике всё же нужно однажды выполнить тело @Bean, чтобы получить объект. Interceptor различает внутренний вызов контейнера, создающий этот bean, и пользовательскую ссылку на другой @Bean. В первом случае выполняется тело, во втором — getBean. Именно это различие не даёт бесконечной рекурсии.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 248" role="img" aria-label="В full-конфигурации вызов gateway направляется в контейнер. В lite тело выполняется напрямую: Service хранит Gateway #2, а контекст — Gateway #1.">
+            <defs>
+              <marker id="beans-full" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <line x1="354" y1="12" x2="354" y2="232" class="dg-sep"/>
+            <text x="20" y="25" class="dg-cap">FULL CONFIGURATION</text>
+            <text x="376" y="25" class="dg-cap">LITE CONFIGURATION</text>
+            <rect x="20" y="50" width="132" height="40" rx="6" class="dg-box"/>
+            <rect x="212" y="50" width="124" height="40" rx="6" class="dg-box"/>
+            <rect x="212" y="150" width="124" height="40" rx="6" class="dg-cell hit"/>
+            <rect x="376" y="50" width="132" height="40" rx="6" class="dg-box"/>
+            <rect x="578" y="50" width="124" height="40" rx="6" class="dg-cell hit"/>
+            <rect x="578" y="150" width="124" height="40" rx="6" class="dg-cell miss"/>
+            <path d="M152 70 L208 70" class="dg-line" marker-end="url(#beans-full)"/>
+            <path d="M274 90 L274 146" class="dg-line" marker-end="url(#beans-full)"/>
+            <path d="M86 90 C86 170 145 170 208 170" class="dg-line" marker-end="url(#beans-full)"/>
+            <path d="M508 70 C535 70 540 170 574 170" class="dg-line bad" marker-end="url(#beans-full)"/>
+            <text x="86" y="75" text-anchor="middle" class="dg-in">service()</text>
+            <text x="274" y="75" text-anchor="middle" class="dg-in">BeanFactory</text>
+            <text x="274" y="175" text-anchor="middle" class="dg-in">Gateway #1</text>
+            <text x="442" y="75" text-anchor="middle" class="dg-in">service()</text>
+            <text x="640" y="75" text-anchor="middle" class="dg-in">Gateway #1</text>
+            <text x="640" y="175" text-anchor="middle" class="dg-in">Gateway #2</text>
+            <text x="20" y="219" class="dg-ok">одна managed-ссылка</text>
+            <text x="376" y="116" class="dg-n">gateway(): new напрямую</text>
+            <text x="578" y="114" class="dg-n">managed bean</text>
+            <text x="376" y="219" class="dg-bad">#2 не проходит init и AOP</text>
+          </svg>
+        </div>
+        <figcaption>Отключение proxyBeanMethods не отключает контейнер. Оно меняет семантику прямого вызова метода конфигурации.</figcaption>
+      </figure>
+      <p>При @Configuration(proxyBeanMethods=false) и @Bean в обычном @Component работает lite mode. Определения остаются зарегистрированными, но прямой gateway() — обычный вызов Java. Он выполнит new повторно. Такой экземпляр не проходит managed lifecycle Gateway, даже если отдельный одноимённый bean зарегистрирован в том же контексте.</p>
+      <p><a href="../examples/spring-core/BeansDemo.java">Полный пример BeansDemo.java</a>, Java 21, Spring 7.0.9. Ниже — фрагмент.</p><pre><code class="language-bash">cd examples/spring-core
+      ./run.sh BeansDemo</code></pre><pre><code class="language-java">@Configuration(proxyBeanMethods = false)
+      static class Parameters {
+          @Bean Gateway gateway() { return new Gateway(); }
+          @Bean Service service(Gateway gateway) {
+              return new Service(gateway); // Spring передал managed-зависимость.
+          }
+      }
+      // В полном примере есть Full и Lite с service() -&gt; gateway(),
+      // а Gateway считает конструкторы и @PostConstruct отдельно.</code></pre>
+      <pre class="out">Full: same=true, created=1, initialized=1
+      Lite: same=false, created=2, initialized=1
+      Parameters: same=true, created=1, initialized=1
+      product same: true
+      factory: TokenFactory</pre>
+      <p>Full, Lite и Parameters различаются именно связями. В lite создано два Gateway, но init вызван у одного managed Gateway. В параметрическом варианте один объект и одна инициализация без enhancement конфигурации. Это хороший default для конфигураций без прямых inter-bean calls: зависимости видны в сигнатурах.</p>
+      <p>Full-конфигурация не может быть final, а interceptable instance @Bean-методы — private/final: подкласс не способен их переопределить. Static @Bean не участвует в таком instance-перехвате. Отключение enhancement позволяет final-конфигурации, но требует дисциплины в прямых вызовах. Не путай enhancement @Configuration с AOP-прокси сервисов: задачи у них разные.</p>
+    </section>
+    
+    <section class="step" id="composition">
+      <h2>Явный import собирает модуль без бесконтрольного сканирования</h2>
+      <p>@Import(BankConfig.class) подключает конфигурацию как часть текущего контекста. Это не создание второго ApplicationContext и не переход в другой scope. Можно импортировать обычный компонент, группу конфигураций, ImportSelector или registrar. Так модуль предоставляет понятную точку подключения вместо требования «просканируй мои пакеты».</p>
+      <p>ImportSelector по metadata выбирает имена классов для регистрации; <code>ImportBeanDefinitionRegistrar</code> непосредственно добавляет определения. DeferredImportSelector обрабатывается позже обычных imports — такой механизм полезен для инфраструктуры, которая должна учесть пользовательскую конфигурацию. Spring Boot использует расширения этого семейства для auto-configuration, но конкретные условия и imports Boot разобраны в соседней теме.</p>
+      <p>XML, @ImportResource и программная registerBeanDefinition по-прежнему доступны. Их результаты сходятся в общем реестре. Не существует правила «XML bean хуже аннотационного»: важно, что metadata описывает, какие processors включены и как разрешаются зависимости.</p>
+      <p>Конфликт имени и неоднозначность типа — разные проблемы. Два определения paymentGateway спорят за одно имя; два имени одного типа дают два кандидата для DI. У обычной DefaultListableBeanFactory overriding разрешён по умолчанию, Boot запрещает его по умолчанию. При сканировании несовместимые одноимённые компоненты могут вызвать конфликт ещё до обычного bean overriding. Нельзя лечить все три ситуации одним @Primary.</p>
+      <p>Практическое правило: один модуль — явная точка импорта и узкая область scan внутри модуля. Тогда при чтении startup failure можно восстановить, кто зарегистрировал определение. Если bean неожиданно появился, исследуй граф импортов так же внимательно, как граф объектов.</p>
+    </section>
+    
+    <section class="step" id="conditions">
+      <h2>Profile и condition решают состав графа до его создания</h2>
+      <p>@Profile — условие регистрации определения. Если банковский sandbox включён только в profile test, без активного test определения не будет вовсе. Bean не создаётся и не ждёт переключения режима. Профиль задаётся в Environment до обработки конфигурации; изменение active profiles после refresh не пересобирает уже работающий граф.</p>
+      <p>@Conditional вызывает Condition.matches с доступом к metadata и ConditionContext: Environment, registry и другим доступным на этой фазе данным. @Profile сам построен на @Conditional. Условие должно отвечать, регистрировать ли компонент, а не создавать бизнес-объекты ради проверки: ранний getBean ломает нормальный порядок startup.</p>
+      <p>Environment объединяет property sources и active/default profiles. ${bank.url} в @Value означает подстановку свойства, #{…} — вычисление SpEL-выражения. Затем ConversionService или conversion-механизм приводит значение к ожидаемому типу параметра/поля. Это не тот же алгоритм, что поиск bean по типу. Возможность прочитать property не означает, что classpath application.yml автоматически загружен голым Framework-контекстом.</p>
+      <p>Spring Boot добавляет загрузку configuration files, свой порядок источников и удобный binding @ConfigurationProperties. Здесь достаточно удержать границу: настройки помогают выбрать и собрать определения, DI связывает объекты. При инциденте «взялся неправильный клиент» нужно проверить и активные условия регистрации, и выбор среди уже зарегистрированных кандидатов.</p>
+      <p>Не делай профиль названием каждой маленькой бизнес-развилки. Чем больше независимых profile-комбинаций, тем больше разных графов нужно понимать. Для изменяемого во время работы бизнес-правила используй явную стратегию или feature configuration; профиль описывает состав приложения при запуске.</p>
+    </section>
+    
+    <section class="step" id="factories">
+      <h2>FactoryBean разделяет фабрику и продукт под одним именем</h2>
+      <p>BeanFactory создаёт и управляет бинами всего контейнера. FactoryBean&lt;T&gt; — отдельный bean, который производит продукт T. Такой адаптер полезен, если внешний объект сложно создать: нужен dynamic proxy, SDK builder или интеграция с другой фабрикой. Это два разных уровня слова «factory».</p>
+      <p>Для bean с именем token обычный getBean("token") возвращает продукт getObject(), а getBean("&amp;token") — сам FactoryBean. isSingleton сообщает, можно ли кешировать продукт; это отдельная политика от scope самого factory bean. При singleton-фабрике и isSingleton=false фабрика одна, продуктов много.</p>
+      <p>getObjectType позволяет контейнеру сопоставить тип продукта без его изготовления. Если он возвращает null, некоторые операции поиска по типу не увидят продукт заранее. Поэтому фабрики инфраструктуры должны давать точную type information и избегать побочных действий в методах определения типа.</p>
+      <p>Сама фабрика проходит обычный lifecycle bean. За полную инициализацию и уничтожение продукта отвечает FactoryBean: контейнер постобрабатывает выданный продукт, но не автоматически проводит через него все init/destroy callbacks как через самостоятельное обычное определение. Ресурсы продукта фабрика закрывает в своём destroy. Не путай cached product с автоматически зарегистрированным disposable bean.</p>
+      <details class="deep">
+        <summary>Под капотом: два кеша и префикс &</summary>
+        <p>AbstractBeanFactory.getObjectForBeanInstance распознаёт dereference-префикс и FactoryBean. Затем FactoryBeanRegistrySupport получает или создаёт продукт и хранит singleton-продукты в отдельном кеше. Из этого следует, что «singleton factory» и «singleton product» нельзя выводить друг из друга без проверки isSingleton.</p>
+      </details>
+      <p>Граница декларативной конфигурации проста: она делает сборку обозримой, пока связи остаются в параметрах и определения не меняются во время живой работы. Если конфигурация начинает управлять бизнес-процессом, искать половину контекста через getBean и создавать скрытые вложенные объекты, верни эту логику в обычные сервисы. Следующая тема — <a href="spring-di.html">как Spring выбирает зависимости</a> среди готовых определений.</p>
+    </section>
+    <div class="summary">
+      <ul>
+        <li>Аннотация без обнаружения не регистрирует bean.</li>
+        <li>Component и Bean сходятся в реестре, но отвечают за разные способы описать создание.</li>
+        <li>Lite не отменяет DI; он отменяет перехват прямого вызова Bean-метода.</li>
+        <li>Profile/Conditional выбирают определения при запуске, а не переключают живой граф.</li>
+        <li>FactoryBean — managed-фабрика и отдельный продукт с собственной политикой кеширования.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="registration" data-freq="3">
+      <h3>Чем @Component отличается от @Bean?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@Component сообщает сканеру, что класс можно зарегистрировать. @Bean описывает factory method, результат которого контейнер берёт под управление. Я выбираю Component для собственных компонентов и Bean для внешних классов или явной настройки создания.</p>
+          <p>Оба пути дают BeanDefinition в общем реестре. Отсутствие bean с Component сначала заставляет меня проверить scan/import/condition, а не переписывать конструктор.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Stereotype-аннотации могут быть составными. @Repository несёт роль для инфраструктуры exception translation, @Service сам не включает транзакции.</li>
+            <li>Точный declared return type factory method нужен для определения кандидатов и раннего обнаружения processors.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="full-lite" data-freq="3">
+      <h3>Зачем proxyBeanMethods и что изменится при false?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Full Configuration перехватывает прямые calls между Bean-методами и направляет их в контейнер. При false определения остаются, но вызов метода выполняется как обычный Java-код. Если он делает new, получится дополнительный объект вне managed-пути.</p>
+          <p>Я передаю зависимости параметрами Bean-метода. Тогда контейнер разрешает их явно, и lite-конфигурация безопасно обходится без CGLIB enhancement.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Scope соблюдается при обращении к контейнеру, а не потому, что метод помечен Bean.</li>
+            <li>Static методы не перехватываются как instance-вызовы. Full configuration ограничена правилами переопределения final/private.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему в lite у вложенного Gateway не вызвался PostConstruct?</summary>
+          <p>Потому что service() вызвал gateway() напрямую. Его результат передан в Service и не возвращён контейнеру как создаваемый gateway-bean. Исправление — зависимость в параметрах service(Gateway gateway), а не ручной вызов init.</p>
+        </details>
+      </div>
+    </article>
+    
+    <article class="q" id="conditional-registration" data-freq="3">
+      <h3>На каком этапе работают @Profile и @Conditional?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Они участвуют в решении, попадёт ли определение в контекст. Profile проверяет активные профили Environment, Conditional применяет условие к metadata. Без определения нет ни создания объекта, ни дальнейшего выбора этого bean для DI.</p>
+          <p>Я задаю окружение до refresh и проверяю граф для нужной комбинации. Изменение свойства после запуска не включает автоматически пропущенный bean.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Profile реализован через Conditional. Состав графа и runtime-бизнес-правила требуют разных механизмов.</li>
+            <li>Условия регистрации нельзя использовать как повод для раннего создания обычных бинов; это нарушает фазы расширения контейнера.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="factory-bean" data-freq="3">
+      <h3>Чем FactoryBean отличается от BeanFactory?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>BeanFactory — контейнерный механизм; FactoryBean — bean, который создаёт продукт. По обычному имени я получаю продукт, по имени с амперсандом — саму фабрику. Это удобно для адаптации сложного создания объектов к контейнеру.</p>
+          <p>Я отдельно проверяю scope фабрики, isSingleton продукта и getObjectType. Одна фабрика не обязана всегда возвращать один продукт.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Singleton product кешируется отдельно от самой фабрики.</li>
+            <li>Фабрика отвечает за init/destroy продукта; автоматический lifecycle продукта не равен обычному bean-definition пути.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/java/basic-concepts.html">Spring Reference: Java Configuration</a> — основа урока: full/lite и inter-bean calls.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/classpath-scanning.html">Spring Reference: Classpath Scanning</a> — границы, фильтры и stereotypes.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/java/composing-configuration-classes.html">Spring Reference: Composing Configurations</a> — imports и conditional registration.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html">Spring Reference: Container Extension Points</a> — контракт FactoryBean; ConfigurationClassEnhancer проверен по исходникам v7.0.9.</li>
+      <li><a href="https://www.manning.com/books/spring-start-here">Spring Start Here, главы 2–3</a> — учебный ориентир для контекста и явной сборки; современные границы уточнены по Reference.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

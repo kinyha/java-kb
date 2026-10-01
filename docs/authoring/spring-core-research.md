@@ -17,3 +17,17 @@
 - Диагностика причин создания и ограничения → boundaries. Точный выбор → Dependency Resolution; готовность → Lifecycle.
 
 Доказательства: ContextDemo, Java 21.0.11, Spring 7.0.9; реальный вывод в странице. Неоднозначность parent/child с разными именами также получена запуском. Схемы: реестр и граф ссылок; пять кадров создания singleton. Все кадры, dark/mobile и раскрытие карточки/вывода проверяются перед коммитом.
+
+## Configuration & Beans
+
+Центральный вопрос: как конфигурация превращается в определения и когда обычный вызов @Bean создаёт лишний объект?
+
+- Stereotypes, scan boundaries и чтение метаданных → scanning; registration card.
+- @Bean, имена/aliases, declared return type, new → factory-methods.
+- Full/lite, CGLIB enhancement, static/final ограничения, injection через параметры → configuration; BeansDemo, full-lite card.
+- @Import, ImportSelector/Registrar, XML и программная регистрация → composition.
+- @Profile/@Conditional, Environment, placeholders и SpEL → conditions. Полный property precedence и binding → Boot / Configuration & Profiles.
+- FactoryBean, &name, product cache, lifecycle и getObjectType → factories; factory-bean card.
+- Scan conflicts и случайный импорт, границы декларативности → composition/conditions/factories.
+
+Проверка реализации: ConfigurationClassEnhancer.BeanMethodInterceptor и AbstractBeanFactory.getObjectForBeanInstance, исходники v7.0.9. Учебный ориентир — Spring Start Here, главы 2–3; современное поведение — Reference, Java-based configuration, classpath scanning, container extension points.
