@@ -1,7 +1,7 @@
 # Web demos
 
 Запускаемые примеры к темам раздела Spring › Web. Нужны JDK 21 и Maven.
-Зависимости зафиксированы в `pom.xml`: встроенный Tomcat 11.0.26, Spring Framework 7.0.9, Jackson 3.1.5, Spring Boot 4.1.1, Hibernate Validator 9.1.3, Apache HttpClient 5.6.4.
+Зависимости зафиксированы в `pom.xml`: встроенный Tomcat 11.0.26, Spring Framework 7.0.9, Jackson 3.1.5, Spring Boot 4.1.1, Hibernate Validator 9.1.3, Apache HttpClient 5.6.4, Reactor Netty 1.3.7.
 
 ```bash
 cd examples/web
@@ -26,3 +26,5 @@ cd examples/web
 | `ClientDemo.java` | HTTP Clients | `RestClient.create()` без таймаутов против билдера Boot, ошибки 4xx и `onStatus`, HTTP-интерфейс `@ImportHttpServices` |
 | `ClientPoolDemo.java` | HTTP Clients | пул Apache HttpClient на 5 соединений к хосту против пула на 20 и JDK HttpClient |
 | `RetryDemo.java` | HTTP Clients | `@Retryable` из Spring 7 с паузами; тройное списание без ключа идемпотентности и одно с ключом |
+| `ReactiveLoopDemo.java` | WebFlux | два потока event loop: `Mono.delay`, блокирующий `sleep` и вынос в `boundedElastic` |
+| `ReactorBasicsDemo.java` | WebFlux | ленивость Mono, `publishOn` и `subscribeOn`, ThreadLocal против Context, backpressure через `request(n)` |

@@ -537,8 +537,8 @@ window.KB_TREE = [
           scope: 'Bean Validation и каскад @Valid, проверка в контроллере и HandlerMethodValidationException, @Validated на сервисе, @ExceptionHandler и @ControllerAdvice, ProblemDetail и RFC 9457, /error в Boot' },
         { id: 'spring-clients', freq: 2, status: 'draft', title: 'HTTP Clients',
           scope: 'RestClient, RestTemplate, WebClient и HTTP-интерфейсы, библиотеки под ними, таймауты, пул соединений, ошибки 4xx и 5xx, @Retryable и идемпотентность, @ConcurrencyLimit' },
-        { id: 'spring-reactive', freq: 1, status: 'empty', title: 'WebFlux',
-          scope: 'Mono и Flux, event loop, backpressure, когда реактив оправдан' },
+        { id: 'spring-reactive', freq: 1, status: 'draft', title: 'WebFlux',
+          scope: 'event loop Netty, блокирующий вызов и boundedElastic, Mono и Flux, подписка, publishOn и subscribeOn, Reactor Context вместо ThreadLocal, backpressure, WebFlux или виртуальные потоки' },
       ] },
       { id: 'data', title: 'Data', source: 'Spring Framework Reference: Data Access; Spring Start Here, гл. 12–14; Hibernate ORM User Guide', items: [
         { id: 'jdbc', freq: 2, status: 'empty', title: 'JDBC & Connection Pools',

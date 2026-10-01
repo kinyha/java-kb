@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>WebFlux · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-reactive">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>WebFlux</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>В Spring MVC запрос держит поток, пока ждёт базу или банк. WebFlux устроен иначе: код не ждёт, а описывает, что сделать, когда придут данные, и несколько потоков event loop Netty обслуживают все соединения сразу. Работает это, только пока никто не блокирует эти потоки: один <code>Thread.sleep</code> или JDBC-вызов в обработчике останавливает все запросы своего event loop. Mono и Flux — описание конвейера, которое начинает работать при подписке и прыгает между потоками, поэтому ThreadLocal в нём теряется. Платишь за это сложностью, а виртуальные потоки решают задачу «много ожидающих запросов» без смены модели.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Поток на запрос простаивает в ожидании, а событийный цикл — нет</h2>
+      <p>В теме <a href="servlet.html">Servlet & Tomcat</a> 200 потоков закончились, потому что каждый запрос держал свой поток всё время, пока ждал банк. Работы у потока было на миллисекунды, ожидания — на секунды. Если сервис держит тысячи долгих соединений, например стримит события подписчикам или проксирует запросы как шлюз, потоков нужно столько же, и большую часть времени они спят.</p>
+      <p>Реактивный подход убирает ожидание из потока. Обработчик не ждёт ответа, а регистрирует, что сделать, когда ответ придёт, и сразу возвращает поток. Сеть отслеживает Netty: несколько потоков event loop через Selector следят за всеми сокетами, как Poller в Tomcat, но здесь они же выполняют и твой код, короткими кусками по мере прихода событий. По умолчанию таких потоков столько, сколько ядер, но не меньше четырёх.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Слева три запроса в модели поток на запрос: у каждого свой поток, короткая работа в начале и в конце и долгое ожидание между ними, всё время поток занят. Справа те же три запроса на одном потоке event loop: поток выполняет короткие куски работы A, B и C, а ожидание происходит без потока.">
+            <text x="14" y="18" class="dg-cap bad">ПОТОК НА ЗАПРОС</text>
+            <text x="380" y="18" class="dg-cap">EVENT LOOP</text>
+            <line x1="360" y1="8" x2="360" y2="200" class="dg-sep"/>
+            <!-- слева: три потока -->
+            <text x="14" y="55" class="dg-n">поток 1</text>
+            <text x="14" y="95" class="dg-n">поток 2</text>
+            <text x="14" y="135" class="dg-n">поток 3</text>
+            <g>
+              <rect x="80" y="40" width="20" height="24" rx="3" class="dg-cell hit"/><rect x="100" y="40" width="200" height="24" rx="3" class="dg-cell miss"/><rect x="300" y="40" width="20" height="24" rx="3" class="dg-cell hit"/>
+              <rect x="86" y="80" width="20" height="24" rx="3" class="dg-cell hit"/><rect x="106" y="80" width="200" height="24" rx="3" class="dg-cell miss"/><rect x="306" y="80" width="20" height="24" rx="3" class="dg-cell hit"/>
+              <rect x="92" y="120" width="20" height="24" rx="3" class="dg-cell hit"/><rect x="112" y="120" width="200" height="24" rx="3" class="dg-cell miss"/><rect x="312" y="120" width="20" height="24" rx="3" class="dg-cell hit"/>
+            </g>
+            <!-- справа: один поток event loop -->
+            <text x="380" y="75" class="dg-n">event loop</text>
+            <text x="380" y="135" class="dg-n">без потока</text>
+            <rect x="460" y="60" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="478" y="60" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="496" y="60" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="650" y="60" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="668" y="60" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="686" y="60" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="476" y="120" width="174" height="24" rx="3" class="dg-sep" fill="none"/>
+            <g text-anchor="middle">
+              <text x="90" y="56" class="dg-n">A</text><text x="200" y="56" class="dg-s">ждёт банк</text>
+              <text x="96" y="96" class="dg-n">B</text><text x="206" y="96" class="dg-s">ждёт банк</text>
+              <text x="102" y="136" class="dg-n">C</text><text x="212" y="136" class="dg-s">ждёт банк</text>
+              <text x="468" y="76" class="dg-n">A</text><text x="486" y="76" class="dg-n">B</text><text x="504" y="76" class="dg-n">C</text>
+              <text x="658" y="76" class="dg-n">A</text><text x="676" y="76" class="dg-n">B</text><text x="694" y="76" class="dg-n">C</text>
+              <text x="563" y="136" class="dg-s">ответы ждут сокет и таймер</text>
+              <text x="575" y="104" class="dg-s">поток свободен</text>
+            </g>
+            <text x="14" y="176" class="dg-bad">3 запроса = 3 занятых потока</text>
+            <text x="14" y="192" class="dg-s">почти всё время они спят</text>
+            <text x="380" y="176" class="dg-ok">3 запроса = 1 поток</text>
+            <text x="380" y="192" class="dg-s">работает, только когда пришло событие</text>
+          </svg>
+        </div>
+        <figcaption>Красное слева — поток, который занят, но ничего не делает. Справа то же ожидание идёт вообще без потока, и event loop успевает обслужить другие соединения.</figcaption>
+      </figure>
+      <p>WebFlux — реактивный веб-стек Spring на библиотеке Project Reactor. Снаружи он похож на MVC: те же <code>@RestController</code> и <code>@GetMapping</code>, но методы возвращают Mono (ноль или один результат) и Flux (поток результатов). В Boot его подключает <code>spring-boot-starter-webflux</code>, сервер по умолчанию — Netty. Если в classpath есть и MVC, Boot выбирает MVC, а реактивный режим включают явно: <code>spring.main.web-application-type=reactive</code>.</p>
+    </section>
+
+    <section class="step" id="event-loop">
+      <h2>Event loop справляется с тысячами соединений, пока его никто не блокирует</h2>
+      <p>Проверим на «банке» из темы про Tomcat, но в WebFlux и с двумя потоками event loop вместо двухсот потоков Tomcat. Три варианта одного эндпоинта: ожидание через <code>Mono.delay</code>, которое поток не занимает; блокирующий <code>Thread.sleep</code> прямо в обработчике; тот же <code>sleep</code>, вынесенный в отдельный пул. <a href="../examples/web/ReactiveLoopDemo.java">ReactiveLoopDemo.java</a>, Spring Boot 4.1.1, Reactor Netty 1.3.7, фрагмент:</p>
+      <pre><code class="language-bash">cd examples/web
+./run.sh ReactiveLoopDemo</code></pre>
+      <pre><code class="language-java">System.setProperty("reactor.netty.ioWorkerCount", "2");  // по умолчанию max(число ядер, 4)
+
+@GetMapping("/delay")
+Mono&lt;String&gt; delay() {                    // ждём секунду, не занимая поток
+    String handler = thread();
+    return Mono.delay(Duration.ofSeconds(1)).map(tick -&gt; handler + " -&gt; " + thread());
+}
+
+@GetMapping("/sleep")
+Mono&lt;String&gt; sleep() {                    // ошибка: блокирующий вызов в потоке event loop
+    String handler = thread();
+    sleepMillis(1000);
+    return Mono.just(handler + " -&gt; " + thread());
+}
+
+@GetMapping("/offload")
+Mono&lt;String&gt; offload() {                  // блокирующий вызов вынесен в отдельный пул
+    String handler = thread();
+    return Mono.fromCallable(() -&gt; {
+        sleepMillis(1000);
+        return handler + " -&gt; " + thread();
+    }).subscribeOn(Schedulers.boundedElastic());
+}
+
+// На каждый эндпоинт: шесть запросов разом, через 0,1 с — /health, который сразу возвращает Mono.just.</code></pre>
+      <pre class="out">6 x /delay finished after: 1.0 1.0 1.0 1.0 1.0 1.0 s
+  handler ran on: [reactor-http-nio-1, reactor-http-nio-2], result produced on: [parallel-1, parallel-2, parallel-3, parallel-4, parallel-5]
+  /health sent 0.1 s later: 0.0 s
+6 x /sleep finished after: 1.0 1.0 2.0 2.0 3.0 3.0 s
+  handler ran on: [reactor-http-nio-1, reactor-http-nio-2], result produced on: [reactor-http-nio-1, reactor-http-nio-2]
+  /health sent 0.1 s later: 2.9 s
+6 x /offload finished after: 1.0 1.0 1.0 1.0 1.0 1.0 s
+  handler ran on: [reactor-http-nio-1, reactor-http-nio-2], result produced on: [boundedElastic-1, boundedElastic-2, boundedElastic-3, boundedElastic-4, boundedElastic-5, boundedElastic-6]
+  /health sent 0.1 s later: 0.0 s</pre>
+      <p>С <code>Mono.delay</code> два потока обслужили шесть запросов за одну секунду: обработчик отработал на event loop за доли миллисекунды и вернул поток, а через секунду результат выдал поток планировщика parallel. С <code>Thread.sleep</code> вышло хуже, чем у Tomcat: каждый поток event loop обслуживает свои соединения по очереди, запросы прошли тремя волнами, и health-check ждал 2,9 секунды. В Tomcat заблокировался бы один поток из двухсот, а тут — половина сервера. В других запусках health-check отвечал через 1,9 секунды, а последний запрос — через 4: в каком порядке освободившийся event loop разбирает накопившиеся события, не гарантировано. Вариант <code>/offload</code> вернул скорость: блокирующая работа ушла в пул boundedElastic, а event loop остался свободным.</p>
+      <div class="trap">
+        <p class="myth">WebFlux быстрее MVC, поэтому достаточно поменять стартер.</p>
+        <p class="fact">Отдельный запрос WebFlux не ускоряет. Выигрыш — в числе одновременных ожиданий на малом числе потоков, и только если вся цепочка неблокирующая. JDBC, RestClient, синхронный SDK внутри обработчика превращают event loop в узкое место хуже пула Tomcat.</p>
+      </div>
+      <p>Значит, всё, что ждёт, должно быть неблокирующим: WebClient вместо RestClient, R2DBC вместо JDBC, реактивные драйверы Redis, Kafka и MongoDB. Если неблокирующей версии нет, вызов оборачивают в <code>Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())</code>. У этого пула не больше 10 × число ядер потоков и очередь до 100 000 задач на поток — это тот же пул потоков с теми же ограничениями, просто отдельный. Найти случайную блокировку в event loop помогает BlockHound от команды Reactor: в тестах он бросает исключение, если поток Netty вызвал блокирующий метод.</p>
+    </section>
+
+    <section class="step" id="mono-flux">
+      <h2>Mono и Flux описывают конвейер, а работа начинается только при подписке</h2>
+      <p>Mono и Flux — не результаты, а рецепты их получения. Пока никто не подписался, ничего не выполняется. Каждая новая подписка выполняет рецепт заново: такой издатель называют холодным. <a href="../examples/web/ReactorBasicsDemo.java">ReactorBasicsDemo.java</a>, без сервера, фрагмент:</p>
+      <pre><code class="language-bash">./run.sh ReactorBasicsDemo</code></pre>
+      <pre><code class="language-java">Mono&lt;String&gt; charge = Mono.fromCallable(() -&gt; {
+    System.out.println("  bank called on " + thread());
+    return "paid";
+});
+System.out.println("  Mono created");
+charge.subscribe(result -&gt; System.out.println("  first subscriber got " + result));
+charge.subscribe(result -&gt; System.out.println("  second subscriber got " + result)); // вторая подписка — второй вызов</code></pre>
+      <pre class="out">1. Nothing happens until subscribe
+  Mono created
+  bank called on main
+  first subscriber got paid
+  bank called on main
+  second subscriber got paid</pre>
+      <p>Банк вызван не при создании Mono, а при каждой подписке, то есть дважды. Отсюда две частые ошибки. Первая: вызвать метод, который возвращает Mono, и не вернуть его из обработчика: <code>repository.save(payment);</code> без использования результата ничего не сохранит, потому что никто не подписался. В WebFlux подписывается сам фреймворк — на тот Mono, который вернул контроллер. Вторая: подписаться дважды и не заметить двойной вызов внешней системы. Если результат нужен нескольким подписчикам, его кешируют оператором <code>cache()</code>.</p>
+      <p>Подписка идёт по цепочке операторов снизу вверх, к источнику, а данные — сверху вниз, к подписчику. Отсюда разница между двумя операторами смены потока. <code>subscribeOn</code> задаёт, в каком потоке начнётся подписка, а значит, и работа источника; где он стоит в цепочке, неважно. <code>publishOn</code> переключает поток для всех операторов ниже себя. Пролистай вторую часть демо:</p>
+      <pre><code class="language-java">Flux.range(1, 2)
+        .map(i -&gt; { System.out.println("  map " + i + " on " + thread()); return i; })
+        .publishOn(Schedulers.parallel())                // всё ниже — в потоке parallel
+        .map(i -&gt; { System.out.println("  after publishOn " + i + " on " + thread()); return i; })
+        .subscribeOn(Schedulers.boundedElastic())        // откуда стартует подписка, то есть начало цепочки
+        .blockLast();                                    // только в демо: ждём конца</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Цепочка операторов range, map, publishOn, map, subscribeOn, blockLast. Сначала цепочка только собрана. Затем подписка идёт справа налево, к источнику, и в subscribeOn переходит в поток boundedElastic. Потом данные идут слева направо: range и первый map работают в boundedElastic-1, после publishOn второй map работает в parallel-1.">
+            <defs>
+              <marker id="rf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rf-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- операторы -->
+            <rect x="14" y="70" width="102" height="44" rx="7" class="dg-box"/>
+            <rect x="130" y="70" width="102" height="44" rx="7" class="dg-box"/>
+            <rect x="246" y="70" width="102" height="44" rx="7" class="dg-box"/>
+            <rect x="362" y="70" width="102" height="44" rx="7" class="dg-box"/>
+            <rect x="478" y="70" width="102" height="44" rx="7" class="dg-box"/>
+            <rect x="594" y="70" width="102" height="44" rx="7" class="dg-box"/>
+            <g data-s="3"><rect x="14" y="70" width="102" height="44" rx="7" class="dg-cell hit"/><rect x="130" y="70" width="102" height="44" rx="7" class="dg-cell hit"/><rect x="362" y="70" width="102" height="44" rx="7" class="dg-cell hit"/></g>
+            <!-- подписка: справа налево -->
+            <g data-s="2"><path d="M594 56 L 120 56" class="dg-line" marker-end="url(#rf-n)"/><text x="600" y="46" class="dg-n">subscribe()</text></g>
+            <!-- данные: слева направо -->
+            <g data-s="3"><path d="M20 130 L 690 130" class="dg-line ok" marker-end="url(#rf-ok)"/><text x="20" y="146" class="dg-ok">onNext(1), onNext(2)</text></g>
+            <!-- потоки -->
+            <g data-s="2"><rect x="14" y="160" width="566" height="18" rx="3" class="dg-cell"/><text x="20" y="173" class="dg-n">подписка идёт в boundedElastic-1 после subscribeOn</text></g>
+            <g data-s="3"><rect x="14" y="160" width="290" height="18" rx="3" class="dg-cell"/><rect x="306" y="160" width="390" height="18" rx="3" class="dg-cell hit"/>
+              <text x="20" y="173" class="dg-n">boundedElastic-1</text><text x="312" y="173" class="dg-n">parallel-1</text></g>
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="65" y="90" class="dg-in">range(1,2)</text><text x="65" y="106" class="dg-n">источник</text>
+              <text x="181" y="90" class="dg-in">map</text><text x="181" y="106" class="dg-n">печатает поток</text>
+              <text x="297" y="90" class="dg-in">publishOn</text><text x="297" y="106" class="dg-n">parallel</text>
+              <text x="413" y="90" class="dg-in">map</text><text x="413" y="106" class="dg-n">печатает поток</text>
+              <text x="529" y="90" class="dg-in">subscribeOn</text><text x="529" y="106" class="dg-n">boundedElastic</text>
+              <text x="645" y="90" class="dg-in">blockLast</text><text x="645" y="106" class="dg-n">подписчик</text>
+            </g>
+            <text data-s="1" x="14" y="40" class="dg-s">цепочка собрана, ни один оператор ещё не выполнялся</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Цепочка операторов собрана. Каждый оператор — обёртка над предыдущим, но ни источник, ни map ещё не выполнялись.</li>
+          <li>blockLast подписывается. Подписка идёт справа налево, к источнику. В subscribeOn она переходит в поток boundedElastic, и до range доходит уже в нём.</li>
+          <li>Источник отдаёт 1 и 2 в том потоке, где его подписали, и первый map печатает boundedElastic-1. publishOn передаёт элементы в parallel, и второй map печатает parallel-1.</li>
+        </ol>
+      </figure>
+      <pre class="out">2. Operators run on the thread the signal arrives on
+  map 1 on boundedElastic-1
+  map 2 on boundedElastic-1
+  after publishOn 1 on parallel-1
+  after publishOn 2 on parallel-1</pre>
+      <p>Строки из разных потоков могут печататься вперемешку; в шести запусках подряд порядок был таким. Главное в выводе — поток каждого оператора. Один запрос в WebFlux может пройти через event loop Netty, parallel и boundedElastic и вернуться в event loop для записи ответа. Отладчик и стектрейсы это отражают: в стеке исключения вместо твоих методов — операторы Reactor. Помогают <code>checkpoint("описание")</code> в цепочке и <code>Hooks.onOperatorDebug()</code> в разработке.</p>
+    </section>
+
+    <section class="step" id="context">
+      <h2>Конвейер переходит между потоками, поэтому ThreadLocal в нём теряется</h2>
+      <p>В MVC весь запрос живёт в одном потоке, и на этом держатся MDC, SecurityContextHolder и привязка транзакции к потоку (тема <a href="servlet.html">Servlet & Tomcat</a>). В WebFlux запрос не принадлежит потоку: следующий оператор может выполниться в другом потоке, а тот же поток тем временем обслуживает чужие запросы. Значение из ThreadLocal либо пропадёт, либо окажется чужим. Третья часть демо:</p>
+      <pre><code class="language-java">USER.set("alice");
+String viaThreadLocal = Mono.just("payment")
+        .publishOn(Schedulers.parallel())
+        .map(p -&gt; p + " by " + USER.get())               // другой поток: ThreadLocal пуст
+        .block();
+String viaContext = Mono.just("payment")
+        .publishOn(Schedulers.parallel())
+        .flatMap(p -&gt; Mono.deferContextual(ctx -&gt; Mono.just(p + " by " + ctx.get("user"))))
+        .contextWrite(Context.of("user", "alice"))       // контекст едет вместе с подпиской
+        .block();</code></pre>
+      <pre class="out">3. ThreadLocal is lost, Reactor Context travels with the signal
+  ThreadLocal: payment by null
+  Context:     payment by alice</pre>
+      <p>Замена ThreadLocal — Reactor Context: неизменяемая карта, которая привязана к подписке, а не к потоку. Её пишут <code>contextWrite</code> ниже по цепочке и читают через <code>deferContextual</code>. Так устроены ReactiveSecurityContextHolder в Spring Security и реактивные транзакции. Для MDC в логах и трассировки есть библиотека Micrometer Context Propagation: в Boot <code>spring.reactor.context-propagation=auto</code> (по умолчанию limited) копирует ThreadLocal-значения в Context и обратно на каждом переходе между потоками. Ценой лишней работы на каждом операторе.</p>
+    </section>
+
+    <section class="step" id="backpressure">
+      <h2>Подписчик сам решает, сколько данных готов принять</h2>
+      <p>Если источник быстрее подписчика, без договорённости данные копятся в памяти. Reactive Streams — спецификация, на которой стоят Reactor и WebFlux, а в JDK она есть как <code>java.util.concurrent.Flow</code>, — решает это обратным давлением, backpressure. Подписчик получает объект Subscription и сам запрашивает элементы вызовом <code>request(n)</code>. Источник не вправе отдать больше, чем запрошено. Последняя часть демо: подписчик берёт по два элемента.</p>
+      <pre><code class="language-java">Flux.range(1, 6)
+        .doOnRequest(n -&gt; System.out.println("  request(" + n + ")"))
+        .doOnNext(i -&gt; System.out.println("  emit " + i))
+        .subscribe(new BaseSubscriber&lt;Integer&gt;() {
+            int handled;
+
+            protected void hookOnSubscribe(Subscription subscription) {
+                request(2);                              // готов принять только два элемента
+            }
+
+            protected void hookOnNext(Integer value) {
+                if (++handled % 2 == 0) request(2);      // обработал два — прошу ещё два
+            }
+        });</code></pre>
+      <pre class="out">4. Backpressure: the subscriber asks for 2 at a time
+  request(2)
+  emit 1
+  emit 2
+  request(2)
+  emit 3
+  emit 4
+  request(2)
+  emit 5
+  emit 6
+  request(2)</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 260" role="img" aria-label="Обмен сигналами между источником Flux.range и подписчиком: подписка, onSubscribe с объектом Subscription, затем подписчик запрашивает два элемента, получает onNext 1 и 2, запрашивает ещё два и так далее; после шестого элемента источник посылает onComplete.">
+            <defs>
+              <marker id="rb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rb-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- участники -->
+            <rect x="120" y="10" width="160" height="32" rx="7" class="dg-box"/>
+            <rect x="440" y="10" width="160" height="32" rx="7" class="dg-box"/>
+            <line x1="200" y1="42" x2="200" y2="250" class="dg-sep"/>
+            <line x1="520" y1="42" x2="520" y2="250" class="dg-sep"/>
+            <!-- сигналы сверху вниз -->
+            <path d="M520 60 L 204 60" class="dg-line" marker-end="url(#rb-n)"/>
+            <path d="M200 78 L 516 78" class="dg-line" marker-end="url(#rb-n)"/>
+            <path d="M520 100 L 204 100" class="dg-line" marker-end="url(#rb-n)"/>
+            <path d="M200 118 L 516 118" class="dg-line ok" marker-end="url(#rb-ok)"/>
+            <path d="M200 134 L 516 134" class="dg-line ok" marker-end="url(#rb-ok)"/>
+            <path d="M520 156 L 204 156" class="dg-line" marker-end="url(#rb-n)"/>
+            <path d="M200 174 L 516 174" class="dg-line ok" marker-end="url(#rb-ok)"/>
+            <path d="M200 190 L 516 190" class="dg-line ok" marker-end="url(#rb-ok)"/>
+            <path d="M200 228 L 516 228" class="dg-line" marker-end="url(#rb-n)"/>
+            <g text-anchor="middle">
+              <text x="200" y="31" class="dg-in">Flux.range(1, 6)</text>
+              <text x="520" y="31" class="dg-in">BaseSubscriber</text>
+              <text x="360" y="56" class="dg-n">subscribe</text>
+              <text x="360" y="74" class="dg-n">onSubscribe(subscription)</text>
+              <text x="360" y="96" class="dg-n">request(2)</text>
+              <text x="360" y="114" class="dg-n">onNext(1)</text>
+              <text x="360" y="130" class="dg-n">onNext(2)</text>
+              <text x="360" y="152" class="dg-n">request(2)</text>
+              <text x="360" y="170" class="dg-n">onNext(3)</text>
+              <text x="360" y="186" class="dg-n">onNext(4)</text>
+              <text x="360" y="210" class="dg-s">… так же 5 и 6 …</text>
+              <text x="360" y="224" class="dg-n">onComplete()</text>
+            </g>
+            <text x="14" y="124" class="dg-n">отдаёт не больше,</text>
+            <text x="14" y="138" class="dg-n">чем запросили</text>
+            <text x="612" y="104" class="dg-n">спрашивает,</text>
+            <text x="612" y="118" class="dg-n">когда готов</text>
+          </svg>
+        </div>
+        <figcaption>Последний request(2) в выводе демо остался без ответа: элементов больше нет, и источник завершился сигналом onComplete.</figcaption>
+      </figure>
+      <p>В обычной цепочке операторов Reactor договаривается сам: <code>flatMap</code> по умолчанию держит 256 одновременных внутренних подписок, <code>limitRate(n)</code> дробит запрос на пачки. Когда источник не умеет ждать — события из внешней системы, клики, тики, — выбирают стратегию переполнения: <code>onBackpressureBuffer</code> копит до лимита, <code>onBackpressureDrop</code> выбрасывает лишнее, <code>onBackpressureLatest</code> оставляет последнее.</p>
+      <p>В WebFlux backpressure доходит до сети. Netty читает из сокета, только когда цепочка запросила данные, а пока не читает, буфер TCP заполняется, и клиенту приходится ждать. Поэтому сервис на WebFlux может отдавать большой поток ответов (<code>application/x-ndjson</code>, Server-Sent Events), не загружая его целиком в память, а медленный клиент замедляет только свой поток.</p>
+    </section>
+
+    <section class="step" id="when">
+      <h2>WebFlux оправдан для потоков данных и тысяч долгих соединений, а обычному CRUD хватит виртуальных потоков</h2>
+      <p>До Java 21 выбор был такой: MVC с ограниченным пулом потоков или WebFlux, если ожидающих запросов слишком много. Виртуальные потоки изменили картину: блокирующий код в MVC больше не держит дорогой платформенный поток (тема <a href="virtual-threads.html">Virtual Threads</a>). Для сервиса, который принимает запрос, ходит в базу и пару API и отвечает, это та же масштабируемость без смены модели программирования.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>MVC + виртуальные потоки</th><th>WebFlux</th></tr></thead>
+        <tbody>
+          <tr><td>Стиль кода</td><td>обычный последовательный</td><td>цепочки операторов Mono и Flux</td></tr>
+          <tr><td>Стектрейсы и отладка</td><td>привычные</td><td>операторы Reactor вместо твоих методов</td></tr>
+          <tr><td>Контекст запроса</td><td>ThreadLocal работает</td><td>Reactor Context, перенос MDC отдельно</td></tr>
+          <tr><td>База данных</td><td>JDBC, JPA</td><td>R2DBC или JDBC в boundedElastic</td></tr>
+          <tr><td>Поток данных и backpressure</td><td>вручную</td><td>встроены</td></tr>
+          <tr><td>Тысячи долгих соединений</td><td>возможны, лимиты на ресурсы ставишь сам</td><td>основной сценарий</td></tr>
+        </tbody>
+      </table>
+      <p>WebFlux стоит своей сложности, когда данные идут потоком и важен темп: стриминг ответов, тысячи подписчиков SSE и WebSocket, шлюз, который проксирует запросы и сам почти ничего не считает (Spring Cloud Gateway изначально построен на WebFlux), агрегация десятков параллельных вызовов. А ещё когда вся цепочка уже неблокирующая: реактивные драйверы, WebClient, R2DBC. Если в обработчике остаётся JDBC или синхронный SDK, выигрыш съедает boundedElastic, а сложность остаётся.</p>
+      <p>Обратный случай — команда пишет CRUD на WebFlux «на вырост». Читать и отлаживать такой код дороже, ошибки вроде неподписанного <code>save</code> или блокировки в event loop не видны при ревью, а нагрузку, ради которой всё затевалось, проще снять виртуальными потоками. На собеседовании ценится именно это рассуждение, а не знание всех операторов.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>WebFlux не держит поток на время ожидания: несколько потоков event loop Netty обслуживают все соединения, пока код не блокирует.</li>
+        <li>Блокирующий вызов в обработчике останавливает все запросы своего event loop; такую работу выносят в boundedElastic или заменяют неблокирующей.</li>
+        <li>Mono и Flux — рецепт: без подписки ничего не выполняется, каждая подписка выполняет его заново. subscribeOn задаёт поток источника, publishOn — поток ниже по цепочке.</li>
+        <li>ThreadLocal в реактивной цепочке теряется; контекст передают через Reactor Context или Micrometer Context Propagation.</li>
+        <li>Backpressure: подписчик запрашивает request(n), источник отдаёт не больше; в WebFlux это доходит до TCP.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="webflux-vs-mvc" data-freq="2">
+      <h3>Чем WebFlux отличается от Spring MVC и когда его выбирать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>MVC работает по модели «поток на запрос»: запрос держит поток Tomcat, пока ждёт базу или внешний API. WebFlux неблокирующий: обработчик возвращает Mono или Flux, ожидание идёт без потока, а несколько потоков event loop Netty обслуживают все соединения. Аннотации контроллеров те же.</p>
+          <p>Выбираю WebFlux для стриминга, тысяч долгих соединений вроде SSE и WebSocket, шлюзов и когда вся цепочка неблокирующая. Для обычного CRUD на JDBC беру MVC, а с Java 21 — MVC на виртуальных потоках: масштабируется так же, а код проще.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>WebFlux не ускоряет отдельный запрос: выигрыш в числе одновременных ожиданий на малом числе потоков.</li>
+            <li>Цена: стектрейсы из операторов, Reactor Context вместо ThreadLocal, R2DBC вместо JPA, ошибки вроде неподписанного Mono.</li>
+            <li>Если в classpath есть и MVC, и WebFlux, Boot запускает MVC; реактивный режим включают через spring.main.web-application-type=reactive.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="blocking-in-webflux" data-freq="2">
+      <h3>Что будет, если в WebFlux вызвать блокирующий код?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Заблокируется поток event loop Netty, а он обслуживает не один запрос, а все соединения, которые ему достались. Пока он ждёт, эти соединения стоят, включая health-check. Потоков event loop мало — по числу ядер, но не меньше четырёх, — так что пара медленных JDBC-вызовов кладёт сервис быстрее, чем исчерпание пула Tomcat.</p>
+          <p>Блокирующий вызов выношу в Schedulers.boundedElastic через subscribeOn или заменяю неблокирующим: WebClient, R2DBC, реактивный драйвер.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>boundedElastic — обычный ограниченный пул: до 10 × число ядер потоков и очередь до 100 000 задач на поток. Если всё в нём, получаешь MVC с лишними шагами.</li>
+            <li>Ловить блокировки помогает BlockHound в тестах.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим обработчиком?</summary>
+          <pre><code class="language-java">@PostMapping("/payments")
+Mono&lt;Payment&gt; create(@RequestBody Payment payment) {
+    Account account = accountJdbcRepository.findById(payment.accountId()); // JDBC
+    paymentRepository.save(payment);                                       // реактивный, возвращает Mono
+    return Mono.just(payment);
+}</code></pre>
+          <p>Две ошибки. JDBC-вызов блокирует поток event loop, и вместе с этим запросом стоят все соединения этого потока. А реактивный save возвращает Mono, на который никто не подписался, поэтому платёж не сохранится. Нужно встроить save в цепочку (<code>return paymentRepository.save(payment)</code>), а чтение счёта сделать реактивным или вынести в boundedElastic.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mono-and-flux" data-freq="2">
+      <h3>Что такое Mono и Flux и что будет, если на них не подписаться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это издатели из Project Reactor: Mono отдаёт ноль или один элемент, Flux — сколько угодно. По сути это описание вычисления. Без подписки ничего не выполняется, а каждая подписка выполняет его заново. В WebFlux подписывается фреймворк на то, что вернул контроллер.</p>
+          <p>Поэтому реактивный вызов, результат которого никуда не вернули, просто не выполнится, а двойная подписка дважды вызовет внешнюю систему. Если результат нужен нескольким, его кеширую через cache().</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>subscribeOn задаёт поток, в котором начнётся подписка и работа источника, где бы он ни стоял; publishOn переключает поток для операторов ниже себя.</li>
+            <li>ThreadLocal в цепочке теряется: контекст едет в Reactor Context, MDC переносит Micrometer Context Propagation.</li>
+            <li>block() в потоке Netty бросает IllegalStateException «block()/blockFirst()/blockLast() are blocking, which is not supported in thread reactor-http-nio-2», но только если значения надо ждать: на готовом Mono.just проверка не срабатывает, и ошибка всплывёт позже, под нагрузкой.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="what-is-backpressure" data-freq="1">
+      <h3>Что такое backpressure?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обратное давление: подписчик сам говорит источнику, сколько элементов готов принять, вызовом request(n), и источник не отдаёт больше. Так быстрый производитель не заваливает медленного потребителя, и данные не копятся в памяти. Это часть спецификации Reactive Streams, на которой построены Reactor и WebFlux.</p>
+          <p>В WebFlux это доходит до сети: пока цепочка не запросила данные, Netty не читает сокет, и TCP замедляет отправителя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Для источников, которые не умеют ждать, выбирают стратегию: onBackpressureBuffer, Drop или Latest.</li>
+            <li>flatMap по умолчанию держит 256 параллельных внутренних подписок; limitRate дробит запрос на пачки.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/web/webflux.html">Spring Framework Reference: Spring WebFlux</a> — основа урока: модель конкурентности, когда выбирать WebFlux, сравнение с MVC.</li>
+      <li><a href="https://projectreactor.io/docs/core/release/reference/">Reactor Reference Guide</a> — подписка и холодные издатели, publishOn и subscribeOn, Context, backpressure и отладка.</li>
+      <li><a href="https://github.com/reactive-streams/reactive-streams-jvm">Reactive Streams Specification</a> — правила для Publisher, Subscriber и Subscription.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/web/reactive.html">Spring Boot Reference: Reactive Web Applications</a> — автоконфигурация WebFlux, выбор сервера и web-application-type.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
