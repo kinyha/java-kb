@@ -515,7 +515,7 @@ window.KB_TREE = [
           scope: 'refresh, BeanDefinitionRegistryPostProcessor и BeanFactoryPostProcessor, BeanPostProcessor, Aware, init и destroy, SmartLifecycle, lazy, циклические зависимости и ранние ссылки' },
         { id: 'spring-aop', freq: 3, status: 'draft', title: 'AOP & Proxies',
           scope: 'aspect и advisor, advice и pointcut, цепочка interceptors, JDK proxy и CGLIB, self-invocation, final и private, порядок аспектов, диагностика' },
-        { id: 'spring-events', freq: 2, status: 'empty', title: 'Application Events',
+        { id: 'spring-events', freq: 2, status: 'draft', title: 'Application Events',
           scope: 'ApplicationEventPublisher и @EventListener, синхронные ошибки и порядок, @Async, @TransactionalEventListener и фазы, потери при сбое и outbox' },
       ] },
       { id: 'boot', title: 'Boot', source: 'Spring Boot Reference: Developing with Spring Boot, Core Features, Production-ready Features', items: [

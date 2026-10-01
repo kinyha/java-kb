@@ -90,3 +90,18 @@
 - Order и retry/transaction, диагностика AopUtils/Advised, matching и слои → boundaries.
 
 Источники: Reference / Proxying Mechanisms, Declaring Advice, Declaring a Pointcut, @AspectJ support; Boot / AOP defaults. Оба примера Java 21 / 7.0.9. Final owner в CGLIB демонстрируется с присваиванием в конструкторе, чтобы javac не заменил чтение constant field на литерал. Отдельно отмечен bypass конструктора прокси в данном запуске; реальная БД/транзакции для примера порядка не используются.
+
+## Application Events
+
+Центральный вопрос: когда слушатель выполняется относительно издателя и commit, и где хранится обещание доставки?
+
+Подача: один факт Paid, три слушателя и наблюдаемый порядок. Затем меняется ровно одно условие — другой поток или фаза транзакции. Документация Modulith использована как учебный разбор цены синхронной связи и окна потери; реализации Modulith и Debezium обозначены как отдельная инфраструктура, а не свойства Core.
+
+- Publisher, обычный объект/PayloadApplicationEvent, listener adapter, тип/condition/generic и повторная публикация результата → publication/deep.
+- Синхронный стек, Order, остановка на ошибке, ErrorHandler и уже выполненные эффекты → synchronous; EventsDemo и схема ошибки.
+- EnableAsync, ограниченный executor, возврат до завершения, ошибки и потеря thread-local контекста → asynchronous; AsyncEventDemo. Async multicaster и supportsAsyncExecution → deep.
+- Регистрация synchronization, четыре фазы, отсутствие транзакции и fallback → transaction; TransactionEventDemo, пять кадров commit.
+- После commit нет нового commit для связанных ресурсов; REQUIRES_NEW, ошибки afterCompletion и реактивный контекст → completion/deep. Полные propagation и JDBC/JPA → Data Access.
+- Crash window, outbox в той же транзакции, повторные отправки/идемпотентность и наблюдаемость → boundaries; сравнение двух путей доставки. Настройка брокера/CDC → Kafka.
+
+Источники: Framework Reference / Context Introduction, Transaction-bound Events, EventListener/SimpleApplicationEventMulticaster/TransactionPhase/TransactionalEventListener API 7.0.9; исходники TransactionalApplicationListenerSynchronization и TransactionSynchronizationUtils v7.0.9; Spring Modulith / Working with Application Events; Debezium / Outbox Event Router. Три демо Java 21 выполняют реальную рассылку, Async-прокси и Spring transaction synchronization. Учебный менеджер транзакций не подключает БД: проверен порядок фаз, а не сохранение данных. Брокер/CDC не запускаются.

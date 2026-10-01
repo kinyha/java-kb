@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Application Events · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-events">
+<main class="page">
+  <header class="topic-head"><h1>Spring: Application Events</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>После платежа несколько компонентов реагируют на один факт: готовят чек, обновляют статистику, ведут журнал. Событие даёт им общий сигнал, а способ доставки определяет связь с исходным вызовом. В обычной конфигурации слушатели работают сразу в потоке издателя; Async переносит их в пул, а транзакционный слушатель ждёт нужного результата. Для важной обработки после сбоя понадобится сохраняемая запись о работе.</p>
+    </div>
+    <section class="step" id="publication">
+      <h2>Событие позволяет сообщить о факте, сохранив выбор реакции у слушателей</h2>
+      <p>Платёж завершён. Теперь нужно подготовить чек, обновить статистику и журнал действий. Если сервис платежей внедряет все эти компоненты, каждое новое действие меняет его зависимости. Через событие сервис сообщает факт <code>Paid</code>, а нужные бины сами подписываются на этот тип.</p>
+      <p><code>ApplicationEventPublisher.publishEvent</code> передаёт объект системе событий контекста. Слушатель объявляется через <code>@EventListener</code> на методе управляемого бина либо реализует <code>ApplicationListener</code>. Тип аргумента задаёт интересующее событие. Сам издатель знает факт и контракт публикации, а состав слушателей определяется конфигурацией.</p>
+      <p>Событием может быть обычный объект, например record с ID платежа и суммой. Spring оборачивает такой объект в <code>PayloadApplicationEvent</code>, а метод слушателя получает исходные данные. Передавай снимок нужного состояния: ссылка на изменяемый объект делает результат зависимым от того, когда слушатель её прочитает.</p>
+      <p>Эта форма связи скрывает конкретных получателей, но время их работы всё равно влияет на издателя. Сначала проследим обычную синхронную рассылку. Название «событие» само по себе ещё ничего не говорит о потоке, транзакции и сохранности доставки.</p>
+      <details class="deep">
+        <summary>Под капотом: регистрация, выбор типа и повторная публикация</summary>
+        <p><code>EventListenerMethodProcessor</code> находит методы и создаёт адаптеры слушателей. Рассылкой занимается <code>ApplicationEventMulticaster</code>; обычный контекст использует <code>SimpleApplicationEventMulticaster</code>. Java-конфигурация регистрирует нужную обработку аннотаций. Метод на объекте, созданном вручную, становится слушателем только после явного подключения к этой инфраструктуре.</p>
+        <p><code>condition</code> задаёт дополнительный фильтр SpEL. Обращение <code>#a0</code> к первому аргументу работает и без <code>-parameters</code>; имя аргумента требует сохранённых имён. Для события с generic-параметром его тип должен быть доступен во время выполнения: через конкретный подкласс или <code>ResolvableTypeProvider</code>. Одной записи <code>new Event&lt;Payment&gt;(...)</code> при стирании типов недостаточно.</p>
+        <p>Результат обычного синхронного метода слушателя может стать новым событием; массив или коллекция публикуются по элементам. Это создаёт вложенную рассылку ещё до возврата исходного слушателя. Случайная цепь, снова публикующая тот же факт, способна уйти в рекурсию. События дочернего контекста также передаются родительскому; в обратную сторону такой рассылки нет.</p>
+      </details>
+    </section>
+    
+    <section class="step" id="synchronous">
+      <h2>Синхронный слушатель выполняется в стеке издателя и влияет на его ошибку</h2>
+      <p>По умолчанию все подходящие слушатели выполняются в том же потоке, который вызвал публикацию. <code>publishEvent</code> возвращается после их завершения. Задержка отправки чека входит в длительность исходного запроса, а обычный слушатель видит привязанный к этому потоку транзакционный контекст.</p>
+      <p><code>@Order</code> задаёт порядок вызова: меньшее число идёт раньше. Без явного порядка на расположение методов в файле полагаться не стоит. В <code>EventsDemo</code> порядок задан для всех трёх методов, поэтому можно точно предсказать, до кого дойдёт событие при ошибке второго.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Издатель вызывает слушателей последовательно в своём потоке. Ошибка receipt возвращается издателю; statistics не вызывается.">
+            <defs>
+              <marker id="event-sync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="52" width="146" height="64" rx="7" class="dg-box"/>
+            <text x="91" y="79" text-anchor="middle" class="dg-in">publishEvent</text>
+            <text x="91" y="101" text-anchor="middle" class="dg-s">поток main</text>
+            <rect x="222" y="52" width="112" height="64" rx="7" class="dg-cell hit"/>
+            <text x="278" y="80" text-anchor="middle" class="dg-in">audit</text>
+            <text x="278" y="101" text-anchor="middle" class="dg-s">Order 1</text>
+            <rect x="390" y="52" width="112" height="64" rx="7" class="dg-cell miss"/>
+            <text x="446" y="80" text-anchor="middle" class="dg-in">receipt</text>
+            <text x="446" y="101" text-anchor="middle" class="dg-s">Order 2</text>
+            <rect x="560" y="52" width="142" height="64" rx="7" class="dg-box"/>
+            <text x="631" y="80" text-anchor="middle" class="dg-in">statistics</text>
+            <text x="631" y="101" text-anchor="middle" class="dg-s">Order 3</text>
+            <path d="M164 75 H222 M334 75 H390" class="dg-line" marker-end="url(#event-sync)"/>
+            <path d="M502 75 H541" class="dg-line" stroke-dasharray="4 4"/>
+            <path d="M527 65 L542 84 M542 65 L527 84" class="dg-line"/>
+            <path d="M446 116 V164 H91 V116" class="dg-line" marker-end="url(#event-sync)"/>
+            <text x="268" y="188" text-anchor="middle" class="dg-bad">исключение возвращается издателю</text>
+          </svg>
+        </div>
+        <figcaption>Случай failure из EventsDemo: audit успел выполниться, ошибка остановила дальнейшую рассылку. Здесь нет отдельной очереди или фонового потока.</figcaption>
+      </figure>
+      <p><a href="../examples/spring-core/EventsDemo.java">Полный пример EventsDemo.java</a>, Java 21, Spring 7.0.9. </p>
+      <pre><code class="language-bash">cd examples/spring-core
+./run.sh EventsDemo</code></pre>
+      <pre><code class="language-java">import org.springframework.context.annotation.*;
+import org.springframework.context.event.EventListener;
+import org.springframework.core.annotation.Order;
+
+public class EventsDemo {
+    record Paid(boolean fail) {}
+
+    static class Listeners {
+        @EventListener @Order(1)
+        public void audit(Paid event) {
+            System.out.println(&quot;audit: &quot; + Thread.currentThread().getName());
+        }
+
+        @EventListener @Order(2)
+        public void receipt(Paid event) {
+            System.out.println(&quot;receipt&quot;);
+            if (event.fail()) throw new IllegalStateException(&quot;receipt failed&quot;);
+        }
+
+        @EventListener @Order(3)
+        public void statistics(Paid event) {
+            System.out.println(&quot;statistics&quot;);
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class Config {
+        @Bean Listeners listeners() { return new Listeners(); }
+    }
+
+    public static void main(String[] args) {
+        try (var ctx = new AnnotationConfigApplicationContext(Config.class)) {
+            System.out.println(&quot;success:&quot;);
+            ctx.publishEvent(new Paid(false));
+            System.out.println(&quot;caller returned&quot;);
+            System.out.println(&quot;failure:&quot;);
+            try {
+                ctx.publishEvent(new Paid(true));
+            } catch (IllegalStateException e) {
+                // Ошибка второго слушателя прерывает рассылку и доходит до издателя.
+                System.out.println(&quot;caller caught: &quot; + e.getClass().getSimpleName());
+            }
+        }
+    }
+}</code></pre>
+      <pre class="out">success:
+audit: main
+receipt
+statistics
+caller returned
+failure:
+audit: main
+receipt
+caller caught: IllegalStateException</pre>
+      <p>При стандартной настройке исключение слушателя прерывает рассылку и возвращается издателю. Для этой политики у multicaster можно заменить <code>ErrorHandler</code>: например, зарегистрировать ошибку и продолжить. Это решение меняет смысл успешной публикации, поэтому пропущенную обработку нужно наблюдать явно.</p>
+      <p>Уже выполненные действия живут по правилам своих ресурсов. Запись в ту же транзакцию БД может откатиться вместе с издателем; отправленный HTTP-запрос или письмо остаётся внешним эффектом. Поэтому обязательные проверки платежа удобнее вызвать прямо в сервисе, а реакции на завершённый факт выбирать с учётом их времени и отказов.</p>
+    </section>
+    
+    <section class="step" id="asynchronous">
+      <h2>Async переносит обработку в пул, а завершение и контекст становятся отдельными</h2>
+      <p>Чек можно подготовить позже, чтобы клиент не ждал. <code>@Async</code> вместе с <code>@EnableAsync</code> направляет вызов конкретного слушателя в executor. Остальные обычные слушатели продолжают выполняться синхронно. Для опыта пул выбран явно: один поток, очередь на десять задач.</p>
+      <p>В <code>AsyncEventDemo</code> защёлка удерживает слушатель до разрешения из main. Это делает сравнение времени возврата воспроизводимым, без задержек через sleep. Публикация возвращается раньше завершения обработки, хотя сама задача действительно принята пулом.</p>
+      <p><a href="../examples/spring-core/AsyncEventDemo.java">Полный пример AsyncEventDemo.java</a>, Java 21, Spring 7.0.9. </p>
+      <pre><code class="language-bash">cd examples/spring-core
+./run.sh AsyncEventDemo</code></pre>
+      <pre><code class="language-java">import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.springframework.context.annotation.*;
+import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.*;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+public class AsyncEventDemo {
+    record Paid() {}
+
+    static class Gate {
+        final CountDownLatch release = new CountDownLatch(1);
+        final CountDownLatch finished = new CountDownLatch(1);
+    }
+
+    static class Receipt {
+        final Gate gate;
+        Receipt(Gate gate) { this.gate = gate; }
+
+        @Async(&quot;eventsExecutor&quot;)
+        @EventListener
+        public void send(Paid event) throws InterruptedException {
+            // Удерживаем слушатель, чтобы порядок не зависел от скорости потоков.
+            if (!gate.release.await(5, TimeUnit.SECONDS)) throw new IllegalStateException();
+            System.out.println(&quot;listener: &quot; + Thread.currentThread().getName());
+            gate.finished.countDown();
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableAsync(proxyTargetClass = true)
+    static class Config {
+        @Bean Gate gate() { return new Gate(); }
+        @Bean Receipt receipt(Gate gate) { return new Receipt(gate); }
+        @Bean ThreadPoolTaskExecutor eventsExecutor() {
+            var pool = new ThreadPoolTaskExecutor();
+            pool.setCorePoolSize(1);
+            pool.setMaxPoolSize(1);
+            pool.setQueueCapacity(10);
+            pool.setThreadNamePrefix(&quot;events-&quot;);
+            return pool; // Контейнер запускает и закрывает пул.
+        }
+    }
+
+    public static void main(String[] args) throws InterruptedException {
+        try (var ctx = new AnnotationConfigApplicationContext(Config.class)) {
+            var gate = ctx.getBean(Gate.class);
+            ctx.publishEvent(new Paid());
+            System.out.println(&quot;publisher returned&quot;);
+            gate.release.countDown();
+            if (!gate.finished.await(5, TimeUnit.SECONDS)) throw new IllegalStateException();
+        }
+    }
+}</code></pre>
+      <pre class="out">publisher returned
+listener: events-1</pre>
+      <p>Ошибка тела такого <code>void</code>-слушателя обрабатывается через <code>AsyncUncaughtExceptionHandler</code> и не возвращается уже ушедшему издателю. Ошибка принятия задачи — другой случай: переполненная очередь способна отклонить отправку прямо во время публикации. Настройка размера очереди и политики отказа определяет поведение под нагрузкой.</p>
+      <p>Поток пула получает свои ThreadLocal. Транзакция издателя и данные текущего HTTP-запроса автоматически в него не переносятся; нужные значения передают в событии, а контекст логирования настраивают отдельно. Слушателю для доступа к БД нужна собственная корректная транзакционная граница.</p>
+      <p>Порядок постановки задач через <code>@Order</code> отличается от порядка их завершения. Если второе действие использует результат первого, вырази зависимость явно: составной обработчик, цепь событий или сохраняемый процесс. Возврат нового события из метода <code>@Async</code> тоже заменяют явным вызовом publisher.</p>
+      <details class="deep">
+        <summary>Под капотом: Async у слушателя и executor у multicaster</summary>
+        <p>Executor можно назначить самому multicaster с именем <code>applicationEventMulticaster</code>. Тогда он передаёт в пул всех слушателей, поддерживающих асинхронное выполнение. Это более широкое изменение политики контекста, чем <code>@Async</code> на одном методе.</p>
+        <p>В Spring 7.0.9 транзакционный адаптер объявляет <code>supportsAsyncExecution=false</code>, чтобы зарегистрировать синхронизацию в исходной транзакции. После выбранной фазы сам метод с <code>@Async</code> может уйти в пул. Это сохраняет условие «после commit», но обработка всё равно выполняется отдельно и может потеряться при падении процесса.</p>
+      </details>
+    </section>
+    
+    <section class="step" id="transaction">
+      <h2>TransactionalEventListener сохраняет вызов до выбранной фазы транзакции</h2>
+      <p>Обычный слушатель получает Paid сразу после публикации. Если затем сохранение платежа откатится, уже отправленный чек окажется ложным. <code>@TransactionalEventListener</code> связывает обработку с результатом текущей транзакции: по умолчанию используется <code>AFTER_COMMIT</code>.</p>
+      <p>При публикации адаптер регистрирует синхронизацию и удерживает событие до нужной фазы. Поэтому возврат <code>publishEvent</code> внутри сервиса ещё предшествует транзакционным слушателям. Синхронный AFTER_COMMIT всё же работает на пути завершения транзакции, до возврата её внешнему вызову; его длительность продолжает влиять на ответ.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 300" role="img" aria-label="При публикации транзакционный слушатель регистрирует отложенную обработку. Before Commit выполняется до commit, After Commit и Completion — после результата транзакции.">
+            <defs>
+              <marker id="event-tx" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="24" width="182" height="232" rx="8" class="dg-box"/>
+            <text x="109" y="50" text-anchor="middle" class="dg-cap">ТРАНЗАКЦИЯ</text>
+            <text x="109" y="89" text-anchor="middle" class="dg-in">publish Paid</text>
+            <path d="M109 102 V189" class="dg-line" stroke-dasharray="4 4"/>
+            <text x="109" y="217" text-anchor="middle" class="dg-in">manager commit</text>
+            <text x="109" y="242" text-anchor="middle" class="dg-ok" data-s="3-">зафиксировано</text>
+            <rect x="300" y="24" width="392" height="82" rx="8" class="dg-box"/>
+            <text x="496" y="48" text-anchor="middle" class="dg-cap">СИНХРОНИЗАЦИИ</text>
+            <text x="496" y="75" text-anchor="middle" class="dg-s">событие + слушатель + нужная фаза</text>
+            <path d="M200 82 H300" class="dg-line" marker-end="url(#event-tx)" data-s="1"/>
+            <g data-s="2">
+              <rect x="300" y="132" width="198" height="50" rx="7" class="dg-cell hit"/>
+              <text x="399" y="162" text-anchor="middle" class="dg-in">BEFORE_COMMIT</text>
+              <path d="M200 157 H300" class="dg-line" marker-end="url(#event-tx)"/>
+            </g>
+            <g data-s="4-">
+              <rect x="300" y="206" width="174" height="50" rx="7" class="dg-cell hit"/>
+              <text x="387" y="236" text-anchor="middle" class="dg-in">AFTER_COMMIT</text>
+            </g>
+            <path d="M200 229 H300" class="dg-line" marker-end="url(#event-tx)" data-s="4"/>
+            <g data-s="5">
+              <rect x="514" y="206" width="178" height="50" rx="7" class="dg-cell hit"/>
+              <text x="603" y="236" text-anchor="middle" class="dg-in">AFTER_COMPLETION</text>
+              <path d="M200 244 H264 V278 H603 V256" class="dg-line" marker-end="url(#event-tx)"/>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>publishEvent вызывает обычного слушателя сразу. Для транзакционных слушателей Spring сохраняет событие и регистрирует синхронизации в текущей транзакции.</li>
+          <li>Тело сервиса уже закончено. На пути к commit вызывается BEFORE_COMMIT. Ошибка здесь ещё способна привести к rollback.</li>
+          <li>Менеджер фиксирует транзакцию. В опыте печатается manager commit; в реальном JDBC-менеджере здесь фиксируются изменения БД.</li>
+          <li>При результате COMMITTED запускается AFTER_COMMIT. Уже зафиксированные изменения останутся, даже если последующий обработчик завершится ошибкой.</li>
+          <li>Вызывается AFTER_COMPLETION. В нашем опыте его Order 2 ставит его после AFTER_COMMIT с Order 1. Оба — отдельные обработки результата завершения.</li>
+        </ol>
+      </figure>
+      <table class="mx">
+        <thead><tr><th>Фаза</th><th>Когда запускается</th><th>Что учитывать</th></tr></thead>
+        <tbody>
+          <tr><td><code>BEFORE_COMMIT</code></td><td>На пути к commit, до фиксации</td><td>Ошибка способна вызвать rollback; успешный callback ещё не означает успешный commit</td></tr>
+          <tr><td><code>AFTER_COMMIT</code></td><td>После успешной фиксации</td><td>Основные данные уже сохранены</td></tr>
+          <tr><td><code>AFTER_ROLLBACK</code></td><td>После отката</td><td>Для реакции на неуспешную транзакцию</td></tr>
+          <tr><td><code>AFTER_COMPLETION</code></td><td>После завершения с любым результатом</td><td>Порядок относительно других обработчиков завершения задают отдельно</td></tr>
+        </tbody>
+      </table>
+      <p><code>TransactionEventDemo</code> использует учебный менеджер без БД. Он печатает место commit/rollback, а настоящая инфраструктура Spring выполняет синхронизации. Опыт проверяет фазы, порядок и отсутствие транзакции; сохранение строк в БД здесь не моделируется.</p>
+      <p><a href="../examples/spring-core/TransactionEventDemo.java">Полный пример TransactionEventDemo.java</a>, Java 21, Spring 7.0.9. </p>
+      <pre><code class="language-bash">cd examples/spring-core
+./run.sh TransactionEventDemo</code></pre>
+      <pre><code class="language-java">import org.springframework.context.annotation.*;
+import org.springframework.context.event.EventListener;
+import org.springframework.core.annotation.Order;
+import org.springframework.transaction.*;
+import org.springframework.transaction.annotation.EnableTransactionManagement;
+import org.springframework.transaction.event.*;
+import org.springframework.transaction.support.*;
+
+public class TransactionEventDemo {
+    record Paid() {}
+
+    static class Listeners {
+        @EventListener
+        public void ordinary(Paid event) { System.out.println(&quot;ordinary&quot;); }
+
+        @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
+        public void before(Paid event) { System.out.println(&quot;before commit&quot;); }
+
+        @TransactionalEventListener @Order(1)
+        public void committed(Paid event) { System.out.println(&quot;after commit&quot;); }
+
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_ROLLBACK)
+        @Order(1)
+        public void rolledBack(Paid event) { System.out.println(&quot;after rollback&quot;); }
+
+        @TransactionalEventListener(phase = TransactionPhase.AFTER_COMPLETION)
+        @Order(2)
+        public void completed(Paid event) { System.out.println(&quot;completion&quot;); }
+    }
+
+    // Учебный менеджер без БД. Синхронизации и фазы исполняет настоящий Spring.
+    static class DemoTxManager extends AbstractPlatformTransactionManager {
+        protected Object doGetTransaction() { return new Object(); }
+        protected void doBegin(Object tx, TransactionDefinition definition) {}
+        protected void doCommit(DefaultTransactionStatus status) {
+            System.out.println(&quot;manager commit&quot;);
+        }
+        protected void doRollback(DefaultTransactionStatus status) {
+            System.out.println(&quot;manager rollback&quot;);
+        }
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    @EnableTransactionManagement
+    static class Config {
+        @Bean Listeners listeners() { return new Listeners(); }
+        @Bean PlatformTransactionManager transactionManager() {
+            return new DemoTxManager();
+        }
+    }
+
+    public static void main(String[] args) {
+        try (var ctx = new AnnotationConfigApplicationContext(Config.class)) {
+            var tx = new TransactionTemplate(ctx.getBean(PlatformTransactionManager.class));
+            System.out.println(&quot;outside transaction:&quot;);
+            ctx.publishEvent(new Paid()); // fallbackExecution оставлен false.
+
+            System.out.println(&quot;commit:&quot;);
+            tx.executeWithoutResult(status -&gt; {
+                ctx.publishEvent(new Paid());
+                System.out.println(&quot;publication returned&quot;);
+            });
+
+            System.out.println(&quot;rollback:&quot;);
+            tx.executeWithoutResult(status -&gt; {
+                ctx.publishEvent(new Paid());
+                status.setRollbackOnly();
+                System.out.println(&quot;publication returned&quot;);
+            });
+        }
+    }
+}</code></pre>
+      <pre class="out">outside transaction:
+ordinary
+commit:
+ordinary
+publication returned
+before commit
+manager commit
+after commit
+completion
+rollback:
+ordinary
+publication returned
+manager rollback
+after rollback
+completion</pre>
+      <p>При отсутствии активной транзакции этот слушатель по умолчанию пропускается. <code>fallbackExecution=true</code> разрешает обработать событие сразу в таком случае. Включай его, если такое поведение подходит контракту: фактической фиксации, которую можно дождаться, вне транзакции нет.</p>
+    </section>
+    
+    <section class="step" id="completion">
+      <h2>После commit новая запись и новая ошибка требуют отдельного решения</h2>
+      <p>AFTER_COMMIT сообщает о свершившемся результате. Исключение на этом этапе уже не отменит платеж. Для синхронного BEFORE_COMMIT ошибка ещё может привести к откату, поэтому перенос одного и того же метода между фазами меняет бизнес-поведение.</p>
+      <p>Есть тонкость самого API: фаза <code>@TransactionalEventListener(AFTER_COMMIT)</code> реализована внутри <code>afterCompletion</code> с проверкой результата COMMITTED. В стандартном пути <code>AbstractPlatformTransactionManager</code> исключения таких callbacks записываются в лог и не пробрасываются вызывающему коду. Это отличается от отдельного <code>TransactionSynchronization.afterCommit()</code>, где ошибка пробрасывается. При диагностике важно назвать конкретный механизм, а не просто сказать «после commit».</p>
+      <p>Соединение или EntityManager исходной транзакции ещё может быть привязано к потоку после её завершения. Видимость ресурса создаёт ловушку: изменение данных через него не получает следующего commit автоматически. Для новой записи из такого обработчика вызывай отдельный управляемый сервис с <code>REQUIRES_NEW</code>; это отдельная фиксация и отдельный возможный отказ.</p>
+      <p>Комбинация транзакционного слушателя и Async откладывает постановку задачи до выбранной фазы, а затем выполняет её в другом потоке. Чек не уйдёт до успешного платежа, но успешный платеж ещё не доказывает успешную отправку чека. Для важных реакций нужна сохраняемая запись о предстоящей работе.</p>
+      <details class="deep">
+        <summary>Под капотом: что проверить в исходниках и реактивном приложении</summary>
+        <p>В <code>TransactionalApplicationListenerSynchronization</code> видно две точки: обработка BEFORE_COMMIT в <code>beforeCommit</code>, остальные фазы в <code>afterCompletion(status)</code>. <code>TransactionSynchronizationUtils.invokeAfterCompletion</code> оборачивает каждый callback в try/catch с логированием. Поэтому ошибки этих callbacks требуют собственного наблюдения и повторов.</p>
+        <p>С версии 6.1 доступны и реактивные транзакционные события. Их контекст живёт в Reactor Context, поэтому передаётся через источник события; для публикации служит <code>TransactionalEventPublisher</code>. Модель thread-local из синхронного JDBC-приложения туда переносить буквально нельзя. Подробное управление реактивной транзакцией остаётся в разделе доступа к данным.</p>
+      </details>
+    </section>
+    
+    <section class="step" id="boundaries">
+      <h2>Важное событие должно пережить падение процесса и повторную доставку</h2>
+      <p>Платёж зафиксирован, а процесс упал за миг до запуска AFTER_COMMIT или до чтения задачи из памяти пула. После перезапуска Spring Core не восстановит потерянное событие. Транзакционная фаза выбирает момент обработки; долговечность возникает там, где записано само намерение выполнить действие.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 328" role="img" aria-label="В обычном After Commit падение процесса между commit и отправкой теряет событие. Outbox сохраняет намерение вместе с бизнес-данными, а отдельный отправитель повторяет доставку.">
+            <defs>
+              <marker id="event-outbox" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="18" y="28" class="dg-cap">ТОЛЬКО ЛОКАЛЬНОЕ СОБЫТИЕ</text>
+            <rect x="18" y="46" width="170" height="58" rx="7" class="dg-cell hit"/>
+            <text x="103" y="72" text-anchor="middle" class="dg-in">БД: платёж PAID</text>
+            <text x="103" y="92" text-anchor="middle" class="dg-s">commit выполнен</text>
+            <rect x="294" y="46" width="156" height="58" rx="7" class="dg-cell miss"/>
+            <text x="372" y="81" text-anchor="middle" class="dg-in">процесс упал</text>
+            <rect x="558" y="46" width="144" height="58" rx="7" class="dg-box"/>
+            <text x="630" y="81" text-anchor="middle" class="dg-in">отправка чека</text>
+            <path d="M188 76 H294" class="dg-line" marker-end="url(#event-outbox)"/>
+            <path d="M450 76 H558" class="dg-line" stroke-dasharray="4 4"/>
+            <text x="501" y="125" text-anchor="middle" class="dg-bad">потеря</text>
+            <line x1="18" y1="147" x2="702" y2="147" class="dg-sep"/>
+            <text x="18" y="176" class="dg-cap">OUTBOX: ОДНА ТРАНЗАКЦИЯ В БД</text>
+            <rect x="18" y="191" width="238" height="114" rx="8" class="dg-box"/>
+            <rect x="32" y="202" width="210" height="36" rx="5" class="dg-cell hit"/>
+            <text x="137" y="225" text-anchor="middle" class="dg-in">платёж PAID</text>
+            <rect x="32" y="248" width="210" height="44" rx="5" class="dg-cell hit"/>
+            <text x="137" y="275" text-anchor="middle" class="dg-in">outbox: событие #42</text>
+            <rect x="350" y="214" width="150" height="60" rx="7" class="dg-box"/>
+            <text x="425" y="242" text-anchor="middle" class="dg-in">отправитель</text>
+            <text x="425" y="261" text-anchor="middle" class="dg-s">или CDC</text>
+            <rect x="578" y="214" width="124" height="60" rx="7" class="dg-box"/>
+            <text x="640" y="248" text-anchor="middle" class="dg-in">получатель</text>
+            <path d="M256 270 H298 V244 H350 M500 244 H578" class="dg-line" marker-end="url(#event-outbox)"/>
+            <path d="M425 274 V306 H640 V274" class="dg-line" stroke-dasharray="4 4" marker-end="url(#event-outbox)"/>
+            <text x="522" y="323" text-anchor="middle" class="dg-s">повтор #42 после сбоя</text>
+          </svg>
+        </div>
+        <figcaption>Outbox переживает перезапуск, потому что событие хранится в БД. Повторная доставка остаётся возможной: получатель связывает обработку с устойчивым ID события.</figcaption>
+      </figure>
+      <p>В outbox бизнес-изменение и запись события сохраняют одной транзакцией в одной БД. После commit отдельный отправитель читает эту запись; другой вариант — CDC, например Debezium. Если сервис упал до отправки, запись остаётся доступной после перезапуска. Это вывод из архитектуры хранения, а не дополнительное свойство <code>@EventListener</code>.</p>
+      <p>Отправитель может успеть доставить сообщение и упасть до отметки об успехе. При повторе получатель увидит то же событие ещё раз. Устойчивый ID и идемпотентная обработка связывают повтор с уже выполненной работой; отметка обработанного ID и локальный результат по возможности фиксируются атомарно. Outbox закрывает окно потери между бизнес-commit и сохранением события, сохраняя задачу работы с повторами.</p>
+      <p>Spring Modulith предлагает журнал публикаций для подходящих транзакционных слушателей: запись создаётся в исходной транзакции и отмечается после успешной обработки. Для доставки между сервисами нужны выбранные транспорт и правила подтверждения. Конкретные настройки Kafka/CDC и полной транзакции БД разобраны в соседних разделах.</p>
+      <p>В проде полезно видеть ID события, длительность и ошибки каждого слушателя, заполненность очереди, число отказов и возраст необработанной записи. Если действие определяет успех платежа, вырази его в понятной общей транзакционной границе. Если оно должно продолжиться после перезапуска, начни с сохраняемой работы и стратегии повторов.</p>
+    </section>
+    <div class="summary">
+      <ul>
+        <li>Обычная публикация синхронна: время и ошибка слушателя входят в вызов издателя.</li>
+        <li>Async меняет поток и обработку ошибок; порядок отправки задач ещё не задаёт порядок завершения.</li>
+        <li>TransactionalEventListener выбирает фазу текущей транзакции; без неё по умолчанию событие пропускается.</li>
+        <li>После commit платеж уже сохранён. Новая запись и ошибка обработчика требуют отдельного решения.</li>
+        <li>Для продолжения после перезапуска храни событие вместе с бизнес-данными и рассчитывай на безопасные повторы.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="event-publication" data-freq="2">
+      <h3>Как работают события Spring и как ошибка слушателя влияет на издателя?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я публикую объект через ApplicationEventPublisher, а методы бинов с @EventListener выбираются по типу события. В обычной конфигурации они выполняются последовательно в потоке издателя, поэтому publishEvent ждёт окончания обработки.</p>
+          <p>Ошибка слушателя прерывает стандартную рассылку и возвращается издателю. Уже выполненные внешние действия сохраняются; их нельзя считать автоматически откатанными вместе с публикацией.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Order задаёт вызов слушателей, а ErrorHandler multicaster способен изменить политику остановки.</li>
+            <li>Обычный объект оборачивается в PayloadApplicationEvent; условие SpEL и доступные generic-метаданные дополнительно ограничивают выбор.</li>
+            <li>Возврат события из синхронного слушателя создаёт вложенную публикацию; случайная цепь может рекурсивно публиковать сама себя.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="transactional-listener" data-freq="2">
+      <h3>Когда вызывается TransactionalEventListener и что будет без транзакции?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Он регистрирует обработку события в синхронизациях текущей транзакции. По умолчанию метод вызывается после успешного commit. Можно выбрать фазу до commit, после rollback или после любого завершения.</p>
+          <p>Без активной транзакции метод по умолчанию пропускается. FallbackExecution разрешает немедленную обработку в этом случае, если это соответствует смыслу реакции.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>BEFORE_COMMIT ещё способен сорвать фиксацию; AFTER_COMMIT реагирует на уже сохранённые данные.</li>
+            <li>В стандартном PlatformTransactionManager AFTER_COMMIT этой аннотации выполняется через afterCompletion: ошибки логируются. Отдельный synchronization.afterCommit имеет другую политику проброса.</li>
+            <li>Связанные ресурсы после commit ещё доступны, но новые изменения через них не получают нового commit. Для новой записи нужна отдельная корректная транзакция, например REQUIRES_NEW у вызываемого сервиса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="async-listener" data-freq="2">
+      <h3>Что меняется, если добавить Async к слушателю событий?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Вызов направляется в выбранный executor при подключённой поддержке Async. Издатель возвращается раньше завершения слушателя. Поэтому длительность и ошибка обработки становятся отдельными от исходного вызова.</p>
+          <p>Я явно выбираю пул, размер очереди и обработку ошибок. Данные события передаю снимком, а собственную транзакцию слушателя задаю отдельно: thread-local транзакция издателя в другой поток не переходит.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Order управляет порядком отправки задач, а завершение при нескольких потоках зависит от их выполнения.</li>
+            <li>Ошибка тела void-метода попадает в AsyncUncaughtExceptionHandler. Отклонение самой задачи пулом может возникнуть ещё у издателя.</li>
+            <li>Async вместе с TransactionalEventListener откладывает передачу в пул до выбранной фазы, сохраняя риск потери задачи в памяти при падении.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="event-durability" data-freq="2">
+      <h3>Почему After Commit не гарантирует доставку и как помогает outbox?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>После commit процесс может упасть до выполнения слушателя. Локальное событие и задача в памяти пула потеряются. Поэтому факт сохранённого платежа ещё не означает отправленного чека.</p>
+          <p>Для важной доставки я сохраняю событие в outbox вместе с бизнес-данными одной транзакцией. Отдельный отправитель продолжает работу после перезапуска, а получатель умеет безопасно обработать повтор по ID события.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Сбой после доставки, но до отметки об успехе создаёт повтор. Требуется идемпотентность конечного действия, а не только повтор чтения outbox.</li>
+            <li>Если запись платежа и outbox находятся в независимых транзакциях, исходное окно потери сохраняется.</li>
+            <li>Для наблюдения нужны возраст необработанных событий, число попыток и ошибки получателей. Журнал публикаций Modulith и outbox/CDC — подключаемые механизмы со своим хранением и политикой повторов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html">Spring Reference: Application Events</a> — выбор слушателей, типы, порядок и синхронная связь.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/context/event/SimpleApplicationEventMulticaster.html">SimpleApplicationEventMulticaster API</a> — executor, ошибки и supportsAsyncExecution.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/context/event/EventListener.html">EventListener API</a> — результаты методов, condition и Async.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/event.html">Spring Reference: Transaction-bound Events</a> — четыре фазы, fallback и реактивный контекст.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/transaction/event/TransactionalEventListener.html">TransactionalEventListener API</a> — ресурсы после завершения транзакции.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/transaction/event/TransactionPhase.html">TransactionPhase API</a> — AFTER_COMMIT как обработка afterCompletion.</li>
+      <li><a href="https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-tx/src/main/java/org/springframework/transaction/support/TransactionSynchronizationUtils.java">TransactionSynchronizationUtils 7.0.9</a> — исходник проброса и логирования ошибок callbacks.</li>
+      <li><a href="https://docs.spring.io/spring-modulith/reference/events.html">Spring Modulith: Working with Application Events</a> — цена синхронной связи, потери и журнал публикаций.</li>
+      <li><a href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html">Debezium: Outbox Event Router</a> — хранение события и идентификатор для повторной доставки.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
