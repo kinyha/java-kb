@@ -503,7 +503,7 @@ window.KB_TREE = [
     source: 'Spring Framework Reference, Spring Boot Reference, Spring Start Here (Spilca), roadmap.sh/spring-boot, awesome-java-backend-interview-rus',
     items: [
       { id: 'core', title: 'Core', source: 'Spring Framework Reference: IoC Container, AOP, Context Events; Spring Start Here, гл. 2–6; порядок от графа объектов к перехвату вызовов', items: [
-        { id: 'spring-core', freq: 3, status: 'empty', title: 'IoC & ApplicationContext',
+        { id: 'spring-core', freq: 3, status: 'draft', title: 'IoC & ApplicationContext',
           scope: 'IoC и DI, граф объектов, BeanDefinition и bean, BeanFactory и ApplicationContext, refresh, иерархия контекстов, Spring и Boot' },
         { id: 'spring-beans', freq: 3, status: 'empty', title: 'Configuration & Beans',
           scope: 'component scan, stereotypes, @Configuration и @Bean, full и lite mode, @Import, FactoryBean, @Profile и @Conditional' },
