@@ -1,7 +1,7 @@
 # Web demos
 
 Запускаемые примеры к темам раздела Spring › Web. Нужны JDK 21 и Maven.
-Зависимости зафиксированы в `pom.xml`: встроенный Tomcat 11.0.26, Spring Framework 7.0.9, Jackson 3.1.5, Spring Boot 4.1.1.
+Зависимости зафиксированы в `pom.xml`: встроенный Tomcat 11.0.26, Spring Framework 7.0.9, Jackson 3.1.5, Spring Boot 4.1.1, Hibernate Validator 9.1.3.
 
 ```bash
 cd examples/web
@@ -9,7 +9,7 @@ cd examples/web
 ./run.sh PoolDemo virtual
 ```
 
-Скрипт собирает classpath через Maven и запускает файл через Java source launcher, то есть без флага компилятора `-parameters`. `logback.xml` оставляет от фреймворков только ошибки. Демо поднимают Tomcat на порту 18080 (PoolDemo ещё «банк» на 18081), сами отправляют запросы и останавливаются.
+Скрипт собирает classpath через Maven, компилирует файл `javac` без флага `-parameters` в `target/<Demo>` и запускает. `logback.xml` оставляет от фреймворков только ошибки. Демо поднимают Tomcat на порту 18080 (PoolDemo ещё «банк» на 18081), сами отправляют запросы и останавливаются.
 
 | Файл | Тема | Что показывает |
 |---|---|---|
@@ -21,3 +21,5 @@ cd examples/web
 | `MvcStatusDemo.java` | Spring MVC | какой этап даёт 404, 405, 415, 406 и 400 и каким исключением |
 | `MvcArgumentsDemo.java` | Spring MVC | забытый `@RequestBody`, имена без `-parameters`, String в `@RestController` и `@Controller` |
 | `MvcBootDemo.java` | Spring MVC | то же в Spring Boot: ленивый DispatcherServlet, его маппинги, 404 через обработчик статики |
+| `ValidationDemo.java` | Validation & Errors | валидатор и каскад `@Valid`, проверка тела и параметров в MVC, `@Validated` на контроллере и сервисе |
+| `ErrorHandlingDemo.java` | Validation & Errors | `@ExceptionHandler` по ближайшему типу, локальный обработчик, ProblemDetail, исключение фильтра; `naive` — catch-all на Exception |
