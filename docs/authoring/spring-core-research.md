@@ -75,3 +75,18 @@
 - Диагностика BPP eligibility, внешние эффекты не откатываются вместе с refresh, готовность разных уровней → boundaries.
 
 Источники: Reference / Customizing the Nature of a Bean, Container Extension Points; API BeanPostProcessor/Bean/SmartLifecycle; AbstractAutowireCapableBeanFactory 7.0.9 doCreateBean/initializeBean. LifecycleDemo и CycleDemo запускаются Java 21; примеры сети/пулов обсуждаются как границы, реальные внешние подключения не выполняются.
+
+## AOP & Proxies
+
+Центральный вопрос: через какую ссылку прошёл вызов и какая цепочка его окружала?
+
+Подача: внешняя оболочка и отдельный target вместо идеи «аннотация меняет метод». Сопоставление двух proxy types на одном интерфейсе; затем отдельный опыт двух Around. Это разделяет геометрию вызова и порядок advice, который Reference объясняет через вложенность входа/выхода.
+
+- Цель AOP, join point/pointcut/advice/advisor/aspect, регистрация → interception и selection.
+- Ограничения Spring method execution; this/target/args/bean, AspectJ отличие → selection/deep.
+- Around/proceed, before/returning/throwing/finally, замена результата и ошибки → chain; AdviceDemo и пять кадров вложенности.
+- JDK/CGLIB, интерфейсный контракт/final/private/static, Objenesis и непрогретые поля прокси → proxy-types; ProxyDemo.
+- Self invocation, init, new, extraction/self-reference/AopContext → self-invocation; схема внешнего и внутреннего вызова.
+- Order и retry/transaction, диагностика AopUtils/Advised, matching и слои → boundaries.
+
+Источники: Reference / Proxying Mechanisms, Declaring Advice, Declaring a Pointcut, @AspectJ support; Boot / AOP defaults. Оба примера Java 21 / 7.0.9. Final owner в CGLIB демонстрируется с присваиванием в конструкторе, чтобы javac не заменил чтение constant field на литерал. Отдельно отмечен bypass конструктора прокси в данном запуске; реальная БД/транзакции для примера порядка не используются.

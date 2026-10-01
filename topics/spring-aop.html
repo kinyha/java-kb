@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: AOP & Proxies · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-aop">
+<main class="page">
+  <header class="topic-head"><h1>Spring: AOP & Proxies</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Общее поведение удобно добавить вокруг вызова сервиса: измерить время, проверить права, открыть транзакцию. Spring выдаёт клиенту оболочку, которая выполняет эти действия и обращается к исходному объекту. Поэтому главный вопрос — прошёл ли конкретный вызов через эту оболочку. От него зависят и работа аннотаций, и внутренние вызовы, и ограничения final.</p>
+    </div>
+    <section class="step" id="interception">
+      <h2>Метрики и транзакции добавляются на границе вызова сервиса</h2>
+      <p>Десять сервисов отправляют платежи, и в каждом нужны измерение времени, журналирование ошибок и проверка прав. Если вставлять одинаковый код вокруг каждого метода, основная логика становится труднее читать. Общее поведение удобно выделить отдельно и подключить к нужным вызовам.</p>
+      <p>Spring AOP делает это через <b>прокси</b>: клиент получает ссылку на оболочку. Она выполняет дополнительные действия, вызывает исходный объект и обрабатывает завершение. Исходный PaymentService по-прежнему содержит обычный метод Java. Разница возникает на пути, по которому клиент в него пришёл.</p>
+      <p>Так устроены многие инфраструктурные аннотации, в том числе декларативные транзакции, кеширование и асинхронные вызовы. Для них нужна подключённая инфраструктура и вызов через подходящий прокси. Простое присутствие аннотации в исходном файле описывает намерение, а работу выполняет цепочка обработчиков.</p>
+      <p>Полезный мысленный опыт: возьми ссылку, через которую вызывается сервис, и проследи её до реального метода. Это сразу отличает внешний вызов через Spring от самостоятельного new и внутреннего вызова через this.</p>
+    </section>
+    
+    <section class="step" id="selection">
+      <h2>Pointcut выбирает вызов, advice задаёт добавленное действие</h2>
+      <p><b>Join point</b> — место, где можно подключить дополнительное поведение. В Spring AOP это выполнение метода бина через прокси. <b>Pointcut</b> отбирает такие места, <b>advice</b> выполняет действие до, после или вокруг вызова. <b>Advisor</b> связывает условие выбора с обработчиком, а <b>aspect</b> объединяет связанные правила.</p>
+      <p>Например, pointcut выбирает pay у бина gateway, advice измеряет длительность вызова. Аннотация @Aspect описывает этот набор правил, но сам аспект также должен стать бином: через @Bean, сканирование или импорт. В обычном Framework приложение подключает @EnableAspectJAutoProxy; Boot может сделать это автоматической конфигурацией.</p>
+      <p>execution описывает сигнатуру метода, within ограничивает область классов, @annotation проверяет аннотацию метода, args учитывает аргументы. this относится к объекту прокси, target — к исходному объекту. Поэтому this(ConcreteService) различает JDK-прокси и прокси-подкласс, тогда как target проверяет реальную реализацию. bean — расширение Spring для выбора по имени бина.</p>
+      <p>Spring использует синтаксис pointcut и аннотации AspectJ, сохраняя собственный механизм прокси. Для перехвата конструктора, доступа к полю или произвольного вызова внутри объекта нужен другой механизм, например weaving AspectJ. Наличие aspectjweaver.jar для разбора выражений ещё не включает такое преобразование классов.</p>
+      <details class="deep">
+        <summary>Под капотом: как аспект превращается в цепочку</summary>
+        <p>AnnotationAwareAspectJAutoProxyCreator обнаруживает аспекты и подходящие advisors. При создании бина он определяет, нужна ли оболочка; при вызове прокси строится цепочка подходящих перехватчиков для метода. Часть проверки pointcut возможна заранее по классу и методу, а условие по реальным аргументам может проверяться при каждом вызове.</p>
+      </details>
+    </section>
+    
+    <section class="step" id="chain">
+      <h2>Around охватывает следующий участок цепочки, а не только target</h2>
+      <p>Вызов проходит через упорядоченную цепочку. Around получает ProceedingJoinPoint и решает, когда передать управление дальше через proceed. Следующим участком может быть ещё один advice. Поэтому код после proceed выполняется на обратном пути, в порядке, обратном входу.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 205" role="img" aria-label="Внешний Around с Order 1 охватывает внутренний с Order 2. Вызов идёт к target, а завершение возвращается в обратном порядке.">
+            <defs>
+              <marker id="aop-chain" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="172" y="18" width="366" height="164" rx="10" class="dg-sep" fill="none"/>
+            <text x="188" y="40" class="dg-cap">ЦЕПОЧКА ПРОКСИ</text>
+            <rect x="18" y="68" width="116" height="56" rx="7" class="dg-box"/>
+            <rect x="188" y="68" width="134" height="56" rx="7" class="dg-box"/>
+            <rect x="388" y="68" width="134" height="56" rx="7" class="dg-box"/>
+            <rect x="582" y="68" width="120" height="56" rx="7" class="dg-cell hit"/>
+            <text x="76" y="102" text-anchor="middle" class="dg-in">клиент</text>
+            <text x="255" y="92" text-anchor="middle" class="dg-in">Outer</text><text x="255" y="112" text-anchor="middle" class="dg-s">Order 1</text>
+            <text x="455" y="92" text-anchor="middle" class="dg-in">Inner</text><text x="455" y="112" text-anchor="middle" class="dg-s">Order 2</text>
+            <text x="642" y="102" text-anchor="middle" class="dg-in">target.pay()</text>
+            <path data-s="1" d="M134 86 L184 86" class="dg-line" marker-end="url(#aop-chain)"/>
+            <path data-s="2" d="M322 86 L384 86" class="dg-line" marker-end="url(#aop-chain)"/>
+            <path data-s="3" d="M522 86 L578 86" class="dg-line" marker-end="url(#aop-chain)"/>
+            <path data-s="4" d="M582 108 L526 108" class="dg-line" marker-end="url(#aop-chain)"/>
+            <g data-s="5"><path d="M388 108 L326 108" class="dg-line" marker-end="url(#aop-chain)"/><path d="M188 108 L138 108" class="dg-line" marker-end="url(#aop-chain)"/></g>
+            <text data-s="1-" x="188" y="149" class="dg-s">outer enter</text>
+            <text data-s="2-" x="388" y="149" class="dg-s">inner enter</text>
+            <text data-s="4-" x="388" y="169" class="dg-ok">inner exit</text>
+            <text data-s="5" x="188" y="169" class="dg-ok">outer exit</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент вызывает pay через прокси. Внешний Around печатает outer enter.</li>
+          <li>proceed внешнего обработчика передаёт управление внутреннему; тот печатает inner enter.</li>
+          <li>proceed внутреннего обработчика доходит до BankGateway.pay. Без него целевой метод здесь не выполнился бы.</li>
+          <li>Метод заканчивается, управление возвращается во внутренний Around. Его finally печатает inner exit.</li>
+          <li>Внутренний Around возвращается во внешний. Печатается outer exit, затем вызов завершается у клиента. Меньший Order окружает больший.</li>
+        </ol>
+      </figure>
+      <p>В <a href="../examples/spring-core/AdviceDemo.java">AdviceDemo.java</a> аспекты имеют разные Order. Все регистрации и оба Around показаны ниже. Меньшее число означает более высокое предпочтение: такой аспект выполняется первым на входе и последним на выходе.</p>
+      <p><a href="../examples/spring-core/AdviceDemo.java">Полный пример AdviceDemo.java</a>, Java 21, Spring 7.0.9. </p><pre><code class="language-bash">cd examples/spring-core
+./run.sh AdviceDemo</code></pre><pre><code class="language-java">import org.aspectj.lang.ProceedingJoinPoint;
+      import org.aspectj.lang.annotation.*;
+      import org.springframework.context.annotation.*;
+      import org.springframework.core.annotation.Order;
+      
+      public class AdviceDemo {
+          interface Gateway { void pay(); }
+          static class BankGateway implements Gateway {
+              public void pay() { System.out.println(&quot;target pay&quot;); }
+          }
+          @Aspect @Order(1)
+          static class Outer {
+              @Around(&quot;bean(gateway) &amp;&amp; execution(* pay(..))&quot;)
+              Object around(ProceedingJoinPoint call) throws Throwable {
+                  System.out.println(&quot;outer enter&quot;);
+                  try { return call.proceed(); }
+                  finally { System.out.println(&quot;outer exit&quot;); }
+              }
+          }
+          @Aspect @Order(2)
+          static class Inner {
+              @Around(&quot;bean(gateway) &amp;&amp; execution(* pay(..))&quot;)
+              Object around(ProceedingJoinPoint call) throws Throwable {
+                  System.out.println(&quot;inner enter&quot;);
+                  try { return call.proceed(); }
+                  finally { System.out.println(&quot;inner exit&quot;); }
+              }
+          }
+          @Configuration(proxyBeanMethods = false)
+          @EnableAspectJAutoProxy
+          static class Config {
+              @Bean Gateway gateway() { return new BankGateway(); }
+              @Bean Outer outer() { return new Outer(); }
+              @Bean Inner inner() { return new Inner(); }
+          }
+          public static void main(String[] args) {
+              try (var ctx = new AnnotationConfigApplicationContext(Config.class)) {
+                  ctx.getBean(Gateway.class).pay();
+              }
+          }
+      }</code></pre>
+      <pre class="out">outer enter
+inner enter
+target pay
+inner exit
+outer exit</pre>
+      <table class="mx">
+        <thead><tr><th>Вид advice</th><th>Когда выполняется</th><th>Что может сделать</th></tr></thead>
+        <tbody>
+          <tr><td>Before</td><td>Перед охваченным вызовом</td><td>Проверить условия; исключение прервёт вызов</td></tr>
+          <tr><td>AfterReturning</td><td>При нормальном завершении</td><td>Получить результат, выполнить побочное действие</td></tr>
+          <tr><td>AfterThrowing</td><td>При подходящем исключении</td><td>Реагировать на ошибку; восстановление нормального результата требует Around</td></tr>
+          <tr><td>After</td><td>После завершения, как finally</td><td>Освободить ресурс при успехе и ошибке</td></tr>
+          <tr><td>Around</td><td>Охватывает следующий участок</td><td>Изменить аргументы/результат, вызвать дальше или вернуть ответ сразу</td></tr>
+        </tbody>
+      </table>
+      <p>Around может вызвать proceed несколько раз. Для повторной попытки это означает повторное выполнение следующей цепочки и целевого действия, а для списания денег — риск повторного списания. Если задача только наблюдать успех, AfterReturning проще. Присвоение новой ссылки локальной переменной в AfterReturning не заменяет возвращаемый результат; такую замену выполняют через Around.</p>
+      <p>Порядок имеет смысл для взаимодействующих механизмов. Retry снаружи transaction advice может создавать отдельную транзакционную попытку; retry внутри одной транзакции продолжает работу в её контексте, который уже мог стать rollback-only. Конкретное поведение зависит от propagation и обрабатываемой ошибки. Сам Order задаёт вложенность, а корректность повторов определяет бизнес-протокол.</p>
+    </section>
+    
+    <section class="step" id="proxy-types">
+      <h2>JDK-прокси реализует интерфейсы, CGLIB создаёт подкласс</h2>
+      <p>У JDK-прокси есть интерфейсы сервиса, но он не является экземпляром BankGateway. Клиенту удобно зависеть от Gateway. Вызов интерфейсного метода направляется обработчику, который может вызвать даже final-метод исходного объекта: наследование BankGateway для этого не требуется.</p>
+      <p>CGLIB создаёт подкласс BankGateway и переопределяет методы для перехвата. Поэтому final-класс невозможно расширить, а final-метод невозможно переопределить. Private и static тоже обходят обычный путь такого AOP. Унаследованные методы с ограниченной видимостью дополнительно зависят от пакета и доступности для подкласса.</p>
+      <table class="mx">
+        <thead><tr><th>Свойство</th><th>JDK-прокси</th><th>CGLIB-прокси</th></tr></thead>
+        <tbody>
+          <tr><td>Контракт клиента</td><td>Интерфейс</td><td>Класс и его интерфейсы</td></tr>
+          <tr><td>Метод final у target</td><td>Можно перехватить через интерфейс</td><td>Переопределение отсутствует</td></tr>
+          <tr><td>Класс target final</td><td>Возможен при интерфейсном контракте</td><td>Подкласс создать нельзя</td></tr>
+          <tr><td>Вызов this внутри target</td><td>Обходит оболочку</td><td>Обходит оболочку</td></tr>
+          <tr><td>Обычный выбор Framework</td><td>При наличии подходящих интерфейсов</td><td>Когда нужен класс; можно включить явно</td></tr>
+        </tbody>
+      </table>
+      <p>Boot по умолчанию включает прокси классов через автоматическую конфигурацию AOP. Свойство spring.aop.proxy-target-class=false переключает её на интерфейсный вариант. В явном ProxyFactory ниже выбор задан для каждого опыта, поэтому результат не зависит от настроек Boot.</p>
+      <p>В <a href="../examples/spring-core/ProxyDemo.java">ProxyDemo.java</a> один интерфейс и одна реализация используются с обоими видами оболочки. owner — final-метод, читающий поле, присвоенное в конструкторе. Лог показывает также внутренний и внешний audit.</p>
+      <p><a href="../examples/spring-core/ProxyDemo.java">Полный пример ProxyDemo.java</a>, Java 21, Spring 7.0.9. </p><pre><code class="language-bash">cd examples/spring-core
+./run.sh ProxyDemo</code></pre><pre><code class="language-java">import java.util.logging.*;
+      import org.aopalliance.intercept.MethodInterceptor;
+      import org.springframework.aop.framework.ProxyFactory;
+      import org.springframework.aop.support.AopUtils;
+      
+      public class ProxyDemo {
+          public interface Gateway {
+              void pay();
+              void audit();
+              String owner();
+          }
+          public static class BankGateway implements Gateway {
+              final String bank;
+              public BankGateway() { bank = &quot;bank&quot;; }
+              public void pay() {
+                  System.out.println(&quot;target pay&quot;);
+                  audit(); // Этот вызов идёт через this исходного объекта.
+              }
+              public void audit() { System.out.println(&quot;target audit&quot;); }
+              public final String owner() { return bank; }
+          }
+          static void run(boolean classProxy) {
+              var target = new BankGateway();
+              var factory = new ProxyFactory(target);
+              factory.setInterfaces(Gateway.class);
+              factory.setProxyTargetClass(classProxy);
+              factory.addAdvice((MethodInterceptor) invocation -&gt; {
+                  String method = invocation.getMethod().getName();
+                  System.out.println(&quot;advice &gt; &quot; + method);
+                  try { return invocation.proceed(); }
+                  finally { System.out.println(&quot;advice &lt; &quot; + method); }
+              });
+              var proxy = (Gateway) factory.getProxy();
+              System.out.println(classProxy ? &quot;CGLIB:&quot; : &quot;JDK:&quot;);
+              System.out.println(&quot;class proxy: &quot; + AopUtils.isCglibProxy(proxy));
+              proxy.pay();
+              proxy.audit(); // Здесь вызов приходит снаружи через прокси.
+              System.out.println(&quot;owner: &quot; + proxy.owner()); // В CGLIB метод final.
+          }
+          public static void main(String[] args) {
+              // Предупреждение о final-методе ожидается; результат печатаем сами.
+              Logger.getLogger(&quot;org.springframework&quot;).setLevel(Level.SEVERE);
+              run(false);
+              run(true);
+          }
+      }</code></pre>
+      <pre class="out">JDK:
+class proxy: false
+advice &gt; pay
+target pay
+target audit
+advice &lt; pay
+advice &gt; audit
+target audit
+advice &lt; audit
+advice &gt; owner
+advice &lt; owner
+owner: bank
+CGLIB:
+class proxy: true
+advice &gt; pay
+target pay
+target audit
+advice &lt; pay
+advice &gt; audit
+target audit
+advice &lt; audit
+owner: null</pre>
+      <p>В этом запуске CGLIB-оболочка создана через Objenesis с обходом своего конструктора. Final owner выполняется прямо на ней, поскольку не переопределён: он читает её незаполненное поле и возвращает null. Обычные перехваченные методы делегируют отдельному подготовленному target. Если обход конструктора недоступен и применяется резервный способ создания, значение поля может отличаться; отсутствие перехвата final сохраняется.</p>
+    </section>
+    
+    <section class="step" id="self-invocation">
+      <h2>Вызов через this остаётся внутри исходного объекта</h2>
+      <p>В ProxyDemo внешний proxy.pay проходит через advice. Затем BankGateway.pay вызывает audit через this, то есть исходный BankGateway. Внутренний вызов не возвращается к прокси, поэтому отдельный advice для audit отсутствует. При следующем внешнем proxy.audit появляется перехват для этого же метода.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Внешние pay и audit проходят через прокси. Внутренний вызов audit из pay идёт внутри исходного BankGateway и не возвращается в цепочку advice.">
+            <defs>
+              <marker id="aop-self" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="50" width="130" height="58" rx="7" class="dg-box"/>
+            <rect x="18" y="164" width="130" height="58" rx="7" class="dg-box"/>
+            <rect x="220" y="28" width="158" height="204" rx="8" class="dg-box"/>
+            <rect x="450" y="28" width="252" height="204" rx="8" class="dg-box"/>
+            <text x="83" y="84" text-anchor="middle" class="dg-in">proxy.pay()</text>
+            <text x="83" y="198" text-anchor="middle" class="dg-in">proxy.audit()</text>
+            <text x="234" y="55" class="dg-t">прокси</text>
+            <text x="234" y="87" class="dg-in">advice для pay</text>
+            <text x="234" y="200" class="dg-in">advice для audit</text>
+            <text x="464" y="55" class="dg-t">исходный BankGateway</text>
+            <rect x="478" y="66" width="196" height="40" rx="6" class="dg-cell"/>
+            <rect x="478" y="176" width="196" height="40" rx="6" class="dg-cell"/>
+            <text x="576" y="92" text-anchor="middle" class="dg-in">pay()</text>
+            <text x="576" y="202" text-anchor="middle" class="dg-in">audit()</text>
+            <path d="M148 79 L216 79" class="dg-line" marker-end="url(#aop-self)"/>
+            <path d="M378 86 L474 86" class="dg-line" marker-end="url(#aop-self)"/>
+            <path d="M576 106 L576 172" class="dg-line" marker-end="url(#aop-self)"/>
+            <text x="590" y="143" class="dg-s">this</text>
+            <path d="M148 193 L216 193" class="dg-line" marker-end="url(#aop-self)"/>
+            <path d="M378 196 L474 196" class="dg-line" marker-end="url(#aop-self)"/>
+          </svg>
+        </div>
+        <figcaption>Один и тот же audit выполняется через два пути. Перехват зависит от того, прошёл ли вызов через оболочку.</figcaption>
+      </figure>
+      <p>Из-за этого собственный метод с @Transactional, @Cacheable или @Async способен вести себя как обычный метод. Переключение JDK на CGLIB сохраняет причину: стандартный Spring AOP делегирует выполнение отдельному target. При разборе ошибки важен вызывающий объект, а не только аннотация на вызываемом методе.</p>
+      <p>Самое ясное исправление — выделить отдельный компонент с нужной границей поведения и внедрить его. Тогда внешний вызов проходит по ссылке Spring. Ссылка на собственный прокси также может работать, но добавляет зависимость на механизм сборки и возможный цикл. AopContext.currentProxy требует exposeProxy и связывает код с текущим AOP-вызовом; это более тесная зависимость от инфраструктуры.</p>
+      <p>У full @Configuration другой способ перехвата: тело выполняется в усиленном экземпляре конфигурации, и прямой вызов другого @Bean может попасть в переопределённый метод этого же подкласса. Название CGLIB общее, но геометрия объектов отличается. Подмена методов конфигурации и сервисный AOP решают разные задачи.</p>
+      <p>В init исходный объект также ещё готовится, а самостоятельно созданный new вообще не проходит стандартную обработку бина. Для первого случая выбирают отдельный этап запуска, для второго — управляемую сборку или явную обычную оболочку Java. Эти причины разобраны в <a href="bean-lifecycle.html">Bean Lifecycle</a>.</p>
+    </section>
+    
+    <section class="step" id="boundaries">
+      <h2>Диагностика прокси начинается с реальной ссылки клиента</h2>
+      <p>Проверь AopUtils.isAopProxy, isJdkDynamicProxy или isCglibProxy на той ссылке, через которую выполняется вызов. AopUtils.getTargetClass помогает узнать исходный тип. Если объект реализует Advised и конфигурация доступна, getAdvisors показывает подключённые правила. Класс из исходного файла и класс фактически полученной ссылки могут различаться.</p>
+      <p>Дальше проверь, попал ли метод в pointcut, какая версия конфигурации включена и откуда пришёл вызов. Прямой new, this и final у прокси класса объясняют разные обходы. Проверка типа прокси не доказывает, что нужный advice подходит конкретному методу.</p>
+      <p>Для порядка разных аспектов используй Ordered или @Order на аспекте. Два advice одного вида в одном аспекте не получают надёжный порядок из расположения методов в исходнике. Если их последовательность важна, объедини логику или выдели упорядоченные аспекты. Несколько оболочек разных подсистем также могут иметь внешнюю и внутреннюю цепочки.</p>
+      <p>AOP хорошо выражает общее техническое поведение на границе вызова. Если аспект начинает выбирать банк, менять бизнес-состояние или незаметно повторять необратимое действие, основная логика становится трудно обозримой. Такие решения лучше показать в сервисе или явной стратегии, оставив инфраструктуре измерение, проверку и управление контекстом.</p>
+    </section>
+    <div class="summary">
+      <ul>
+        <li>Pointcut выбирает вызов, advice выполняет добавленное действие, а прокси связывает их с target.</li>
+        <li>Around охватывает оставшуюся цепочку. Меньший Order входит первым и выходит последним.</li>
+        <li>JDK использует интерфейс; CGLIB — подкласс с ограничениями переопределения.</li>
+        <li>This внутри target обходит обычный Spring AOP у обоих видов прокси.</li>
+        <li>Проверяй реальную ссылку, matching и путь вызова; повторение proceed может повторить бизнес-действие.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="aop-model" data-freq="3">
+      <h3>Как Spring AOP добавляет поведение к методу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Клиент получает прокси бина. Прокси выбирает подходящие обработчики, выполняет их и вызывает исходный объект. Pointcut отвечает за выбор метода, advice — за действие; advisor соединяет их, а аспект группирует правила.</p>
+          <p>При разборе я прослеживаю путь ссылки. Аннотация описывает намерение, но для её работы нужна подключённая инфраструктура и подходящий внешний вызов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Spring AOP перехватывает выполнение методов через прокси. Конструкторы и доступ к полям требуют другого механизма.</li>
+            <li>Синтаксис AspectJ и его аннотации могут использоваться без weaving: исполнение остаётся в Spring-прокси.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="jdk-cglib" data-freq="3">
+      <h3>Чем JDK-прокси отличается от CGLIB и что происходит с final?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JDK-прокси реализует интерфейс и передаёт вызов обработчику. CGLIB создаёт подкласс и переопределяет методы. Поэтому JDK может перехватить интерфейсный вызов final-метода target, а CGLIB — нет.</p>
+          <p>Для final-класса подходит интерфейсный вариант. Клиент JDK-прокси зависит от интерфейса; приведение к конкретной реализации ошибочно. В Boot автоматическая конфигурация по умолчанию выбирает прокси класса.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Обход конструктора прокси через Objenesis отделяет его состояние от состояния target. Final-метод, исполненный на самой оболочке, способен читать незаполненные поля.</li>
+            <li>Private, static и недоступные подклассу методы не образуют обычный путь перехвата CGLIB.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="self-call" data-freq="3">
+      <h3>Почему вызов собственного метода обходит AOP даже с CGLIB?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Перехват находится в оболочке, а целевой метод выполняется на исходном объекте. Его this ссылается на этот объект, поэтому внутренний вызов остаётся внутри него. Выбор подкласса для оболочки сам по себе этот путь не меняет.</p>
+          <p>Я выделяю компонент, чью границу действительно нужно перехватывать, и вызываю его через внедрённую ссылку. Это делает транзакцию, кеш или асинхронность видимыми по структуре кода.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Собственный прокси требует отдельного получения ссылки и может добавить цикл; AopContext требует exposeProxy и текущего AOP-вызова.</li>
+            <li>У full Configuration прямые Bean-вызовы устроены иначе: усиленный экземпляр конфигурации использует собственные переопределённые методы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="advice-order" data-freq="3">
+      <h3>Как работает порядок Around и почему важен proceed?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Around окружает следующий участок цепочки. При меньшем Order обработчик выполняется раньше на входе и позже на выходе. Proceed передаёт управление дальше; без него метод может вообще не выполниться.</p>
+          <p>Для нескольких попыток каждый proceed повторяет оставшийся участок. Я учитываю вложенность retry и transaction, а также безопасность повторного бизнес-действия.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>AfterReturning наблюдает нормальный результат, но присвоение его параметру другую ссылку не заменяет ответ клиента. Для замены нужен Around.</li>
+            <li>У однотипных advice в одном аспекте порядок не следует надёжно из исходника. Если он важен, задаётся между отдельными аспектами.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="proxy-diagnostics" data-freq="3">
+      <h3>Аннотация стоит, но перехвата нет. Что проверить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я проверяю реальную ссылку клиента через AopUtils, затем регистрацию инфраструктуры и соответствие метода pointcut. После этого смотрю на путь вызова: внешний через прокси, внутренний this или самостоятельный new. Для CGLIB также важны final и видимость метода.</p>
+          <p>Разные причины требуют разных исправлений: зарегистрировать бин или аспект, уточнить выбор методов, изменить границу компонента. Добавление аннотации к той же строке не меняет геометрию вызова.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>У доступного Advised можно посмотреть advisors, но наличие одного из них не доказывает его применимость к каждому методу.</li>
+            <li>Init выполняется на этапе подготовки объекта: обычный внешний путь AOP для собственных вызовов там отсутствует.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/aop/proxying.html">Spring Reference: Proxying Mechanisms</a> — основа урока: оболочка, target, ограничения и self invocation.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html">Spring Reference: Declaring Advice</a> — виды advice, proceed и порядок.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/pointcuts.html">Spring Reference: Declaring a Pointcut</a> — условия выбора вызова.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/aop/ataspectj.html">Spring Reference: @AspectJ support</a> — Spring AOP и отличие от weaving.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/aop.html">Spring Boot: AOP</a> — прокси класса по умолчанию.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/aop/support/AopUtils.html">AopUtils API</a> — диагностика вида прокси и исходного класса.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
