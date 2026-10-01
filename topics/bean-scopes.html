@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Bean Scopes · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="bean-scopes">
+<main class="page">
+  <header class="topic-head"><h1>Spring: Bean Scopes</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Общий сервис может жить всё время работы приложения, а черновик нужен только одному платежу. Spring позволяет задать правила выдачи таких объектов, но ссылка в поле сохраняет полученный экземпляр. Для разного времени жизни важно выбрать и область бина, и способ его получения: напрямую, через provider или через прокси текущего запроса.</p>
+    </div>
+    <section class="step" id="sharing">
+      <h2>Черновик одного платежа опасно хранить в общем сервисе</h2>
+      <p>PaymentService обслуживает сразу много HTTP-запросов. Если он сохраняет в поле черновик текущего платежа, запрос второго клиента способен перезаписать данные первого. Настройки банка удобно разделять между вызовами, а номер счёта и сумму конкретной операции — держать отдельно. Вопрос времени жизни начинается с того, кто пользуется состоянием одновременно.</p>
+      <p><b>Scope</b> задаёт, как контейнер возвращает экземпляры одного описания бина. По умолчанию используется <b>singleton</b>: одна сохранённая ссылка для этого бина в конкретной фабрике. Два имени могут описывать два объекта одного класса; два самостоятельных контекста также имеют собственные экземпляры.</p>
+      <p>Поэтому singleton-сервис удобен для работы без состояния отдельного клиента. Зависимости и общая конфигурация находятся в полях, данные платежа — в аргументах и локальных переменных. При этом общий кеш или счётчик допустимы, если ты отдельно обеспечил конкурентный доступ. Область видимости определяет совместное использование, а правила работы потоков определяет сам класс.</p>
+      <table class="mx">
+        <thead><tr><th>Scope</th><th>Что сохраняется между обращениями</th><th>Когда заканчивается управление</th></tr></thead>
+        <tbody>
+          <tr><td>singleton</td><td>Один бин в фабрике</td><td>При уничтожении бина/закрытии контекста</td></tr>
+          <tr><td>prototype</td><td>Каждый запрос создания даёт новый объект</td><td>После подготовки и передачи клиенту</td></tr>
+          <tr><td>request</td><td>Один объект для текущего HTTP-запроса</td><td>При завершении запроса</td></tr>
+          <tr><td>session</td><td>Один объект для HTTP-сессии</td><td>При завершении сессии</td></tr>
+          <tr><td>application</td><td>Один объект в ServletContext</td><td>При завершении веб-приложения</td></tr>
+          <tr><td>websocket</td><td>Объект STOMP-сессии WebSocket</td><td>При завершении этой сессии</td></tr>
+        </tbody>
+      </table>
+      <p>Сессия тоже допускает параллельный доступ: браузер может отправить два запроса из разных вкладок. Даже request-объект можно передать в несколько задач вручную. Отдельный экземпляр уменьшает число разделяющих его клиентов, но синхронизация всё равно нужна там, где один объект реально используют несколько потоков.</p>
+    </section>
+    
+    <section class="step" id="prototype">
+      <h2>Prototype создаётся на запрос фабрики, а поле хранит полученную ссылку</h2>
+      <p>Кажется естественным пометить Draft как prototype и внедрить его в PaymentService. Но сервис создаётся один раз. В этот момент Spring создаёт один Draft и записывает ссылку в поле. Дальше каждый платёж читает это же поле. Вызов метода сервиса сам по себе снова к фабрике не обращается.</p>
+      <p>Новый prototype появляется при новом getBean или getObject у provider. Обычный доступ к полю сохраняет объект ровно так же, как любая ссылка Java. Схема показывает, где проходит граница между использованием существующего объекта и запросом нового.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 260" role="img" aria-label="Один singleton хранит prototype номер 1. Прямое обращение сохраняет эту ссылку; два запроса через provider создают экземпляры 2 и 3.">
+            <defs>
+              <marker id="scope-proto" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="40" width="202" height="174" rx="8" class="dg-box"/>
+            <text x="32" y="66" class="dg-t">Service: singleton</text>
+            <rect x="32" y="88" width="174" height="38" rx="6" class="dg-cell"/>
+            <text x="44" y="112" class="dg-in">fixed: ссылка</text>
+            <rect x="32" y="160" width="174" height="38" rx="6" class="dg-cell"/>
+            <text x="44" y="184" class="dg-in">fresh: provider</text>
+            <rect x="284" y="160" width="178" height="56" rx="7" class="dg-box"/>
+            <text x="298" y="184" class="dg-t">BeanFactory</text>
+            <text x="298" y="203" class="dg-s">draft: prototype</text>
+            <rect x="538" y="34" width="162" height="44" rx="6" class="dg-cell hit"/>
+            <text x="619" y="62" text-anchor="middle" class="dg-in">Draft #1</text>
+            <path d="M206 107 C370 107 370 56 534 56" class="dg-line" marker-end="url(#scope-proto)"/>
+            <g data-s="2"><path d="M220 134 C350 134 390 76 534 70" class="dg-line" marker-end="url(#scope-proto)"/></g>
+            <g data-s="3-"><rect x="538" y="112" width="162" height="44" rx="6" class="dg-cell hit"/><text x="619" y="140" text-anchor="middle" class="dg-in">Draft #2</text></g>
+            <g data-s="3"><path d="M206 179 L280 179" class="dg-line" marker-end="url(#scope-proto)"/><path d="M462 174 C499 174 496 134 534 134" class="dg-line" marker-end="url(#scope-proto)"/></g>
+            <g data-s="4"><rect x="538" y="190" width="162" height="44" rx="6" class="dg-cell hit"/><text x="619" y="218" text-anchor="middle" class="dg-in">Draft #3</text><path d="M206 179 L280 179" class="dg-line" marker-end="url(#scope-proto)"/><path d="M462 202 L534 212" class="dg-line" marker-end="url(#scope-proto)"/></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>При создании Service контейнер создаёт Draft #1 и передаёт его в fixed. Эта ссылка остаётся в singleton.</li>
+          <li>Повторные обращения к fixed читают ту же ссылку. Нового запроса к фабрике здесь нет.</li>
+          <li>Первый getObject() у provider обращается к фабрике. По prototype-описанию создаётся Draft #2.</li>
+          <li>Второй getObject() создаёт Draft #3. Поле fixed продолжает хранить #1: новая сборка происходит только на пути provider.</li>
+        </ol>
+      </figure>
+      <p>Время фактической жизни зависит и от ссылок. Если singleton удерживает prototype, сборщик мусора видит его достижимым столько же, сколько сам singleton. Название scope не задаёт срок, после которого JVM удаляет объект. Оно описывает политику выдачи контейнера.</p>
+      <div class="trap">
+        <p class="myth">Prototype внутри singleton автоматически новый на каждый вызов сервиса.</p>
+        <p class="fact">Прямое внедрение выполняется при создании сервиса. Для нового объекта на каждую операцию сервис должен в этот момент запросить фабрику: например, через ObjectProvider.</p>
+      </div>
+    </section>
+    
+    <section class="step" id="retrieval">
+      <h2>Provider позволяет выбрать момент создания нового объекта</h2>
+      <p>ObjectProvider&lt;Draft&gt; сохраняет возможность получить зависимость. Сервис вызывает getObject в начале платежа и использует полученный Draft до конца операции. Два вызова getObject для prototype дадут два черновика: если первый нужен для нескольких действий, удержи его в локальной переменной.</p>
+      <p>В демо ниже прямое поле и provider относятся к одному prototype-описанию. Счётчики различают создание, инициализацию и завершение. <a href="../examples/spring-core/ScopesDemo.java">Полный ScopesDemo.java</a>, Java 21, Spring 7.0.9; все причины вывода показаны на странице.</p>
+      <p><a href="../examples/spring-core/ScopesDemo.java">Полный пример ScopesDemo.java</a>, Java 21, Spring 7.0.9. Ниже — фрагмент.</p><pre><code class="language-bash">cd examples/spring-core
+./run.sh ScopesDemo</code></pre><pre><code class="language-java">import jakarta.annotation.PostConstruct;
+      import jakarta.annotation.PreDestroy;
+      import org.springframework.beans.factory.ObjectProvider;
+      import org.springframework.context.annotation.*;
+      
+      public class ScopesDemo {
+          static int created, initialized, destroyed;
+          static class Draft {
+              final int id = ++created;
+              @PostConstruct void init() { initialized++; }
+              @PreDestroy void destroy() { destroyed++; }
+          }
+          record Service(Draft fixed, ObjectProvider&lt;Draft&gt; fresh) {}
+          @Configuration(proxyBeanMethods = false)
+          static class Config {
+              @Bean @Scope(&quot;prototype&quot;) Draft draft() { return new Draft(); }
+              @Bean Service service(Draft draft, ObjectProvider&lt;Draft&gt; provider) {
+                  return new Service(draft, provider); // Прямая ссылка выбирается один раз.
+              }
+          }
+          public static void main(String[] args) {
+              try (var ctx = new AnnotationConfigApplicationContext(Config.class)) {
+                  Service s = ctx.getBean(Service.class);
+                  System.out.println(&quot;fixed: &quot; + s.fixed().id + &quot; &quot; + s.fixed().id);
+                  Draft first = s.fresh().getObject(); // Новый запрос к фабрике.
+                  Draft second = s.fresh().getObject();
+                  System.out.println(&quot;provider: &quot; + first.id + &quot; &quot; + second.id);
+                  System.out.println(&quot;initialized: &quot; + initialized);
+              } // Закрытие контекста не уничтожает выданные prototype.
+              System.out.println(&quot;destroyed after close: &quot; + destroyed);
+          }
+      }</code></pre>
+      <pre class="out">fixed: 1 1
+provider: 2 3
+initialized: 3
+destroyed after close: 0</pre>
+      <p>ObjectFactory предоставляет основной getObject, а ObjectProvider добавляет способы получить необязательную зависимость и группу. При singleton оба используют сохранённый бин. Для выбора класса объекта обычная фабрика Java часто проще: например, черновик платежа можно создавать напрямую, передавая данные конструктору, а Spring оставить сборку самих сервисов.</p>
+      <details class="deep">
+        <summary>Когда встречается @Lookup</summary>
+        <p>@Lookup позволяет Spring переопределить метод получения зависимости в созданном подклассе. Класс и метод должны допускать переопределение. Такой подход работает, когда экземпляр создаёт контейнер; для объекта, возвращённого методом @Bean, Spring не создаёт нужный подкласс автоматически. Provider делает момент получения видимым в коде и обычно проще для тестирования.</p>
+      </details>
+      <p>Прокси с prototype устроен иначе, чем локально полученный объект: каждый вызов его метода может создать новый целевой экземпляр. Если сначала вызвать draft.setAmount, затем draft.send через такой прокси, действия могут попасть в два разных Draft. Для одной составной операции удобнее получить конкретный экземпляр один раз.</p>
+    </section>
+    
+    <section class="step" id="web">
+      <h2>Прокси хранится в сервисе, а объект выбирается из текущего запроса</h2>
+      <p>Для данных, общих в пределах одного HTTP-запроса, подходит request scope. Singleton-сервис живёт дольше запроса, поэтому прямую ссылку на единственный request-объект ему дать нельзя при обычном старте. Вместо неё Spring передаёт долгоживущий прокси. Когда сервис вызывает его метод, прокси получает реальный Draft из текущего запроса.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Singleton Service хранит один прокси. Для первого и второго запроса прокси направляет вызов в разные Draft. Без активного запроса целевой объект недоступен.">
+            <defs>
+              <marker id="scope-web" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="84" width="144" height="70" rx="8" class="dg-box"/>
+            <text x="90" y="112" text-anchor="middle" class="dg-t">Service</text>
+            <text x="90" y="137" text-anchor="middle" class="dg-s">singleton</text>
+            <rect x="224" y="84" width="156" height="70" rx="8" class="dg-box"/>
+            <text x="302" y="112" text-anchor="middle" class="dg-t">прокси Draft</text>
+            <text x="302" y="137" text-anchor="middle" class="dg-s">одна ссылка</text>
+            <rect x="446" y="16" width="256" height="94" rx="8" class="dg-sep" fill="none"/>
+            <rect x="446" y="142" width="256" height="94" rx="8" class="dg-sep" fill="none"/>
+            <text x="460" y="40" class="dg-cap">ЗАПРОС 1</text><text x="460" y="166" class="dg-cap">ЗАПРОС 2</text>
+            <rect x="476" y="54" width="196" height="38" rx="6" class="dg-cell hit"/>
+            <rect x="476" y="180" width="196" height="38" rx="6" class="dg-cell hit"/>
+            <text x="574" y="79" text-anchor="middle" class="dg-in">Draft #1</text>
+            <text x="574" y="205" text-anchor="middle" class="dg-in">Draft #2</text>
+            <path d="M162 119 L220 119" class="dg-line" marker-end="url(#scope-web)"/>
+            <path d="M380 106 C422 106 427 73 472 73" class="dg-line" marker-end="url(#scope-web)"/>
+            <path d="M380 135 C422 135 427 199 472 199" class="dg-line" marker-end="url(#scope-web)"/>
+            <text x="18" y="211" class="dg-s">получить объект текущего запроса</text>
+          </svg>
+        </div>
+        <figcaption>Стрелки справа — два разных момента времени. Каждый вызов прокси выбирает объект из текущего запроса.</figcaption>
+      </figure>
+      <p>@RequestScope по умолчанию включает прокси на основе класса. Целевой класс и перехватываемые методы должны допускать такой перехват; состояние читают через методы целевого объекта. Прямое чтение поля прокси не выполняет поиск текущего Draft. Для интерфейсного варианта можно указать ScopedProxyMode.INTERFACES.</p>
+      <p>В Servlet-приложении DispatcherServlet, RequestContextFilter или RequestContextListener связывает запрос с обслуживающим потоком. RequestScope использует эту информацию. Новый поток из executor её автоматически не получает. Вызов прокси в фоновой задаче способен закончиться ScopeNotActiveException даже при том, что исходный HTTP-запрос ещё выполняется.</p>
+      <p>Демо использует MockHttpServletRequest из spring-test: запрос привязывается явно, но сама область видимости и прокси работают в Spring. <a href="../examples/spring-core/RequestScopeDemo.java">Полный файл</a> включает создание веб-контекста и все условия опыта. HTTP-сервер здесь не требуется.</p>
+      <p><a href="../examples/spring-core/RequestScopeDemo.java">Полный пример RequestScopeDemo.java</a>, Java 21, Spring 7.0.9. </p><pre><code class="language-bash">cd examples/spring-core
+./run.sh RequestScopeDemo</code></pre><pre><code class="language-java">import org.springframework.context.annotation.*;
+      import org.springframework.mock.web.MockHttpServletRequest;
+      import org.springframework.mock.web.MockServletContext;
+      import org.springframework.web.context.annotation.RequestScope;
+      import org.springframework.web.context.request.*;
+      import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
+      
+      public class RequestScopeDemo {
+          public static class Draft {
+              static int created;
+              final int id = ++created;
+              public int id() { return id; } // Читаем поле через метод реального объекта.
+          }
+          record Service(Draft draft) {
+              int currentId() { return draft.id(); }
+          }
+          @Configuration(proxyBeanMethods = false)
+          static class Config {
+              @Bean @RequestScope Draft draft() { return new Draft(); }
+              @Bean Service service(Draft draft) {
+                  return new Service(draft); // В singleton передаётся долгоживущий прокси.
+              }
+          }
+          public static void main(String[] args) {
+              try (var ctx = new AnnotationConfigWebApplicationContext()) {
+                  ctx.setServletContext(new MockServletContext());
+                  ctx.register(Config.class);
+                  ctx.refresh(); // Реального HTTP-запроса пока нет, сервис уже создан.
+                  var s = ctx.getBean(Service.class);
+                  for (int request = 1; request &lt;= 2; request++) {
+                      var attrs = new ServletRequestAttributes(new MockHttpServletRequest());
+                      RequestContextHolder.setRequestAttributes(attrs);
+                      try {
+                          System.out.println(&quot;request &quot; + request + &quot;: &quot; +
+                              s.currentId() + &quot; &quot; + s.currentId());
+                      } finally {
+                          attrs.requestCompleted(); // Завершение времени жизни запроса.
+                          RequestContextHolder.resetRequestAttributes();
+                      }
+                  }
+                  try { s.currentId(); } // Получение target требует активного запроса.
+                  catch (org.springframework.beans.factory.support.ScopeNotActiveException ex) {
+                      System.out.println(&quot;outside request: &quot; + ex.getClass().getSimpleName());
+                  }
+              }
+          }
+      }</code></pre>
+      <pre class="out">request 1: 1 1
+request 2: 2 2
+outside request: ScopeNotActiveException</pre>
+      <p>Session scope ищет объект в сессии, application — в ServletContext. Последняя может объединять несколько Spring-контекстов одного веб-приложения, тогда как singleton относится к одной фабрике. WebSocket scope в Spring относится к STOMP-сессии. Для этих областей нужна соответствующая инфраструктура; обычный AnnotationConfigApplicationContext знает стандартные singleton и prototype, а веб-области регистрируются веб-контекстом.</p>
+    </section>
+    
+    <section class="step" id="cleanup">
+      <h2>Клиент prototype отвечает за освобождение его ресурсов</h2>
+      <p>При создании prototype Spring внедряет зависимости и выполняет инициализацию, в том числе @PostConstruct. После выдачи он перестаёт учитывать каждый экземпляр для автоматического уничтожения. Поэтому закрытие контекста в первом демо оставляет счётчик @PreDestroy равным нулю, хотя инициализированы все три объекта.</p>
+      <p>Если prototype держит файл, соединение или временный буфер с явным освобождением, определи владельца. Получивший объект код может закрыть его через AutoCloseable и try-with-resources. Для вызова настроенных Spring-методов уничтожения существует фабричный destroyBean, но приложение должно знать, какой экземпляр и когда ему передать. Вызов GC ресурсный протокол не заменяет.</p>
+      <p>Для singleton контейнер сохраняет регистрацию уничтожения и вызывает её при штатном закрытии. Request scope привязывает завершение к концу запроса, session — к завершению сессии. Это срок управления контейнера; Java-объект может оставаться в памяти, если приложение сохранило ссылку, но продолжать пользоваться закрытым ресурсом уже нельзя.</p>
+      <p>Отдельный список всех prototype ради будущего cleanup тоже требует осторожности: такой список удержит объекты и может расти бесконечно. Лучше выразить владение на уровне одной операции. Подробный порядок методов инициализации и уничтожения разобран в <a href="bean-lifecycle.html">Bean Lifecycle</a>.</p>
+    </section>
+    
+    <section class="step" id="boundaries">
+      <h2>Время жизни выбирай по состоянию, которое действительно нужно хранить</h2>
+      <p>Начинай с сервиса без состояния клиента и явных параметров операции. Если нужно получить подготовленный Spring объект для каждой операции, добавь provider и локальную ссылку. Если данные должны разделять компоненты одного HTTP-запроса, request scope выражает это время жизни. Каждый вариант должен отвечать на вопрос: кто владеет состоянием и когда перестаёт им пользоваться?</p>
+      <p>Scope удобен, пока граница исполнения совпадает с границей жизни объекта. Для фоновых задач лучше передать неизменяемый снимок нужных данных — идентификатор клиента, язык, номер платежа. Сохранение request-прокси не сохраняет исходный запрос: при более позднем вызове он ищет объект из контекста того момента.</p>
+      <p>В распределённом backend session-объект одного процесса ещё не является общим состоянием всех узлов. Для устойчивого состояния заказа или платежа нужен явный источник данных и протокол изменения. Scope регулирует локальные объекты приложения, а хранение данных и конкурентные обновления решаются на другом уровне.</p>
+      <p>При диагностике выпиши три вещи: область бина, место получения ссылки и место вызова. Это отличает prototype, сохранённый в singleton, от provider, вызываемого на операцию, и от request-прокси, вызванного в чужом потоке. Аннотация одна, а пути использования различаются.</p>
+    </section>
+    <div class="summary">
+      <ul>
+        <li>Singleton — общий бин одной фабрики; состояние клиента лучше держать вне его полей.</li>
+        <li>Prototype новый на запрос создания, а не на каждый вызов использующего его сервиса.</li>
+        <li>Provider делает момент получения явным; один экземпляр на операцию сохраняют локально.</li>
+        <li>Request-прокси выбирает target из текущего запроса. Фоновому потоку данные передают отдельно.</li>
+        <li>Инициализацию prototype выполняет Spring, освобождением ресурсов после выдачи занимается клиент.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="singleton-safety" data-freq="3">
+      <h3>Что означает singleton в Spring и делает ли он объект потокобезопасным?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Singleton — одна сохранённая ссылка на бин в конкретной фабрике. Один класс может иметь несколько таких бинов под разными именами. Я учитываю, что общий сервис вызывают параллельно, и держу данные отдельных платежей в аргументах и локальных переменных.</p>
+          <p>Если в общем объекте есть изменяемый кеш или счётчик, я отдельно выбираю безопасный способ доступа. Scope определяет, кто получает один экземпляр; конкурентность определяется кодом объекта.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Session scope также допускает одновременные запросы одной сессии.</li>
+            <li>Application scope привязан к ServletContext и может объединять несколько Spring-контекстов веб-приложения.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="prototype-in-singleton" data-freq="3">
+      <h3>Что получится при внедрении prototype в singleton?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При создании singleton Spring один раз создаст prototype и передаст ссылку. Она останется в поле между вызовами. Если нужен новый объект на каждый платёж, я получаю его через provider в начале операции.</p>
+          <p>Полученный экземпляр сохраняю локально на всю операцию. Повторный getObject для prototype означает уже новый объект.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Долгоживущая ссылка может удерживать prototype в памяти до уничтожения сервиса.</li>
+            <li>Prototype-прокси способен получать новый target на каждый вызов метода; последовательность set и execute тогда попадёт в разные объекты.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="scoped-proxy" data-freq="3">
+      <h3>Как внедрить request-бин в singleton и что будет в фоне?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я передаю singleton-сервису прокси request-бина. Прокси живёт вместе с сервисом, а метод направляет вызов в объект текущего запроса. Внутри запроса это один target, в следующем — другой.</p>
+          <p>При переносе работы в executor я передаю нужные данные явно. Сам новый поток не получает привязку HTTP-запроса, поэтому обращение через прокси там может упасть.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>RequestScope по умолчанию использует прокси класса; final-методы мешают перехвату, а чтение полей обходит его.</li>
+            <li>Сохранённый прокси не является снимком данных предыдущего запроса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="prototype-destroy" data-freq="3">
+      <h3>Кто уничтожает prototype и когда нужен @Lookup?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spring создаёт и подготавливает prototype, затем отдаёт клиенту. Автоматический destroy для каждого выданного экземпляра при закрытии контекста не выполняется. Я определяю владельца ресурса и закрываю объект после операции.</p>
+          <p>Для повторного получения мне обычно достаточно ObjectProvider. Lookup позволяет контейнеру переопределить метод получения, но этот скрытый механизм сложнее наблюдать и тестировать.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Lookup требует подкласса и переопределяемого метода; для экземпляра, возвращённого @Bean, такой путь не применяется.</li>
+            <li>Чтобы вызвать Spring destruction callbacks вручную, нужно передать конкретный экземпляр подходящему destroyBean; простой выход из метода этого не делает.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html">Spring Reference: Bean Scopes</a> — основа урока: время жизни, повторное получение и scoped proxy.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-method-injection.html">Spring Reference: Method Injection</a> — Lookup и ограничения метода создания.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/context/annotation/RequestScope.html">RequestScope API</a> — прокси класса по умолчанию.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/context/request/RequestContextHolder.html">RequestContextHolder API</a> — связь текущего запроса и потока.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -45,3 +45,18 @@
 - Constructor cycles → Lifecycle, prototype retrieval → Scopes; не размазывать здесь их механизмы.
 
 Источники: Reference, Annotation-based Container Configuration; исходники DefaultListableBeanFactory.doResolveDependency/determineAutowireCandidate. В 7.0.9 single selection включает primary/не-fallback, dependency name, suggested qualifier name, highest priority, default candidate и resolvable dependency; схема показывает понятный семантический случай, а не обещает неизменный порядок всех внутренних оптимизаций.
+
+## Bean Scopes
+
+Центральный вопрос: почему prototype внутри singleton остаётся тем же объектом и как получать зависимость нужного времени жизни?
+
+Подача: от общего черновика платежа к графу удерживаемых ссылок; затем явный запрос через provider и подстановка объекта текущего HTTP-запроса. Reference иллюстрирует scope связями клиентов с экземплярами; в уроке добавляется время повторных обращений, чтобы различить новую сборку и повторный вызов метода.
+
+- Singleton на имя/фабрику, разделяемое состояние и конкурентность → sharing; карта областей жизни.
+- Prototype создаётся при запросе фабрики, прямое внедрение один раз → prototype; ScopesDemo и четыре кадра.
+- ObjectProvider/ObjectFactory, один экземпляр на операцию, @Lookup и его ограничения → retrieval.
+- Request/session/application/websocket, request binding, прокси и финальные методы → web; RequestScopeDemo, схема двух запросов.
+- Инициализация и отсутствие автоматического destroy у prototype, владение ресурсом → cleanup.
+- Потоки, сохранённые ссылки, stateless и явные параметры → boundaries. Механика AOP → AOP; полный порядок callbacks → Lifecycle.
+
+Источники: Reference / Bean Scopes и Method Injection, API Lookup и RequestScope (7.0.9). Java 21: ScopesDemo сравнивает прямое внедрение/provider и init/destroy; RequestScopeDemo использует настоящую request scope с MockHttpServletRequest, без HTTP-сервера. Нагрузка сервера, сессии и WebSocket не эмулируются: их границы сверены с Reference.

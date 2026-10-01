@@ -11,3 +11,5 @@ cd examples/spring-core
 Скрипт собирает classpath через Maven, компилирует пример через javac --release 21 и запускает полученный класс. Для сравнения метаданных параметров используй ./run.sh ContextDemo --parameters. Без второго аргумента -parameters не включается. Сервер, Spring Boot и база данных не нужны. Каталог `target/` не коммитится. Консольный вывод соответствующего запуска приведён в уроке; временные пути и времена не используются как ожидаемые значения.
 
 В каждом файле один самостоятельный эксперимент. Комментарии выделяют причину наблюдаемого поведения. Для сравнения с веткой 6.2 можно выполнить `mvn dependency:build-classpath -Dspring.version=6.2.19 -Dmdep.outputFile=target/classpath-6.txt` и `java --class-path "$(cat target/classpath-6.txt)" ContextDemo.java`.
+
+ScopesDemo показывает прямое внедрение prototype и ObjectProvider. RequestScopeDemo использует spring-web и spring-test 7.0.9, Jakarta Servlet API 6.1.0: mock задаёт два запроса, а Spring выполняет настоящие scope lookup и проксирование. HTTP-сервер для этого эксперимента не запускается.
