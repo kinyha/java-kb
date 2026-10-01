@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Servlet & Tomcat · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="servlet">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Servlet & Tomcat</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Tomcat сам держит сетевые соединения и зовёт твой код, только когда по соединению пришёл запрос. На время обработки запрос получает поток из пула и не отдаёт его до последнего байта ответа, даже если всё это время просто ждёт базу или банк. Соединений может быть тысячи, а потоков по умолчанию двести, поэтому сервис чаще упирается не в процессор, а в число запросов, которые одновременно чего-то ждут. Фильтры, сервлет и весь твой код выполняются в этом одном потоке: на этом держится ThreadLocal-контекст, и отсюда же его утечки.</p>
+    </div>
+
+    <section class="step" id="incident">
+      <h2>Медленный банк останавливает весь сервис, хотя процессор свободен</h2>
+      <p>Сервис платежей на Spring Boot спокойно держит 100 запросов в секунду. Каждый платёж синхронно ходит в API банка, банк отвечает за 50 мс. Однажды банк начинает отвечать за 3 секунды. Через минуту перестаёт отвечать сам сервис: даже <code>/actuator/health</code> не укладывается в таймаут, и Kubernetes перезапускает под. Процессор при этом загружен на 5 %, памяти хватает, ошибок в логе нет.</p>
+      <p>Причина в модели «поток на запрос». Встроенный Tomcat выдаёт каждому запросу поток из пула и получает его обратно, только когда ответ отправлен. Пока платёж ждёт банк, поток ничего не считает, но и другим запросам недоступен. Потоков по умолчанию 200.</p>
+      <p>Сколько потоков нужно, считает закон Литтла: одновременных запросов = запросов в секунду × время ответа. Пока банк быстрый, 100 × 0,05 с = 5 занятых потоков из 200. Когда банк медленный, 100 × 3 с = 300, а потоков всего 200. Они пропускают 200 / 3 ≈ 67 платежей в секунду, остальные 33 в секунду встают в очередь. За минуту в ней накопится около 2000 запросов, и каждый новый будет ждать примерно 30 секунд. Health-check стоит в той же очереди, хотя банк ему не нужен.</p>
+      <p>Воспроизведём это в миниатюре: Tomcat с двумя потоками вместо двухсот, банк отвечает за секунду. Полный код — <a href="../examples/web/PoolDemo.java">PoolDemo.java</a>, Java 21, Tomcat 11.0.26. Ниже фрагмент.</p>
+      <pre><code class="language-bash">cd examples/web
+./run.sh PoolDemo</code></pre>
+      <pre><code class="language-java">// Сервер: два потока вместо 200. В Boot это server.tomcat.threads.max.
+protocol.setMaxThreads(2);
+
+// Платёж синхронно ждёт банк, который отвечает через 1 секунду.
+protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+    CLIENT.send(bank, BodyHandlers.discarding()); // поток стоит здесь всё время ожидания
+    resp.getWriter().print(Thread.currentThread().getName());
+}
+
+// Клиент: 50 соединений, которые ничего не шлют, как keep-alive между запросами.
+for (int i = 0; i &lt; 50; i++) idle.add(new Socket("localhost", 18080));
+call("/health");                                    // первый health-check
+
+for (int i = 0; i &lt; 6; i++) payments.add(call("/pay")); // шесть платежей разом
+sleep(100);
+var health = call("/health");                       // и через 0,1 с health-check от балансировщика</code></pre>
+      <pre class="out">mode: maxThreads=2
+idle connections: 50, GET /health: 0.0 s
+6 x /pay finished after: 1.0 1.0 2.0 2.0 3.0 3.0 s
+threads used (2): http-nio-18080-exec-1, http-nio-18080-exec-2
+/health sent 0.1 s later: 2.9 s</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 204" role="img" aria-label="Диаграмма времени демо. Два потока exec-1 и exec-2 по очереди обрабатывают по три платежа длиной в секунду: первые два заканчиваются через 1 секунду, следующие через 2 и 3. Health-check приходит через 0,1 секунды, 2,9 секунды ждёт свободный поток и выполняется мгновенно в момент 3 секунды.">
+            <!-- дорожки потоков: платежи по секунде -->
+            <text x="20" y="57" class="dg-in">exec-1</text>
+            <text x="20" y="99" class="dg-in">exec-2</text>
+            <text x="20" y="147" class="dg-t">очередь</text>
+            <rect x="131" y="36" width="177" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="311" y="36" width="177" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="491" y="36" width="177" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="671" y="36" width="10" height="32" rx="2" class="dg-cell hit"/>
+            <rect x="131" y="78" width="177" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="311" y="78" width="177" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="491" y="78" width="177" height="32" rx="5" class="dg-cell hit"/>
+            <!-- health-check ждёт в очереди пула -->
+            <rect x="148" y="126" width="520" height="32" rx="5" class="dg-cell miss"/>
+            <!-- ось времени -->
+            <line x1="130" y1="176" x2="670" y2="176" class="dg-sep"/>
+            <line x1="130" y1="172" x2="130" y2="180" class="dg-line"/>
+            <line x1="310" y1="172" x2="310" y2="180" class="dg-line"/>
+            <line x1="490" y1="172" x2="490" y2="180" class="dg-line"/>
+            <line x1="670" y1="172" x2="670" y2="180" class="dg-line"/>
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="220" y="57" class="dg-in">pay-1</text><text x="400" y="57" class="dg-in">pay-3</text><text x="580" y="57" class="dg-in">pay-5</text>
+              <text x="220" y="99" class="dg-in">pay-2</text><text x="400" y="99" class="dg-in">pay-4</text><text x="580" y="99" class="dg-in">pay-6</text>
+              <text x="408" y="147" class="dg-bad">health ждёт свободный поток 2.9 с</text>
+              <text x="130" y="194" class="dg-n">0 с</text><text x="310" y="194" class="dg-n">1 с</text>
+              <text x="490" y="194" class="dg-n">2 с</text><text x="670" y="194" class="dg-n">3 с</text>
+            </g>
+            <text x="20" y="194" class="dg-n">время</text>
+          </svg>
+        </div>
+        <figcaption>Платежи 3–6 тоже ждали в очереди, но health-check пришёл последним и встал за ними. Узкая полоска в конце exec-1 — сам health-check: работы на миллисекунду, ожидания почти три секунды.</figcaption>
+      </figure>
+      <p>Два наблюдения из вывода разберём в следующих шагах. Пятьдесят открытых соединений не помешали первому health-check, хотя потоков всего два: соединение и поток в Tomcat — разные ресурсы. А второй health-check ждал 2,9 с, хотя сам выполняется мгновенно: ожидание банка заняло оба потока, и запрос стоял в очереди пула.</p>
+    </section>
+
+    <section class="step" id="servlet">
+      <h2>Сервлет — один объект, который Tomcat вызывает из многих потоков</h2>
+      <p>Tomcat берёт на себя всю сетевую часть: принимает соединения, читает байты, разбирает HTTP, держит потоки. Приложение получает уже готовые объекты <code>HttpServletRequest</code> и <code>HttpServletResponse</code>. Договор между ними — Servlet API из Jakarta EE. Сервлет — это класс с методом <code>service(request, response)</code>. Базовый <code>HttpServlet</code> разбирает этот вызов по методам HTTP: <code>doGet</code>, <code>doPost</code> и так далее.</p>
+      <p>В Spring MVC сервлет один — <code>DispatcherServlet</code>. Он принимает все запросы и сам выбирает контроллер (тема <a href="spring-web.html">Spring MVC</a>). Spring Boot запускает Tomcat внутри приложения и регистрирует в нём этот сервлет. Поэтому всё, что сказано ниже про сервлет, верно и для твоих контроллеров.</p>
+      <p>Жизненный цикл короткий. Tomcat создаёт экземпляр сервлета один раз и вызывает <code>init()</code>, затем вызывает <code>service()</code> на каждый запрос, а при остановке — <code>destroy()</code>. По умолчанию <code>init()</code> выполняется на первом запросе, а не при старте: за это отвечает настройка load-on-startup со значением −1. У DispatcherServlet в Boot так же (<code>spring.mvc.servlet.load-on-startup=-1</code>), поэтому строка «Initializing Spring DispatcherServlet» появляется в логе вместе с первым запросом, и он отвечает медленнее остальных.</p>
+      <p>Главное следствие: экземпляр один, а потоков много. Два одновременных запроса выполняют <code>doGet</code> одного объекта, и поля этого объекта у них общие. Проверим на сервлете, который по ошибке хранит имя пользователя в поле. <a href="../examples/web/LifecycleDemo.java">LifecycleDemo.java</a>, фрагмент:</p>
+      <pre><code class="language-java">static class GreetingServlet extends HttpServlet {
+    final int number = CREATED.incrementAndGet(); // сколько экземпляров создал Tomcat
+    private String user;                          // ошибка: поле общее для всех запросов
+
+    public void init() {
+        System.out.println("init() on " + Thread.currentThread().getName());
+    }
+
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        user = req.getParameter("user"); // alice записала себя в поле...
+        sleep(300);                      // ...ждёт банк, а bob за это время перезаписал поле
+        resp.getWriter().print("hello " + user + " ("
+                + Thread.currentThread().getName() + ", servlet #" + number + ")");
+    }
+}
+
+// main: старт Tomcat, alice, через 100 мс bob, остановка Tomcat
+tomcat.start();
+System.out.println("started, waiting for requests");
+var alice = client.sendAsync(get("alice"), BodyHandlers.ofString());
+sleep(100);
+var bob = client.sendAsync(get("bob"), BodyHandlers.ofString());</code></pre>
+      <pre class="out">started, waiting for requests
+init() on http-nio-18080-exec-1
+alice got: hello bob (http-nio-18080-exec-1, servlet #1)
+bob got:   hello bob (http-nio-18080-exec-2, servlet #1)
+destroy() on main</pre>
+      <p>alice получила чужое имя: пока её поток ждал, поток bob записал в то же поле. Оба запроса обслужил один экземпляр, а <code>init()</code> выполнился не при старте, а в потоке первого запроса. Отсюда правило для сервлетов, контроллеров и любых singleton-бинов: данные запроса живут в локальных переменных и в самом request. В полях хранят только то, что не меняется после старта: клиенты, настройки, репозитории.</p>
+      <div class="trap">
+        <p class="myth">На каждый запрос Spring создаёт новый экземпляр контроллера, поэтому запросы друг другу не мешают.</p>
+        <p class="fact">Экземпляр один на приложение. Запросы изолированы потому, что у каждого свой поток со своим стеком и локальными переменными. Изменяемое поле контроллера — общая память без синхронизации.</p>
+      </div>
+      <p>Версии API важны при обновлении. В Servlet 5 пакет <code>javax.servlet</code> переименовали в <code>jakarta.servlet</code>, поэтому библиотека со старым пакетом не работает в Boot 3 и 4 без миграции. Boot 3 работает на Tomcat 10.1 и Servlet 6.0, Boot 4 — на Tomcat 11 и Servlet 6.1.</p>
+    </section>
+
+    <section class="step" id="connector">
+      <h2>Соединение ждёт в Poller, а поток нужен только на обработку</h2>
+      <p>Внутри Tomcat два разных ресурса. Соединение — открытый TCP-сокет. Браузеры, балансировщики и другие сервисы держат его открытым между запросами (keep-alive), чтобы не тратить время на новое рукопожатие. Поток нужен, только когда по соединению пришёл запрос и его надо обработать.</p>
+      <p>Это разделение обеспечивает коннектор NIO, он используется по умолчанию. Поток Acceptor принимает новые соединения. Поток Poller через <code>Selector</code> следит сразу за всеми открытыми сокетами и замечает, на каком появились данные. Только тогда работа уходит в пул потоков-обработчиков <code>http-nio-8080-exec-N</code>. Пролистай путь одного запроса:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Путь запроса через NIO-коннектор Tomcat. Клиент подключается, Acceptor принимает сокет и отдаёт его Poller. Когда приходят данные, Poller передаёт задачу в пул, поток exec-1 разбирает HTTP, проходит valves, фильтры и вызывает сервлет, который ждёт банк. После ответа поток возвращается в пул, а сокет — в Poller ждать следующего запроса, пока соединение не закроют по таймауту.">
+            <defs>
+              <marker id="tc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="tc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- компоненты коннектора -->
+            <rect x="20" y="40" width="90" height="50" rx="8" class="dg-box"/>
+            <rect x="160" y="40" width="120" height="50" rx="8" class="dg-box"/>
+            <rect x="320" y="40" width="150" height="50" rx="8" class="dg-box"/>
+            <rect x="510" y="28" width="190" height="74" rx="8" class="dg-box"/>
+            <rect x="522" y="60" width="80" height="30" rx="6" class="dg-cell"/>
+            <rect x="610" y="60" width="80" height="30" rx="6" class="dg-cell"/>
+            <rect data-s="3-4" x="522" y="60" width="80" height="30" rx="6" class="dg-cell hit"/>
+            <!-- конвейер внутри потока-обработчика -->
+            <rect data-s="3-4" x="12" y="150" width="696" height="76" rx="10" class="dg-sep" fill="none"/>
+            <rect x="20" y="172" width="150" height="44" rx="7" class="dg-cell"/>
+            <rect x="196" y="172" width="150" height="44" rx="7" class="dg-cell"/>
+            <rect x="372" y="172" width="140" height="44" rx="7" class="dg-cell"/>
+            <rect x="538" y="172" width="162" height="44" rx="7" class="dg-cell"/>
+            <rect data-s="3-4" x="20" y="172" width="150" height="44" rx="7" class="dg-cell hit"/>
+            <g data-s="4"><rect x="196" y="172" width="150" height="44" rx="7" class="dg-cell hit"/><rect x="372" y="172" width="140" height="44" rx="7" class="dg-cell hit"/><rect x="538" y="172" width="162" height="44" rx="7" class="dg-cell hit"/></g>
+            <path d="M170 194 L 192 194" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M346 194 L 368 194" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M512 194 L 534 194" class="dg-line" marker-end="url(#tc-n)"/>
+            <!-- сокет на каждом шаге -->
+            <rect data-s="1" x="175" y="110" width="90" height="26" rx="5" class="dg-cell hit"/>
+            <rect data-s="2" x="350" y="110" width="90" height="26" rx="5" class="dg-cell hit"/>
+            <rect data-s="3-4" x="517" y="110" width="90" height="26" rx="5" class="dg-cell hit"/>
+            <rect data-s="5" x="350" y="110" width="90" height="26" rx="5" class="dg-cell"/>
+            <rect data-s="6" x="350" y="110" width="90" height="26" rx="5" class="dg-cell miss"/>
+            <!-- стрелки шагов -->
+            <g data-s="1"><path d="M110 65 L 156 65" class="dg-line" marker-end="url(#tc-n)"/><path d="M280 65 L 316 65" class="dg-line" marker-end="url(#tc-n)"/></g>
+            <g data-s="2"><path d="M65 90 C 65 140, 300 140, 346 124" class="dg-line" marker-end="url(#tc-n)"/><path d="M470 65 L 506 65" class="dg-line" marker-end="url(#tc-n)"/></g>
+            <path data-s="5" d="M600 28 C 600 8, 70 8, 66 36" class="dg-line ok" marker-end="url(#tc-ok)"/>
+            <!-- подписи компонентов -->
+            <text x="34" y="70" class="dg-t">клиент</text>
+            <text x="172" y="62" class="dg-t">Acceptor</text>
+            <text x="172" y="80" class="dg-s">1 поток</text>
+            <text x="332" y="62" class="dg-t">Poller</text>
+            <text x="332" y="80" class="dg-s">Selector, 1 поток</text>
+            <text x="522" y="48" class="dg-t">пул exec-N</text>
+            <text x="690" y="48" class="dg-n" text-anchor="end">до 200</text>
+            <g text-anchor="middle">
+              <text x="562" y="80" class="dg-in">exec-1</text>
+              <text x="650" y="80" class="dg-in">exec-2</text>
+              <text x="95" y="191" class="dg-in">Http11Processor</text>
+              <text x="95" y="208" class="dg-n">разбор HTTP</text>
+              <text x="271" y="191" class="dg-in">valves</text>
+              <text x="271" y="208" class="dg-n">Engine → Wrapper</text>
+              <text x="442" y="191" class="dg-in">FilterChain</text>
+              <text x="442" y="208" class="dg-n">твои фильтры</text>
+              <text x="619" y="191" class="dg-in">servlet.service</text>
+              <text x="619" y="208" class="dg-n">твой код</text>
+              <!-- сокет и его состояние -->
+              <text data-s="1" x="220" y="128" class="dg-in">сокет</text>
+              <text data-s="1" x="220" y="152" class="dg-n">новый</text>
+              <text data-s="2" x="395" y="128" class="dg-in">сокет</text>
+              <text data-s="2" x="395" y="152" class="dg-n">пришли данные</text>
+              <text data-s="3-4" x="562" y="128" class="dg-in">сокет</text>
+              <text data-s="3-4" x="562" y="146" class="dg-n">в работе</text>
+              <text data-s="5" x="395" y="128" class="dg-in">сокет</text>
+              <text data-s="5" x="395" y="152" class="dg-n">keep-alive</text>
+              <text data-s="6" x="395" y="128" class="dg-bad">сокет</text>
+              <text data-s="6" x="395" y="152" class="dg-n">закрыт</text>
+              <text data-s="2" x="190" y="150" class="dg-in">GET /pay</text>
+              <text data-s="5" x="330" y="24" class="dg-ok">ответ 200</text>
+              <text data-s="4" x="619" y="240" class="dg-bad">ждёт банк</text>
+            </g>
+            <text data-s="1" x="114" y="58" class="dg-n">connect</text>
+            <text data-s="3-4" x="24" y="164" class="dg-n">поток exec-1 выполняет</text>
+            <!-- счётчики: отдельный слой на каждый шаг -->
+            <g data-s="1"><text x="20" y="262" class="dg-t">соединений: 1 из 8192</text><text x="280" y="262" class="dg-t">занято потоков: 0 из 200</text></g>
+            <g data-s="2"><text x="20" y="262" class="dg-t">соединений: 1 из 8192</text><text x="280" y="262" class="dg-t">занято потоков: 0 из 200</text></g>
+            <g data-s="3"><text x="20" y="262" class="dg-t">соединений: 1 из 8192</text><text x="280" y="262" class="dg-t">занято потоков: 1 из 200</text></g>
+            <g data-s="4"><text x="20" y="262" class="dg-t">соединений: 1 из 8192</text><text x="280" y="262" class="dg-bad">занято потоков: 1 из 200</text></g>
+            <g data-s="5"><text x="20" y="262" class="dg-t">соединений: 1 из 8192</text><text x="280" y="262" class="dg-ok">занято потоков: 0 из 200</text></g>
+            <g data-s="6"><text x="20" y="262" class="dg-t">соединений: 0 из 8192</text><text x="280" y="262" class="dg-t">занято потоков: 0 из 200</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент открыл TCP-соединение. Acceptor забрал его у ядра ОС, увеличил счётчик соединений и передал сокет в Poller. Ни одного потока из пула пока не занято.</li>
+          <li>Клиент прислал запрос. Poller увидел, что на сокете есть данные, и отдал пулу задачу «обработай этот сокет». Пока данных не было, сокет просто лежал в Selector вместе с тысячами других.</li>
+          <li>Свободный поток exec-1 взял задачу. Http11Processor прочитал и разобрал HTTP: метод, путь, заголовки. С этого момента поток принадлежит запросу.</li>
+          <li>Тот же поток проходит valves контейнера, цепочку фильтров и вызывает сервлет. Сервлет ждёт банк: процессор свободен, но поток занят, и другой запрос его не получит.</li>
+          <li>Ответ записан в сокет. exec-1 вернулся в пул, а сокет — в Poller ждать следующего запроса. Соединение живо, поток свободен.</li>
+          <li>Соединение живёт, пока по нему идут запросы, и каждый следующий снова проходит через Poller, возможно, в другой поток. Если клиент молчит дольше keepAliveTimeout (по умолчанию равен connectionTimeout, 60 с) или отправил 100 запросов, Tomcat закрывает соединение, и счётчик уменьшается.</li>
+        </ol>
+      </figure>
+      <p>Поэтому 50 молчащих соединений в первом демо ничему не помешали: они лежали в Poller и не занимали ни одного из двух потоков. В Tomcat 8.0 и раньше был ещё коннектор BIO, где каждое соединение держало поток даже в паузе между запросами. В 8.5 его убрали, и с тех пор число клиентов с открытыми соединениями не ограничено числом потоков.</p>
+      <p>Поток не привязан к соединению. В демо с фильтрами из шага 5 три запроса подряд пришли по одному соединению (у клиента не менялся порт), а обработали их три разных потока: exec-1, exec-2 и exec-3.</p>
+      <p>Путь запроса виден и в thread dump. Ниже стек потока exec-1 из первого демо, снятый командой <code>jcmd &lt;pid&gt; Thread.print</code>, пока платёж ждал банк. Отрывок сокращён, строки с # — пометки. Читай снизу вверх:</p>
+      <pre><code class="language-text">"http-nio-18080-exec-1" #47 daemon prio=5 ... waiting on condition
+   java.lang.Thread.State: WAITING (parking)
+        at jdk.internal.misc.Unsafe.park(java.base@21.0.11/Native Method)
+        ...
+        at java.util.concurrent.CompletableFuture.get(CompletableFuture.java:2072)
+        at jdk.internal.net.http.HttpClientImpl.send(HttpClientImpl.java:934)
+# 5. поток ждёт ответа банка, процессор не тратит
+        at PoolDemo$PayServlet.doGet(PoolDemo.java:35)
+        at jakarta.servlet.http.HttpServlet.service(HttpServlet.java:622)
+# 4. твой код: сервлет
+        at org.apache.catalina.core.ApplicationFilterChain.doFilter(ApplicationFilterChain.java:132)
+# 3. цепочка фильтров (здесь пустая)
+        at org.apache.catalina.core.StandardWrapperValve.invoke(StandardWrapperValve.java:166)
+        at org.apache.catalina.core.StandardContextValve.invoke(StandardContextValve.java:77)
+        at org.apache.catalina.authenticator.AuthenticatorBase.invoke(AuthenticatorBase.java:540)
+        at org.apache.catalina.core.StandardHostValve.invoke(StandardHostValve.java:115)
+        at org.apache.catalina.valves.ErrorReportValve.invoke(ErrorReportValve.java:86)
+        at org.apache.catalina.core.StandardEngineValve.invoke(StandardEngineValve.java:71)
+        at org.apache.catalina.connector.CoyoteAdapter.service(CoyoteAdapter.java:347)
+# 2. valves контейнера: Engine → Host → Context → Wrapper
+        at org.apache.coyote.http11.Http11Processor.service(Http11Processor.java:408)
+# 1. разбор HTTP
+        at org.apache.coyote.AbstractProtocol$ConnectionHandler.process(AbstractProtocol.java:1307)
+        at org.apache.tomcat.util.net.NioEndpoint$SocketProcessor.doRun(NioEndpoint.java:2201)
+# 0. задача «обработай сокет», которую отдал Poller
+        at org.apache.tomcat.util.threads.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:949)
+        ...
+        at java.lang.Thread.run(java.base@21.0.11/Thread.java:1583)</code></pre>
+      <p>Состояние WAITING и HTTP-клиент наверху стека значат, что поток не работает, а ждёт. Если в дампе 200 потоков exec с одинаковым верхом стека, ты нашёл, что держит пул.</p>
+      <details class="deep">
+        <summary>Под капотом: контейнеры и valves</summary>
+        <p>Tomcat собран из вложенных контейнеров: Engine (весь сервер) → Host (виртуальный хост, в Boot один — localhost) → Context (одно веб-приложение) → Wrapper (один сервлет). У каждого контейнера свой конвейер valves: последний valve передаёт запрос дочернему контейнеру. Через valves работают access log (<code>AccessLogValve</code>), страница ошибки Tomcat (<code>ErrorReportValve</code>) и подстановка IP клиента из <code>X-Forwarded-For</code> (<code>RemoteIpValve</code>, в Boot — <code>server.forward-headers-strategy=native</code>).</p>
+        <p>Слой Coyote отвечает за протокол: Http11Processor разбирает HTTP/1.1 в низкоуровневый запрос, CoyoteAdapter превращает его в <code>HttpServletRequest</code>. Объекты запроса Tomcat переиспользует между запросами, поэтому ссылку на request нельзя уносить из запроса в другой поток. В Tomcat 11 фасады запроса по умолчанию не переиспользуются (<code>discardFacades=true</code>): устаревшая ссылка даст исключение, а не данные чужого запроса.</p>
+      </details>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>При перегрузке запрос ждёт в очередях, а не получает ошибку</h2>
+      <p>Когда потоков не хватает, Tomcat сам не отвечает 503. Запрос ждёт, и ждать ему есть где: в очереди пула, а когда кончаются соединения — в очереди ядра ОС. Пролистай, что происходит с сервисом из первого шага, когда банк замедляется:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Четыре места, где запрос ждёт в Tomcat: очередь подключений ядра ОС размером accept-count 100, открытые соединения до 8192, очередь задач пула без лимита и потоки до 200. Сначала заполняются потоки, затем растёт очередь задач, затем кончаются соединения и заполняется очередь ядра, после чего новые подключения отбрасываются.">
+            <defs>
+              <marker id="tl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- четыре места ожидания по порядку прохождения запроса -->
+            <rect x="20" y="44" width="150" height="104" rx="8" class="dg-box"/>
+            <rect x="200" y="44" width="150" height="104" rx="8" class="dg-box"/>
+            <rect x="380" y="44" width="150" height="104" rx="8" class="dg-box"/>
+            <rect x="560" y="44" width="140" height="104" rx="8" class="dg-box"/>
+            <!-- шкалы заполнения -->
+            <rect x="32" y="100" width="126" height="14" rx="3" class="dg-sep" fill="none"/>
+            <rect x="212" y="100" width="126" height="14" rx="3" class="dg-sep" fill="none"/>
+            <rect x="392" y="100" width="126" height="14" rx="3" class="dg-sep" fill="none"/>
+            <rect x="572" y="100" width="116" height="14" rx="3" class="dg-sep" fill="none"/>
+            <!-- шаг 1: норма -->
+            <g data-s="1"><rect x="212" y="100" width="5" height="14" rx="2" class="dg-cell hit"/><rect x="572" y="100" width="3" height="14" rx="2" class="dg-cell hit"/></g>
+            <!-- шаг 2: потоки заполнились раньше очереди -->
+            <g data-s="2"><rect x="212" y="100" width="5" height="14" rx="2" class="dg-cell hit"/><rect x="572" y="100" width="116" height="14" rx="2" class="dg-cell hit"/></g>
+            <!-- шаг 3: растёт очередь задач -->
+            <g data-s="3"><rect x="212" y="100" width="38" height="14" rx="2" class="dg-cell hit"/><rect x="392" y="100" width="80" height="14" rx="2" class="dg-cell miss"/><rect x="572" y="100" width="116" height="14" rx="2" class="dg-cell hit"/></g>
+            <!-- шаг 4: кончились соединения и очередь ядра -->
+            <g data-s="4"><rect x="32" y="100" width="126" height="14" rx="2" class="dg-cell miss"/><rect x="212" y="100" width="126" height="14" rx="2" class="dg-cell miss"/><rect x="392" y="100" width="126" height="14" rx="2" class="dg-cell miss"/><rect x="572" y="100" width="116" height="14" rx="2" class="dg-cell hit"/></g>
+            <!-- стрелки: путь нового запроса -->
+            <path d="M170 96 L 196 96" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M350 96 L 376 96" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M530 96 L 556 96" class="dg-line" marker-end="url(#tl-n)"/>
+            <!-- подписи мест -->
+            <text x="32" y="66" class="dg-t">очередь ядра</text>
+            <text x="32" y="84" class="dg-n">accept-count=100</text>
+            <text x="212" y="66" class="dg-t">соединения</text>
+            <text x="212" y="84" class="dg-n">max-connections=8192</text>
+            <text x="392" y="66" class="dg-t">очередь пула</text>
+            <text x="392" y="84" class="dg-n">без лимита</text>
+            <text x="572" y="66" class="dg-t">потоки</text>
+            <text x="572" y="84" class="dg-n">threads.max=200</text>
+            <!-- нагрузка на шаге -->
+            <text data-s="1" x="20" y="24" class="dg-t">банк отвечает за 0.05 с, 100 запросов в секунду</text>
+            <text data-s="2" x="20" y="24" class="dg-t">банк замедлился до 3 с: прошло 2 секунды</text>
+            <text data-s="3" x="20" y="24" class="dg-t">прошла минута</text>
+            <text data-s="4" x="20" y="24" class="dg-t">клиентов больше, чем соединений</text>
+            <!-- счётчики -->
+            <g data-s="1"><text x="32" y="136" class="dg-in">0</text><text x="212" y="136" class="dg-in">300</text><text x="392" y="136" class="dg-in">0</text><text x="572" y="136" class="dg-in">5</text></g>
+            <g data-s="2"><text x="32" y="136" class="dg-in">0</text><text x="212" y="136" class="dg-in">300</text><text x="392" y="136" class="dg-in">0</text><text x="572" y="136" class="dg-in">200</text></g>
+            <g data-s="3"><text x="32" y="136" class="dg-in">0</text><text x="212" y="136" class="dg-in">≈ 2 300</text><text x="392" y="136" class="dg-bad">≈ 2 000</text><text x="572" y="136" class="dg-in">200</text></g>
+            <g data-s="4"><text x="32" y="136" class="dg-bad">100</text><text x="212" y="136" class="dg-bad">8192</text><text x="392" y="136" class="dg-bad">≈ 8 000</text><text x="572" y="136" class="dg-in">200</text></g>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="180" class="dg-ok">запрос сразу получает поток</text>
+            <text data-s="2" x="20" y="180" class="dg-ok">потоки уже все заняты, а очередь ещё пуста</text>
+            <text data-s="3" x="20" y="180" class="dg-bad">новый запрос ждёт поток ≈ 30 с, health-check тоже</text>
+            <text data-s="4" x="20" y="180" class="dg-bad">Acceptor не принимает новые соединения</text>
+            <text data-s="4" x="20" y="198" class="dg-s">сверх 100 в очереди ядра подключения отбрасываются</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Норма. Банк отвечает за 50 мс: 100 запросов в секунду занимают 5 потоков из 200. Клиенты держат около 300 keep-alive соединений, но потоков они не занимают.</li>
+          <li>Банк замедлился до 3 секунд. Каждую секунду приходит 100 новых платежей, а старые не освобождают потоки. Tomcat создаёт новые потоки, пока не дойдёт до 200, и только потом начинает ставить задачи в очередь.</li>
+          <li>Пул пропускает около 67 платежей в секунду, ещё 33 добавляются в очередь. Через минуту в ней около 2000 задач, и каждая новая ждёт примерно 30 секунд. Каждый ждущий запрос держит своё соединение, поэтому соединений тоже стало больше.</li>
+          <li>Когда соединений набирается 8192, Acceptor перестаёт принимать новые. Подключения копятся в очереди ядра ОС до accept-count (100). Дальше ядро Linux по умолчанию молча отбрасывает новые попытки, и клиент упирается в свой таймаут подключения.</li>
+        </ol>
+      </figure>
+      <p>Порядок «сначала потоки, потом очередь» — особенность Tomcat. Стандартный <code>ThreadPoolExecutor</code> из JDK делает наоборот: держит core-потоки, копит задачи в очереди и создаёт потоки сверх core, только когда очередь заполнена. С неограниченной очередью он вообще не вырос бы выше core. Tomcat подменяет очередь на свою <code>TaskQueue</code>, которая отказывается принять задачу, пока потоков меньше максимума, и пул вынужден создать новый поток. При всплеске нагрузки это правильно: лучше сразу работать, чем копить очередь при свободных слотах.</p>
+      <details class="deep">
+        <summary>Под капотом: TaskQueue.offer</summary>
+        <p>Пул Tomcat — наследник логики JDK. Когда core-потоки заняты, он вызывает <code>queue.offer(task)</code>, и если очередь вернула false, создаёт новый поток. Tomcat 11.0.26, сокращённо:</p>
+        <pre><code class="language-java">public boolean offer(Runnable o) {
+    if (parent.getPoolSizeNoLock() == parent.getMaximumPoolSize()) {
+        return super.offer(o);  // потоков уже max: ставим в очередь
+    }
+    if (parent.getSubmittedCount() &lt;= parent.getPoolSizeNoLock()) {
+        return super.offer(o);  // есть простаивающий поток: он заберёт задачу из очереди
+    }
+    if (parent.getPoolSizeNoLock() &lt; parent.getMaximumPoolSize()) {
+        return false;           // все заняты, но можно расти: «очередь полна», пул создаст поток
+    }
+    return super.offer(o);
+}</code></pre>
+      </details>
+      <p>Очередь пула по умолчанию не ограничена (<code>server.tomcat.threads.max-queue-capacity</code> равен <code>Integer.MAX_VALUE</code>). Перегруженный сервис не падает, а медленно отвечает всем сразу. Хуже того, он тратит потоки на запросы, клиенты которых уже ушли по своему таймауту: задача лежит в очереди, клиент через 10 секунд сдался, а Tomcat через 30 секунд честно выполнит платёж и запишет ответ в никуда. Если ограничить очередь, лишние задачи Tomcat отклонит и закроет соединение. Клиент увидит обрыв, а не 503, поэтому ограничивать нагрузку удобнее в самом приложении.</p>
+      <table class="mx">
+        <thead><tr><th>Настройка Boot</th><th>По умолчанию</th><th>Что ограничивает</th></tr></thead>
+        <tbody>
+          <tr><td><code>server.tomcat.threads.max</code></td><td>200</td><td>запросы в обработке одновременно</td></tr>
+          <tr><td><code>server.tomcat.threads.min-spare</code></td><td>10</td><td>потоки, которые живут и без нагрузки</td></tr>
+          <tr><td><code>server.tomcat.threads.max-queue-capacity</code></td><td>2 147 483 647</td><td>задачи, которые ждут поток</td></tr>
+          <tr><td><code>server.tomcat.max-connections</code></td><td>8192</td><td>открытые соединения, включая молчащие keep-alive</td></tr>
+          <tr><td><code>server.tomcat.accept-count</code></td><td>100</td><td>подключения в очереди ядра, когда соединений уже максимум</td></tr>
+          <tr><td><code>server.tomcat.connection-timeout</code></td><td>60 с (умолчание Tomcat)</td><td>сколько ждать данных от клиента</td></tr>
+          <tr><td><code>server.tomcat.keep-alive-timeout</code></td><td>как connection-timeout</td><td>простой соединения между запросами</td></tr>
+          <tr><td><code>server.tomcat.max-keep-alive-requests</code></td><td>100</td><td>запросов по одному соединению, потом закрыть</td></tr>
+          <tr><td><code>server.max-http-request-header-size</code></td><td>8 КБ</td><td>все заголовки запроса; больше — ответ 400</td></tr>
+        </tbody>
+      </table>
+      <p>Первое желание при инциденте — поднять <code>threads.max</code> до 2000. Это почти никогда не помогает. Банк от этого быстрее не станет, ждущих просто будет больше. Узкое место переедет ниже: у пула соединений HikariCP по умолчанию 10 соединений с базой, и 2000 потоков встанут в очередь уже к нему. А каждый платформенный поток стоит памяти под стек и времени на переключения.</p>
+      <p>Помогает сокращение времени, на которое запрос держит поток. Таймауты на исходящих вызовах освобождают поток через секунду, а не через минуту (тема <a href="spring-clients.html">HTTP Clients</a>). Отдельный лимит на вызовы медленной зависимости (bulkhead: семафор или Resilience4j) не даёт банку занять все 200 потоков, и остальные эндпоинты продолжают работать. Если лимит исчерпан, быстрый ответ 503 честнее, чем 30 секунд в очереди.</p>
+      <div class="note warn">
+        <p>Health-check обслуживает тот же пул, что и бизнес-запросы. Если вынести actuator на отдельный порт (<code>management.server.port</code>), Boot поднимет для него отдельный коннектор со своими потоками, и проверка перестанет стоять в общей очереди. Но тогда liveness-проба не должна зависеть от банка или базы: иначе Kubernetes будет перезапускать здоровые поды из-за чужой медленности.</p>
+      </div>
+    </section>
+
+    <section class="step" id="filters">
+      <h2>Фильтр оборачивает сервлет и работает в том же потоке</h2>
+      <p>Перед сервлетом запрос проходит цепочку фильтров. Фильтр — объект с методом <code>doFilter(request, response, chain)</code>. Он может что-то сделать до вызова <code>chain.doFilter</code>, передать запрос дальше и что-то сделать после. Если <code>chain.doFilter</code> не вызвать, дальше запрос не пойдёт. Так работают проверка токена, ограничение частоты запросов, ответ на CORS preflight.</p>
+      <p>Цепочка — это вложенные вызовы. Первый фильтр вызывает второй, второй вызывает сервлет, и всё это один стек одного потока. Поэтому «после» у первого фильтра выполняется последним, а исключение из сервлета пролетает через все фильтры наверх. Демо: фильтр замера времени, за ним фильтр проверки токена, затем сервлет, который пишет ответ заданного размера. <a href="../examples/web/FilterDemo.java">FilterDemo.java</a>, фрагмент:</p>
+      <pre><code class="language-java">class TimingFilter implements Filter {
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) throws ... {
+        long start = System.nanoTime();
+        System.out.println("  timing: before (" + Thread.currentThread().getName()
+                + ", client port " + req.getRemotePort() + ")"); // порт клиента = одно соединение
+        chain.doFilter(req, res);                                // здесь выполняются AuthFilter и сервлет
+        System.out.println("  timing: after, committed=" + resp.isCommitted());
+        resp.setHeader("X-Elapsed-Ms", ...);                     // после коммита молча игнорируется
+    }
+}
+
+class AuthFilter implements Filter {
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) throws ... {
+        if (((HttpServletRequest) req).getHeader("X-Token") == null) {
+            ((HttpServletResponse) res).setStatus(401);
+            return;                      // chain.doFilter не вызван: сервлет не узнает о запросе
+        }
+        chain.doFilter(req, res);
+    }
+}
+
+class ReportServlet extends HttpServlet {
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        int size = Integer.parseInt(req.getParameter("size"));
+        resp.getWriter().print("x".repeat(size)); // больше 8 КБ: Tomcat отправит заголовки клиенту
+        System.out.println("  servlet: wrote " + size + " chars, committed=" + resp.isCommitted());
+    }
+}
+
+// Порядок фильтров = порядок регистрации: timing, затем auth, оба на /*.</code></pre>
+      <pre class="out">GET /report?size=100
+  timing: before (http-nio-18080-exec-1, client port 50600)
+  auth: token ok
+  servlet: wrote 100 chars, committed=false
+  auth: after
+  timing: after, committed=false
+  client: status 200, X-Elapsed-Ms present
+GET /report?size=20000
+  timing: before (http-nio-18080-exec-2, client port 50600)
+  auth: token ok
+  servlet: wrote 20000 chars, committed=true
+  auth: after
+  timing: after, committed=true
+  client: status 200, X-Elapsed-Ms missing
+GET /report?size=100 without token
+  timing: before (http-nio-18080-exec-3, client port 50600)
+  auth: no token, chain stopped
+  timing: after, committed=false
+  client: status 401, X-Elapsed-Ms present</pre>
+      <p>Номер порта меняется от запуска к запуску; важно, что он один на все три запроса. В третьем запросе AuthFilter не вызвал цепочку, сервлет не выполнялся, а код TimingFilter после <code>chain.doFilter</code> всё равно выполнился: внешний фильтр видит и отказы внутренних. Во втором запросе заголовок <code>X-Elapsed-Ms</code> потерялся без единой ошибки.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 216" role="img" aria-label="Второй запрос демо на шкале времени. TimingFilter оборачивает AuthFilter, тот оборачивает сервлет. Сервлет пишет 20 000 символов; когда буфер в 8 КБ переполняется, Tomcat отправляет клиенту статус и заголовки. После этого сервлет дописывает остаток тела, а заголовок, который TimingFilter ставит в конце, уже не уходит.">
+            <defs>
+              <marker id="tf-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="tf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="18" class="dg-cap">ПОТОК EXEC-2, ВРЕМЯ →</text>
+            <!-- вложенность: фильтр в фильтре, внутри сервлет -->
+            <rect x="20" y="28" width="680" height="122" rx="10" class="dg-sep" fill="none"/>
+            <rect x="120" y="48" width="480" height="88" rx="8" class="dg-sep" fill="none"/>
+            <rect x="210" y="70" width="300" height="54" rx="7" class="dg-box"/>
+            <!-- буфер ответа: первые 8 КБ и остаток -->
+            <rect x="222" y="100" width="113" height="14" rx="3" class="dg-cell hit"/>
+            <rect x="335" y="100" width="163" height="14" rx="3" class="dg-cell"/>
+            <!-- сеть к клиенту -->
+            <line x1="20" y1="176" x2="700" y2="176" class="dg-sep"/>
+            <path d="M335 114 L 335 172" class="dg-line ok" marker-end="url(#tf-ok)"/>
+            <path d="M498 114 L 498 172" class="dg-line" marker-end="url(#tf-n)"/>
+            <path d="M650 112 L 650 170" class="dg-line bad"/>
+            <!-- подписи -->
+            <text x="30" y="42" class="dg-n">TimingFilter</text>
+            <text x="130" y="62" class="dg-n">AuthFilter</text>
+            <text x="222" y="90" class="dg-in">ReportServlet: print 20 000</text>
+            <text x="34" y="100" class="dg-s">before</text>
+            <text x="134" y="100" class="dg-s">before</text>
+            <text x="522" y="100" class="dg-s">after</text>
+            <text x="612" y="100" class="dg-bad">setHeader</text>
+            <text x="20" y="196" class="dg-n">сеть → клиент</text>
+            <text x="344" y="192" class="dg-ok">commit: статус + заголовки</text>
+            <text x="504" y="208" class="dg-s">ещё ~12 КБ тела</text>
+            <text x="700" y="192" class="dg-bad" text-anchor="end">заголовок потерян</text>
+          </svg>
+        </div>
+        <figcaption>Заголовки уходят клиенту вместе с первым переполнением буфера. Всё, что фильтр делает с заголовками после этого, Tomcat игнорирует без ошибки.</figcaption>
+      </figure>
+      <p>Ответ сначала копится в буфере, по умолчанию 8 КБ. Когда буфер переполнен или кто-то вызвал <code>flush()</code>, Tomcat отправляет клиенту статус и заголовки, и ответ считается зафиксированным (committed). После этого статус и заголовки уже не изменить: <code>setHeader</code> молча ничего не делает, а <code>sendError</code> бросит <code>IllegalStateException</code>. Заголовок, который зависит от результата, ставят до записи тела или через обёртку, которая придерживает всё тело в памяти (<code>ContentCachingResponseWrapper</code> в Spring).</p>
+      <p>В Spring Boot любой бин типа <code>Filter</code> автоматически регистрируется на все URL. Порядок задают <code>@Order</code> или <code>FilterRegistrationBean</code>. Spring Security тоже подключается одним фильтром: <code>DelegatingFilterProxy</code> в цепочке Tomcat передаёт запрос своей внутренней цепочке <code>SecurityFilterChain</code> (тема <a href="spring-security.html">Security › Architecture</a>).</p>
+      <p>Один запрос может пройти через контейнер несколько раз. Если сервлет бросил исключение или вызвал <code>sendError</code>, Tomcat внутренне перенаправляет запрос на страницу ошибки (проход типа ERROR); в Boot это <code>/error</code>. Асинхронный запрос возвращается в контейнер ещё одним проходом типа ASYNC. Фильтр срабатывает на тех типах dispatch, на которые зарегистрирован. Boot регистрирует обычный Filter только на REQUEST, а наследников <code>OncePerRequestFilter</code> — на все типы: такой фильтр сам помечает запрос атрибутом и пропускает повторные проходы. Поэтому фильтры логирования и аутентификации в Spring наследуют <code>OncePerRequestFilter</code>.</p>
+    </section>
+
+    <section class="step" id="thread-context">
+      <h2>Поток переживает запрос: ThreadLocal, async и виртуальные потоки</h2>
+      <p>Весь запрос — фильтры, сервлет, контроллер, сервисы, репозитории — выполняется в одном потоке. На этом держится неявный контекст, который не надо передавать параметрами: MDC в логах, <code>SecurityContextHolder</code> в Spring Security, <code>RequestContextHolder</code>, привязка транзакции к потоку. Всё это ThreadLocal — значение, видимое только текущему потоку.</p>
+      <p>Но поток из пула не умирает вместе с запросом. Он возвращается в пул и обслуживает следующий запрос со всем, что в нём осталось. Демо: Tomcat с одним потоком, фильтр кладёт пользователя из заголовка в ThreadLocal. <a href="../examples/web/ThreadLocalDemo.java">ThreadLocalDemo.java</a>, фрагмент:</p>
+      <pre><code class="language-java">static final ThreadLocal&lt;String&gt; CURRENT_USER = new ThreadLocal&lt;&gt;();
+
+// main: Tomcat с одним потоком, чтобы второй запрос гарантированно попал в тот же поток
+protocol.setMaxThreads(1);
+
+// /leaky/*: как часто пишут в первый раз
+String user = request.getHeader("X-User");
+if (user != null) CURRENT_USER.set(user); // нет заголовка: остаётся значение прошлого запроса
+chain.doFilter(req, res);                 // после запроса значение не удалено
+
+// /safe/*: set в начале, remove в finally
+CURRENT_USER.set(request.getHeader("X-User")); // null тоже записываем
+try {
+    chain.doFilter(req, res);
+} finally {
+    CURRENT_USER.remove(); // поток вернётся в пул чистым, даже если сервлет бросил исключение
+}
+
+// Сервлет печатает CURRENT_USER.get() или "anonymous". Каждый путь: запрос alice, затем без заголовка.</code></pre>
+      <pre class="out">/leaky/me
+  alice:     user=alice on http-nio-18080-exec-1
+  no header: user=alice on http-nio-18080-exec-1
+/safe/me
+  alice:     user=alice on http-nio-18080-exec-1
+  no header: user=anonymous on http-nio-18080-exec-1</pre>
+      <p>Запрос без заголовка получил alice: значение пережило свой запрос вместе с потоком. В реальном сервисе это чужой tenant в запросе к базе или чужой пользователь в журнале аудита. Готовые механизмы Spring убирают за собой: <code>SecurityContextHolderFilter</code> очищает контекст безопасности, <code>FrameworkServlet</code> — RequestContextHolder. Утечки дают самописные ThreadLocal без finally.</p>
+      <p>Есть способ отпустить поток до готовности ответа — асинхронный сервлет. <code>request.startAsync()</code> возвращает поток в пул, а ответ позже дописывает другой поток. На этом работают <code>DeferredResult</code>, <code>Callable</code> и <code>CompletableFuture</code> в контроллерах Spring MVC. Цена — контекст сам не переходит: ThreadLocal остаётся в исходном потоке, и MDC с SecurityContext в новый поток переносят явно.</p>
+      <p>Виртуальные потоки меняют арифметику первого шага. С <code>spring.threads.virtual.enabled=true</code> (Boot 3.2+) Boot ставит в Tomcat executor, который запускает каждый запрос в новом виртуальном потоке. Пула потоков и <code>threads.max</code> больше нет. Когда виртуальный поток ждёт сеть, он освобождает поток-носитель. То же первое демо в этом режиме:</p>
+      <pre><code class="language-bash">./run.sh PoolDemo virtual</code></pre>
+      <pre><code class="language-java">// вместо setMaxThreads(2); так делает Boot при spring.threads.virtual.enabled=true
+protocol.setExecutor(new VirtualThreadExecutor("tomcat-handler-"));</code></pre>
+      <pre class="out">mode: virtual threads
+idle connections: 50, GET /health: 0.0 s
+6 x /pay finished after: 1.0 1.0 1.0 1.0 1.0 1.0 s
+threads used (6): tomcat-handler-1, tomcat-handler-2, tomcat-handler-3, tomcat-handler-4, tomcat-handler-5, tomcat-handler-6
+/health sent 0.1 s later: 0.0 s</pre>
+      <p>Ожидание банка больше не держит дефицитный ресурс, health-check отвечает сразу. Но ограничение не исчезло, а переехало: тысячи запросов одновременно дойдут до пула соединений с базой или до самого банка. Поэтому с виртуальными потоками нужны явные лимиты — семафор на вызовы банка, осмысленный размер пула БД. ThreadLocal между запросами не утекает, ведь поток каждый раз новый, но и кешировать в нём дорогие объекты бессмысленно. В JDK 21 виртуальный поток, который ждёт внутри <code>synchronized</code>, не отпускает носитель; JDK 24 это исправил (JEP 491). Подробнее — в теме <a href="virtual-threads.html">Virtual Threads</a>.</p>
+    </section>
+
+    <section class="step" id="operate">
+      <h2>Тормозит сервис — смотри потоки, очередь и таймауты</h2>
+      <p>Симптом «всё медленно, CPU свободен, ошибок нет» почти всегда означает, что потоки чего-то ждут. Проверяй в таком порядке.</p>
+      <ul>
+        <li><b>Метрики пула.</b> <code>tomcat.threads.busy</code> против <code>tomcat.threads.config.max</code> и <code>tomcat.connections.current</code>. Micrometer читает их из JMX Tomcat, поэтому в Boot они появятся только при <code>server.tomcat.mbeanregistry.enabled=true</code>. Если busy долго равен max, пул исчерпан.</li>
+        <li><b>Thread dump.</b> <code>jcmd &lt;pid&gt; Thread.print</code> или <code>/actuator/threaddump</code>. Сгруппируй потоки <code>http-nio-8080-exec-*</code> по верхним строкам стека. Сотня одинаковых стеков в HTTP-клиенте или в <code>HikariPool.getConnection</code> показывает, кого ждёт пул.</li>
+        <li><b>Таймауты.</b> У каждого исходящего вызова должен быть таймаут подключения и чтения меньше, чем таймаут твоего клиента. Без них один медленный партнёр забирает все потоки.</li>
+      </ul>
+      <p>При остановке Boot с версии 3.4 по умолчанию делает graceful shutdown: Tomcat перестаёт принимать новые соединения и ждёт текущие запросы до <code>spring.lifecycle.timeout-per-shutdown-phase</code> (30 с). Только после этого вызывается <code>destroy()</code> у сервлетов. Подробнее — в теме <a href="boot-startup.html">Startup & Packaging</a>.</p>
+      <p>Модель «поток на запрос» проста: обычный стек вызовов, обычные исключения, ThreadLocal, понятный thread dump. Она плохо подходит, когда соединений много, живут они долго, а работы по каждому мало: тысячи подписчиков SSE или WebSocket, стриминг, прокси-шлюз. Там нужен неблокирующий стек на event loop — WebFlux на Netty (тема <a href="spring-reactive.html">WebFlux</a>) — или виртуальные потоки, если код блокирующий. Из других servlet-контейнеров Boot 4 поддерживает Jetty; поддержку Undertow убрали, его стартер есть только до Boot 3.5.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Запрос держит поток от разбора HTTP до последнего байта ответа, включая всё время ожидания базы и внешних API.</li>
+        <li>Соединения ждут в Poller и потоков не занимают: 8192 соединения на 200 потоков — нормальная пропорция.</li>
+        <li>При нехватке потоков Tomcat не отвечает ошибкой, а копит неограниченную очередь; задержка растёт у всех эндпоинтов сразу, включая health-check.</li>
+        <li>Число потоков считается по закону Литтла, а лечится перегрузка таймаутами и лимитами на медленные зависимости, а не ростом maxThreads.</li>
+        <li>Сервлет, фильтры и контроллеры — одни объекты на все потоки; данные запроса хранят в локальных переменных, ThreadLocal очищают в finally.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="concurrent-requests" data-freq="3">
+      <h3>Как Spring Boot обрабатывает много запросов одновременно, если контроллер — singleton?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Встроенный Tomcat выдаёт каждому запросу поток из пула, по умолчанию их до 200. Все потоки вызывают методы одного и того же экземпляра контроллера. Это безопасно, пока контроллер не хранит данные запроса в полях: у каждого потока свой стек и свои локальные переменные.</p>
+          <p>Ограничение здесь — число потоков. Запрос держит поток всё время, пока ждёт базу или внешний API. Если ожидание затягивается, пул заканчивается, и новые запросы стоят в очереди, хотя процессор свободен.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Соединения и потоки — разные лимиты. NIO-коннектор держит до 8192 соединений в Poller, а поток занимается только на время обработки запроса.</li>
+            <li>Пул Tomcat сначала растёт до maxThreads и только потом копит очередь, в отличие от ThreadPoolExecutor из JDK. Очередь по умолчанию не ограничена.</li>
+            <li>С виртуальными потоками лимита потоков нет, и ограничение переезжает в пул соединений БД и во внешние сервисы.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди ошибку в фильтре, который кладёт tenant в ThreadLocal</summary>
+          <pre><code class="language-java">public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain) throws ... {
+    String tenant = ((HttpServletRequest) req).getHeader("X-Tenant");
+    if (tenant != null) TenantContext.set(tenant);
+    chain.doFilter(req, res);
+}</code></pre>
+          <p>Значение не удаляется после запроса, а без заголовка не перезаписывается. Поток вернётся в пул, и следующий запрос без <code>X-Tenant</code> выполнится с чужим tenant: прочитает или запишет данные другого клиента. Исправление — <code>set</code> всегда, включая null, и <code>remove()</code> в <code>finally</code> вокруг <code>chain.doFilter</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pool-exhausted" data-freq="3">
+      <h3>Что будет, если все потоки Tomcat заняты?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Tomcat не отвечает ошибкой. Новые запросы встают в очередь пула, которая по умолчанию не ограничена, и ждут свободного потока. Снаружи это выглядит как рост задержки у всех эндпоинтов сразу, включая health-check, при низкой загрузке процессора.</p>
+          <p>Если вдобавок соединений набралось max-connections, 8192, Acceptor перестаёт принимать новые, и подключения ждут в очереди ядра ОС размером accept-count, 100. Сверх неё клиенты упираются в таймаут подключения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Нужное число потоков считаю по закону Литтла: запросов в секунду × время ответа. 100 rps при ответе 3 с — это 300 потоков; при 200 очередь растёт на 33 запроса в секунду.</li>
+            <li>Лечу время удержания потока, а не maxThreads: таймауты на исходящих вызовах, bulkhead на медленную зависимость, быстрый 503. Больше потоков при пуле БД на 10 соединений — та же очередь, только в другом месте.</li>
+            <li>Запросы из очереди выполняются, даже если их клиенты уже ушли по таймауту, — длинная очередь тратит потоки впустую.</li>
+            <li>Actuator на отдельном порту получает свой коннектор и не ждёт в общей очереди, но liveness тогда не должен зависеть от внешних систем.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>threads.max = 200, внешний API отвечает 2 с, приходит 150 запросов в секунду. Что будет через минуту?</summary>
+          <p>Нужно 150 × 2 = 300 одновременных запросов, а потоков 200. Пул пропускает 200 / 2 = 100 запросов в секунду, остальные 50 в секунду копятся в очереди. Через минуту там около 3000 запросов, и новый ждёт 3000 / 100 = 30 секунд плюс свои 2 секунды. Если клиенты сдаются раньше, сервис тратит потоки на ответы, которые никто не прочитает.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="servlet-lifecycle" data-freq="2">
+      <h3>Что такое сервлет и какой у него жизненный цикл?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сервлет — объект, через который контейнер вроде Tomcat передаёт приложению HTTP-запрос: метод <code>service</code> получает готовые request и response. Tomcat создаёт экземпляр один раз и вызывает <code>init</code>, по умолчанию на первом запросе. Потом вызывает <code>service</code> на каждый запрос из разных потоков, а при остановке — <code>destroy</code>.</p>
+          <p>В Spring MVC это DispatcherServlet: один сервлет на все запросы, а контроллер выбирает уже он. Из-за ленивого init первый запрос после старта медленнее; <code>spring.mvc.servlet.load-on-startup=1</code> переносит инициализацию на старт.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Экземпляр один, потоков много: поля сервлета, как и singleton-бинов, общие для всех запросов.</li>
+            <li>В Servlet 5 пакет javax.servlet стал jakarta.servlet. Boot 3 — Tomcat 10.1 и Servlet 6.0, Boot 4 — Tomcat 11 и Servlet 6.1.</li>
+            <li>При graceful shutdown destroy вызывается после того, как Tomcat перестал принимать соединения и дождался активных запросов.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему первый запрос после деплоя отвечает заметно дольше?</summary>
+          <p>Складывается несколько разовых затрат. DispatcherServlet инициализируется на первом запросе. Классы контроллеров, сериализации и клиентов загружаются при первом использовании, а код ещё работает в интерпретаторе, до JIT. Пулы соединений с базой и HTTP-клиенты открывают первые соединения. Лечат прогревом до того, как под станет ready: load-on-startup, тестовые запросы в readiness, заранее заполненные пулы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="filter-chain" data-freq="2">
+      <h3>Что такое фильтр и чем он отличается от сервлета?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сервлет обрабатывает запрос, а фильтр его оборачивает. Фильтр получает request, response и цепочку: может что-то сделать до <code>chain.doFilter</code>, после него или не вызывать его и ответить сам. Так делают аутентификацию, логирование, CORS, ограничение частоты запросов.</p>
+          <p>Цепочка — вложенные вызовы в одном потоке: код первого фильтра после <code>chain.doFilter</code> выполняется последним, и ему видны исключения изнутри. В Boot любой бин Filter регистрируется автоматически, порядок задаёт <code>@Order</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Когда буфер ответа (8 КБ) переполнен или вызван flush, статус и заголовки уже ушли клиенту, и setHeader после <code>chain.doFilter</code> игнорируется.</li>
+            <li>При ошибке и в асинхронных запросах контейнер прогоняет запрос через фильтры повторно (проходы ERROR и ASYNC); OncePerRequestFilter защищает от двойного срабатывания.</li>
+            <li>HandlerInterceptor Spring MVC работает внутри DispatcherServlet, после выбора контроллера, и знает handler. Фильтр стоит до DispatcherServlet и видит все запросы, включая статику и отказы Security.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Фильтр зарегистрировали через FilterRegistrationBean на все DispatcherType, и ошибочные запросы он логирует дважды. Почему?</summary>
+          <p>При исключении или <code>sendError</code> Tomcat внутренне перенаправляет запрос на <code>/error</code>, и запрос второй раз проходит цепочку фильтров. Фильтр, зарегистрированный на тип ERROR, срабатывает снова. Решение — регистрировать только на REQUEST или наследовать <code>OncePerRequestFilter</code>: он по умолчанию пропускает повторные и ERROR-проходы.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://jakarta.ee/specifications/servlet/6.1/jakarta-servlet-spec-6.1">Jakarta Servlet 6.1 Specification</a> — основа урока: жизненный цикл сервлета и многопоточность (гл. 2), фильтры и типы dispatch (гл. 6), буфер и коммит ответа (гл. 5).</li>
+      <li><a href="https://tomcat.apache.org/tomcat-11.0-doc/config/http.html">Tomcat 11: The HTTP Connector</a> — maxThreads, maxConnections, acceptCount, таймауты и раздел «Connector Comparison».</li>
+      <li><a href="https://github.com/apache/tomcat/blob/11.0.26/java/org/apache/tomcat/util/threads/TaskQueue.java">Исходники Tomcat 11.0.26: TaskQueue</a> — почему пул растёт до max раньше очереди; рядом NioEndpoint с Acceptor и Poller.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/web/servlet.html">Spring Boot Reference: Servlet Web Applications</a> — встроенный контейнер, регистрация фильтров и сервлетов; настройки <code>server.tomcat.*</code> — в приложении Application Properties.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -529,8 +529,8 @@ window.KB_TREE = [
           scope: 'endpoints, health, readiness и liveness, метрики Micrometer, tracing' },
       ] },
       { id: 'web', title: 'Web', source: 'Spring Framework Reference: Web on Servlet Stack; Spring Start Here, гл. 7–11', items: [
-        { id: 'servlet', freq: 2, status: 'empty', title: 'Servlet & Tomcat',
-          scope: 'жизненный цикл сервлета, фильтры, поток на запрос, пул потоков Tomcat' },
+        { id: 'servlet', freq: 2, status: 'draft', title: 'Servlet & Tomcat',
+          scope: 'жизненный цикл сервлета, NIO-коннектор и пул потоков, очереди при перегрузке, фильтры и коммит ответа, ThreadLocal, виртуальные потоки' },
         { id: 'spring-web', freq: 3, status: 'empty', title: 'Spring MVC',
           scope: 'путь запроса через DispatcherServlet, HandlerMapping и HandlerAdapter, message converters, @RestController' },
         { id: 'spring-validation', freq: 2, status: 'empty', title: 'Validation & Errors',
