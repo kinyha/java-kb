@@ -5,14 +5,14 @@ import org.springframework.context.annotation.*;
 public class BeansDemo {
     static int created, initialized;
     static class Gateway {
-        Gateway() { created++; }
-        @PostConstruct void init() { initialized++; }
+        Gateway() { created++; } // Считаем все созданные объекты, включая лишние.
+        @PostConstruct void init() { initialized++; } // Считает объекты, подготовленные Spring.
     }
     record Service(Gateway gateway) {}
     @Configuration
     static class Full {
         @Bean Gateway gateway() { return new Gateway(); }
-        @Bean Service service() { return new Service(gateway()); } // Перехватывается конфигурацией.
+        @Bean Service service() { return new Service(gateway()); } // Spring перенаправит gateway() в контейнер.
     }
     @Configuration(proxyBeanMethods = false)
     static class Lite {
@@ -22,14 +22,14 @@ public class BeansDemo {
     @Configuration(proxyBeanMethods = false)
     static class Parameters {
         @Bean Gateway gateway() { return new Gateway(); }
-        @Bean Service service(Gateway gateway) { return new Service(gateway); } // Разрешает контейнер.
+        @Bean Service service(Gateway gateway) { return new Service(gateway); } // Готовую зависимость передаёт Spring.
     }
     record Token(int number) {}
     static class TokenFactory implements FactoryBean<Token> {
         int number;
         public Token getObject() { return new Token(++number); }
         public Class<?> getObjectType() { return Token.class; } // Тип продукта доступен без его создания.
-        public boolean isSingleton() { return true; } // Кеш продукта отдельно от bean-фабрики.
+        public boolean isSingleton() { return true; } // Spring сохраняет продукт отдельно от экземпляра фабрики.
     }
     @Configuration(proxyBeanMethods = false)
     static class Factories {
