@@ -531,8 +531,8 @@ window.KB_TREE = [
       { id: 'web', title: 'Web', source: 'Spring Framework Reference: Web on Servlet Stack; Spring Start Here, гл. 7–11', items: [
         { id: 'servlet', freq: 2, status: 'draft', title: 'Servlet & Tomcat',
           scope: 'жизненный цикл сервлета, NIO-коннектор и пул потоков, очереди при перегрузке, фильтры и коммит ответа, ThreadLocal, виртуальные потоки' },
-        { id: 'spring-web', freq: 3, status: 'empty', title: 'Spring MVC',
-          scope: 'путь запроса через DispatcherServlet, HandlerMapping и HandlerAdapter, message converters, @RestController' },
+        { id: 'spring-web', freq: 3, status: 'draft', title: 'Spring MVC',
+          scope: 'путь запроса через DispatcherServlet, HandlerMapping и HandlerAdapter, коды 404, 405, 415, 406 и 400, резолверы аргументов, message converters и Jackson 3, @RestController, фильтр и интерцептор' },
         { id: 'spring-validation', freq: 2, status: 'empty', title: 'Validation & Errors',
           scope: 'Bean Validation, @Valid и @Validated, @ControllerAdvice, ProblemDetail' },
         { id: 'spring-clients', freq: 2, status: 'empty', title: 'HTTP Clients',

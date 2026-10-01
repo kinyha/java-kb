@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring MVC · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-web">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Spring MVC</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Tomcat отдаёт каждый запрос одному сервлету — DispatcherServlet. Сам он запрос не обрабатывает, а по очереди спрашивает помощников. Таблица маршрутов выбирает метод контроллера, резолверы собирают его аргументы из пути, параметров и тела, конвертер превращает результат в JSON. Если какой-то этап не справился, он бросает исключение, и по статусу видно, где сломалось: 404 — не нашёлся путь, 405 — метод, 415 — формат тела, 406 — формат ответа, 400 — аргумент. Аннотации на контроллере — описание, которое эти помощники читают при старте и на каждом запросе.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Контроллер — это описание, а запрос обрабатывает DispatcherServlet</h2>
+      <p>Вот контроллер платёжного сервиса из демо этой темы. В нём нет ни слова об HTTP: не видно, где разбирается путь, где читается JSON и откуда берётся статус 201.</p>
+      <pre><code class="language-java">@RestController
+@RequestMapping("/payments")
+static class PaymentController {
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    Payment create(@RequestBody PaymentRequest request) {
+        return new Payment(42, request.account(), request.amount(), "NEW");
+    }
+
+    @GetMapping
+    List&lt;Payment&gt; list(@RequestParam("limit") int limit) { ... }
+}</code></pre>
+      <p>На голом Servlet API из <a href="servlet.html">прошлой темы</a> всё это пришлось бы писать руками в <code>doPost</code> и <code>doGet</code>: сверить путь и метод, проверить Content-Type, прочитать тело через Jackson, перевести строку <code>"300"</code> в число, поставить статус, записать JSON, а каждое исключение превратить в код ответа. Spring MVC делает эту работу один раз для всех контроллеров. Аннотации говорят, какие запросы метод принимает, откуда брать аргументы и как вернуть результат, а выполняют это конкретные классы:</p>
+      <table class="mx">
+        <thead><tr><th>В контроллере</th><th>Кто выполняет</th><th>Когда</th></tr></thead>
+        <tbody>
+          <tr><td><code>@PostMapping</code>, <code>@GetMapping</code></td><td>RequestMappingHandlerMapping</td><td>при старте строит таблицу маршрутов, на запросе выбирает метод</td></tr>
+          <tr><td><code>@RequestParam int limit</code></td><td>резолвер аргументов и ConversionService</td><td>перед вызовом метода</td></tr>
+          <tr><td><code>@RequestBody PaymentRequest</code></td><td>HttpMessageConverter для JSON (Jackson)</td><td>перед вызовом метода</td></tr>
+          <tr><td>возвращаемый <code>Payment</code></td><td>обработчик результата и тот же конвертер</td><td>после вызова</td></tr>
+          <tr><td><code>@ResponseStatus(CREATED)</code></td><td>обработчик результата</td><td>после вызова</td></tr>
+          <tr><td>исключение из метода</td><td>HandlerExceptionResolver</td><td>вместо обычного ответа</td></tr>
+        </tbody>
+      </table>
+      <p>Всех их вызывает DispatcherServlet — обычный сервлет. Spring Boot регистрирует его в Tomcat на путь <code>/</code>, и все запросы приложения попадают к нему. Как и любой сервлет, по умолчанию он инициализируется на первом запросе: до этого внутри нет ни таблицы маршрутов, ни конвертеров. Это видно в демо на Boot в следующем шаге.</p>
+    </section>
+
+    <section class="step" id="strategies">
+      <h2>DispatcherServlet ничего не знает о контроллерах: он опрашивает списки стратегий</h2>
+      <p>В коде DispatcherServlet нет ни слова про <code>@RequestMapping</code> или JSON. При инициализации он находит в Spring-контексте бины нескольких типов и на каждый запрос опрашивает их по порядку. HandlerMapping отвечает, кто обработает запрос. HandlerAdapter знает, как этого обработчика вызвать. HandlerExceptionResolver превращает исключение в ответ. Ещё есть ViewResolver для HTML-страниц, в REST-сервисе он почти не участвует.</p>
+      <p>Чтобы увидеть это без магии Boot, демо поднимает Spring MVC руками на Tomcat из прошлой темы и печатает, что нашёл DispatcherServlet. <a href="../examples/web/MvcTraceDemo.java">MvcTraceDemo.java</a>, Java 21, Spring 7.0.9, Tomcat 11.0.26, фрагмент:</p>
+      <pre><code class="language-bash">cd examples/web
+./run.sh MvcTraceDemo</code></pre>
+      <pre><code class="language-java">var spring = new AnnotationConfigWebApplicationContext();
+spring.register(WebConfig.class);            // @Configuration + @EnableWebMvc + бин PaymentController
+
+var dispatcherServlet = new DispatcherServlet(spring);
+var dispatcher = Tomcat.addServlet(ctx, "dispatcher", dispatcherServlet); // обычный сервлет Tomcat
+dispatcher.setLoadOnStartup(1);              // поднять Spring-контекст при старте, а не на первом запросе
+ctx.addServletMapping("/", "dispatcher");    // все запросы приложения идут к нему
+tomcat.start();
+
+// Стратегии, которые DispatcherServlet нашёл в контексте, в порядке опроса.
+System.out.println("handler mappings: " + names(dispatcherServlet.getHandlerMappings()));
+System.out.println("handler adapters: " + names(sorted(spring.getBeansOfType(HandlerAdapter.class).values())));
+System.out.println("exception resolvers: " + names(spring.getBean(HandlerExceptionResolverComposite.class).getExceptionResolvers()));
+System.out.println("message converters: " + names(spring.getBean(RequestMappingHandlerAdapter.class).getMessageConverters()));</code></pre>
+      <pre class="out">handler mappings: [RouterFunctionMapping, RequestMappingHandlerMapping, BeanNameUrlHandlerMapping]
+handler adapters: [RequestMappingHandlerAdapter, HandlerFunctionAdapter, HttpRequestHandlerAdapter, SimpleControllerHandlerAdapter]
+exception resolvers: [ExceptionHandlerExceptionResolver, ResponseStatusExceptionResolver, DefaultHandlerExceptionResolver]
+message converters: [ByteArrayHttpMessageConverter, StringHttpMessageConverter, ResourceHttpMessageConverter, ResourceRegionHttpMessageConverter, AllEncompassingFormHttpMessageConverter, JacksonJsonHttpMessageConverter]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 430" role="img" aria-label="DispatcherServlet опрашивает три списка стратегий: маппинги, адаптеры и обработчики исключений. Для запроса к контроллеру ответили RequestMappingHandlerMapping и RequestMappingHandlerAdapter. Адаптер использует список конвертеров тела, где JSON пишет и читает JacksonJsonHttpMessageConverter, а StringHttpMessageConverter стоит раньше него.">
+            <defs>
+              <marker id="ms-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- DispatcherServlet -->
+            <rect x="14" y="14" width="692" height="40" rx="8" class="dg-box"/>
+            <!-- три списка стратегий -->
+            <rect x="14" y="78" width="206" height="130" rx="8" class="dg-box"/>
+            <rect x="228" y="78" width="226" height="156" rx="8" class="dg-box"/>
+            <rect x="462" y="78" width="244" height="130" rx="8" class="dg-box"/>
+            <!-- конвертеры: их использует адаптер -->
+            <rect x="228" y="262" width="226" height="156" rx="8" class="dg-box"/>
+            <!-- элементы списков, в реальном порядке -->
+            <rect x="22" y="124" width="190" height="22" rx="4" class="dg-cell"/>
+            <rect x="22" y="150" width="190" height="22" rx="4" class="dg-cell hit"/>
+            <rect x="22" y="176" width="190" height="22" rx="4" class="dg-cell"/>
+            <rect x="236" y="124" width="210" height="22" rx="4" class="dg-cell hit"/>
+            <rect x="236" y="150" width="210" height="22" rx="4" class="dg-cell"/>
+            <rect x="236" y="176" width="210" height="22" rx="4" class="dg-cell"/>
+            <rect x="236" y="202" width="210" height="22" rx="4" class="dg-cell"/>
+            <rect x="470" y="124" width="228" height="22" rx="4" class="dg-cell"/>
+            <rect x="470" y="150" width="228" height="22" rx="4" class="dg-cell"/>
+            <rect x="470" y="176" width="228" height="22" rx="4" class="dg-cell"/>
+            <rect x="236" y="308" width="210" height="22" rx="4" class="dg-cell"/>
+            <rect x="236" y="334" width="210" height="22" rx="4" class="dg-cell"/>
+            <rect x="236" y="360" width="210" height="22" rx="4" class="dg-sep" fill="none"/>
+            <rect x="236" y="386" width="210" height="22" rx="4" class="dg-cell hit"/>
+            <!-- стрелки: кого спрашивает DispatcherServlet и кого использует адаптер -->
+            <path d="M117 54 L 117 74" class="dg-line" marker-end="url(#ms-n)"/>
+            <path d="M341 54 L 341 74" class="dg-line" marker-end="url(#ms-n)"/>
+            <path d="M584 54 L 584 74" class="dg-line" marker-end="url(#ms-n)"/>
+            <path d="M341 234 L 341 258" class="dg-line" marker-end="url(#ms-n)"/>
+            <!-- подписи -->
+            <text x="28" y="39" class="dg-t">DispatcherServlet</text>
+            <text x="200" y="39" class="dg-s">спрашивает каждый список по порядку: работает первый, кто ответил</text>
+            <text x="26" y="98" class="dg-t">HandlerMapping</text>
+            <text x="26" y="114" class="dg-s">кто обработает запрос?</text>
+            <text x="240" y="98" class="dg-t">HandlerAdapter</text>
+            <text x="240" y="114" class="dg-s">как вызвать обработчик?</text>
+            <text x="474" y="98" class="dg-t">HandlerExceptionResolver</text>
+            <text x="474" y="114" class="dg-s">что ответить на исключение?</text>
+            <text x="240" y="282" class="dg-t">HttpMessageConverter</text>
+            <text x="240" y="298" class="dg-s">как прочитать и записать тело</text>
+            <text x="349" y="250" class="dg-n">использует</text>
+            <g text-anchor="middle" class="dg-n">
+              <text x="117" y="139" class="dg-n">RouterFunctionMapping</text>
+              <text x="117" y="165" class="dg-n">RequestMappingHandlerMapping</text>
+              <text x="117" y="191" class="dg-n">BeanNameUrlHandlerMapping</text>
+              <text x="341" y="139" class="dg-n">RequestMappingHandlerAdapter</text>
+              <text x="341" y="165" class="dg-n">HandlerFunctionAdapter</text>
+              <text x="341" y="191" class="dg-n">HttpRequestHandlerAdapter</text>
+              <text x="341" y="217" class="dg-n">SimpleControllerHandlerAdapter</text>
+              <text x="584" y="139" class="dg-n">ExceptionHandlerExceptionResolver</text>
+              <text x="584" y="165" class="dg-n">ResponseStatusExceptionResolver</text>
+              <text x="584" y="191" class="dg-n">DefaultHandlerExceptionResolver</text>
+              <text x="341" y="323" class="dg-n">ByteArrayHttpMessageConverter</text>
+              <text x="341" y="349" class="dg-n">StringHttpMessageConverter</text>
+              <text x="341" y="375" class="dg-n">ещё 3: Resource, Form…</text>
+              <text x="341" y="401" class="dg-n">JacksonJsonHttpMessageConverter</text>
+            </g>
+            <!-- пояснения под списками -->
+            <text x="22" y="234" class="dg-n">в Boot ещё WelcomePage…</text>
+            <text x="22" y="250" class="dg-n">и SimpleUrlHandlerMapping:</text>
+            <text x="22" y="266" class="dg-n">статические файлы на /**</text>
+            <text x="470" y="234" class="dg-n">сверху вниз: @ExceptionHandler,</text>
+            <text x="470" y="250" class="dg-n">@ResponseStatus у исключения,</text>
+            <text x="470" y="266" class="dg-n">стандартные исключения → 4xx</text>
+          </svg>
+        </div>
+        <figcaption>Подсвечено, кто сработал на POST /payments с JSON. StringHttpMessageConverter стоит раньше Jackson — это ещё понадобится в шаге 6.</figcaption>
+      </figure>
+      <p>Зачем адаптер, если можно просто вызвать метод? Обработчик бывает разным: метод с <code>@RequestMapping</code>, функция из RouterFunction, объект HttpRequestHandler, старый интерфейс Controller. DispatcherServlet не разбирается в их сигнатурах, он ищет адаптер, который умеет вызвать такой объект. Поэтому новый способ писать обработчики Spring добавляет новой парой «маппинг + адаптер», не меняя DispatcherServlet: так появились функциональные эндпоинты, и их RouterFunctionMapping стоит в списке первым.</p>
+      <p>В Spring Boot стратегии регистрирует автоконфигурация, и их больше. <a href="../examples/web/MvcBootDemo.java">MvcBootDemo.java</a> поднимает настоящее приложение на Boot 4.1.1 с тем же контроллером и печатает список до и после первого запроса:</p>
+      <pre><code class="language-bash">./run.sh MvcBootDemo</code></pre>
+      <pre><code class="language-java">try (var spring = SpringApplication.run(App.class, "--server.port=18080", ...)) {
+    var dispatcher = spring.getBean(DispatcherServlet.class);
+    System.out.println("handler mappings before first request: " + dispatcher.getHandlerMappings());
+    // GET /payments/1 и GET /refunds/42 с Accept: application/json, вывод — в шагах 3 и 6
+    System.out.println("handler mappings after: " + dispatcher.getHandlerMappings().stream()
+            .map(m -&gt; m.getClass().getSimpleName()).toList());
+}</code></pre>
+      <pre class="out">handler mappings before first request: null
+...
+handler mappings after: [RouterFunctionMapping, RequestMappingHandlerMapping, WelcomePageHandlerMapping, BeanNameUrlHandlerMapping, WelcomePageNotAcceptableHandlerMapping, SimpleUrlHandlerMapping]</pre>
+      <p>До первого запроса списков нет: Boot регистрирует DispatcherServlet с <code>load-on-startup=-1</code>, и тот читает стратегии из контекста только на первом запросе. Последний в списке SimpleUrlHandlerMapping отдаёт статические файлы на <code>/**</code>, и от этого зависит, как в Boot выглядит 404.</p>
+      <div class="trap">
+        <p class="myth">В приложение на Spring Boot для MVC нужно добавить <code>@EnableWebMvc</code>.</p>
+        <p class="fact">Аннотация регистрирует WebMvcConfigurationSupport, а автоконфигурация MVC в Boot срабатывает, только когда такого бина нет. Поставишь <code>@EnableWebMvc</code> — потеряешь настройки Boot: статические файлы, конвертеры с Jackson из <code>spring.jackson.*</code>, форматы <code>spring.mvc.*</code>. Настраивают MVC в Boot бином, реализующим WebMvcConfigurer.</p>
+      </div>
+    </section>
+
+    <section class="step" id="mapping">
+      <h2>Таблица маршрутов строится при старте, а запрос выбирает самый точный вариант</h2>
+      <p>RequestMappingHandlerMapping при старте контекста проходит по бинам с <code>@Controller</code> и превращает аннотации каждого метода в запись таблицы: шаблон пути, HTTP-метод, условия на параметры и заголовки, какой формат тела метод принимает (consumes) и какой отдаёт (produces). Таблица из MvcTraceDemo:</p>
+      <pre><code class="language-java">mapping.getHandlerMethods().entrySet().stream()
+        .map(e -&gt; "mapped " + e.getKey() + " -&gt; " + e.getValue()).sorted().forEach(System.out::println);</code></pre>
+      <pre class="out">mapped {GET [/payments]} -&gt; MvcTraceDemo$PaymentController#list(int)
+mapped {POST [/payments]} -&gt; MvcTraceDemo$PaymentController#create(PaymentRequest)</pre>
+      <p>Таблица готова до первого запроса, поэтому ошибка в ней ломает старт, а не запрос: два метода с одинаковыми путём и HTTP-методом дают «Ambiguous mapping» при запуске приложения. На запросе маппинг берёт записи, чей шаблон подходит под путь, отсеивает те, что не прошли остальные условия, и из оставшихся выбирает самую точную. Если не осталось ни одной, ответ зависит от того, на каком условии отсеялись кандидаты.</p>
+      <p>Проверим на контроллере, где каждый запрос ломается на своём этапе. <a href="../examples/web/MvcStatusDemo.java">MvcStatusDemo.java</a>, фрагмент; первый в цепочке HandlerExceptionResolver только запоминает имя исключения и отдаёт его стандартным обработчикам:</p>
+      <pre><code class="language-java">@RestController
+@RequestMapping("/payments")
+static class PaymentController {
+    @GetMapping("/{id}")
+    Payment find(@PathVariable("id") long id) { return new Payment(id, "acc-1", 500); }
+
+    @GetMapping("/export")                 // точный путь, который подходит и под шаблон /{id}
+    String export() { return "export"; }
+
+    @PostMapping(consumes = "application/json")
+    @ResponseStatus(HttpStatus.CREATED)
+    Payment create(@RequestBody PaymentRequest request) { ... }
+}
+
+// метод, путь, Content-Type, Accept, тело
+call(client, "GET", "/payments/42", null, null, null);
+call(client, "GET", "/payments/export", null, null, null);
+call(client, "GET", "/payments/42/", null, null, null);
+call(client, "GET", "/refunds/42", null, null, null);
+call(client, "DELETE", "/payments/42", null, null, null);
+call(client, "GET", "/payments/abc", null, null, null);
+call(client, "POST", "/payments", "text/plain", null, json);
+call(client, "POST", "/payments", "application/json", null, "{\"account\":"); // обрезанный JSON
+call(client, "GET", "/payments/42", null, "application/xml", null);
+call(client, "POST", "/payments", "application/json", null, json);</code></pre>
+      <pre class="out">GET    /payments/42                                -&gt; 200 {"id":42,"account":"acc-1","amount":500}
+GET    /payments/export                            -&gt; 200 export
+GET    /payments/42/                               -&gt; 404 NoHandlerFoundException
+GET    /refunds/42                                 -&gt; 404 NoHandlerFoundException
+DELETE /payments/42                                -&gt; 405 HttpRequestMethodNotSupportedException, Allow: GET
+GET    /payments/abc                               -&gt; 400 MethodArgumentTypeMismatchException
+POST   /payments        [text/plain]               -&gt; 415 HttpMediaTypeNotSupportedException
+POST   /payments        [application/json]         -&gt; 400 HttpMessageNotReadableException
+GET    /payments/42     [Accept: application/xml]  -&gt; 406 HttpMediaTypeNotAcceptableException
+POST   /payments        [application/json]         -&gt; 201 {"id":43,"account":"acc-1","amount":500}</pre>
+      <p><code>/payments/export</code> подходит и под точный путь, и под шаблон <code>/{id}</code>. Выиграл точный путь, поэтому слово export никто не пытался превратить в число. Остальные строки складываются в цепочку проверок: каждый статус показывает самый ранний этап, который отказал.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 186" role="img" aria-label="Шесть проверок по порядку: путь, HTTP-метод, Content-Type, Accept, аргументы, вызов контроллера. Отказ на каждой даёт свой статус: 404, 405, 415, 406, 400; успешный вызов — 201, исключение в коде — 500.">
+            <defs>
+              <marker id="ml-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ml-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              <marker id="ml-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="14" y="18" class="dg-cap">ПРОВЕРКИ ПО ПОРЯДКУ</text>
+            <text x="706" y="18" class="dg-s" text-anchor="end">первый отказ определяет статус</text>
+            <!-- этапы -->
+            <rect x="14" y="30" width="100" height="46" rx="7" class="dg-box"/>
+            <rect x="130" y="30" width="100" height="46" rx="7" class="dg-box"/>
+            <rect x="246" y="30" width="100" height="46" rx="7" class="dg-box"/>
+            <rect x="362" y="30" width="100" height="46" rx="7" class="dg-box"/>
+            <rect x="478" y="30" width="100" height="46" rx="7" class="dg-box"/>
+            <rect x="594" y="30" width="100" height="46" rx="7" class="dg-box"/>
+            <!-- выходы со статусами -->
+            <rect x="28" y="110" width="72" height="30" rx="6" class="dg-cell miss"/>
+            <rect x="144" y="110" width="72" height="30" rx="6" class="dg-cell miss"/>
+            <rect x="260" y="110" width="72" height="30" rx="6" class="dg-cell miss"/>
+            <rect x="376" y="110" width="72" height="30" rx="6" class="dg-cell miss"/>
+            <rect x="492" y="110" width="72" height="30" rx="6" class="dg-cell miss"/>
+            <rect x="608" y="110" width="72" height="30" rx="6" class="dg-cell hit"/>
+            <!-- переходы между этапами и выходы вниз -->
+            <path d="M114 53 L 126 53" class="dg-line" marker-end="url(#ml-n)"/>
+            <path d="M230 53 L 242 53" class="dg-line" marker-end="url(#ml-n)"/>
+            <path d="M346 53 L 358 53" class="dg-line" marker-end="url(#ml-n)"/>
+            <path d="M462 53 L 474 53" class="dg-line" marker-end="url(#ml-n)"/>
+            <path d="M578 53 L 590 53" class="dg-line" marker-end="url(#ml-n)"/>
+            <path d="M64 76 L 64 106" class="dg-line bad" marker-end="url(#ml-bad)"/>
+            <path d="M180 76 L 180 106" class="dg-line bad" marker-end="url(#ml-bad)"/>
+            <path d="M296 76 L 296 106" class="dg-line bad" marker-end="url(#ml-bad)"/>
+            <path d="M412 76 L 412 106" class="dg-line bad" marker-end="url(#ml-bad)"/>
+            <path d="M528 76 L 528 106" class="dg-line bad" marker-end="url(#ml-bad)"/>
+            <path d="M644 76 L 644 106" class="dg-line ok" marker-end="url(#ml-ok)"/>
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="64" y="50" class="dg-in">путь</text><text x="64" y="67" class="dg-n">path</text>
+              <text x="180" y="50" class="dg-in">HTTP-метод</text><text x="180" y="67" class="dg-n">method</text>
+              <text x="296" y="50" class="dg-in">Content-Type</text><text x="296" y="67" class="dg-n">consumes</text>
+              <text x="412" y="50" class="dg-in">Accept</text><text x="412" y="67" class="dg-n">produces</text>
+              <text x="528" y="50" class="dg-in">аргументы</text><text x="528" y="67" class="dg-n">резолверы</text>
+              <text x="644" y="50" class="dg-in">вызов</text><text x="644" y="67" class="dg-n">контроллер</text>
+              <text x="64" y="130" class="dg-bad">404</text>
+              <text x="180" y="130" class="dg-bad">405</text>
+              <text x="296" y="130" class="dg-bad">415</text>
+              <text x="412" y="130" class="dg-bad">406</text>
+              <text x="528" y="130" class="dg-bad">400</text>
+              <text x="644" y="130" class="dg-ok">201</text>
+              <text x="64" y="158" class="dg-n">нет такого</text><text x="64" y="172" class="dg-n">пути</text>
+              <text x="180" y="158" class="dg-n">путь есть,</text><text x="180" y="172" class="dg-n">метода нет</text>
+              <text x="296" y="158" class="dg-n">не читаю</text><text x="296" y="172" class="dg-n">такое тело</text>
+              <text x="412" y="158" class="dg-n">не могу</text><text x="412" y="172" class="dg-n">так ответить</text>
+              <text x="528" y="158" class="dg-n">значение</text><text x="528" y="172" class="dg-n">не разобрать</text>
+              <text x="644" y="158" class="dg-n">или 500, если</text><text x="644" y="172" class="dg-n">код бросил</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>Первые четыре проверки — условия таблицы маршрутов, их проходит запрос ещё до чтения тела. Поэтому DELETE с битым JSON получит 405, а не 400.</figcaption>
+      </figure>
+      <p>Читай статус как адрес поломки. 405 — путь верный, а HTTP-метод нет, и заголовок Allow подсказывает допустимые. 415 — сервер не понимает формат тела: проверь Content-Type у клиента. 406 — сервер не умеет ответить в формате из Accept. 400 — запрос дошёл до метода, но аргумент не собрался: строка не стала числом или JSON не разобрался.</p>
+      <p>Две ловушки при переходе со старых версий. С Spring 6 путь с завершающим слешем <code>/payments/42/</code> больше не совпадает с <code>/payments/{id}</code>, и клиенты, которые его добавляли, получают 404. А 404 в Boot выглядит иначе, чем в демо: запрос без контроллера подхватывает обработчик статических файлов на <code>/**</code>, и исключение называется NoResourceFoundException. Строки из MvcBootDemo:</p>
+      <pre class="out">GET /refunds/42
+  exception: NoResourceFoundException: No static resource refunds/42 for request '/refunds/42'.
+  404 application/json {"timestamp":"2026-10-01T22:02:37.176Z","status":404,"error":"Not Found","path":"/refunds/42"}</pre>
+      <p>Тело ответа с timestamp собрал не DispatcherServlet, а BasicErrorController Boot: Tomcat перенаправил ошибку на <code>/error</code>. Об этом пути и о своём формате ошибок — тема <a href="spring-validation.html">Validation & Errors</a>. Время в ответе меняется от запуска к запуску.</p>
+    </section>
+
+    <section class="step" id="dispatch">
+      <h2>Один запрос проходит фильтр, интерцептор, сбор аргументов, метод и конвертер</h2>
+      <p>Теперь пройдём одним запросом весь путь внутри DispatcherServlet. Это метод <code>doDispatch</code>, и всё в нём выполняется в одном потоке Tomcat. Пролистай POST /payments с JSON из демо:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 312" role="img" aria-label="Путь запроса POST /payments внутри фильтра Tomcat и DispatcherServlet: маппинг находит метод, интерцептор пропускает запрос, адаптер с Jackson собирает аргумент PaymentRequest, вызывается метод контроллера, Jackson пишет Payment в JSON, интерцептор завершает обработку, ответ 201 уходит клиенту.">
+            <defs>
+              <marker id="md-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="md-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- клиент, фильтр Tomcat, DispatcherServlet -->
+            <rect x="14" y="128" width="84" height="44" rx="8" class="dg-box"/>
+            <rect x="112" y="14" width="594" height="286" rx="10" class="dg-sep" fill="none"/>
+            <rect x="128" y="40" width="566" height="248" rx="10" class="dg-sep" fill="none"/>
+            <!-- участники -->
+            <rect x="144" y="68" width="170" height="40" rx="7" class="dg-cell"/>
+            <rect x="330" y="68" width="170" height="40" rx="7" class="dg-cell"/>
+            <rect x="516" y="68" width="170" height="40" rx="7" class="dg-cell"/>
+            <rect x="144" y="144" width="170" height="44" rx="7" class="dg-cell"/>
+            <rect x="330" y="144" width="170" height="44" rx="7" class="dg-cell"/>
+            <rect x="516" y="144" width="170" height="44" rx="7" class="dg-cell"/>
+            <!-- кто работает на шаге -->
+            <rect data-s="2" x="144" y="68" width="170" height="40" rx="7" class="dg-cell hit"/>
+            <rect data-s="3" x="330" y="68" width="170" height="40" rx="7" class="dg-cell hit"/>
+            <rect data-s="7" x="330" y="68" width="170" height="40" rx="7" class="dg-cell hit"/>
+            <rect data-s="4" x="516" y="68" width="170" height="40" rx="7" class="dg-cell hit"/>
+            <rect data-s="4" x="144" y="144" width="170" height="44" rx="7" class="dg-cell hit"/>
+            <rect data-s="5" x="330" y="144" width="170" height="44" rx="7" class="dg-cell hit"/>
+            <rect data-s="6" x="516" y="144" width="170" height="44" rx="7" class="dg-cell hit"/>
+            <!-- движение запроса -->
+            <path data-s="1" d="M98 150 L 124 150" class="dg-line" marker-end="url(#md-n)"/>
+            <path data-s="2" d="M229 46 L 229 64" class="dg-line" marker-end="url(#md-n)"/>
+            <path data-s="3" d="M314 88 L 326 88" class="dg-line" marker-end="url(#md-n)"/>
+            <g data-s="4"><path d="M500 88 L 512 88" class="dg-line" marker-end="url(#md-n)"/><path d="M560 108 C 560 128, 229 122, 229 140" class="dg-line" marker-end="url(#md-n)"/></g>
+            <path data-s="5" d="M314 166 L 326 166" class="dg-line" marker-end="url(#md-n)"/>
+            <path data-s="6" d="M500 166 L 512 166" class="dg-line" marker-end="url(#md-n)"/>
+            <path data-s="7" d="M124 160 L 102 160" class="dg-line ok" marker-end="url(#md-ok)"/>
+            <!-- подписи -->
+            <text x="56" y="155" class="dg-t" text-anchor="middle">клиент</text>
+            <text data-s="1" x="14" y="118" class="dg-n">POST /payments</text>
+            <text data-s="7" x="14" y="192" class="dg-ok">201 + JSON</text>
+            <text x="122" y="30" class="dg-n">TraceFilter, цепочка Tomcat</text>
+            <text x="250" y="56" class="dg-n">DispatcherServlet.doDispatch</text>
+            <g text-anchor="middle">
+              <text x="229" y="93" class="dg-in">HandlerMapping</text>
+              <text x="415" y="93" class="dg-in">Interceptor</text>
+              <text x="601" y="93" class="dg-in">HandlerAdapter</text>
+              <text x="229" y="162" class="dg-in">Jackson</text>
+              <text x="229" y="178" class="dg-n">JSON → PaymentRequest</text>
+              <text x="415" y="162" class="dg-in">create(request)</text>
+              <text x="415" y="178" class="dg-n">твой метод</text>
+              <text x="601" y="162" class="dg-in">Jackson</text>
+              <text x="601" y="178" class="dg-n">Payment → JSON</text>
+            </g>
+            <!-- состояние запроса -->
+            <text x="144" y="228" class="dg-n">обработчик</text>
+            <text x="144" y="250" class="dg-n">аргумент</text>
+            <text x="144" y="272" class="dg-n">ответ</text>
+            <text data-s="1" x="230" y="228" class="dg-in">?</text>
+            <text data-s="2-" x="230" y="228" class="dg-in">create(PaymentRequest) + интерцептор</text>
+            <text data-s="1-3" x="230" y="250" class="dg-in">—</text>
+            <text data-s="4-" x="230" y="250" class="dg-in">PaymentRequest[acc-1, 500]</text>
+            <text data-s="1-4" x="230" y="272" class="dg-in">пусто</text>
+            <text data-s="5" x="230" y="272" class="dg-in">пусто, метод вернул Payment[id=42]</text>
+            <text data-s="6" x="230" y="272" class="dg-in">201, 55 байт JSON в буфере, committed=false</text>
+            <text data-s="7" x="230" y="272" class="dg-ok">отправлен клиенту после выхода из фильтра</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>POST /payments с JSON прошёл фильтры Tomcat и попал в DispatcherServlet. Кто его обработает, пока неизвестно.</li>
+          <li>DispatcherServlet спрашивает маппинги по порядку. RequestMappingHandlerMapping находит в таблице запись POST /payments и отдаёт цепочку: метод create и подходящие интерцепторы.</li>
+          <li>Вызывается preHandle каждого интерцептора. Вернул бы false — обработка закончилась бы здесь, контроллер бы не вызвался.</li>
+          <li>Адаптер для методов с @RequestMapping собирает аргументы. Для @RequestBody резолвер выбирает конвертер по Content-Type, и JacksonJsonHttpMessageConverter читает JSON в PaymentRequest.</li>
+          <li>Вызывается метод контроллера — обычный вызов Java с готовыми аргументами. Он вернул объект Payment.</li>
+          <li>Обработчик результата выбирает конвертер по Accept и типу Payment. Jackson пишет 55 байт JSON в буфер ответа, статус 201 берётся из @ResponseStatus. Маленький ответ пока лежит в буфере Tomcat.</li>
+          <li>postHandle и afterCompletion интерцептора: тело уже записано, изменить его нельзя. Запрос выходит из фильтра, и Tomcat отправляет ответ клиенту.</li>
+        </ol>
+      </figure>
+      <p>В демо этот путь печатают фильтр, интерцептор и два ControllerAdvice вокруг чтения и записи тела. Фрагмент MvcTraceDemo:</p>
+      <pre><code class="language-java">static class TraceInterceptor implements HandlerInterceptor {
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse res, Object handler) {
+        System.out.println("  preHandle: handler = " + handler);
+        return true;                     // false остановит обработку: контроллер не вызовется
+    }
+    public void postHandle(HttpServletRequest req, HttpServletResponse res, Object handler, ModelAndView mv) {
+        System.out.println("  postHandle: committed=" + res.isCommitted() + ", modelAndView=" + mv);
+    }
+    public void afterCompletion(HttpServletRequest req, HttpServletResponse res, Object handler, Exception ex) {
+        System.out.println("  afterCompletion: status=" + res.getStatus() + ", exception=" + ex);
+    }
+}
+
+// RequestBodyAdvice и ResponseBodyAdvice в одном классе: вызываются вокруг чтения и записи тела
+public Object afterBodyRead(Object body, ..., Class&lt;? extends HttpMessageConverter&lt;?&gt;&gt; converter) {
+    System.out.println("    body read by " + converter.getSimpleName() + " as " + body.getClass().getSimpleName());
+    return body;
+}
+public Object beforeBodyWrite(Object body, ..., MediaType contentType, Class&lt;? extends HttpMessageConverter&lt;?&gt;&gt; converter, ...) {
+    System.out.println("    body write by " + converter.getSimpleName() + " as " + contentType);
+    return body;                         // здесь тело ещё можно заменить
+}
+
+// Два запроса: POST /payments с маленьким JSON и GET /payments?limit=300 — список на 17 КБ.</code></pre>
+      <pre class="out">filter: before /payments
+  preHandle: handler = MvcTraceDemo$PaymentController#create(PaymentRequest)
+    body read by JacksonJsonHttpMessageConverter as PaymentRequest
+      controller: create(PaymentRequest[account=acc-1, amount=500])
+    body write by JacksonJsonHttpMessageConverter as application/json
+  postHandle: committed=false, modelAndView=null
+  afterCompletion: status=201, exception=null
+filter: after
+client: 201 {"id":42,"account":"acc-1","amount":500,"status":"NEW"}
+filter: before /payments
+  preHandle: handler = MvcTraceDemo$PaymentController#list(int)
+      controller: list(300)
+    body write by JacksonJsonHttpMessageConverter as application/json
+  postHandle: committed=true, modelAndView=null
+  afterCompletion: status=200, exception=null
+filter: after
+client: 200, 17481 chars of JSON</pre>
+      <p>Главное в выводе — момент postHandle. Для <code>@RestController</code> тело к этому времени уже записано, и <code>modelAndView=null</code>: показывать нечего. Маленький ответ ещё лежит в буфере Tomcat (committed=false), и заголовок поставить можно. Ответ на 17 КБ уже частично ушёл клиенту (committed=true), и заголовки менять поздно — как с фильтром в прошлой теме. Поэтому postHandle не подходит для изменения JSON-ответа. Для этого есть ResponseBodyAdvice: он вызывается перед записью, как beforeBodyWrite в демо.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Filter</th><th>HandlerInterceptor</th></tr></thead>
+        <tbody>
+          <tr><td>Где стоит</td><td>в цепочке Tomcat, до DispatcherServlet</td><td>внутри DispatcherServlet, после выбора обработчика</td></tr>
+          <tr><td>Знает метод контроллера</td><td>нет</td><td>да: HandlerMethod с аннотациями</td></tr>
+          <tr><td>Какие запросы видит</td><td>все, включая статику и отказы Spring Security</td><td>только те, для которых нашёлся обработчик</td></tr>
+          <tr><td>Как остановить запрос</td><td>не вызвать <code>chain.doFilter</code></td><td>вернуть false из preHandle</td></tr>
+          <tr><td>Видит исключение</td><td>необработанное, оно пролетает через фильтр</td><td>afterCompletion получает его, только если ни один резолвер не обработал</td></tr>
+          <tr><td>Для чего обычно</td><td>логирование, MDC, CORS, безопасность, сжатие</td><td>проверки по аннотациям метода, метрики по обработчику</td></tr>
+        </tbody>
+      </table>
+      <details class="deep">
+        <summary>Под капотом: doDispatch в Spring 7.0.9</summary>
+        <p>Сокращённый метод, обработка multipart и асинхронности убрана. Видно, что исключение из любого этапа попадает в одно место — processDispatchResult.</p>
+        <pre><code class="language-java">mappedHandler = getHandler(processedRequest);           // HandlerMapping по порядку
+if (mappedHandler == null) {
+    noHandlerFound(processedRequest, response);           // 404
+    return;
+}
+if (!mappedHandler.applyPreHandle(processedRequest, response)) {
+    return;                                               // интерцептор вернул false
+}
+HandlerAdapter ha = getHandlerAdapter(mappedHandler.getHandler());
+mv = ha.handle(processedRequest, response, mappedHandler.getHandler()); // аргументы, вызов, запись тела
+mappedHandler.applyPostHandle(processedRequest, response, mv);
+// исключение из любой строки выше ловится и передаётся сюда:
+processDispatchResult(processedRequest, response, mappedHandler, mv, dispatchException);
+// внутри: HandlerExceptionResolver по порядку, затем afterCompletion</code></pre>
+      </details>
+    </section>
+
+    <section class="step" id="arguments">
+      <h2>Аргументы собирают резолверы: аннотация говорит, откуда взять значение</h2>
+      <p>Перед вызовом метода RequestMappingHandlerAdapter проходит по его параметрам и для каждого ищет HandlerMethodArgumentResolver, который умеет его заполнить. <code>@PathVariable</code> берёт кусок пути, <code>@RequestParam</code> — параметр запроса, <code>@RequestHeader</code> — заголовок, <code>@RequestBody</code> — тело через конвертер. Есть резолверы, которые узнают параметр по типу: HttpServletRequest, Principal, Locale.</p>
+      <p>Из пути, параметров и заголовков приходят строки. Резолвер переводит их в тип параметра через ConversionService: <code>"42"</code> становится <code>long</code>. Если не получилось, будет MethodArgumentTypeMismatchException и 400, как у <code>/payments/abc</code>. Тело читает конвертер, которого выбирают по Content-Type: для <code>application/json</code> это Jackson. Обрезанный JSON дал HttpMessageNotReadableException и тоже 400.</p>
+      <p>Параметр без аннотации Spring не отвергает, а угадывает. Простой тип — строку, число, дату — он считает <code>@RequestParam</code> и не требует его в запросе. Остальное — <code>@ModelAttribute</code>: объект собирается из параметров запроса по именам полей. Отсюда тихая ошибка: забыл <code>@RequestBody</code>, и JSON в теле никто не читает. Ещё одна ловушка — имя параметра. <code>@PathVariable long id</code> без имени в скобках работает, только если компилятор сохранил имена параметров в байткоде флагом <code>-parameters</code>: с Spring 6.1 их больше не достают из отладочной информации. <a href="../examples/web/MvcArgumentsDemo.java">MvcArgumentsDemo.java</a> собран через <code>./run.sh</code>, то есть без этого флага:</p>
+      <pre><code class="language-java">record PaymentRequest(String account, Long amount) {}
+
+@PostMapping("/with-body")
+String withBody(@RequestBody PaymentRequest request) { return request.toString(); }
+
+@PostMapping("/without-body")
+String withoutBody(PaymentRequest request) { // забыли @RequestBody: Spring ищет поля в параметрах запроса
+    return request.toString();
+}
+
+@GetMapping("/named/{id}")
+String named(@PathVariable("id") long id) { return "id=" + id; }   // имя задано явно
+
+@GetMapping("/unnamed/{id}")
+String unnamed(@PathVariable long id) { return "id=" + id; }       // имя нужно взять из байткода
+
+// POST обоих методов с телом {"account":"acc-1","amount":500}, затем GET /named/42 и /unnamed/42</code></pre>
+      <pre class="out">POST /with-body -&gt; 200
+  body: PaymentRequest[account=acc-1, amount=500]  (text/plain;charset=ISO-8859-1)
+POST /without-body -&gt; 200
+  body: PaymentRequest[account=null, amount=null]  (text/plain;charset=ISO-8859-1)
+GET /named/42 -&gt; 200
+  body: id=42  (text/plain;charset=ISO-8859-1)
+GET /unnamed/42 -&gt; 500
+  IllegalArgumentException: Name for argument of type [long] not specified, and parameter name information not available via reflection. Ensure that the compiler uses the '-parameters' flag.</pre>
+      <p>Без <code>@RequestBody</code> метод получил объект с пустыми полями, и ответ 200 — ни ошибки, ни предупреждения. Без имени и без флага — 500 с прямой подсказкой в тексте исключения. В проекте на Spring Boot флаг включён: его ставят <code>spring-boot-starter-parent</code> для Maven и плагин Boot для Gradle. Проблема всплывает в модулях со своей сборкой и после копирования кода между проектами, поэтому в общих библиотеках имена пишут явно.</p>
+      <div class="trap">
+        <p class="myth">Если в JSON нет поля, Spring вернёт 400.</p>
+        <p class="fact">Зависит от типа поля. String или Long молча станут null, а лишние поля Jackson просто пропустит. Отсутствующее поле примитивного типа в Boot 4 даёт 400: Jackson 3 по умолчанию не кладёт null в <code>long</code> (FAIL_ON_NULL_FOR_PRIMITIVES), а Jackson 2 в Boot 3 молча ставил 0. Проверено на Boot 4.1.1 и отдельно на Jackson 2.21. Обязательность описывают явно: <code>@Valid</code> и <code>@NotNull</code> (тема <a href="spring-validation.html">Validation & Errors</a>).</p>
+      </div>
+    </section>
+
+    <section class="step" id="responses">
+      <h2>Ответ пишет конвертер, выбранный по Accept и типу результата</h2>
+      <p><code>@RestController</code> — это <code>@Controller</code> плюс <code>@ResponseBody</code> на каждом методе. С ним значение, которое вернул метод, становится телом ответа. Его обрабатывает RequestResponseBodyMethodProcessor. Он берёт типы из заголовка Accept, оставляет те, что метод разрешил в produces и что умеет записать хотя бы один конвертер для этого класса, выбирает самый конкретный и отдаёт значение конвертеру. Если ничего не осталось — 406, как у запроса с <code>Accept: application/xml</code>: XML-конвертера в демо нет.</p>
+      <p>Конвертеры опрашиваются по порядку, и StringHttpMessageConverter стоит раньше Jackson. Поэтому String из REST-метода уходит как есть. Продолжение MvcArgumentsDemo:</p>
+      <pre><code class="language-java">@RestController
+static class PaymentController {
+    @GetMapping(value = "/status", produces = "application/json")
+    String status() { return "ok"; }  // StringHttpMessageConverter пишет строку как есть, без кавычек JSON
+}
+
+@Controller
+static class PageController {
+    @GetMapping("/page")
+    String page() { return "ok"; }    // без @ResponseBody строка — имя представления (view)
+}</code></pre>
+      <pre class="out">GET /status -&gt; 200
+  body: ok  (application/json)
+GET /page -&gt; 404
+  NoHandlerFoundException: No endpoint GET /ok.</pre>
+      <p>В первом случае заголовок обещает JSON, а в теле <code>ok</code> без кавычек — клиент на Jackson упадёт при разборе. Нужна JSON-строка — верни объект или Map. Во втором случае <code>@Controller</code> без <code>@ResponseBody</code> воспринял "ok" как имя страницы. Spring нашёл стандартный InternalResourceViewResolver, сделал внутренний forward на <code>/ok</code> и не нашёл там обработчика. Так выглядит частая ошибка: REST-контроллер пометили <code>@Controller</code>.</p>
+      <p>Кодировка тоже зависит от конвертера. В чистом Spring MVC StringHttpMessageConverter пишет в ISO-8859-1 — это видно по Content-Type в выводе выше, и кириллица превратится в знаки вопроса. Boot настраивает UTF-8 (<code>spring.http.converters.string-encoding-charset</code>). Тот же String в MvcBootDemo:</p>
+      <pre class="out">GET /payments/1
+  200 application/json Платёж 1</pre>
+      <p>Кириллица на месте, но тело опять не JSON: Boot исправляет кодировку, а не формат. Для статуса и заголовков, вычисленных в коде, метод возвращает ResponseEntity. <code>@ResponseStatus</code> на методе подходит, когда статус фиксирован, как 201 у create.</p>
+      <p>JSON в Spring 7 и Boot 4 пишет Jackson 3. Его классы переехали в пакет <code>tools.jackson</code>, конвертер называется JacksonJsonHttpMessageConverter, а старый MappingJackson2HttpMessageConverter для Jackson 2 помечен на удаление. Аннотации остались прежними: <code>@JsonProperty</code> и другие лежат в <code>com.fasterxml.jackson.annotation</code>, в демо для этого подключается jackson-annotations 2.21.</p>
+      <p>Если метод бросил исключение, DispatcherServlet по порядку спрашивает HandlerExceptionResolver. Первым идёт поиск <code>@ExceptionHandler</code> в контроллере и в <code>@ControllerAdvice</code>. Потом <code>@ResponseStatus</code> на классе исключения. Последний переводит стандартные исключения Spring в 4xx — им выданы все коды из шага 3. Если не справился никто, исключение уходит в Tomcat, и в Boot ответ собирает <code>/error</code>. Как сделать единый формат ошибок — в теме <a href="spring-validation.html">Validation & Errors</a>.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Spring MVC держит поток до конца ответа, и это его главная граница</h2>
+      <p>Всё описанное выше выполняется в одном потоке Tomcat. Пока метод ждёт базу или внешний API, поток занят (тема <a href="servlet.html">Servlet & Tomcat</a>). Отпустить его можно асинхронным результатом: если метод возвращает CompletableFuture, DeferredResult или Callable, DispatcherServlet запускает асинхронную обработку сервлета и возвращает поток в пул. Когда результат готов, запрос второй раз проходит через DispatcherServlet и только тогда пишет ответ. Интерцептор получает в этот момент <code>afterConcurrentHandlingStarted</code> вместо postHandle. Это нужно для долгого ожидания — long polling, SSE через SseEmitter, — а не для ускорения обычного запроса.</p>
+      <p>Функциональные эндпоинты (RouterFunction) описывают маршруты кодом, а не аннотациями. Это не отдельный фреймворк: тот же DispatcherServlet, свои маппинг и адаптер. Их удобно собирать программно и тестировать без рефлексии, но команда должна договориться об одном стиле.</p>
+      <p>В Spring 7 появилось версионирование API. У <code>@GetMapping</code> есть атрибут <code>version</code>: один путь может вести в разные методы для версий 1 и 2, а откуда брать версию, задаёт настройка — заголовок, параметр запроса или сегмент пути, в Boot это <code>spring.mvc.apiversion.use.*</code>. Проверено на Boot 4.1.1 с <code>spring.mvc.apiversion.use.header=API-Version</code>: заголовок 1 и 2 вызвал разные методы, неизвестная версия 3 получила 400.</p>
+      <p>MVC плохо подходит там, где соединений тысячи, живут они долго, а работы по каждому мало: стриминг, тысячи подписчиков SSE, прокси-шлюз. Там нужен WebFlux с неблокирующим стеком (тема <a href="spring-reactive.html">WebFlux</a>). Если код блокирующий, а проблема только в числе ожидающих потоков, сначала попробуй виртуальные потоки: модель MVC и код контроллеров не меняются.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>DispatcherServlet — обычный сервлет, который опрашивает списки стратегий: маппинг находит обработчик, адаптер вызывает, резолверы исключений превращают ошибки в ответы.</li>
+        <li>Таблица маршрутов строится при старте; на запросе побеждает самый точный вариант, а статус ошибки показывает первый не пройденный этап: 404, 405, 415, 406, 400.</li>
+        <li>Аргументы собирают резолверы по аннотациям; без аннотации Spring угадывает, и забытый @RequestBody даёт null-поля без ошибки.</li>
+        <li>Тело читает и пишет HttpMessageConverter, выбранный по Content-Type, Accept и типу; String обгоняет Jackson и уходит как есть.</li>
+        <li>postHandle вызывается после записи JSON — менять ответ нужно раньше, в ResponseBodyAdvice или ResponseEntity.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="request-path" data-freq="3">
+      <h3>Что происходит с запросом в Spring MVC от Tomcat до контроллера?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Tomcat передаёт запрос по цепочке фильтров в DispatcherServlet — единственный сервлет приложения. Тот спрашивает HandlerMapping, кто обработает запрос. RequestMappingHandlerMapping находит метод контроллера по таблице, которую построил при старте из аннотаций. Дальше интерцепторы, затем HandlerAdapter собирает аргументы через резолверы и конвертеры, вызывает метод, а результат через конвертер пишет в ответ.</p>
+          <p>Если на каком-то этапе бросилось исключение, его разбирают HandlerExceptionResolver: <code>@ExceptionHandler</code>, <code>@ResponseStatus</code>, стандартные коды. Поэтому по статусу видно, где запрос сломался: 404 — путь, 405 — метод, 415 и 406 — форматы, 400 — аргументы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Адаптеры нужны, потому что обработчики бывают разными: HandlerMethod, RouterFunction, HttpRequestHandler. DispatcherServlet не знает их сигнатур.</li>
+            <li>В Boot DispatcherServlet инициализируется на первом запросе; <code>spring.mvc.servlet.load-on-startup</code> переносит это на старт.</li>
+            <li><code>@EnableWebMvc</code> в Boot отключает автоконфигурацию MVC; настраивать нужно через WebMvcConfigurer.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Клиент шлёт DELETE /payments/42 с битым JSON, а такого метода нет. Какой будет статус?</summary>
+          <p>405. Таблица маршрутов отсеивает кандидатов по пути и HTTP-методу до того, как кто-то читает тело. Путь /payments/{id} нашёлся, метода DELETE у него нет, и HttpRequestMethodNotSupportedException случается раньше, чем дело доходит до JSON. В ответе будет заголовок Allow с допустимыми методами.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="controller-vs-rest" data-freq="3">
+      <h3>Чем @Controller отличается от @RestController?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>@RestController</code> — это <code>@Controller</code> и <code>@ResponseBody</code> на всех методах. В нём то, что вернул метод, становится телом ответа: объект превращается в JSON конвертером, строка уходит как есть.</p>
+          <p>В обычном <code>@Controller</code> без <code>@ResponseBody</code> возвращённая строка — имя представления, страницы для шаблонизатора. Если REST-метод по ошибке оказался в <code>@Controller</code>, Spring попробует отрисовать view и вернёт 404 или ошибку шаблона вместо JSON.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>String из REST-метода пишет StringHttpMessageConverter, он стоит раньше Jackson. С <code>produces=application/json</code> клиент получит <code>ok</code> без кавычек — невалидный JSON.</li>
+            <li>Для вычисляемого статуса и заголовков возвращают ResponseEntity; <code>@ResponseStatus</code> — для фиксированного.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="filter-vs-interceptor" data-freq="3">
+      <h3>Чем фильтр отличается от HandlerInterceptor?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Фильтр — часть Servlet API, он стоит в цепочке Tomcat до DispatcherServlet и видит все запросы, включая статику и отказы Spring Security. Интерцептор — часть Spring MVC: его вызывает DispatcherServlet после выбора обработчика, поэтому он знает метод контроллера и его аннотации.</p>
+          <p>Фильтр беру для того, что не зависит от контроллера: логирование, MDC, CORS, безопасность. Интерцептор — когда решение зависит от метода: проверка по аннотации, метрики по обработчику.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>postHandle вызывается после того, как @ResponseBody записал тело. Большой ответ уже ушёл клиенту, и даже заголовки не поменять. Менять JSON-ответ надо в ResponseBodyAdvice.</li>
+            <li>afterCompletion получает исключение, только если его не обработал ни один HandlerExceptionResolver.</li>
+            <li>Для асинхронного результата вместо postHandle вызывается afterConcurrentHandlingStarted, а остальное — при повторном проходе запроса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="request-params" data-freq="2">
+      <h3>Чем отличаются @PathVariable, @RequestParam и @RequestBody?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>@PathVariable</code> берёт часть пути по шаблону, например id из <code>/payments/{id}</code>. <code>@RequestParam</code> — параметр запроса после знака вопроса или поле формы. <code>@RequestBody</code> — всё тело запроса, которое конвертер, выбранный по Content-Type, превращает в объект; для JSON это Jackson.</p>
+          <p>Первые два приходят строками и переводятся в нужный тип; не получилось — 400. Тело с неверным Content-Type даёт 415, а непарсящийся JSON — 400.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без аннотации простой тип считается необязательным @RequestParam, а объект — @ModelAttribute из параметров. Забытый @RequestBody даёт объект с null-полями и ответ 200.</li>
+            <li>Имена без явного указания берутся из байткода только с флагом компилятора <code>-parameters</code>; в Boot его включает сборка, в других модулях — 500 с подсказкой.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Клиент шлёт JSON, а в сервис приходят пустые поля, и ошибок нет. Где искать?</summary>
+          <pre><code class="language-java">@PostMapping("/payments")
+Payment create(PaymentRequest request) {
+    return service.create(request.account(), request.amount());
+}</code></pre>
+          <p>У параметра нет <code>@RequestBody</code>. Spring считает его <code>@ModelAttribute</code> и ищет account и amount в параметрах запроса, а тело никто не читает. Поля остаются null, ответ 200. Нужна аннотация <code>@RequestBody</code>, а обязательные поля стоит проверять через <code>@Valid</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="message-converters" data-freq="2">
+      <h3>Как Spring превращает JSON в объект и обратно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через HttpMessageConverter. Для <code>@RequestBody</code> Spring смотрит Content-Type запроса и ищет конвертер, который умеет читать такой тип в класс параметра, — для JSON это Jackson. Для ответа берёт типы из Accept, пересекает с тем, что умеют конвертеры и что разрешено в produces, и пишет значение выбранным конвертером.</p>
+          <p>Если подходящего конвертера для чтения нет — 415, для ответа — 406. В Spring Boot конвертеры настроены автоконфигурацией, и Jackson берёт настройки из <code>spring.jackson.*</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Порядок конвертеров важен: StringHttpMessageConverter стоит раньше Jackson, поэтому String уходит как есть.</li>
+            <li>Spring 7 и Boot 4 работают на Jackson 3: пакет tools.jackson, конвертер JacksonJsonHttpMessageConverter; MappingJackson2HttpMessageConverter помечен на удаление. Аннотации остались в com.fasterxml.jackson.annotation.</li>
+            <li>Переезд с Boot 3 на Boot 4 меняет поведение: отсутствующее поле примитивного типа Jackson 2 заполнял нулём, а Jackson 3 отвечает ошибкой, и клиент получает 400.</li>
+            <li>В чистом Spring MVC StringHttpMessageConverter пишет в ISO-8859-1; Boot ставит UTF-8.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet.html">Spring Framework Reference: DispatcherServlet</a> — основа урока: специальные бины, порядок обработки, интерцепторы, исключения.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/arguments.html">Spring Framework Reference: Method Arguments</a> — какие аргументы понимает метод контроллера и что значит отсутствие аннотации.</li>
+      <li><a href="https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-webmvc/src/main/java/org/springframework/web/servlet/DispatcherServlet.java">Исходники Spring 7.0.9: DispatcherServlet</a> — методы doDispatch и processDispatchResult.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/web/servlet.html">Spring Boot Reference: Servlet Web Applications</a> — автоконфигурация MVC, почему не нужен @EnableWebMvc, конвертеры и статические файлы.</li>
+      <li><a href="https://www.manning.com/books/spring-start-here">Spring Start Here</a>, главы 7–10 — простое введение в контроллеры и REST-эндпоинты; детали проверены по Spring 7.0.9.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
