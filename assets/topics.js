@@ -507,7 +507,7 @@ window.KB_TREE = [
           scope: 'IoC и DI, граф объектов, BeanDefinition и bean, BeanFactory и ApplicationContext, refresh, иерархия контекстов, Spring и Boot' },
         { id: 'spring-beans', freq: 3, status: 'draft', title: 'Configuration & Beans',
           scope: 'component scan, stereotypes, @Configuration и @Bean, full и lite mode, @Import, FactoryBean, @Profile и @Conditional' },
-        { id: 'spring-di', freq: 3, status: 'empty', title: 'Dependency Resolution',
+        { id: 'spring-di', freq: 3, status: 'draft', title: 'Dependency Resolution',
           scope: 'constructor, setter и field injection, выбор кандидата по типу, @Qualifier, @Primary и @Fallback, generics, коллекции, Optional и ObjectProvider, @Resource' },
         { id: 'bean-scopes', freq: 3, status: 'empty', title: 'Bean Scopes',
           scope: 'singleton и prototype, время жизни и thread safety, prototype внутри singleton, ObjectProvider, scoped proxy и @Lookup, request и session, уничтожение' },

@@ -31,3 +31,17 @@
 - Scan conflicts и случайный импорт, границы декларативности → composition/conditions/factories.
 
 Проверка реализации: ConfigurationClassEnhancer.BeanMethodInterceptor и AbstractBeanFactory.getObjectForBeanInstance, исходники v7.0.9. Учебный ориентир — Spring Start Here, главы 2–3; современное поведение — Reference, Java-based configuration, classpath scanning, container extension points.
+
+## Dependency Resolution
+
+Центральный вопрос: какую ссылку Spring передаст в injection point и почему?
+
+- Constructor/setter/field, момент внедрения, final и optional setters → injection-style; constructor card.
+- Тип/qualifier/generics, candidate eligibility → candidates и qualifiers; candidates card.
+- Primary, Fallback (6.2+), Priority/name/default; version-sensitive shortcuts и -parameters → single-choice, deep; preference card.
+- List/Map, Order, одинаковый qualifier на нескольких beans → collections; DiDemo.
+- Optional, required=false, nullable, ObjectProvider getIfAvailable/getIfUnique/orderedStream, lazy → deferred; provider card.
+- Resource by name, Autowired by type, unresolved/ambiguous errors → qualifiers/boundaries.
+- Constructor cycles → Lifecycle, prototype retrieval → Scopes; не размазывать здесь их механизмы.
+
+Источники: Reference, Annotation-based Container Configuration; исходники DefaultListableBeanFactory.doResolveDependency/determineAutowireCandidate. В 7.0.9 single selection включает primary/не-fallback, dependency name, suggested qualifier name, highest priority, default candidate и resolvable dependency; схема показывает понятный семантический случай, а не обещает неизменный порядок всех внутренних оптимизаций.

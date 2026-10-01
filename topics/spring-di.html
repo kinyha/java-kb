@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Dependency Resolution · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-di">
+<main class="page">
+  <header class="topic-head"><h1>Spring: Dependency Resolution</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Injection point задаёт требования к ссылке: тип, generic-аргументы, qualifiers и допустимость отсутствия. Spring сначала ограничивает кандидатов, затем выбирает одного или собирает группу. Конструктор показывает контракт объекта; Optional разрешает отсутствие; ObjectProvider переносит запрос к фабрике на более поздний момент.</p>
+    </div>
+    <section class="step" id="injection-style">
+      <h2>Конструктор делает обязательные зависимости частью инварианта</h2>
+      <p>PaymentService без Gateway не умеет выполнять свою основную работу. Если Gateway спрятан в @Autowired поле, обычный new PaymentService() создаёт внешне существующий, но неполный объект. Ошибка вылезает позже при первом вызове. Конструктор требует зависимость в момент создания и не позволяет забыть её при ручной сборке или тесте.</p>
+      <p>Для класса с единственным конструктором @Autowired не нужен: Spring использует его для разрешения параметров. Поле можно сделать final. Это не магия immutable service — внутреннее состояние зависимости может быть изменяемым, — но сам контракт «после конструктора ссылка задана» становится понятным без знания Spring.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 188" role="img" aria-label="При constructor injection ссылка есть уже внутри конструктора. При field injection сначала выполняется конструктор с null-полем, потом Spring заполняет поле до init.">
+            <defs>
+              <marker id="di-time" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="28" class="dg-cap">МОМЕНТ, КОГДА ДОСТУПНА ЗАВИСИМОСТЬ</text>
+            <text x="20" y="80" class="dg-in">constructor</text><text x="20" y="142" class="dg-in">field/setter</text>
+            <path d="M164 172 L695 172" class="dg-line" marker-end="url(#di-time)"/>
+            <rect x="164" y="53" width="190" height="42" rx="6" class="dg-cell hit"/>
+            <rect x="390" y="53" width="120" height="42" rx="6" class="dg-cell hit"/>
+            <rect x="552" y="53" width="140" height="42" rx="6" class="dg-cell hit"/>
+            <rect x="164" y="115" width="190" height="42" rx="6" class="dg-cell miss"/>
+            <rect x="390" y="115" width="120" height="42" rx="6" class="dg-cell hit"/>
+            <rect x="552" y="115" width="140" height="42" rx="6" class="dg-cell hit"/>
+            <path d="M354 74 L386 74" class="dg-line" marker-end="url(#di-time)"/>
+            <path d="M510 74 L548 74" class="dg-line" marker-end="url(#di-time)"/>
+            <path d="M354 136 L386 136" class="dg-line" marker-end="url(#di-time)"/>
+            <path d="M510 136 L548 136" class="dg-line" marker-end="url(#di-time)"/>
+            <text x="259" y="79" text-anchor="middle" class="dg-in">new(gateway)</text>
+            <text x="450" y="79" text-anchor="middle" class="dg-in">populate</text>
+            <text x="622" y="79" text-anchor="middle" class="dg-in">init</text>
+            <text x="259" y="141" text-anchor="middle" class="dg-in">new(): field=null</text>
+            <text x="450" y="141" text-anchor="middle" class="dg-in">inject</text>
+            <text x="622" y="141" text-anchor="middle" class="dg-in">init</text>
+          </svg>
+        </div>
+        <figcaption>Constructor injection позволяет сохранить инвариант через final-поле. Заполнение поля после new требует работы контейнерного processor.</figcaption>
+      </figure>
+      <p>Setter и field injection происходят после конструктора при population объекта. Поэтому обращаться к field-injected зависимости из конструктора рано. Setter полезен, если объект действительно допускает изменение или отсутствие collaborator и сохраняет корректное значение по умолчанию. Field injection скрывает контракт и связывает полноценное создание объекта с reflection/processor; удобство короткой записи имеет эту цену.</p>
+      <p>При нескольких конструкторах явно обозначь намерение. Только один может быть @Autowired(required=true). Если несколько помечены required=false, Spring выбирает удовлетворимый вариант с наибольшим числом зависимостей; при невозможности использует подходящий default/primary constructor, если он есть. Несколько конструкторов не означают автоматическое «всегда взять самый длинный».</p>
+      <p>Большой конструктор — сигнал, что у класса много требований. Field injection этот сигнал прячет. Не нужно дробить сервис ради произвольного числа параметров, но стоит понять, почему один объект одновременно знает про платежи, уведомления, отчётность и управление сессиями.</p>
+    </section>
+    
+    <section class="step" id="candidates">
+      <h2>Каждый injection point задаёт запрос к множеству кандидатов</h2>
+      <p>Autowired начинается с требуемого типа и metadata injection point: параметр, поле или аргумент factory method. Spring учитывает типы определений, generic-аргументы, qualifiers и eligibility для autowiring. Bean, подходящий по имени, но не по типу, не становится корректной зависимостью. Несколько зарегистрированных реализаций — нормальная ситуация, пока правила дают понятный ответ.</p>
+      <p>Для PaymentService с Gateway это могут быть клиенты разных регионов. Qualifier eu означает требование к роли, а не приказ взять произвольный объект с похожим названием. Когда остаётся несколько допустимых кандидатов для одиночной ссылки, вступают приоритеты. Если победителя нет, контейнер сообщает неоднозначность; он не выбирает случайный bean.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Injection point Gateway с qualifier eu рассматривает четыре определения, отбрасывает us и fallback без qualifier, выбирает euSafe по Primary и получает ссылку.">
+            <defs>
+              <marker id="di-select" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="20" y="60" width="212" height="126" rx="8" class="dg-box"/>
+            <rect x="20" y="132" width="212" height="40" rx="6" class="dg-sep" fill="none"/>
+            <text x="34" y="86" class="dg-t">Client constructor</text>
+            <text x="34" y="108" class="dg-in">@Qualifier("eu")</text>
+            <text x="34" y="157" class="dg-in">Gateway selected</text>
+            <rect x="296" y="28" width="186" height="72" rx="7" class="dg-cell"/>
+            <rect x="512" y="28" width="186" height="72" rx="7" class="dg-cell"/>
+            <rect x="296" y="132" width="186" height="72" rx="7" class="dg-cell"/>
+            <rect x="512" y="132" width="186" height="72" rx="7" class="dg-cell"/>
+            <g data-s="2-"><rect x="296" y="132" width="186" height="72" rx="7" class="dg-cell miss"/><rect x="512" y="132" width="186" height="72" rx="7" class="dg-cell miss"/></g>
+            <rect data-s="3-" x="512" y="28" width="186" height="72" rx="7" class="dg-cell hit"/>
+            <text x="308" y="52" class="dg-in">euFast</text><text x="308" y="79" class="dg-s">Gateway, eu</text>
+            <text x="524" y="52" class="dg-in">euSafe</text><text x="524" y="79" class="dg-s">Gateway, eu, Primary</text>
+            <text x="308" y="157" class="dg-in">us</text><text x="308" y="184" class="dg-s">Gateway, без eu</text>
+            <text x="524" y="157" class="dg-in">fallback</text><text x="524" y="184" class="dg-s">Gateway, без eu</text>
+            <g data-s="4"><path d="M605 100 C605 116 260 116 260 152 L236 152" class="dg-line" marker-end="url(#di-select)"/><text x="20" y="226" class="dg-ok">ссылка euSafe передана в Client</text></g>
+            <text data-s="1" x="296" y="234" class="dg-in">по типу: 4 кандидата</text>
+            <text data-s="2" x="296" y="234" class="dg-in">с eu: 2 кандидата</text>
+            <text data-s="3" x="296" y="234" class="dg-in">primary: один победитель</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Injection point требует Gateway. Все четыре определения подходят по типу; пока выбор не сделан.</li>
+          <li>Qualifier eu сужает множество до euFast и euSafe. us и fallback не имеют нужной квалификации и не могут выиграть.</li>
+          <li>Среди двух допустимых кандидатов euSafe помечен Primary. Выбирается один объект; euFast остаётся допустимым для других запросов.</li>
+          <li>Контейнер получает managed euSafe и передаёт ссылку в конструктор Client. Primary выбирает внутри допустимого множества, а не отменяет qualifier.</li>
+        </ol>
+      </figure>
+      <p>Важно отличать процесс выбора от создания. Сопоставление старается пользоваться metadata без instantiation, но недостаточная type information factory methods/FactoryBean способна потребовать ранней инициализации. Поэтому точные сигнатуры помогают и пониманию, и предсказуемому startup.</p>
+      <details class="deep">
+        <summary>Под капотом: DependencyDescriptor и resolver</summary>
+        <p>DependencyDescriptor хранит injection point и ResolvableType. <code>QualifierAnnotationAutowireCandidateResolver</code> проверяет квалификацию, DefaultListableBeanFactory находит кандидатов и выбирает результат. doResolveDependency отдельно обрабатывает Optional/Provider, suggested values, name shortcuts и multi-element dependencies. Это объясняет, почему один заученный линейный список «сначала имя, потом тип» плохо описывает все запросы.</p>
+      </details>
+    </section>
+    
+    <section class="step" id="qualifiers">
+      <h2>Qualifier и generics выражают смысл зависимости</h2>
+      <p>@Qualifier может совпадать с bean name, поскольку имя используется как fallback qualifier value. Но сама семантика — сужение type-compatible кандидатов. Несколько бинов могут иметь одинаковый qualifier eu: один нужен для одиночного клиента, а List&lt;Gateway&gt; с eu должен собрать группу. Для растущего проекта собственная qualifier-аннотация с region/channel часто понятнее свободных строк.</p>
+      <p>Generic metadata тоже участвует в выборе. Если определения объявлены как Store&lt;Payment&gt; и Store&lt;Refund&gt;, параметр Store&lt;Payment&gt; сужает выбор. JVM стирает generic-типы из runtime-класса объекта, но Spring читает сохранённые сигнатуры классов, методов и injection point через ResolvableType. Raw type или чрезмерно общий @Bean return type теряет эту информацию.</p>
+      <p>@Resource из jakarta.annotation задаёт другую исходную модель: именованный ресурс. При явном name Spring ищет это имя и проверяет совместимость типа. Без имени использует имя поля или property; при отсутствии такого bean стандартная реализация может перейти к type-based resolution. Resource ставят на поля/методы, а не используют как constructor injection. Для явной зависимости по роли чаще яснее constructor плюс Qualifier.</p>
+      <p>Переименование поля может незаметно изменить name-based выбор, поэтому бизнес-контракт лучше делать явным. Аналогично Lombok-конструктор нужно проверять по реально сгенерированным параметрам: qualifier на поле не обязан автоматически копироваться в параметр. Смотри деломбокированный код и annotation-copy настройки, а не только короткий исходник.</p>
+      <div class="trap">
+        <p class="myth">Qualifier всегда сильнее Primary, потому что это поиск по имени.</p>
+        <p class="fact">Qualifier сначала ограничивает допустимых кандидатов. Primary выбирает среди них. Primary в другом регионе не отменяет eu, а два eu-кандидата всё ещё требуют выбора для одиночной ссылки.</p>
+      </div>
+    </section>
+    
+    <section class="step" id="single-choice">
+      <h2>Primary выбирает предпочтительный bean, Fallback обозначает резерв</h2>
+      <p>@Primary означает предпочтение для одиночной зависимости среди допустимых кандидатов. Если в локальном множестве два Primary, это ошибка неоднозначности. Отмечать каждую реализацию Primary бессмысленно: предпочтение должно иметь одного победителя. Явный qualifier помогает обозначить особую роль в отдельных injection points.</p>
+      <p>@Fallback появился в Framework 6.2. Он понижает кандидат для одиночного выбора: если среди оставшихся ровно один обычный non-fallback bean, тот выигрывает. Но Fallback не исчезает из контейнера и не становится недоступным для группового внедрения. Если обычных кандидатов несколько, аннотация сама не выбирает среди них.</p>
+      <p>Когда primary/non-fallback-предпочтение не определило результат, в 7.0.9 учитываются имя зависимости и suggested name qualifier, затем highest priority, unique default candidate и зарегистрированные resolvable dependencies. @Order упорядочивает группы; это не обещание выбрать минимальный Order вместо явного single-bean контракта. @Priority имеет отдельную single-candidate семантику.</p>
+      <p>Совпадение parameter name с bean name требует, чтобы имя параметра сохранилось в bytecode. Начиная с 6.1 для обычных Java-параметров нужен компиляторный -parameters; Spring больше не извлекает имена из debug local variable table. В 6.2+ name matching может идти через оптимизированный shortcut, который проверяет тип, qualifiers и конфликты предпочтений. Поэтому имя параметра — вспомогательная часть алгоритма, а не надёжная замена квалификации.</p>
+      <p>Resolvable dependencies — специальные объекты окружения вроде самого ApplicationContext или BeanFactory, которые контекст предоставляет по контракту без обычного пользовательского определения. Их наличие не оправдывает инъекцию контекста в каждый сервис: для бизнес-класса видимые зависимости полезнее универсального доступа ко всему графу.</p>
+    </section>
+    
+    <section class="step" id="collections">
+      <h2>Коллекция собирает кандидатов, а не победителя одиночного выбора</h2>
+      <p>Антифрод может прогонять платёж через несколько правил. List&lt;Rule&gt; означает «собери подходящие Rule», а не «выбери Rule и положи в список». Primary и Fallback не выкидывают остальные подходящие элементы. Qualifier на коллекции по-прежнему ограничивает группу, потому что меняется требование к допустимости, а не предпочтение одиночного результата.</p>
+      <p>Массивы и List можно упорядочить Ordered, @Order или @Priority: меньшее число раньше. Без указаний порядок следует регистрации. Не превращай случайный registration order в бизнес-гарантию. Map&lt;String, Gateway&gt; собирает ссылки под bean names; @Order не означает общий контракт сортировки keys Map или Set.</p>
+      <p><a href="../examples/spring-core/DiDemo.java">Полный пример DiDemo.java</a>, Java 21, Spring 7.0.9. Ниже — фрагмент.</p><pre><code class="language-bash">cd examples/spring-core
+      ./run.sh DiDemo</code></pre><pre><code class="language-java">Client(@Qualifier(&quot;eu&quot;) Gateway selected, List&lt;Gateway&gt; all,
+             Optional&lt;Missing&gt; optional, ObjectProvider&lt;Missing&gt; deferred) {
+          this.selected=selected; this.all=all;
+          this.optional=optional; this.deferred=deferred;
+      }
+      // Фрагмент DiDemo: euSafe имеет @Primary; четыре factory methods
+      // имеют @Order(1..4). FieldClient отдельно показывает момент field injection.</code></pre>
+      <pre class="out">field during constructor: null
+      selected: eu-safe
+      field after creation: eu-safe
+      all: [eu-fast, eu-safe, us, fallback]
+      optional: false
+      available: false
+      getObject: NoSuchBeanDefinitionException
+      non-fallback wins: real</pre>
+      <p>Вывод одновременно показывает три разных правила: поле ещё null в конструкторе, одиночный eu-запрос выбрал euSafe, а List содержит все четыре Gateway. Порядок списка задан явно. FallbackConfig отдельно подтверждает, что один обычный bean выигрывает у резервного без Primary.</p>
+      <p>Пустая коллекция зависит от injection point: для единственного конструктора multi-element аргумент может разрешиться в пустую коллекцию; для обычного required field/method отсутствие matching элементов по умолчанию считается неудовлетворённой зависимостью. Если отсутствие плагинов — часть контракта, укажи её явно через provider stream или соответствующую необязательность и проверь именно свой вариант.</p>
+    </section>
+    
+    <section class="step" id="deferred">
+      <h2>Optional описывает отсутствие, ObjectProvider — отложенный запрос</h2>
+      <p>Optional&lt;T&gt; делает отсутствие T допустимым, но не лечит два равноправных кандидата. При внедрении разрешается фактическое состояние: Optional содержит выбранный bean или empty. Это снимок результата внедрения, а не динамический registry lookup на каждом isPresent.</p>
+      <p>ObjectProvider&lt;T&gt; внедряется как handle к фабрике и разрешает target при вызове. Это нужно для lazy-получения, необязательной интеграции и повторного получения prototype. Если target singleton, несколько вызовов всё равно вернут одну опубликованную ссылку. Сам provider не меняет scope и не обеспечивает отсутствие ошибок в target constructor.</p>
+      <table class="mx">
+        <thead><tr><th>Метод provider</th><th>Нет T</th><th>Несколько T без победителя</th></tr></thead>
+        <tbody>
+          <tr><td>getObject()</td><td>NoSuchBeanDefinitionException</td><td>NoUniqueBeanDefinitionException</td></tr>
+          <tr><td>getIfAvailable()</td><td>null или supplied default</td><td>NoUniqueBeanDefinitionException</td></tr>
+          <tr><td>getIfUnique()</td><td>null или supplied default</td><td>null или supplied default</td></tr>
+          <tr><td>orderedStream()</td><td>пустой stream</td><td>все подходящие экземпляры по order</td></tr>
+        </tbody>
+      </table>
+      <p>@Autowired(required=false) на поле оставляет значение по умолчанию при отсутствии зависимости. На многопараметрическом методе может пропустить весь method call, если хотя бы один обязательный аргумент не найден; это не поэлементная подстановка null. Nullable-аргумент явно допускает null. Эти варианты лучше выбирать по инварианту объекта, а не использовать как универсальное средство скрыть startup failure.</p>
+      <p>Lazy proxy на injection point откладывает получение ссылки до первого вызова. Но если dependency на самом деле отсутствует, ошибка перемещается в runtime. Lazy не выражает optional-контракт; для него подходят Optional или provider.getIfAvailable. Если вызвать provider.getObject прямо из конструктора, отложенность сразу теряется.</p>
+    </section>
+    
+    <section class="step" id="boundaries">
+      <h2>Ошибка DI говорит о конкретном запросе, а не о неисправности Spring</h2>
+      <p>При NoSuchBeanDefinitionException сначала найди требуемый type/generic/qualifier и проверь definitions: package scan, import, active profiles, conditions, declared factory type. При NoUniqueBeanDefinitionException выпиши имена реально подходящих кандидатов, а затем проверь primary/fallback и совпадение имени зависимости. Эти две ветки требуют разных исправлений.</p>
+      <p>Необязательность имеет смысл только тогда, когда приложение корректно работает без интеграции. Если обязательный банковский gateway скрыт за getIfUnique и в отсутствие выбора код молча пропускает платёж, это уже бизнес-ошибка. Контейнер может сообщить факт, но не определить за тебя контракт отсутствия.</p>
+      <p>DI не вычисляет маршрутизацию по данным каждого платежа. Один constructor injection выбирается при создании сервиса, а решение «этот клиент платит через банк X» требует явной стратегии: registry Map, router или отдельной фабрики бизнес-объектов. Не пытайся выразить runtime-выбор новым набором Primary-аннотаций.</p>
+      <p>Цикл обязательных конструкторов относится к порядку создания и раскрыт в <a href="bean-lifecycle.html">Lifecycle</a>. Provider для нового экземпляра и scoped proxy раскрыты в <a href="bean-scopes.html">Scopes</a>. Здесь главное — восстановить требования injection point и объяснить, почему контейнер выдал именно эту ссылку.</p>
+    </section>
+    <div class="summary">
+      <ul>
+        <li>Конструктор выражает обязательные требования; field injection происходит после new.</li>
+        <li>Qualifier ограничивает множество, Primary/Fallback помогают одиночному выбору внутри него.</li>
+        <li>List собирает группу и не сужается до Primary.</li>
+        <li>Optional и provider не делают неоднозначность корректной.</li>
+        <li>Runtime-маршрутизация платежей — бизнес-решение, а не повторный autowiring сервиса.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="constructor-injection" data-freq="3">
+      <h3>Почему constructor injection предпочитают field injection?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я делаю обязательные зависимости явными при создании объекта. Конструктор позволяет final-поля, простую ручную сборку и тест без контекста. Объект после конструктора уже имеет нужные ссылки, а field injection сначала оставляет поле с default value и заполняет его позднее.</p>
+          <p>Setter использую, когда optional или изменяемая dependency действительно допускается контрактом. Field injection короче, но скрывает требования и момент готовности.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Единственный конструктор используется без Autowired; несколько конструкторов требуют понимания candidate selection.</li>
+            <li>Constructor injection проявляет циклы и перегруженные ответственности вместо того, чтобы скрывать их в полях.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="qualifier-primary" data-freq="3">
+      <h3>Как Spring выбирает между несколькими бинами одного типа?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я начинаю с требуемого типа и qualifiers injection point. Qualifier ограничивает кандидатов, а Primary задаёт предпочтение для одной ссылки среди допустимых. Если одного победителя нет, Spring сообщает неоднозначность; имя и другие metadata могут уточнить выбор.</p>
+          <p>Для регионального клиента я делаю роль явной qualifier-аннотацией. Имя параметра оставляю удобством, потому что оно зависит от сохранения parameter metadata.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Generic signatures участвуют как дополнительные qualifiers через ResolvableType, несмотря на type erasure объекта.</li>
+            <li>С 6.2 есть Fallback; при одном обычном non-fallback bean он выигрывает у резервных.</li>
+            <li>В 7.0.9 есть name shortcuts и unique default-candidate. Алгоритм нужно связывать с версией, а не считать вечной последовательностью по памяти.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="list-injection" data-freq="3">
+      <h3>Что попадёт в List бинов и как управлять порядком?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я получу все подходящие для этого injection point beans. Qualifier ограничит группу, а Primary не оставит в списке один элемент. Ordered или Order задаст порядок массива/List, меньшее значение раньше.</p>
+          <p>Для registry по имени можно внедрить Map с ключом String. Если порядок правил влияет на результат, я задаю его явно и не полагаюсь на расположение классов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Order не задаёт порядок singleton creation: это другой граф, где влияют зависимости и DependsOn.</li>
+            <li>Не переношу sorting guarantee List на Set и Map; одинаковые Order требуют отдельного решения, если нужна строгая последовательность.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Если пометить euSafe как Primary, исчезнет ли fallback из all?</summary>
+          <p>Нет. Это preference одиночного запроса. В DiDemo all по-прежнему содержит четыре Gateway; qualifier eu на all сузил бы группу до двух региональных кандидатов.</p>
+        </details>
+      </div>
+    </article>
+    
+    <article class="q" id="optional-provider" data-freq="3">
+      <h3>Чем Optional отличается от ObjectProvider?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Optional описывает допустимое отсутствие на этапе внедрения. ObjectProvider хранит возможность обратиться к фабрике позже. Для optional-интеграции я могу использовать getIfAvailable, а для нового prototype на каждую операцию — getObject.</p>
+          <p>Оба подхода требуют понятного контракта ошибок. Optional не устраняет неоднозначность, provider не меняет scope и не гарантирует успешное создание.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>getIfAvailable возвращает null при отсутствии, но падает при нескольких равноправных кандидатах; getIfUnique возвращает null и при неоднозначности.</li>
+            <li>Если provider вызывается уже в конструкторе, выигрыша от отложенной зависимости нет.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="autowired-resource" data-freq="2">
+      <h3>Чем @Autowired отличается от @Resource?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Autowired разрешает зависимость по типу и metadata injection point; Resource начинается с имени ресурса. При явном Resource name это lookup по имени с type-check, при отсутствии name Spring выводит его из поля/property и может перейти к type fallback.</p>
+          <p>Для обязательных collaborator я чаще выбираю constructor injection и явную роль qualifier. Resource уместен, когда контракт именно именованный ресурс.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Resource относится к Jakarta common annotations и поддерживает поля/методы, а не конструкторы.</li>
+            <li>Переименование поля способно изменить name-based lookup: это скрытая связь API и сборки.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired.html">Spring Reference: Autowired</a> — основа урока: injection points, constructor resolution, multi-element и required dependencies.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired-qualifiers.html">Spring Reference: Qualifiers</a> — роли, имена и generic qualification.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired-primary.html">Spring Reference: Primary & Fallback</a> — предпочтения кандидатов с Framework 6.2+.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/beans/factory/ObjectProvider.html">ObjectProvider javadoc</a> — отсутствие, неоднозначность и orderedStream; поведение сверено для 7.0.9.</li>
+      <li><a href="https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-beans/src/main/java/org/springframework/beans/factory/support/DefaultListableBeanFactory.java">DefaultListableBeanFactory 7.0.9</a> — doResolveDependency, determineAutowireCandidate, determinePrimaryCandidate.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
