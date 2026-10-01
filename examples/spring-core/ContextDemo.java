@@ -1,38 +1,42 @@
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-import org.springframework.beans.factory.support.RootBeanDefinition;
 
 public class ContextDemo {
-    static class Gateway {}
+    record Gateway(String origin) {}
+
     static class PaymentService {
         final Gateway gateway;
-        PaymentService(Gateway gateway) { this.gateway = gateway; }
+        PaymentService(Gateway gateway) {
+            this.gateway = gateway; // Имя параметра станет доступно Spring с -parameters.
+        }
     }
-    static class Report {
-        Report() { System.out.println("Report created"); }
-    }
-    public static void main(String[] args) {
-        try (var parent = new AnnotationConfigApplicationContext()) {
-            parent.registerBean("gateway", Gateway.class);
-            parent.registerBean("bankName", String.class, () -> "Parent bank");
-            parent.refresh();
-            try (var child = new AnnotationConfigApplicationContext()) {
-                child.setParent(parent);
-                child.registerBean(PaymentService.class);
-                child.registerBean("gateway", Gateway.class); // То же имя скрывает bean родителя.
-                var definition = new RootBeanDefinition(Report.class);
-                definition.setLazyInit(true);
-                child.registerBeanDefinition("report", definition);
-                System.out.println("before refresh: " + child.containsBeanDefinition("report"));
+
+    static void compare(AnnotationConfigApplicationContext parent, String localName) {
+        try (var child = new AnnotationConfigApplicationContext()) {
+            child.setParent(parent);
+            child.registerBean(localName, Gateway.class, () -> new Gateway("child"));
+            child.registerBean(PaymentService.class);
+            try {
                 child.refresh();
-                System.out.println("singleton exists: " + child.getBeanFactory().containsSingleton("report"));
-                System.out.println("service uses local: " +
-                    (child.getBean(PaymentService.class).gateway == child.getBean("gateway")));
-                System.out.println("inherited name: " + child.getBean("bankName"));
-                System.out.println("parent sees child: " + parent.containsBean("report"));
-                Object first = child.getBean("report"); // Lazy bean создаётся на первом запросе.
-                System.out.println("same report: " + (first == child.getBean("report")));
-                System.out.println("manual is managed: " + (new Gateway() == child.getBean("gateway")));
+                System.out.println(localName + " -> " + child.getBean(PaymentService.class).gateway.origin());
+            } catch (org.springframework.beans.factory.UnsatisfiedDependencyException ex) {
+                // Для сравнения нужен корень ошибки, а не весь стек запуска.
+                Throwable cause = ex;
+                while (cause.getCause() != null) cause = cause.getCause();
+                System.out.println(localName + " -> " + cause.getClass().getSimpleName());
             }
+        }
+    }
+
+    public static void main(String[] args) {
+        // Ожидаемую ошибку второго варианта печатаем сами, без служебного WARNING.
+        Logger.getLogger("org.springframework").setLevel(Level.SEVERE);
+        try (var parent = new AnnotationConfigApplicationContext()) {
+            parent.registerBean("gateway", Gateway.class, () -> new Gateway("parent"));
+            parent.refresh();
+            compare(parent, "gateway");      // Одно имя: дочерний бин скрывает родительский.
+            compare(parent, "localGateway"); // Два имени: выбор зависит от метаданных параметра.
         }
     }
 }

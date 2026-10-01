@@ -16,28 +16,29 @@
   <header class="topic-head"><h1>Spring: IoC & Context</h1></header>
   <div class="lesson">
     <div class="note tip">
-      <p>Spring собирает граф объектов по описанию приложения. BeanDefinition — рецепт, bean — управляемый экземпляр, BeanFactory — механизм сборки, ApplicationContext — окружение и запуск. После DI у сервиса обычные Java-ссылки. Аннотации дают метаданные; поведение зависит от того, кто зарегистрировал и создал конкретный объект.</p>
+      <p>В платёжном сервисе удобно отделить проведение платежа от выбора подключения к банку. Spring получает описание этой сборки, создаёт нужные объекты и передаёт сервису готовые зависимости. После запуска сервис работает по обычным Java-ссылкам. Чтобы понять неожиданное поведение, проследи, какой объект был создан и какую ссылку получил его клиент.</p>
     </div>
     <section class="step" id="assembly">
-      <h2>Сервис должен выполнять платёж, а сборка — выбирать его зависимости</h2>
-      <p>Представь PaymentService, который внутри конструктора создаёт BankGateway, а тот — HTTP-клиент с адресом банка. Чтобы подключить песочницу или другой банк, приходится менять бизнес-класс. Когда таких сервисов десятки, адреса, пулы соединений и правила создания объектов расползаются по приложению. Проблема здесь в том, кто принимает решение о составе приложения.</p>
-      <p>Первый ход вообще не требует Spring: передать Gateway в конструктор. Service знает, как провести платёж через этот контракт, а отдельный код сборки выбирает реализацию и создаёт объекты в нужном порядке. Такой код называют <b>composition root</b>: место, где граф зависимостей собирается целиком. В тесте в тот же конструктор можно передать маленькую подставную реализацию без запуска контекста.</p>
-      <pre><code class="language-java">interface Gateway { void charge(long cents); }
-      final class PaymentService {
-          private final Gateway gateway;
-          PaymentService(Gateway gateway) { this.gateway = gateway; }
-          void pay(long cents) { gateway.charge(cents); } // Обычный вызов Java.
-      }
-      // Фрагмент: выбор реализации находится в коде сборки.
-      // new PaymentService(gatewayForThisEnvironment);</code></pre>
-      <p><b>Dependency Injection</b> — передача зависимостей извне. <b>Inversion of Control</b> — более широкая идея: часть управления передана внешнему механизму. В DI это управление сборкой объектов; в servlet-контейнере — момент вызова обработчика. Аннотация не является определением IoC: вручную собрать объект через конструктор — тоже DI.</p>
-      <p>Spring масштабирует эту идею: читает описание приложения, строит граф, выбирает зависимости и управляет жизненным циклом. Контейнер нужен, когда ручная сборка становится отдельной большой программой. Вызов gateway.charge после внедрения остаётся обычным вызовом метода; дополнительное поведение появится только при наличии прокси.</p>
+      <h2>Сервис выполняет платёж, а его зависимости выбираются при сборке</h2>
+      <p>У тебя есть PaymentService, который отправляет платёж в банк. Если он сам создаёт BankGateway и HTTP-клиент, то знает сразу две вещи: как провести платёж и как подключиться к конкретному банку. Для песочницы приходится менять код сервиса. Когда сервисов становится много, настройки подключения оказываются разбросаны по приложению.</p>
+      <p>Передадим Gateway в конструктор. Теперь сервис получает готовое подключение, а выбор банка остаётся в одном месте — в коде сборки приложения. Такой подход называется <b>внедрением зависимостей, DI</b>. Его легко использовать вручную: создать Gateway, затем передать его в новый PaymentService. В тесте вместо настоящего банка можно передать подставной объект.</p>
+      <p>Вот небольшая часть <a href="../examples/spring-core/ContextDemo.java">ContextDemo.java</a>. Сервису достаточно ссылки на зависимость; откуда она пришла, решает вызывающий код.</p>
+      <pre><code class="language-java">record Gateway(String origin) {}
+
+static class PaymentService {
+    final Gateway gateway;
+    PaymentService(Gateway gateway) {
+        this.gateway = gateway; // Внешний код выбирает объект и передаёт сюда.
+    }
+}</code></pre>
+      <p><b>Инверсия управления, IoC</b>, описывает сам перенос решения наружу. Раньше сервис управлял созданием Gateway; теперь это делает код сборки. DI — один из способов такой инверсии. У другого механизма будет другое переданное решение: например, servlet-контейнер сам выбирает момент вызова обработчика HTTP-запроса.</p>
+      <p>Spring берёт сборку приложения на себя. Ты описываешь, какие компоненты нужны и как их создавать; контейнер находит зависимости, создаёт объекты и готовит их к работе. Благодаря этому подключение к банку можно менять через конфигурацию, сохраняя код платежа. После сборки сервис пользуется обычной Java-ссылкой.</p>
     </section>
     
     <section class="step" id="definitions">
-      <h2>Описание бина и сам объект живут на разных уровнях</h2>
-      <p><b>Bean</b> — объект, которым управляет контейнер. Это может быть твой сервис, DataSource сторонней библиотеки или конфигурационный объект. Bean не обязан иметь интерфейс, аннотацию или особый базовый класс. DTO одного платежа обычно остаётся обычным объектом: контейнер не должен хранить каждый запрос пользователя.</p>
-      <p>До создания объекта Spring хранит <b>BeanDefinition</b>. В нём записано, что создавать и как: класс или factory method, имя, scope, lazy-флаг, init/destroy callbacks и другие метаданные. Из component scan, Java-конфигурации и XML получаются разные способы наполнить один реестр определений. После этого общая фабрика работает с единым описанием.</p>
+      <h2>Spring сначала читает описание, затем создаёт объект</h2>
+      <p>Контейнеру нужен рецепт создания каждого компонента. В Spring этот рецепт называется <b>BeanDefinition</b>: он содержит класс или метод создания, имя, правила повторного использования, способы инициализации и завершения работы. Например: «создать Gateway для банка из конфигурации и использовать один экземпляр в этом контейнере».</p>
+      <p>По рецепту Spring создаёт <b>бин</b> — объект, который он связывает с зависимостями и обрабатывает при запуске. Бином может быть твой PaymentService или HTTP-клиент из сторонней библиотеки. Оба проходят один путь подготовки, хотя библиотечный класс ничего о Spring не знает.</p>
       <figure class="fig">
         <div class="fig-box">
           <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Контекст хранит определения отдельно от экземпляров. Два сервиса ссылаются на один Gateway; DTO не включены в этот граф.">
@@ -47,8 +48,8 @@
             <!-- Метаданные и объекты занимают разные области. -->
             <rect x="18" y="22" width="260" height="190" rx="10" class="dg-box"/>
             <rect x="326" y="22" width="376" height="190" rx="10" class="dg-sep" fill="none"/>
-            <text x="32" y="45" class="dg-cap">BEAN DEFINITIONS</text>
-            <text x="340" y="45" class="dg-cap">ОБЪЕКТЫ В HEAP</text>
+            <text x="32" y="45" class="dg-cap">ОПИСАНИЯ БИНОВ</text>
+            <text x="340" y="45" class="dg-cap">ОБЪЕКТЫ В ПАМЯТИ</text>
             <rect x="34" y="66" width="228" height="44" rx="6" class="dg-cell"/>
             <rect x="34" y="136" width="228" height="44" rx="6" class="dg-cell"/>
             <rect x="342" y="66" width="130" height="38" rx="6" class="dg-cell hit"/>
@@ -59,7 +60,7 @@
             <path d="M472 85 C510 85 510 105 542 105" class="dg-line" marker-end="url(#ioc-model)"/>
             <path d="M472 163 C510 163 510 125 542 125" class="dg-line" marker-end="url(#ioc-model)"/>
             <text x="46" y="85" class="dg-in">paymentService</text>
-            <text x="46" y="101" class="dg-n">type + scope + dependencies</text>
+            <text x="46" y="101" class="dg-n">тип + время жизни + зависимости</text>
             <text x="46" y="161" class="dg-in">refundService</text>
             <text x="407" y="91" text-anchor="middle" class="dg-in">PaymentService</text>
             <text x="407" y="169" text-anchor="middle" class="dg-in">RefundService</text>
@@ -69,17 +70,19 @@
         </div>
         <figcaption>BeanDefinition — рецепт. Внедрение оставляет обычную Java-ссылку в объекте, а не обращение к контейнеру на каждом вызове.</figcaption>
       </figure>
-      <p>Одно определение не всегда означает один объект: singleton даёт одну готовую ссылку на имя в этой фабрике, prototype — новый экземпляр при каждом запросе создания. И один Java-класс может иметь два определения с разными именами и настройками. Поэтому вопрос «есть ли этот класс в контексте?» менее точен, чем «какое определение, в какой фабрике и с каким scope?».</p>
+      <p>Разделение описания и объекта помогает понять отложенное создание. Описание отчёта уже зарегистрировано, но сам отчёт появится только тогда, когда его кто-то запросит. А для prototype по одному описанию Spring создаёт новый объект при каждом запросе. Один Java-класс также можно зарегистрировать дважды: например, как gatewayForProduction и gatewayForSandbox, с разными настройками.</p>
+      <p>Аннотации и Java-конфигурация — способы получить эти описания. Сканер обнаруживает @Component и добавляет описание в реестр. Для @Bean описанием становится способ вызвать метод и обработать его результат. Дальше контейнер работает с общим реестром, независимо от того, как он был заполнен.</p>
       <div class="trap">
-        <p class="myth">Любой new объекта с @Component создаёт Spring bean.</p>
-        <p class="fact">Аннотация — метаданные для сканера. new обходит путь создания контейнера; созданный объект сам не получит DI, init callbacks и AOP. Внутри @Bean new допустим: результат factory method передаётся контейнеру для дальнейшей обработки.</p>
+        <p class="myth">Поставлю @Component, и любой экземпляр класса получит зависимости от Spring.</p>
+        <p class="fact">Сканер использует аннотацию, чтобы зарегистрировать бин. При самостоятельном new ты создаёшь другой экземпляр. Он проходит только обычный Java-конструктор. Если new находится внутри @Bean, результат метода передаётся Spring, и контейнер продолжает его подготовку.</p>
       </div>
-      <p>Граница управления относится к конкретному экземпляру. Вызов метода managed-сервиса не делает managed все объекты, которые этот метод вернул или создал. При чтении кода сначала найди место регистрации и получения ссылки — это объясняет больше, чем поиск аннотаций по проекту.</p>
+      <p>Представь, что управляемый PaymentService создаёт Receipt для ответа клиенту. Receipt остаётся обычным результатом метода: Spring подготавливал сам сервис, а не каждый объект, который тот создаёт. Поэтому при разборе ошибки полезнее найти место создания конкретного экземпляра, чем проверять аннотации на его классе.</p>
     </section>
     
     <section class="step" id="lookup">
-      <h2>Контейнер собирает граф при создании, а не заново при каждом запросе</h2>
-      <p>Чтобы создать PaymentService, нужно сначала получить Gateway. Фабрика идёт по зависимостям, пока не найдёт готовый объект или определение без ещё не разрешённых зависимостей. Затем возвращается вверх и передаёт готовые ссылки в конструкторы. Это рекурсивная сборка графа, а не последовательный обход классов по алфавиту.</p>
+      <h2>Чтобы собрать сервис, Spring сначала получает его зависимости</h2>
+      <p>Для вызова конструктора PaymentService нужен готовый Gateway. Spring ищет его среди уже созданных объектов. Если такого объекта ещё нет, читает описание Gateway, получает его зависимости и создаёт его. Затем возвращается к PaymentService и передаёт полученную ссылку в конструктор.</p>
+      <p>Получается обход графа: зависимость готовится раньше компонента, который её использует. В реальном приложении Gateway может зависеть от HTTP-клиента, а тот — от настроек и пула соединений. Схема ниже показывает тот же процесс для короткой цепочки.</p>
       <figure class="fig play">
         <div class="fig-box">
           <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Запрос сервиса проходит через фабрику, создание Gateway и конструктора PaymentService. Готовый singleton публикуется и возвращается вызывающему.">
@@ -89,18 +92,18 @@
             <rect x="18" y="30" width="166" height="64" rx="8" class="dg-box"/>
             <rect x="250" y="30" width="198" height="64" rx="8" class="dg-box"/>
             <rect x="512" y="30" width="190" height="64" rx="8" class="dg-box"/>
-            <text x="32" y="57" class="dg-t">composition root</text>
+            <text x="32" y="57" class="dg-t">код сборки</text>
             <text x="32" y="77" class="dg-in">getBean(Service)</text>
             <text x="264" y="57" class="dg-t">BeanFactory</text>
-            <text x="264" y="77" class="dg-s">definitions + cache</text>
+            <text x="264" y="77" class="dg-s">описания + готовые объекты</text>
             <text x="526" y="57" class="dg-t">создание объектов</text>
-            <g data-s="1"><path d="M184 62 L246 62" class="dg-line" marker-end="url(#ioc-get)"/><text x="250" y="126" class="dg-in">cache: пусто</text></g>
-            <g data-s="2"><path d="M448 62 L508 62" class="dg-line" marker-end="url(#ioc-get)"/><text x="250" y="126" class="dg-in">definition: PaymentService</text><text x="526" y="80" class="dg-n">нужен Gateway</text></g>
+            <g data-s="1"><path d="M184 62 L246 62" class="dg-line" marker-end="url(#ioc-get)"/><text x="250" y="126" class="dg-in">готовые: пусто</text></g>
+            <g data-s="2"><path d="M448 62 L508 62" class="dg-line" marker-end="url(#ioc-get)"/><text x="250" y="126" class="dg-in">описание: PaymentService</text><text x="526" y="80" class="dg-n">нужен Gateway</text></g>
             <g data-s="3-"><rect x="526" y="128" width="160" height="34" rx="6" class="dg-cell hit"/><text x="606" y="150" text-anchor="middle" class="dg-in">Gateway #1</text></g>
-            <g data-s="3"><text x="250" y="126" class="dg-in">cache: Gateway #1</text><path d="M606 94 L606 124" class="dg-line" marker-end="url(#ioc-get)"/></g>
+            <g data-s="3"><text x="250" y="126" class="dg-in">готовые: Gateway #1</text><path d="M606 94 L606 124" class="dg-line" marker-end="url(#ioc-get)"/></g>
             <g data-s="4-"><rect x="526" y="190" width="160" height="34" rx="6" class="dg-cell hit"/><text x="606" y="212" text-anchor="middle" class="dg-in">Service #1</text><path d="M606 190 L606 166" class="dg-line" marker-end="url(#ioc-get)"/></g>
-            <g data-s="4"><text x="250" y="126" class="dg-in">constructor(Gateway #1)</text><text x="250" y="150" class="dg-s">затем init и post-processors</text></g>
-            <g data-s="5"><path d="M512 78 L452 78" class="dg-line" marker-end="url(#ioc-get)"/><path d="M250 78 L188 78" class="dg-line" marker-end="url(#ioc-get)"/><text x="250" y="126" class="dg-in">cache: Service #1</text><text x="18" y="126" class="dg-ok">получена готовая ссылка</text></g>
+            <g data-s="4"><text x="250" y="126" class="dg-in">constructor(Gateway #1)</text><text x="250" y="150" class="dg-s">затем инициализация</text></g>
+            <g data-s="5"><path d="M512 78 L452 78" class="dg-line" marker-end="url(#ioc-get)"/><path d="M250 78 L188 78" class="dg-line" marker-end="url(#ioc-get)"/><text x="250" y="126" class="dg-in">готовые: Service #1</text><text x="18" y="126" class="dg-ok">получена готовая ссылка</text></g>
           </svg>
         </div>
         <ol class="play-steps">
@@ -111,102 +114,107 @@
           <li>Готовая ссылка сохраняется и возвращается. При повторном запросе singleton фабрика отдаст её; это может быть прокси, если обработчики обернули объект.</li>
         </ol>
       </figure>
-      <p>В обычном ApplicationContext non-lazy singleton создаются во время refresh. Поэтому первый HTTP-запрос чаще получает уже собранный сервис, а ошибка обязательной зависимости останавливает запуск приложения. Lazy и prototype меняют момент создания. Lazy-бин всё равно создастся на старте, если eager-сервис требует его прямую ссылку.</p>
-      <p>Ссылку после инициализации может заменить BeanPostProcessor: например, вернуть AOP proxy. Тогда поле gateway или ссылка на Service у клиента содержит именно объект, опубликованный контейнером. Привычное «Spring вызывает new и присваивает поле» объясняет только часть пути; lifecycle и прокси раскрыты в следующих темах.</p>
-      <p>Искать bean из ApplicationContext внутри каждого бизнес-метода — service locator. Это работает, но скрывает зависимости: по конструктору уже нельзя понять требования класса, а простой тест вынужден воспроизводить контекст. Явный конструктор сохраняет видимость графа; ObjectProvider оправдан там, где важен отложенный или повторный поиск.</p>
+      <p>При стандартном запуске ApplicationContext заранее создаёт singleton-бины, для которых включено немедленное создание. Поэтому отсутствие обязательного Gateway обычно обнаруживается при старте, а первый HTTP-запрос приходит уже в собранный PaymentService. Флаг lazy откладывает создание до первого обращения. Если другой запускаемый бин сразу требует этот объект, потребность возникнет уже на старте.</p>
+      <p>После конструктора Spring ещё выполняет внедрение в поля и методы, вызывает инициализацию и подключает обработчики. Один из них может обернуть сервис в прокси: клиент получит ссылку на оболочку, которая добавляет поведение вокруг вызова. Этот этап объясняется в <a href="bean-lifecycle.html">Bean Lifecycle</a> и <a href="spring-aop.html">AOP & Proxies</a>.</p>
+      <p>В рабочем методе сервис обычно просто вызывает gateway. Если вместо этого каждый раз писать context.getBean, зависимости скрываются внутри логики: чтобы понять требования класса, придётся прочитать все его методы. Такой способ называется service locator. Конструктор показывает требования сразу; отложенное получение через ObjectProvider полезно, когда момент создания действительно важен.</p>
     </section>
     
     <section class="step" id="context">
-      <h2>ApplicationContext организует запуск поверх BeanFactory</h2>
-      <p><b>BeanFactory</b> — базовый контракт получения и управления бинами. ListableBeanFactory добавляет перечисление, HierarchicalBeanFactory — родителя, ConfigurableBeanFactory — настройки. Рабочая реализация DefaultListableBeanFactory хранит определения и разрешает зависимости. Сам интерфейс не задаёт «ленивость» как обязательное отличие от любого контекста.</p>
-      <p><b>ApplicationContext</b> расширяет BeanFactory и добавляет окружение приложения: Environment, ресурсы, сообщения для локализации, события. Типичная реализация делегирует работу с бинами внутренней фабрике и организует её подготовку. AnnotationConfigApplicationContext умеет читать Java-конфигурацию; web-контекст добавляет окружение web-приложения.</p>
+      <h2>ApplicationContext подготавливает контейнер к работе приложения</h2>
+      <p><b>BeanFactory</b> отвечает за получение и создание бинов. Его рабочая реализация DefaultListableBeanFactory хранит описания, выбирает зависимости и создаёт экземпляры. Её можно использовать отдельно, но тогда подготовку специальных обработчиков придётся организовать самому.</p>
+      <p><b>ApplicationContext</b> организует этот запуск и добавляет то, что нужно целому приложению. Через Environment он даёт доступ к свойствам и профилям; через ResourceLoader — к ресурсам; через MessageSource — к локализованным сообщениям. Также он позволяет публиковать события. Работу с бинами типичный контекст передаёт внутренней фабрике.</p>
       <table class="mx">
-        <thead><tr><th>Задача</th><th>Голая DefaultListableBeanFactory</th><th>ApplicationContext</th></tr></thead>
+        <thead><tr><th>Что нужно сделать</th><th>Отдельная фабрика</th><th>ApplicationContext</th></tr></thead>
         <tbody>
-          <tr><td>Получить или собрать bean</td><td>Да</td><td>Да, через внутреннюю фабрику</td></tr>
-          <tr><td>Подключить processors из определений</td><td>Нужно организовать самому</td><td>Обнаруживает и регистрирует при refresh</td></tr>
-          <tr><td>Заранее создать non-lazy singleton</td><td>Можно вызвать preInstantiateSingletons</td><td>Часть стандартного refresh</td></tr>
-          <tr><td>Environment, ResourceLoader, events, messages</td><td>Не полный контекст приложения</td><td>Есть соответствующие контракты</td></tr>
+          <tr><td>Создать бин с зависимостями</td><td>Умеет</td><td>Обращается к своей фабрике</td></tr>
+          <tr><td>Подключить обработчики, объявленные бинами</td><td>Нужен отдельный код подготовки</td><td>Находит и подключает при запуске</td></tr>
+          <tr><td>Заранее создать обычные singleton-бины</td><td>Есть явный вызов preInstantiateSingletons</td><td>Выполняет при стандартном запуске</td></tr>
+          <tr><td>Работать со свойствами, ресурсами и событиями</td><td>Нужна дополнительная инфраструктура</td><td>Предоставляет эти возможности</td></tr>
         </tbody>
       </table>
-      <p><b>refresh</b> готовит инфраструктуру: обрабатывает определения, регистрирует BeanPostProcessor, настраивает события, создаёт оставшиеся eager-singleton и завершает запуск. register только сообщает контексту об определении. Конструктор <code>AnnotationConfigApplicationContext(Config.class)</code> делает регистрацию и refresh сразу; пустой конструктор оставляет момент refresh тебе.</p>
+      <p>Метод <b>refresh()</b> запускает подготовку контекста: сначала обрабатываются описания, затем подключаются обработчики объектов, создаются оставшиеся singleton-бины и завершается запуск. Вызов register лишь добавляет описание. Конструктор <code>AnnotationConfigApplicationContext(Config.class)</code> делает регистрацию и refresh сразу; пустой конструктор позволяет сначала настроить контекст и только затем запустить его.</p>
       <details class="deep">
-        <summary>Под капотом: где смотреть refresh</summary>
-        <p>В AbstractApplicationContext.refresh найди invokeBeanFactoryPostProcessors, registerBeanPostProcessors, finishBeanFactoryInitialization и finishRefresh. Порядок объясняет, почему расширение, меняющее определения, должно отработать до создания обычных бинов. GenericApplicationContext и его annotation-наследник поддерживают один refresh на экземпляр; наличие метода refresh в контракте не обещает произвольные перезапуски любого контекста.</p>
+        <summary>Под капотом: как увидеть порядок запуска</summary>
+        <p>В AbstractApplicationContext.refresh этот порядок виден в вызовах invokeBeanFactoryPostProcessors, registerBeanPostProcessors, finishBeanFactoryInitialization и finishRefresh. Сначала расширения меняют описания, потом фабрика создаёт по ним объекты. Если поменять порядок, уже созданные экземпляры сохранят старые настройки.</p>
+        <p>Контекст с Java-конфигурацией наследуется от GenericApplicationContext и поддерживает один refresh на экземпляр. Для нового запуска создают новый контекст. Другие реализации имеют свои правила обновления, поэтому наличие метода в интерфейсе ещё недостаточно для повторного запуска.</p>
       </details>
-      <p>Spring Boot готовит такое приложение по соглашениям: выбирает конфигурации, свойства, web-окружение и вызывает запуск контекста. Это надстройка над Spring Framework. IoC, DI и AOP не требуют Boot, сервера или application.yml: демо ниже использует только Framework.</p>
+      <p>Spring Boot автоматизирует подготовку приложения: подбирает конфигурации, свойства и веб-окружение, затем запускает Spring-контекст. Сам контейнер доступен и без Boot. Для следующего примера достаточно Spring Framework; HTTP-сервер и база данных не требуются.</p>
     </section>
     
     <section class="step" id="hierarchy">
-      <h2>Родительский контекст виден ребёнку, но поиск зависит от вида запроса</h2>
-      <p>В иерархии контекстов общие инфраструктурные бины можно держать в родителе, а отдельные компоненты — в дочернем контексте. При поиске по имени ребёнок сначала смотрит у себя и при отсутствии передаёт запрос родителю. Родитель вниз не смотрит. Singleton принадлежит фабрике, поэтому два самостоятельных контекста могут создать два экземпляра одного класса.</p>
-      <p>Если ребёнок определил bean с тем же именем, родительский bean скрыт для поиска из ребёнка. Но два bean одного типа с <em>разными</em> именами не превращаются в «выбираем локальный»: при autowiring учитываются подходящие кандидаты предков, и возможна неоднозначность. Это частая причина сюрприза при совмещении конфигураций.</p>
-      <p><a href="../examples/spring-core/ContextDemo.java">Полный пример ContextDemo.java</a>, Java 21, Spring 7.0.9. </p><pre><code class="language-bash">cd examples/spring-core
-      ./run.sh ContextDemo</code></pre><pre><code class="language-java">import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-      import org.springframework.beans.factory.support.RootBeanDefinition;
-      
-      public class ContextDemo {
-          static class Gateway {}
-          static class PaymentService {
-              final Gateway gateway;
-              PaymentService(Gateway gateway) { this.gateway = gateway; }
-          }
-          static class Report {
-              Report() { System.out.println(&quot;Report created&quot;); }
-          }
-          public static void main(String[] args) {
-              try (var parent = new AnnotationConfigApplicationContext()) {
-                  parent.registerBean(&quot;gateway&quot;, Gateway.class);
-                  parent.registerBean(&quot;bankName&quot;, String.class, () -&gt; &quot;Parent bank&quot;);
-                  parent.refresh();
-                  try (var child = new AnnotationConfigApplicationContext()) {
-                      child.setParent(parent);
-                      child.registerBean(PaymentService.class);
-                      child.registerBean(&quot;gateway&quot;, Gateway.class); // То же имя скрывает bean родителя.
-                      var definition = new RootBeanDefinition(Report.class);
-                      definition.setLazyInit(true);
-                      child.registerBeanDefinition(&quot;report&quot;, definition);
-                      System.out.println(&quot;before refresh: &quot; + child.containsBeanDefinition(&quot;report&quot;));
-                      child.refresh();
-                      System.out.println(&quot;singleton exists: &quot; + child.getBeanFactory().containsSingleton(&quot;report&quot;));
-                      System.out.println(&quot;service uses local: &quot; +
-                          (child.getBean(PaymentService.class).gateway == child.getBean(&quot;gateway&quot;)));
-                      System.out.println(&quot;inherited name: &quot; + child.getBean(&quot;bankName&quot;));
-                      System.out.println(&quot;parent sees child: &quot; + parent.containsBean(&quot;report&quot;));
-                      Object first = child.getBean(&quot;report&quot;); // Lazy bean создаётся на первом запросе.
-                      System.out.println(&quot;same report: &quot; + (first == child.getBean(&quot;report&quot;)));
-                      System.out.println(&quot;manual is managed: &quot; + (new Gateway() == child.getBean(&quot;gateway&quot;)));
-                  }
-              }
-          }
-      }</code></pre>
-      <pre class="out">before refresh: true
-      singleton exists: false
-      service uses local: true
-      inherited name: Parent bank
-      parent sees child: false
-      Report created
-      same report: true
-      manual is managed: false</pre>
-      <p>Здесь report зарегистрирован до refresh, но lazy-singleton ещё отсутствует в кеше. Его первый getBean создаёт объект; второй отдаёт ту же ссылку. gateway ребёнка скрывает одноимённый gateway родителя, а bankName наследуется. Если переименовать локальный gateway в localGateway, PaymentService получит двух кандидатов и запуск упадёт с NoUniqueBeanDefinitionException внутри UnsatisfiedDependencyException.</p>
-      <p>Перечисление через getBeanNamesForType и getBeansOfType локального ListableBeanFactory не включает предков автоматически. Для объединённого списка есть BeanFactoryUtils.*IncludingAncestors. Нельзя переносить правило одного lookup на все API: по имени, по типу и при перечислении контекстов работают разные операции.</p>
+      <h2>Имя зависимости может изменить выбор между родителем и ребёнком</h2>
+      <p>Допустим, общее подключение к банку хранится в родительском контексте, а отдельный сервис — в дочернем. Ребёнок видит бины родителя. При поиске по имени он сначала проверяет свои бины и затем обращается наверх. Родитель ищет только у себя: дочерний контекст ему недоступен.</p>
+      <p>Если в обоих контекстах зарегистрировать gateway, из ребёнка будет виден его собственный бин. Но переименование локального бина в localGateway меняет ситуацию: для конструктора PaymentService подходят уже два объекта одного типа. Правило «локальный всегда важнее» здесь отсутствует; Spring должен выбрать зависимость.</p>
+      <p>У аргумента конструктора в нашем примере имя <code>gateway</code>. При компиляции с <code>-parameters</code> оно сохраняется в байткоде, и Spring может выбрать одноимённый бин родителя. Без флага имя аргумента недоступно, и два одинаково подходящих кандидата приводят к ошибке. С Spring 6.1 для такого выбора по имени параметра требуется этот флаг. Maven-конфигурация <a href="https://docs.spring.io/spring-boot/maven-plugin/using.html">spring-boot-starter-parent</a> включает его по умолчанию; импорт одного Boot BOM даёт управление зависимостями, а настройки компилятора задаются отдельно.</p>
+      <p><a href="../examples/spring-core/ContextDemo.java">Полный ContextDemo.java</a>, Java 21, Spring 7.0.9. Каждый запуск сравнивает два имени локального бина. Комментарии отмечают условия выбора.</p>
+      <pre><code class="language-java">import java.util.logging.Level;
+import java.util.logging.Logger;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+
+public class ContextDemo {
+    record Gateway(String origin) {}
+
+    static class PaymentService {
+        final Gateway gateway;
+        PaymentService(Gateway gateway) {
+            this.gateway = gateway; // Имя параметра станет доступно Spring с -parameters.
+        }
+    }
+
+    static void compare(AnnotationConfigApplicationContext parent, String localName) {
+        try (var child = new AnnotationConfigApplicationContext()) {
+            child.setParent(parent);
+            child.registerBean(localName, Gateway.class, () -&gt; new Gateway(&quot;child&quot;));
+            child.registerBean(PaymentService.class);
+            try {
+                child.refresh();
+                System.out.println(localName + &quot; -&gt; &quot; + child.getBean(PaymentService.class).gateway.origin());
+            } catch (org.springframework.beans.factory.UnsatisfiedDependencyException ex) {
+                // Для сравнения нужен корень ошибки, а не весь стек запуска.
+                Throwable cause = ex;
+                while (cause.getCause() != null) cause = cause.getCause();
+                System.out.println(localName + &quot; -&gt; &quot; + cause.getClass().getSimpleName());
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        // Ожидаемую ошибку второго варианта печатаем сами, без служебного WARNING.
+        Logger.getLogger(&quot;org.springframework&quot;).setLevel(Level.SEVERE);
+        try (var parent = new AnnotationConfigApplicationContext()) {
+            parent.registerBean(&quot;gateway&quot;, Gateway.class, () -&gt; new Gateway(&quot;parent&quot;));
+            parent.refresh();
+            compare(parent, &quot;gateway&quot;);      // Одно имя: дочерний бин скрывает родительский.
+            compare(parent, &quot;localGateway&quot;); // Два имени: выбор зависит от метаданных параметра.
+        }
+    }
+}</code></pre>
+      <pre><code class="language-bash">cd examples/spring-core
+./run.sh ContextDemo               # javac без -parameters</code></pre>
+      <pre class="out">gateway -&gt; child
+localGateway -&gt; NoUniqueBeanDefinitionException</pre>
+      <pre><code class="language-bash">./run.sh ContextDemo --parameters  # javac с -parameters</code></pre>
+      <pre class="out">gateway -&gt; child
+localGateway -&gt; parent</pre>
+      <p>Такое совпадение имени удобно как соглашение, но связывает выбор банка с названием аргумента. Рефакторинг gateway → localGateway способен изменить поведение. Если выбор важен для бизнеса, вырази его явно через @Qualifier: тогда имя локальной переменной перестанет управлять маршрутом платежа.</p>
+      <p>Отдельное правило действует при перечислении. getBeanNamesForType и getBeansOfType возвращают бины локальной фабрики; для объединённого списка из иерархии есть BeanFactoryUtils с методами IncludingAncestors. Поиск зависимости и перечисление всех бинов решают разные задачи.</p>
     </section>
     
     <section class="step" id="boundaries">
-      <h2>Контейнер управляет сборкой, а корректность сервиса остаётся твоей</h2>
-      <p>Если приложение не стартует, читай цепочку causes до конкретного injection point: имя создаваемого bean, параметр конструктора и тип зависимости. NoSuchBeanDefinitionException означает отсутствие подходящего кандидата; NoUniqueBeanDefinitionException — несколько подходящих. Внешняя UnsatisfiedDependencyException добавляет место, где разрешение зависимости сорвалось, но не является отдельной причиной.</p>
-      <p>Не начинай лечение с добавления @Primary ко всему: сначала отдели отсутствие определения от ошибки выбора и от исключения внутри factory method. Для проверки состава удобно получить имена определений и выборочно inspect BeanDefinition. В большом приложении getBeansOfType может создать lazy-объекты, поэтому диагностика сама способна изменить наблюдаемое состояние.</p>
-      <p>Spring не делает singleton потокобезопасным, не превращает локальный кеш в распределённый и не создаёт транзакцию вокруг каждого метода. DI организует связи, scope задаёт жизненный цикл, AOP добавляет перехват вызова; это разные механизмы. Разделение помогает объяснять ошибки без фразы «Spring почему-то не сработал».</p>
-      <p>Для небольшой утилиты ручная сборка через конструкторы часто яснее. Для backend с множеством интеграций контейнер экономит повторяющийся код и даёт единый путь расширения. Выбор зависит от сложности графа и нужной инфраструктуры, а не от количества аннотаций.</p>
-      <p>Дальше: <a href="spring-beans.html">Configuration & Beans</a> объясняет, откуда берутся определения; <a href="spring-di.html">Dependency Resolution</a> — как выбирается ссылка. Scopes отвечает за повторное использование, Lifecycle — за готовность, AOP — за подмену пути вызова.</p>
+      <h2>Для диагностики найди место, где сборка оборвалась</h2>
+      <p>Ошибка запуска часто начинается с UnsatisfiedDependencyException. Она показывает, какой бин создавался и какую зависимость Spring пытался передать. Двигайся по причинам исключения: NoSuchBeanDefinitionException указывает на отсутствие кандидата, NoUniqueBeanDefinitionException — на неоднозначный выбор. Если упал сам метод @Bean, внизу будет его исходное исключение.</p>
+      <p>От этой причины зависит исправление. Отсутствующее описание требует проверить сканирование, импорт и условия регистрации. Несколько кандидатов требуют уточнить выбор. Ошибка подключения внутри @Bean требует разобраться с созданием клиента. Для просмотра состава получи имена определений и нужный BeanDefinition. Вызов getBeansOfType может создать отложенные бины, поэтому для диагностики регистрации лучше начать с метаданных.</p>
+      <p>Собранные ссылки ещё нужно правильно использовать. Один singleton-сервис доступен нескольким потокам: изменяемые поля требуют отдельного решения для конкурентного доступа. Обычный вызов метода отправляет платёж так, как написано в Java-коде; транзакция и перехват появляются при подключении соответствующей инфраструктуры. Сборка, время жизни и поведение вызова — три разных вопроса.</p>
+      <p>Ручной сборки хватает для небольшой утилиты с несколькими объектами. Контейнер особенно полезен в backend-приложении, где много компонентов и интеграций, а правила подготовки повторяются. Он централизует эту работу, сохраняя обычные классы и конструкторы внутри приложения.</p>
+      <p>Следующая тема, <a href="spring-beans.html">Configuration & Beans</a>, объясняет, как заполняется реестр описаний. <a href="spring-di.html">Dependency Resolution</a> показывает, как из кандидатов выбирается конкретная ссылка. После этого проще разбирать время жизни объектов и прокси.</p>
     </section>
     <div class="summary">
       <ul>
-        <li>DI можно сделать вручную; контейнер централизует большую сборку и lifecycle.</li>
-        <li>Определение, экземпляр и опубликованный proxy — разные сущности.</li>
-        <li>refresh подготавливает расширения и создаёт eager-singleton; lazy откладывает создание до потребности.</li>
-        <li>Singleton ограничен именем и фабрикой, а не всей JVM.</li>
-        <li>Иерархия поиска по имени и выбор кандидатов по типу не одно и то же.</li>
+        <li>DI начинается с передачи готовой зависимости в конструктор. Spring автоматизирует сборку большого приложения.</li>
+        <li>Сначала контейнер получает описания, затем создаёт по ним объекты. Отложенный бин может долго существовать только как описание.</li>
+        <li>При refresh контекст подготавливает обработчики и создаёт бины, нужные для запуска.</li>
+        <li>Singleton принадлежит конкретной фабрике. В иерархии выбор зависит от типа, имён и уточнений зависимости.</li>
+        <li>С -parameters имя аргумента конструктора участвует в выборе. Важное намерение лучше выразить через @Qualifier.</li>
       </ul>
     </div>
   </div>
@@ -216,13 +224,13 @@
       <h3>Чем IoC отличается от DI и какую проблему решает Spring?</h3>
       <div class="answer">
         <div data-level="middle">
-          <p>Я разделяю логику объекта и его сборку. IoC передаёт часть управления внешнему механизму; DI — конкретный способ: зависимости приходят извне. Spring строит граф из конфигурационных метаданных, а сервис использует уже переданные ссылки.</p>
-          <p>Я могу применить DI и без Spring: собрать PaymentService через конструктор вручную. Контейнер становится полезен, когда нужно единообразно собирать большое приложение, выбирать реализации и управлять инициализацией.</p>
+          <p>Я передаю Gateway в конструктор PaymentService, чтобы сервис занимался платежом, а выбором подключения занималась сборка приложения. Такая передача зависимости называется DI. Более общая идея IoC — передать внешнему механизму часть управления, в этом случае создание и связывание объектов.</p>
+          <p>Сначала я могу собрать всё вручную. Spring становится полезен, когда компонентов много: он читает конфигурацию, создаёт нужные объекты и готовит их к работе по общим правилам.</p>
         </div>
         <div data-level="senior">
           <ul>
-            <li>Service locator тоже инвертирует часть управления, но скрывает требования класса за getBean. Конструктор показывает их явно.</li>
-            <li>После внедрения вызовы обычные; накладные расходы поиска кандидатов в основном относятся к созданию, а proxy добавляет отдельную стоимость вызова.</li>
+            <li>Если сервис сам ищет зависимость через getBean, требования класса скрываются внутри методов. Это service locator; конструктор показывает те же требования сразу.</li>
+            <li>Поиск кандидатов происходит при сборке. После внедрения сервис вызывает метод по готовой Java-ссылке; прокси добавляет отдельный путь вызова.</li>
           </ul>
         </div>
       </div>
@@ -232,64 +240,61 @@
       <h3>Чем BeanFactory отличается от ApplicationContext?</h3>
       <div class="answer">
         <div data-level="middle">
-          <p>BeanFactory задаёт базовый контракт контейнера бинов. ApplicationContext расширяет его ресурсами, окружением, сообщениями и событиями, а также организует запуск и подключение processors. Для приложения я использую контекст; голая фабрика полезна для низкоуровневого контроля.</p>
-          <p>Отличие «фабрика всегда lazy, контекст всегда eager» слишком грубое. Стандартный refresh создаёт non-lazy singleton, но есть lazy и prototype, а у фабрики есть явный preInstantiateSingletons.</p>
+          <p>BeanFactory создаёт и выдаёт бины. ApplicationContext организует запуск этой фабрики и даёт приложению свойства, ресурсы, локализованные сообщения и события. В обычном приложении я использую контекст, а отдельную фабрику — когда нужен низкоуровневый контроль.</p>
+          <p>При refresh контекст подключает обработчики и заранее создаёт singleton-бины, у которых включено немедленное создание. Флаг lazy откладывает создание, prototype создаётся по запросу. У отдельной фабрики предварительное создание можно вызвать явно.</p>
         </div>
         <div data-level="senior">
           <ul>
-            <li>Контекст обнаруживает специальные бины по контрактам, голую фабрику нужно подготовить вручную.</li>
-            <li>В конкретной реализации контекст делегирует внутренней DefaultListableBeanFactory; наследование интерфейсов не означает единственный объект с одной структурой данных.</li>
+            <li>Обработчик, объявленный бином, ещё нужно подключить к фабрике. Контекст делает это при запуске; при использовании фабрики отдельно этот шаг организует вызывающий код.</li>
+            <li>В типичной реализации контекст использует внутреннюю DefaultListableBeanFactory. Дополнительные возможности контекста и хранение бинов распределены между этими объектами.</li>
           </ul>
         </div>
       </div>
     </article>
     
     <article class="q" id="bean-definition" data-freq="3">
-      <h3>Что такое bean и чем он отличается от BeanDefinition?</h3>
+      <h3>Что такое бин и чем он отличается от BeanDefinition?</h3>
       <div class="answer">
         <div data-level="middle">
-          <p>Bean — управляемый объект, BeanDefinition — метаданные для его создания и настройки. Сначала Spring читает определения, потом по ним создаёт и связывает экземпляры. Поэтому определение lazy-бина может существовать задолго до самого объекта.</p>
-          <p>Два определения одного класса дают два bean по разным именам; prototype даёт много экземпляров одного определения. Сам по себе new аннотированного класса управление контейнеру не передаёт.</p>
+          <p>BeanDefinition — описание создания и настройки, а бин — объект, подготовленный по этому описанию. Например, определение отложенного отчёта уже находится в реестре, хотя сам отчёт ещё никто не запросил.</p>
+          <p>По одному prototype-описанию создаются разные экземпляры. Один класс также можно описать дважды под разными именами, например для двух банков. Поэтому я различаю класс, описание и конкретный объект.</p>
         </div>
         <div data-level="senior">
           <ul>
-            <li>Factory method может вернуть объект сторонней библиотеки: @Component на его классе не нужен.</li>
-            <li>Клиенту может быть опубликован proxy. Тип target, метаданные определения и runtime-класс полученной ссылки — разные наблюдения.</li>
+            <li>Метод @Bean может создавать объект сторонней библиотеки: Spring обработает его результат без аннотации на самом классе.</li>
+            <li>Обработчик может вернуть прокси вместо исходного объекта. Класс из описания и класс ссылки, полученной клиентом, тогда различаются.</li>
           </ul>
         </div>
       </div>
     </article>
     
     <article class="q" id="context-hierarchy" data-freq="3">
-      <h3>Что означает singleton в нескольких контекстах?</h3>
+      <h3>Как выбирается зависимость между родителем и дочерним контекстом?</h3>
       <div class="answer">
         <div data-level="middle">
-          <p>Я считаю singleton относительно имени bean и конкретной фабрики. Два отдельных контекста способны создать два экземпляра. В иерархии ребёнок может пользоваться bean родителя, пока не скрывает его локальным одноимённым определением.</p>
-          <p>При lookup по имени ребёнок делегирует наверх, родитель вниз не ищет. При autowiring два одинаковых типа с разными именами в родителе и ребёнке могут дать неоднозначность.</p>
+          <p>Ребёнок видит свои бины и бины родителя. Локальный бин с тем же именем скрывает родительский. Если имена разные, оба объекта одного типа участвуют в выборе зависимости.</p>
+          <p>Для одиночной ссылки Spring учитывает уточнения выбора. В нашем примере аргумент gateway при компиляции с -parameters совпадает с именем родительского бина, и сервис получает его. Без метаданных имени выбор неоднозначен.</p>
         </div>
         <div data-level="senior">
           <ul>
-            <li>getBeansOfType у локальной фабрики не равно списку всей иерархии; для него нужен BeanFactoryUtils.</li>
-            <li>Закрытие дочернего контекста не означает уничтожение singleton родительской фабрики.</li>
+            <li>Singleton считается относительно имени и фабрики. Два независимых контекста могут создать два экземпляра одного класса; закрытие ребёнка сохраняет родительские бины.</li>
+            <li>getBeansOfType перечисляет локальные бины. Для всей иерархии есть BeanFactoryUtils с методами IncludingAncestors.</li>
+            <li>Выбор по имени параметра зависит от настроек компиляции. Явный @Qualifier фиксирует намерение лучше, чем название аргумента.</li>
           </ul>
         </div>
-      </div>
-      <div class="check">
-        <details data-kind="задача">
-          <summary>Появится ли report при refresh из демо?</summary>
-          <p>Сам lazy report не создастся. Если добавить eager-bean, которому report нужен как прямая зависимость, создание report понадобится уже во время refresh. Lazy-флаг не отменяет потребность в реальном объекте.</p>
-        </details>
       </div>
     </article>
   </section>
   <div class="qa"></div>
   <div class="refs">
     <ul>
-      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/introduction.html">Spring Reference: IoC Container</a> — основа урока: граница между bean, конфигурацией и контейнером.</li>
-      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/beanfactory.html">Spring Reference: BeanFactory API</a> — фабрика и контекст, обнаружение processors.</li>
-      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html">Spring Reference: ApplicationContext</a> — resources, messages, events и иерархия.</li>
-      <li><a href="https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-context/src/main/java/org/springframework/context/support/AbstractApplicationContext.java">Исходники Spring 7.0.9</a> — refresh; для поиска кандидатов — DefaultListableBeanFactory того же тега.</li>
-      <li><a href="https://www.manning.com/books/spring-start-here">Spring Start Here, главы 2–3</a> — учебный ориентир: контекст и связывание объектов; детали реализации сверены с Framework 7.0.9.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/introduction.html">Spring Reference: IoC Container</a> — описания, бины и сборка.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/beanfactory.html">Spring Reference: BeanFactory API</a> — подготовка фабрики и возможности контекста.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html">Spring Reference: ApplicationContext</a> — ресурсы, события и иерархия.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired-qualifiers.html">Spring Reference: выбор зависимости</a> — совпадение имени параметра, -parameters и условия выбора.</li>
+      <li><a href="https://docs.spring.io/spring-boot/maven-plugin/using.html">Spring Boot: настройки сборки</a> — spring-boot-starter-parent включает -parameters.</li>
+      <li><a href="https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-context/src/main/java/org/springframework/context/support/AbstractApplicationContext.java">Исходники Spring 7.0.9</a> — порядок refresh.</li>
+      <li><a href="https://www.manning.com/books/spring-start-here">Spring Start Here, главы 2–3</a> — учебный ориентир для контекста и связывания объектов.</li>
     </ul>
   </div>
 </main>
