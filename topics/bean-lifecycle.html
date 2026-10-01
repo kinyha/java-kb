@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Bean Lifecycle · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="bean-lifecycle">
+<main class="page">
+  <header class="topic-head"><h1>Spring: Bean Lifecycle</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Созданный объект сначала получает зависимости и проходит подготовку, затем становится доступным клиенту. Конструктор — только начало этого пути. Если другой компонент получил ссылку слишком рано, он способен увидеть пустые поля или обойти ожидаемый перехват. Проследим состояние объекта от описания до готовности и штатного завершения.</p>
+    </div>
+    <section class="step" id="readiness">
+      <h2>Выполненный конструктор ещё не означает готовый Spring-объект</h2>
+      <p>Gateway должен получить Clock и подготовить соединение перед первым платежом. Если обратиться к полю с @Autowired прямо в конструкторе, оно ещё пусто. Если вызвать метод сервиса из собственной инициализации, ожидаемая транзакция или другой перехват может ещё отсутствовать. Эти ситуации становятся понятными, когда разделяешь создание Java-объекта и его подготовку контейнером.</p>
+      <p>Конструктор создаёт исходный экземпляр. Затем Spring внедряет поля и вызывает методы внедрения, сообщает сведения контейнера, выполняет инициализацию и подключает обработчики. В конце фабрика выдаёт клиенту подготовленную ссылку. Иногда эта ссылка ведёт к прокси, а исходный объект остаётся за ним.</p>
+      <p>Зависимость конструктора уже доступна внутри него, потому что Spring получил её перед вызовом. Поля и сеттеры заполняются позже. Такой порядок позволяет объекту на этапе init использовать уже внедрённые зависимости и проверить целостность настройки.</p>
+      <p>При цикле зависимостей контейнер в некоторых режимах способен выдать ссылку раньше завершения этого пути. Поэтому «ссылка уже есть» и «объект закончил подготовку» — разные состояния. Сначала разберём обычный путь, затем его раннее ответвление.</p>
+    </section>
+    
+    <section class="step" id="definitions">
+      <h2>Сначала расширения меняют описания, затем обрабатывают экземпляры</h2>
+      <p>Предположим, для Gateway нужно задать способ прогрева из общей конфигурации. Это можно сделать в описании до создания объекта. BeanFactoryPostProcessor получает фабрику и меняет её метаданные. BeanDefinitionRegistryPostProcessor дополнительно умеет добавлять определения; его этап предшествует обычной обработке фабрики.</p>
+      <p>ConfigurationClassPostProcessor использует этот ранний этап, чтобы разобрать @Configuration, @Bean и импорты. После него общий реестр знает, какие объекты предстоит собрать. На этом уровне меняют способ создания и настройки, а не вызывают рабочие методы сервисов.</p>
+      <p>BeanPostProcessor работает уже с объектами. Его основные методы вызываются перед и после init; расширенные интерфейсы участвуют и в выборе конструктора, заполнении полей, подготовке метаданных, ранней ссылке и уничтожении. Поэтому внедрение @Autowired и вызов @PostConstruct тоже выполняются обработчиками.</p>
+      <p>Обработчики нужно создать раньше обычных компонентов. Если метод @Bean, возвращающий BFPP, зависит от экземпляра конфигурации, тот может понадобиться слишком рано. Для такого метода обычно используют static и точный возвращаемый тип. У BPP также следует избегать обычных сервисов в зависимостях: их ранняя сборка способна произойти до подключения всей цепочки обработчиков.</p>
+      <div class="trap">
+        <p class="myth">BFPP и BPP — два названия одного способа обработать бин.</p>
+        <p class="fact">BFPP меняет описания до сборки, BPP обрабатывает экземпляры в ходе сборки. Вызов getBean из BFPP начинает создание слишком рано и смешивает эти этапы.</p>
+      </div>
+    </section>
+    
+    <section class="step" id="initialization">
+      <h2>Готовность появляется после внедрения и init, а не после new</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Описание Gateway существует до экземпляра. Конструктор оставляет clock пустым, внедрение заполняет его, инициализация устанавливает ready, затем ссылка становится доступна клиенту.">
+            <defs>
+              <marker id="life-state" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="44" width="176" height="130" rx="8" class="dg-box"/>
+            <text x="32" y="70" class="dg-t">описание gateway</text>
+            <text x="32" y="100" class="dg-in">init: warmup</text>
+            <text x="32" y="128" class="dg-in">destroy: disconnect</text>
+            <g data-s="2-"><rect x="280" y="44" width="230" height="130" rx="8" class="dg-box"/><text x="294" y="70" class="dg-t">экземпляр Gateway</text></g>
+            <g data-s="2"><path d="M194 90 L276 90" class="dg-line" marker-end="url(#life-state)"/><text x="294" y="100" class="dg-bad">clock: null</text><text x="294" y="130" class="dg-in">ready: false</text></g>
+            <g data-s="3-"><text x="294" y="100" class="dg-ok">clock: Clock #1</text></g>
+            <g data-s="3"><text x="294" y="130" class="dg-in">ready: false</text><text x="280" y="209" class="dg-s">поля заполнены, init впереди</text></g>
+            <g data-s="4-"><text x="294" y="130" class="dg-ok">ready: true</text></g>
+            <g data-s="5"><rect x="580" y="78" width="122" height="62" rx="8" class="dg-cell hit"/><text x="641" y="114" text-anchor="middle" class="dg-in">клиент</text><path d="M580 109 L514 109" class="dg-line" marker-end="url(#life-state)"/></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Обработчик меняет описание: задаёт warmup и disconnect. Сам Gateway ещё не создан.</li>
+          <li>Фабрика вызывает конструктор Gateway. Поле с Autowired ещё пусто, ready=false.</li>
+          <li>Spring внедряет Clock и вызывает подходящие Aware-методы. Gateway уже связан с зависимостью, но инициализация ещё не завершена.</li>
+          <li>Обработчики и init-методы выполняют подготовку. После warmup ready=true; обработчики после init могут изменить выдаваемую ссылку.</li>
+          <li>Готовая ссылка публикуется и выдаётся клиенту. В данном демо Trace возвращает тот же Gateway.</li>
+        </ol>
+      </figure>
+      <p>Для обычного создаваемого бина порядок такой: конструктор → заполнение зависимостей → BeanNameAware/BeanClassLoaderAware/BeanFactoryAware → обработчики перед init → afterPropertiesSet → настроенный init-метод → обработчики после init. Дополнительные Aware-интерфейсы контекста обрабатываются его собственным BPP, поэтому все разновидности Aware нельзя считать одним отдельным вызовом фабрики.</p>
+      <p>@PostConstruct выполняется внутри обработки перед init, через CommonAnnotationBeanPostProcessor. Если одновременно заданы разные init-методы, сначала идёт @PostConstruct, затем InitializingBean.afterPropertiesSet и затем настроенный метод. Одинаковый метод, заданный несколькими способами, Spring старается вызывать один раз; смешивать три способа в реальном сервисе обычно незачем.</p>
+      <p>В <a href="../examples/spring-core/LifecycleDemo.java">LifecycleDemo.java</a> все три способа намеренно разные, чтобы увидеть порядок. Trace добавлен вручную раньше обработчика аннотаций, поэтому его before init печатается перед postConstruct. Это условие опыта, а не обещание, что любой BPP всегда предшествует аннотации.</p>
+      <p><a href="../examples/spring-core/LifecycleDemo.java">Полный пример LifecycleDemo.java</a>, Java 21, Spring 7.0.9. </p><pre><code class="language-bash">cd examples/spring-core
+./run.sh LifecycleDemo</code></pre><pre><code class="language-java">import jakarta.annotation.PostConstruct;
+      import jakarta.annotation.PreDestroy;
+      import java.time.Clock;
+      import org.springframework.beans.factory.*;
+      import org.springframework.beans.factory.annotation.Autowired;
+      import org.springframework.beans.factory.config.BeanPostProcessor;
+      import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+      
+      public class LifecycleDemo {
+          static class Gateway implements BeanNameAware, InitializingBean, DisposableBean {
+              @Autowired Clock clock;
+              boolean ready;
+              Gateway() { System.out.println(&quot;constructor: clock=&quot; + (clock != null)); }
+              public void setBeanName(String name) {
+                  System.out.println(&quot;aware: &quot; + name + &quot;, clock=&quot; + (clock != null));
+              }
+              @PostConstruct void annotatedInit() { System.out.println(&quot;postConstruct&quot;); }
+              public void afterPropertiesSet() { System.out.println(&quot;afterPropertiesSet&quot;); }
+              void warmup() { ready = true; System.out.println(&quot;warmup&quot;); }
+              @PreDestroy void annotatedDestroy() { System.out.println(&quot;preDestroy&quot;); }
+              public void destroy() { System.out.println(&quot;destroy&quot;); }
+              void disconnect() { System.out.println(&quot;disconnect&quot;); }
+          }
+          static class Trace implements BeanPostProcessor {
+              public Object postProcessBeforeInitialization(Object bean, String name) {
+                  if (bean instanceof Gateway) System.out.println(&quot;before init&quot;);
+                  return bean;
+              }
+              public Object postProcessAfterInitialization(Object bean, String name) {
+                  if (bean instanceof Gateway) System.out.println(&quot;after init&quot;);
+                  return bean; // Другой обработчик здесь мог бы вернуть прокси.
+              }
+          }
+          public static void main(String[] args) {
+              try (var ctx = new AnnotationConfigApplicationContext()) {
+                  ctx.registerBean(&quot;clock&quot;, Clock.class, Clock::systemUTC);
+                  ctx.registerBean(&quot;gateway&quot;, Gateway.class);
+                  ctx.addBeanFactoryPostProcessor(factory -&gt; {
+                      var definition = factory.getBeanDefinition(&quot;gateway&quot;);
+                      definition.setInitMethodName(&quot;warmup&quot;);
+                      definition.setDestroyMethodName(&quot;disconnect&quot;);
+                      System.out.println(&quot;definitions changed&quot;); // Объекта Gateway ещё нет.
+                  });
+                  // Добавлен вручную раньше обработчика аннотаций PostConstruct.
+                  ctx.getBeanFactory().addBeanPostProcessor(new Trace());
+                  ctx.refresh();
+                  System.out.println(&quot;usable: &quot; + ctx.getBean(Gateway.class).ready);
+              } // Закрытие вызывает три разных способа завершения Gateway.
+          }
+      }</code></pre>
+      <pre class="out">definitions changed
+constructor: clock=false
+aware: gateway, clock=true
+before init
+postConstruct
+afterPropertiesSet
+warmup
+after init
+usable: true
+preDestroy
+destroy
+disconnect</pre>
+      <p>Методы init удобно используют для проверки конфигурации и подготовки внутреннего состояния. Обращение к собственному методу с @Transactional из @PostConstruct проходит внутри исходного объекта: обычный внешний путь через AOP-прокси ещё не используется. Для действий, которым нужна готовая инфраструктура приложения, есть этапы после создания singleton.</p>
+    </section>
+    
+    <section class="step" id="cycles">
+      <h2>Цикл полей может дать ссылку на ещё недостроенный объект</h2>
+      <p>При A(B) и B(A) фабрике нужно завершить один конструктор, чтобы вызвать другой. Ни одного экземпляра пока нет, и цикл останавливается с BeanCurrentlyInCreationException. Замена одного аргумента на provider откладывает получение только при условии, что getObject вызывается позже; немедленный вызов из того же конструктора восстанавливает цикл.</p>
+      <p>Для singleton с внедрением в поля или сеттеры экземпляр A уже существует до получения B. При разрешённых циклах Spring может сохранить возможность получить раннюю ссылку на A. B получает её, завершает свою подготовку, после чего фабрика возвращается к A. В этот промежуток B способен увидеть незаполненное состояние A.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 285" role="img" aria-label="При цикле полей B получает раннюю ссылку на A, у которого b ещё null. После инициализации B Spring завершает A и публикует готовые singleton.">
+            <defs>
+              <marker id="life-cycle" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="18" y="38" width="220" height="90" rx="8" class="dg-box"/>
+            <text x="32" y="64" class="dg-t">A: экземпляр создан</text>
+            <text data-s="1-3" x="32" y="100" class="dg-bad">b: null</text>
+            <text data-s="4" x="32" y="100" class="dg-ok">b: ссылка на B</text>
+            <rect x="302" y="18" width="400" height="110" rx="8" class="dg-box"/>
+            <text x="316" y="44" class="dg-t">фабрика: ранняя ссылка ≠ готовый бин</text>
+            <text data-s="1-2" x="316" y="72" class="dg-in">singletonFactories: callback(A)</text>
+            <text data-s="1-2" x="316" y="101" class="dg-s">готового A пока нет</text>
+            <text data-s="3" x="316" y="72" class="dg-in">earlySingletonObjects: A</text>
+            <text data-s="3" x="316" y="101" class="dg-s">callback выполнен; A ещё готовится</text>
+            <text data-s="4" x="316" y="72" class="dg-in">singletonObjects: A, B</text>
+            <text data-s="4" x="316" y="101" class="dg-s">временные записи удалены</text>
+            <g data-s="2-"><rect x="446" y="178" width="256" height="86" rx="8" class="dg-box"/><text x="460" y="204" class="dg-t">B: экземпляр создан</text></g>
+            <text data-s="2" x="460" y="239" class="dg-bad">a: null, нужен A</text>
+            <text data-s="3-" x="460" y="239" class="dg-ok">a: ранняя ссылка на A</text>
+            <path data-s="1" d="M238 72 L298 72" class="dg-line" marker-end="url(#life-cycle)"/>
+            <path data-s="2" d="M128 128 C128 195 235 205 442 205" class="dg-line" marker-end="url(#life-cycle)"/>
+            <path data-s="3" d="M574 178 L574 132" class="dg-line" marker-end="url(#life-cycle)"/>
+            <path data-s="3-" d="M446 244 C316 244 265 106 242 106" class="dg-line" marker-end="url(#life-cycle)"/>
+            <path data-s="4" d="M128 128 C128 167 303 190 442 190" class="dg-line" marker-end="url(#life-cycle)"/>
+            <text data-s="3" x="18" y="206" class="dg-bad">в init B поле A.b ещё пусто</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>A уже прошёл конструктор. В фабрике зарегистрирован способ получить раннюю ссылку на этот экземпляр.</li>
+          <li>Для поля A.b нужен B. Spring начинает создание B; теперь B требуется A.</li>
+          <li>Фабрика выдаёт B ранний A. B может завершить свою инициализацию, но A.b всё ещё null: это наблюдается в PostConstruct B.</li>
+          <li>Готовый B внедряется в A. Spring завершает A, сохраняет готовые singleton и очищает ранние записи. Цикл ссылок существует, но раннее использование было опасным.</li>
+        </ol>
+      </figure>
+      <p>Три структуры фабрики обслуживают этот путь. singletonObjects содержит готовые singleton; earlySingletonObjects — уже выданные ранние ссылки; singletonFactories — функции получения ранней ссылки. Последняя нужна, чтобы обработчик мог подготовить ранний прокси до выдачи. Это функция для существующего объекта, а не ещё один вызов его конструктора.</p>
+      <p>В демо B печатает A.b из собственного @PostConstruct. Регистрации классов, флаг разрешения циклов и оба вида внедрения показаны полностью. Для простого Framework-контейнера флаг разрешения циклов по умолчанию true; Boot задаёт spring.main.allow-circular-references=false. В опыте флаг указан явно для каждого варианта.</p>
+      <p><a href="../examples/spring-core/CycleDemo.java">Полный пример CycleDemo.java</a>, Java 21, Spring 7.0.9. </p><pre><code class="language-bash">cd examples/spring-core
+./run.sh CycleDemo</code></pre><pre><code class="language-java">import jakarta.annotation.PostConstruct;
+      import java.util.logging.*;
+      import org.springframework.beans.factory.annotation.Autowired;
+      import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+      
+      public class CycleDemo {
+          static class ConstructorA {
+              ConstructorA(ConstructorB b) {}
+          }
+          static class ConstructorB {
+              ConstructorB(ConstructorA a) {}
+          }
+          static class FieldA { @Autowired FieldB b; }
+          static class FieldB {
+              @Autowired FieldA a;
+              @PostConstruct void init() {
+                  System.out.println(&quot;B init sees A.b: &quot; + a.b); // A ещё ожидает готовый B.
+              }
+          }
+          static void run(String label, boolean allow, Class&lt;?&gt; a, Class&lt;?&gt; b) {
+              System.out.println(label);
+              try (var ctx = new AnnotationConfigApplicationContext()) {
+                  ctx.getDefaultListableBeanFactory().setAllowCircularReferences(allow);
+                  ctx.register(a, b);
+                  try {
+                      ctx.refresh();
+                      var first = ctx.getBean(FieldA.class);
+                      System.out.println(&quot;connected: &quot; + (first.b.a == first));
+                  } catch (org.springframework.beans.factory.BeanCreationException ex) {
+                      Throwable cause = ex;
+                      while (cause.getCause() != null) cause = cause.getCause();
+                      System.out.println(cause.getClass().getSimpleName());
+                  }
+              }
+          }
+          public static void main(String[] args) {
+              Logger.getLogger(&quot;org.springframework&quot;).setLevel(Level.SEVERE);
+              run(&quot;constructor cycle:&quot;, true, ConstructorA.class, ConstructorB.class);
+              run(&quot;field cycle allowed:&quot;, true, FieldA.class, FieldB.class);
+              run(&quot;field cycle forbidden:&quot;, false, FieldA.class, FieldB.class);
+          }
+      }</code></pre>
+      <pre class="out">constructor cycle:
+BeanCurrentlyInCreationException
+field cycle allowed:
+B init sees A.b: null
+connected: true
+field cycle forbidden:
+BeanCurrentlyInCreationException</pre>
+      <p>Такое разрешение относится к подходящим singleton-циклам. Prototype не получает этот механизм кеширования. Для некоторых комбинаций прокси фабрика также обнаружит несовместимость ранней и окончательной ссылки. Практическое исправление — отделить общий компонент или изменить направление связи, чтобы готовность одного сервиса не требовала полусобранного другого.</p>
+      <details class="deep">
+        <summary>Под капотом: как ранняя ссылка согласуется с прокси</summary>
+        <p>В doCreateBean фабрика регистрирует функцию getEarlyBeanReference перед populateBean. SmartInstantiationAwareBeanPostProcessor может вернуть через неё ранний прокси. После initializeBean фабрика проверяет согласованность выданной ссылки с итоговым объектом. Если другому бину уже дали исходный объект, а поздний BPP заменил его неподходящей оболочкой, запуск может завершиться ошибкой вместо публикации двух разных представлений.</p>
+      </details>
+    </section>
+    
+    <section class="step" id="startup">
+      <h2>Запуск фоновой работы требует готовности всего нужного окружения</h2>
+      <p>Gateway может проверить URL в init. А consumer, который начнёт принимать платежи, должен запускаться после подготовки его зависимостей. Блокировать init ожиданием задачи, которая сама просит ещё создаваемые бины, опасно: подготовка singleton может удерживать блокировку создания. Долгие внешние действия лучше отделить от готовности самого объекта.</p>
+      <table class="mx">
+        <thead><tr><th>Механизм</th><th>Когда используется</th><th>Что это даёт</th></tr></thead>
+        <tbody>
+          <tr><td>@PostConstruct / init</td><td>Подготовка конкретного экземпляра</td><td>Проверка настроек и внутреннее состояние</td></tr>
+          <tr><td>SmartInitializingSingleton</td><td>После обычного предварительного создания singleton</td><td>Действие с уже подготовленной группой</td></tr>
+          <tr><td>ContextRefreshedEvent</td><td>При завершении refresh контекста</td><td>Уведомление о завершении этого запуска</td></tr>
+          <tr><td>SmartLifecycle</td><td>Управляемые start/stop и фазы</td><td>Запуск и остановка фонового компонента</td></tr>
+        </tbody>
+      </table>
+      <p>SmartLifecycle позволяет задать isAutoStartup и фазу getPhase. При автоматическом запуске меньшие фазы стартуют раньше, при остановке большие завершаются раньше. Явные зависимости также учитываются и могут определить порядок сильнее номера фазы. Это позволяет сначала поднять инфраструктуру, затем начать принимать работу, а остановить их в обратной последовательности.</p>
+      <p>Для асинхронной остановки stop(Runnable callback) должен вызвать callback после фактического завершения работы. Иначе контейнер ждёт до ограниченного таймаута. Простой Lifecycle.start не равен проверке готовности приложения: компонент может запустить поток, которому ещё требуется время на подключение.</p>
+      <p>Отложенные бины могут оставаться несозданными после refresh. ContextRefreshedEvent также возможен у родителя и ребёнка; слушатель должен учитывать, какой контекст запущен. В Boot готовность приложения к работе дополнительно учитывает runners и события Boot. Эти уровни полезно различать при выборе места для миграций и запуска consumer.</p>
+    </section>
+    
+    <section class="step" id="shutdown">
+      <h2>При штатном закрытии сначала прекращают работу, затем освобождают ресурсы</h2>
+      <p>Платёжный consumer должен прекратить принимать новые задания до закрытия соединения с банком. Lifecycle-stop даёт ранний сигнал остановки; затем контейнер уничтожает singleton. Зависимый сервис уничтожается раньше зависимости, которой он пользуется. Для обычных singleton этому помогают сведения графа зависимостей и @DependsOn.</p>
+      <p>Для трёх разных методов завершения порядок зеркалит способы настройки: @PreDestroy, DisposableBean.destroy, затем настроенный destroyMethod. Это видно в последних строках LifecycleDemo. Метод @Bean по умолчанию также может обнаружить public close или shutdown; если закрытием владеет другой компонент, такое автоматическое обнаружение можно отключить через destroyMethod="".</p>
+      <p>Prototype после выдачи клиенту автоматически этим путём не проходит — это разобрано в <a href="bean-scopes.html#cleanup">Bean Scopes</a>. Для request/session время завершения задаёт соответствующая область. Контейнер закрывает ресурс по своей регистрации, а не потому, что JVM собирается удалить объект.</p>
+      <p>Штатный close или зарегистрированный shutdown hook дают возможность выполнить cleanup. Принудительное завершение процесса не оставляет такой возможности. Поэтому обработка платежей и фиксация состояния должны выдерживать падение в любой точке: callback завершения помогает аккуратной остановке, но не заменяет устойчивый протокол работы.</p>
+    </section>
+    
+    <section class="step" id="boundaries">
+      <h2>Диагностика начинается с этапа, на котором объект оказался</h2>
+      <p>Null в конструкторе при внедрении в поле означает слишком раннее обращение. Ошибка циклического создания указывает на обратную зависимость во время сборки. Сообщение «not eligible for getting processed by all BeanPostProcessors» помогает найти компонент, созданный до подключения всей цепочки BPP. В каждом случае полезно выписать путь регистрации и момент первого getBean.</p>
+      <p>Падение refresh обычно приводит к уничтожению уже созданных подходящих singleton. Но внешний эффект init, например отправленный платёж или изменённый файл, автоматически не откатывается вместе с контекстом. Инициализация должна быть повторяемой, а существенные внешние действия — иметь собственное устойчивое состояние и понятную обработку повторного запуска.</p>
+      <p>Используй один способ инициализации для одной обязанности и один владелец завершения ресурса. Сложный callback, который ищет половину контекста и запускает бизнес-процесс, обычно смешивает сборку с работой приложения. Выделение запускаемого компонента делает порядок и остановку видимыми.</p>
+      <p>Следующая тема, <a href="spring-aop.html">AOP & Proxies</a>, прослеживает, куда ведёт опубликованная ссылка и почему вызов собственного метода обходит перехват. Lifecycle объясняет, когда ссылка появляется; AOP — что случится при её использовании.</p>
+    </section>
+    <div class="summary">
+      <ul>
+        <li>BFPP меняет метаданные, BPP обрабатывает объекты в процессе сборки.</li>
+        <li>Поле с Autowired заполняется после конструктора; init выполняется после внедрения.</li>
+        <li>PostConstruct — часть обработки перед init. После неё идут afterPropertiesSet и настроенный метод.</li>
+        <li>Ранняя ссылка разрешает некоторые singleton-циклы, но сохраняет риск полусобранного состояния.</li>
+        <li>Фоновый запуск и остановку удобно выражать через Lifecycle; принудительное падение требует отдельной устойчивости.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="init-order" data-freq="3">
+      <h3>Какой жизненный цикл у обычного Spring-бина?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>После конструктора Spring внедряет поля и методы, выполняет подходящие Aware-вызовы, обработку перед init, методы инициализации и обработку после init. Затем клиент получает готовую ссылку, иногда на прокси. Поэтому зависимость конструктора доступна сразу, а поле с Autowired — позже.</p>
+          <p>Если настроены разные способы init, порядок такой: PostConstruct, afterPropertiesSet, настроенный init-метод. PostConstruct вызывается одним из BPP перед init, поэтому порядок конкретных обработчиков требует отдельного учёта.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>BeanNameAware/BeanFactoryAware вызывает фабрика; дополнительные Aware контекста выполняет его обработчик.</li>
+            <li>Для ранней ссылки в цикле часть подготовки ещё не завершена. Существование ссылки само по себе не доказывает готовность.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="processor-kinds" data-freq="3">
+      <h3>Чем BPP отличается от BFPP и зачем static @Bean для инфраструктуры?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>BFPP меняет описания до обычного создания объектов. BPP работает с экземплярами при создании: внедряет зависимости, вызывает аннотации и может вернуть прокси. Registry post-processor добавляет определения на ещё более раннем этапе.</p>
+          <p>Обработчики должны появиться первыми. Static Bean позволяет получить BFPP без преждевременного создания экземпляра конфигурации. Для BPP я также избегаю обычных сервисов в зависимостях.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Программно добавленные BPP применяются по порядку регистрации; Ordered у них сам по себе этот порядок не меняет.</li>
+            <li>Ранний getBean из инфраструктуры способен создать компонент до подключения всех обработчиков и лишить его части ожидаемого поведения.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="circular-dependencies" data-freq="3">
+      <h3>Как Spring разрешает циклические зависимости и почему это опасно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Цикл обязательных конструкторов не даёт создать первый экземпляр. Для некоторых singleton-циклов с полями или сеттерами фабрика может выдать уже созданный, но ещё неготовый объект. B закончит init, затем Spring вернётся к A.</p>
+          <p>Я предпочитаю изменить граф: вынести общее действие или зависимость. Включение разрешения циклов сохраняет риск раннего использования; в демо B видит пустое поле A во время своего init.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Готовые ссылки находятся в singletonObjects, ранние — в earlySingletonObjects, функции получения ранней ссылки — в singletonFactories.</li>
+            <li>Функция ранней ссылки позволяет подготовить прокси. Несогласованность ранней и окончательной оболочки способна остановить запуск.</li>
+            <li>Framework по умолчанию разрешает попытку таких циклов, Boot по умолчанию запрещает. Prototype не использует этот путь.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="startup-lifecycle" data-freq="3">
+      <h3>Когда использовать PostConstruct, SmartInitializingSingleton и SmartLifecycle?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>PostConstruct подходит для подготовки самого объекта. После предварительной сборки singleton можно использовать SmartInitializingSingleton или событие refresh. Для фонового компонента с управляемой остановкой я выбираю SmartLifecycle.</p>
+          <p>Фаза задаёт относительный порядок start/stop: меньшее значение стартует раньше и останавливается позже. Асинхронный stop сообщает завершение через callback.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Зависимости учитываются дополнительно к фазам, а таймаут ограничивает ожидание остановки.</li>
+            <li>Refresh не создаёт все lazy-бины и не означает, что внешние соединения любого запущенного потока уже готовы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    
+    <article class="q" id="destroy-order" data-freq="3">
+      <h3>Что происходит при закрытии контекста?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Контейнер сначала останавливает Lifecycle-компоненты, затем уничтожает singleton, учитывая их зависимости. Зависимый сервис должен завершиться раньше ресурса, которым он пользуется. Для разных методов порядок — PreDestroy, destroy интерфейса, настроенный destroyMethod.</p>
+          <p>Я разделяю аккуратную остановку и устойчивость к падению. При принудительном завершении процесса cleanup может не выполниться; существенное состояние должно выдерживать это независимо.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Prototype после выдачи автоматически не уничтожается: владелец — получивший его код.</li>
+            <li>Bean-метод может автоматически обнаружить close/shutdown. Нужно согласовать это с реальным владельцем ресурса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html">Spring Reference: Lifecycle Callbacks</a> — основа урока: инициализация, остановка и завершение.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html">Spring Reference: Container Extension Points</a> — разделение описаний и экземпляров.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/beans/factory/config/BeanPostProcessor.html">BeanPostProcessor API</a> — порядок программной регистрации.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/context/SmartLifecycle.html">SmartLifecycle API</a> — фазы, автоматический запуск и callback остановки.</li>
+      <li><a href="https://docs.spring.io/spring-boot/appendix/application-properties/">Spring Boot Properties</a> — запрет циклов по умолчанию.</li>
+      <li><a href="https://github.com/spring-projects/spring-framework/blob/v7.0.9/spring-beans/src/main/java/org/springframework/beans/factory/support/AbstractAutowireCapableBeanFactory.java">Исходники 7.0.9</a> — doCreateBean, initializeBean и ранняя ссылка.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -60,3 +60,18 @@
 - Потоки, сохранённые ссылки, stateless и явные параметры → boundaries. Механика AOP → AOP; полный порядок callbacks → Lifecycle.
 
 Источники: Reference / Bean Scopes и Method Injection, API Lookup и RequestScope (7.0.9). Java 21: ScopesDemo сравнивает прямое внедрение/provider и init/destroy; RequestScopeDemo использует настоящую request scope с MockHttpServletRequest, без HTTP-сервера. Нагрузка сервера, сессии и WebSocket не эмулируются: их границы сверены с Reference.
+
+## Bean Lifecycle
+
+Центральный вопрос: когда объект действительно готов и что получает другой бин до этого момента?
+
+Подача: вместо одной ленты терминов — состояние Gateway (clock/ready) и отдельный граф цикла A/B. В Reference callback-порядок сопоставлен со способом создания; опыт фиксирует конкретный порядок собственного BPP и CommonAnnotationBeanPostProcessor, а не обобщает его на все BPP.
+
+- Определения до объектов: BDRPP/BFPP, static infrastructure Bean, раннее создание → definitions.
+- Constructor → population → Aware → BPP before / PostConstruct → afterPropertiesSet → init → BPP after → publication → initialization; LifecycleDemo, схема состояния.
+- Constructor cycle, early exposure, три singleton-cache и ранний proxy → cycles; CycleDemo, отдельная схема. Framework defaults true, Boot false проверены по исходнику и properties reference.
+- SmartInitializingSingleton, ContextRefreshedEvent, SmartLifecycle/phases/start-stop и lazy → startup.
+- PreDestroy/DisposableBean/destroyMethod, зависимые раньше зависимости, graceful/abrupt shutdown → shutdown.
+- Диагностика BPP eligibility, внешние эффекты не откатываются вместе с refresh, готовность разных уровней → boundaries.
+
+Источники: Reference / Customizing the Nature of a Bean, Container Extension Points; API BeanPostProcessor/Bean/SmartLifecycle; AbstractAutowireCapableBeanFactory 7.0.9 doCreateBean/initializeBean. LifecycleDemo и CycleDemo запускаются Java 21; примеры сети/пулов обсуждаются как границы, реальные внешние подключения не выполняются.

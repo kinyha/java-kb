@@ -511,7 +511,7 @@ window.KB_TREE = [
           scope: 'constructor, setter и field injection, выбор кандидата по типу, @Qualifier, @Primary и @Fallback, generics, коллекции, Optional и ObjectProvider, @Resource' },
         { id: 'bean-scopes', freq: 3, status: 'draft', title: 'Bean Scopes',
           scope: 'singleton и prototype, время жизни и thread safety, prototype внутри singleton, ObjectProvider, scoped proxy и @Lookup, request и session, уничтожение' },
-        { id: 'bean-lifecycle', freq: 3, status: 'empty', title: 'Bean Lifecycle',
+        { id: 'bean-lifecycle', freq: 3, status: 'draft', title: 'Bean Lifecycle',
           scope: 'refresh, BeanDefinitionRegistryPostProcessor и BeanFactoryPostProcessor, BeanPostProcessor, Aware, init и destroy, SmartLifecycle, lazy, циклические зависимости и ранние ссылки' },
         { id: 'spring-aop', freq: 3, status: 'empty', title: 'AOP & Proxies',
           scope: 'aspect и advisor, advice и pointcut, цепочка interceptors, JDK proxy и CGLIB, self-invocation, final и private, порядок аспектов, диагностика' },
