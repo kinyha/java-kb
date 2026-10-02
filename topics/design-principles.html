@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Design: SOLID &amp; Principles · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="design-principles">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Design: SOLID &amp; Principles</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>SOLID — пять правил о том, как расставить границы в коде, чтобы изменение одного требования трогало одно место. Класс отвечает перед одним заказчиком изменений. Новое поведение добавляется новым классом, а не правкой старого. Подтип выполняет договор родителя, а не только компилируется. Клиент видит только нужные ему методы. Бизнес-логика зависит от интерфейсов, которыми владеет сама, а инфраструктура подстраивается под них. Каждое правило — ответ на конкретную боль, и применять его без этой боли — лишняя сложность.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Класс платежей правят пять команд, и каждая ломает чужое</h2>
+      <p>Платёжный сервис начинался с одного класса. За два года в нём оказалось всё: выбор способа оплаты через <code>switch</code>, расчёт комиссии, запись в базу, текст SMS, формат чека. Любое изменение — новая комиссия для финансов, новый текст для маркетинга, новая колонка для DBA — правит один и тот же файл.</p>
+      <pre><code class="language-java">class PaymentService {
+    Receipt pay(Payment p) {
+        long fee = switch (p.method()) {        // Финансы: правила комиссии.
+            case "card" -&gt; p.cents() * 15 / 1000;
+            case "sbp" -&gt; 0;
+            default -&gt; throw new IllegalArgumentException(p.method());
+        };
+        String status = switch (p.method()) {   // Каждый новый способ оплаты — правка здесь.
+            case "card" -&gt; tinkoff.charge(p.card(), p.cents() + fee);
+            case "sbp" -&gt; sbp.createQr(p.cents());
+            default -&gt; throw new IllegalArgumentException(p.method());
+        };
+        jdbc.update("insert into payment ...");  // DBA: схема таблицы.
+        sms.send(p.phone(), "Оплачено " + p.cents() / 100 + " ₽"); // Маркетинг: тексты.
+        return new Receipt(p.id(), status, fee);
+    }
+}</code></pre>
+      <p>Проблема не в длине метода. Изменения разных людей сталкиваются в одном месте: маркетинг правит текст SMS и случайно ломает округление комиссии, потому что они в одной строке. Разработчик добавляет способ оплаты и правит два <code>switch</code>, а тест на третий забыт. Слияния веток конфликтуют, потому что все пишут в один файл.</p>
+      <p>SOLID — пять принципов, которые Роберт Мартин собрал из работ Мейера, Лисков и своих статей начала 2000-х. Все пять отвечают на один вопрос: как расставить границы, чтобы изменение одного требования не тянуло за собой правки в несвязанных местах. Демо <a href="../examples/design/SolidDemo.java">SolidDemo.java</a> запускается без сборки: <code>java SolidDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="srp">
+      <h2>SRP: модуль отвечает перед одним заказчиком изменений</h2>
+      <p>Самая частая неправильная формулировка — «класс должен делать одну вещь». По ней любой класс можно оправдать («он делает платежи») или раздробить до класса на метод. Мартин в «Чистой архитектуре» уточняет: модуль должен отвечать перед одним и только одним <b>актором</b> — группой людей, которые просят изменений. Принцип про причины изменений, а не про количество методов.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Слева один класс PaymentService, к которому приходят изменения от финансов, маркетинга и DBA; их правки сталкиваются в одном файле. Справа три класса: FeeCalculator меняют только финансы, PaymentNotifier только маркетинг, PaymentRepository только DBA. PaymentService собирает их и меняется только при изменении самого сценария оплаты.">
+            <defs>
+              <marker id="sr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <path d="M360 24 L 360 240" class="dg-sep"/>
+            <text x="20" y="22" class="dg-cap bad">ОДИН КЛАСС, ТРИ АКТОРА</text>
+            <text x="374" y="22" class="dg-cap">ПО КЛАССУ НА АКТОРА</text>
+            <!-- слева -->
+            <rect x="20" y="40" width="96" height="30" rx="6" class="dg-box"/>
+            <rect x="20" y="110" width="96" height="30" rx="6" class="dg-box"/>
+            <rect x="20" y="180" width="96" height="30" rx="6" class="dg-box"/>
+            <rect x="180" y="70" width="160" height="110" rx="9" class="dg-cell miss"/>
+            <path d="M116 55 C 150 55, 150 100, 176 100" class="dg-line bad" marker-end="url(#sr-bad)"/>
+            <path d="M116 125 L 176 125" class="dg-line bad" marker-end="url(#sr-bad)"/>
+            <path d="M116 195 C 150 195, 150 150, 176 150" class="dg-line bad" marker-end="url(#sr-bad)"/>
+            <!-- справа -->
+            <rect x="374" y="40" width="96" height="30" rx="6" class="dg-box"/>
+            <rect x="374" y="110" width="96" height="30" rx="6" class="dg-box"/>
+            <rect x="374" y="180" width="96" height="30" rx="6" class="dg-box"/>
+            <rect x="510" y="40" width="190" height="30" rx="6" class="dg-cell hit"/>
+            <rect x="510" y="110" width="190" height="30" rx="6" class="dg-cell hit"/>
+            <rect x="510" y="180" width="190" height="30" rx="6" class="dg-cell hit"/>
+            <path d="M470 55 L 506 55" class="dg-line ok" marker-end="url(#sr-n)"/>
+            <path d="M470 125 L 506 125" class="dg-line ok" marker-end="url(#sr-n)"/>
+            <path d="M470 195 L 506 195" class="dg-line ok" marker-end="url(#sr-n)"/>
+            <g text-anchor="middle">
+              <text x="68" y="60" class="dg-n">финансы</text>
+              <text x="68" y="130" class="dg-n">маркетинг</text>
+              <text x="68" y="200" class="dg-n">DBA</text>
+              <text x="260" y="112" class="dg-in">PaymentService</text>
+              <text x="260" y="132" class="dg-bad">комиссия, SMS,</text>
+              <text x="260" y="148" class="dg-bad">SQL в одном файле</text>
+              <text x="422" y="60" class="dg-n">финансы</text>
+              <text x="422" y="130" class="dg-n">маркетинг</text>
+              <text x="422" y="200" class="dg-n">DBA</text>
+              <text x="605" y="60" class="dg-in">FeeCalculator</text>
+              <text x="605" y="130" class="dg-in">PaymentNotifier</text>
+              <text x="605" y="200" class="dg-in">PaymentRepository</text>
+            </g>
+            <text x="374" y="234" class="dg-s">PaymentService лишь связывает шаги сценария.</text>
+          </svg>
+        </div>
+        <figcaption>Признак нарушения — не размер класса, а то, что две разные группы людей приходят с правками в один файл.</figcaption>
+      </figure>
+      <p>После разделения каждый класс меняется по своей причине. Финансы правят FeeCalculator и его тесты; текст SMS живёт в PaymentNotifier, и его правка не может задеть расчёт денег. PaymentService остаётся координатором: получить комиссию, списать, сохранить, уведомить. Он меняется, только когда меняется сам сценарий оплаты.</p>
+      <p>Обратная ошибка — дробить по методам. Класс <code>PaymentAmountValidator</code>, <code>PaymentAmountValidatorFactory</code> и <code>PaymentAmountValidationResultMapper</code> на десять строк кода меняются всегда вместе, по одной причине. Это одна ответственность, размазанная по трём файлам: читать труднее, а пользы нет. Код, который меняется вместе, держат вместе — это и есть <b>связность</b> (cohesion).</p>
+    </section>
+
+    <section class="step" id="ocp">
+      <h2>OCP: новый способ оплаты добавляется новым классом, а не правкой switch</h2>
+      <p>Принцип открытости-закрытости: модуль открыт для расширения и закрыт для изменения. Добавить СБП — значит написать новый код, а не править проверенный. В Java это достигается полиморфизмом: сервис зависит от интерфейса, а каждый способ оплаты — отдельная реализация.</p>
+      <pre><code class="language-java">interface PaymentProcessor {
+    String method();             // Какой способ оплаты обрабатывает.
+    String charge(Payment p);
+}
+
+class PaymentService {
+    private final Map&lt;String, PaymentProcessor&gt; byMethod;
+
+    // В Spring сюда придут все бины-реализации: List&lt;PaymentProcessor&gt;.
+    PaymentService(List&lt;PaymentProcessor&gt; processors) {
+        byMethod = processors.stream().collect(toMap(PaymentProcessor::method, identity()));
+    }
+
+    String pay(Payment p) {
+        var processor = byMethod.get(p.method());
+        if (processor == null) throw new IllegalArgumentException("unsupported method " + p.method());
+        return processor.charge(p);
+    }
+}</code></pre>
+      <pre class="out">card: 3-D Secure, charged 500
+sbp: QR sent for 700
+unsupported method crypto</pre>
+      <p>Чтобы добавить криптовалюту, достаточно класса <code>CryptoProcessor</code> с аннотацией <code>@Component</code>. PaymentService, CardProcessor и их тесты не меняются. Spring внедрит в конструктор все реализации интерфейса, и новая попадёт в карту сама. Это и есть паттерн «стратегия», разобранный в <a href="patterns-behavioral.html">Behavioral Patterns</a>.</p>
+      <p>OCP защищает от изменений по одной оси, которую ты предвидел: способы оплаты. От всех изменений сразу закрыться нельзя. Если завтра комиссия начнёт зависеть от страны, интерфейс придётся менять. Поэтому точки расширения добавляют там, где изменения уже случались или точно случатся. Интерфейс «на всякий случай» для класса, у которого одна реализация и нет второй на горизонте, стоит дороже, чем правка в будущем.</p>
+    </section>
+
+    <section class="step" id="lsp">
+      <h2>LSP: подтип выполняет договор родителя, а не только компилируется</h2>
+      <p>Принцип подстановки Барбары Лисков: код, написанный для типа, должен правильно работать с любым его подтипом. Компилятор проверяет только сигнатуры. Договор — что метод обещает сделать — он не проверяет. Подтип может скомпилироваться и при этом обмануть вызывающего.</p>
+      <pre><code class="language-java">interface RefundingProcessor extends PaymentProcessor {
+    String refund(Payment p); // Договор: вернуть деньги клиенту.
+}
+
+class WalletProcessor implements RefundingProcessor {
+    public String refund(Payment p) {
+        throw new UnsupportedOperationException("wallet refunds are manual"); // Договор нарушен.
+    }
+}
+
+// Код возвратов написан под интерфейс и о кошельке ничего не знает.
+for (var processor : processors) System.out.println(processor.refund(p));</code></pre>
+      <pre class="out">== LSP: refunds
+  card: refunded 300
+  wallet: UnsupportedOperationException — wallet refunds are manual</pre>
+      <p>Ночной job возвратов проходит по всем процессорам и падает на кошельке. Чтобы его починить, в общий код добавляют <code>if (processor instanceof WalletProcessor)</code>, и полиморфизм из OCP перестаёт работать: каждый новый особый случай снова правит общий код. Нарушение LSP почти всегда видно по таким проверкам типа у вызывающего.</p>
+      <p>Формально договор описывают так: подтип не усиливает предусловия (не требует от вызывающего большего), не ослабляет постусловия (не обещает меньшего) и сохраняет инварианты. Бросить исключение, которого договор не предусматривал, — ослабить постусловие. Исправление здесь — не наследовать то, что не можешь выполнить: кошелёк реализует только <code>PaymentProcessor</code>, а возвраты требуют отдельного интерфейса, который кошелёк не реализует.</p>
+      <h3>Нарушение LSP в самой JDK</h3>
+      <pre><code class="language-java">List&lt;String&gt; methods = new ArrayList&lt;&gt;(List.of("card"));
+List&lt;String&gt; view = Collections.unmodifiableList(methods); // Тоже List.
+view.add("sbp");    // List обещает add, этот List — нет.
+methods.add("sbp"); // Меняем исходный список.
+System.out.println(view);</code></pre>
+      <pre class="out">unmodifiableList.add: UnsupportedOperationException
+view after source change: [card, sbp]
+List.copyOf after change: List12 [card, sbp]</pre>
+      <p>Интерфейс <code>List</code> помечает <code>add</code> как «необязательную операцию», и неизменяемые списки бросают <code>UnsupportedOperationException</code>. Это сознательный компромисс JDK, чтобы не плодить отдельные интерфейсы для чтения и записи, и он ровно об этом принципе: метод, принимающий <code>List</code>, не знает, можно ли в него писать. Вторая строка вывода — отдельная ловушка: <code>unmodifiableList</code> — это вид на исходный список, а не копия, и он видит его изменения. Неизменяемую копию даёт <code>List.copyOf</code>.</p>
+      <div class="trap">
+        <p class="myth">Квадрат — это прямоугольник, поэтому Square extends Rectangle — правильное наследование.</p>
+        <p class="fact">Код для Rectangle рассчитывает, что setWidth не меняет высоту. Квадрат обязан менять обе стороны, и вызывающий получает другую площадь, чем ожидал. «Является» в жизни не значит «подставим» в коде: наследование проверяют по поведению, а не по словам.</p>
+      </div>
+    </section>
+
+    <section class="step" id="isp">
+      <h2>ISP: клиент зависит только от методов, которые вызывает</h2>
+      <p>Принцип разделения интерфейсов: не заставляй клиента зависеть от методов, которыми он не пользуется. Шлюз банка умеет списывать, возвращать, делать выплаты и выгружать отчёты. Если всё это один интерфейс <code>BankGateway</code>, то сервис чеков, которому нужен только отчёт, зависит и от списаний.</p>
+      <pre><code class="language-java">// Толстый интерфейс: у каждого клиента свой кусок, но зависят все от всего.
+interface BankGateway {
+    ChargeResult charge(ChargeRequest r);   // платежи
+    RefundResult refund(RefundRequest r);   // возвраты
+    PayoutResult payout(PayoutRequest r);   // выплаты продавцам
+    Report dailyReport(LocalDate day);      // сверка
+}
+
+// Роли по клиентам: реализация одна, интерфейсы разные.
+interface Charging  { ChargeResult charge(ChargeRequest r); }
+interface Reporting { Report dailyReport(LocalDate day); }
+class TinkoffGateway implements Charging, Reporting { /* ... */ }</code></pre>
+      <p>Зачем это нужно, видно при изменениях. Добавили в <code>payout</code> параметр — с толстым интерфейсом перекомпилируется и пересобирается сервис сверки, хотя выплат он не касается. Тест сверки мокает интерфейс из четырёх методов, три из которых ему не нужны. Ролевые интерфейсы показывают по сигнатуре конструктора, чем класс реально пользуется.</p>
+      <p>В Spring тот же вопрос возникает с репозиториями. <code>JpaRepository</code> даёт сервису сверки <code>deleteAll</code> и <code>saveAll</code>, хотя ему нужно только чтение. Свой интерфейс-наследник <code>Repository</code> с двумя нужными методами сужает поверхность и делает зависимость честной. Подробнее — в <a href="spring-data.html">Spring Data</a>.</p>
+    </section>
+
+    <section class="step" id="dip">
+      <h2>DIP: бизнес-логика владеет интерфейсом, а инфраструктура его реализует</h2>
+      <p>Принцип инверсии зависимостей: модули верхнего уровня (политика, бизнес-правила) не зависят от модулей нижнего уровня (детали: банк, база, HTTP). Оба зависят от абстракции, и абстракция принадлежит верхнему уровню. Ключевое слово — «принадлежит»: интерфейс лежит в пакете домена и описан языком домена.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 256" role="img" aria-label="Слева: пакет payments импортирует класс TinkoffClient из пакета bank.tinkoff; зависимость в коде и вызов во время работы направлены одинаково, сверху вниз. Справа: в пакете payments лежит интерфейс BankGateway, а TinkoffAdapter в пакете infra реализует его. Зависимость в коде теперь направлена снизу вверх, хотя вызов во время работы по-прежнему идёт из payments в infra.">
+            <defs>
+              <marker id="dp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="dp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <path d="M360 24 L 360 246" class="dg-sep"/>
+            <text x="20" y="22" class="dg-cap bad">ЗАВИСИМОСТЬ ВНИЗ</text>
+            <text x="374" y="22" class="dg-cap">ЗАВИСИМОСТЬ ИНВЕРТИРОВАНА</text>
+            <!-- слева -->
+            <rect x="20" y="36" width="320" height="76" rx="10" class="dg-sep" fill="none"/>
+            <rect x="40" y="58" width="180" height="38" rx="7" class="dg-cell"/>
+            <rect x="20" y="150" width="320" height="76" rx="10" class="dg-sep" fill="none"/>
+            <rect x="40" y="172" width="180" height="38" rx="7" class="dg-cell"/>
+            <path d="M130 96 L 130 168" class="dg-line bad" marker-end="url(#dp-bad)"/>
+            <!-- справа -->
+            <rect x="374" y="36" width="326" height="76" rx="10" class="dg-sep" fill="none"/>
+            <rect x="390" y="58" width="140" height="38" rx="7" class="dg-cell"/>
+            <rect x="548" y="58" width="140" height="38" rx="7" class="dg-cell hit"/>
+            <rect x="374" y="150" width="326" height="76" rx="10" class="dg-sep" fill="none"/>
+            <rect x="548" y="172" width="140" height="38" rx="7" class="dg-cell"/>
+            <path d="M530 77 L 544 77" class="dg-line" marker-end="url(#dp-n)"/>
+            <path d="M618 168 L 618 100" class="dg-line ok" marker-end="url(#dp-ok)"/>
+            <path d="M460 96 C 460 140, 520 191, 544 191" class="dg-sep" fill="none" marker-end="url(#dp-n)"/>
+            <g text-anchor="middle">
+              <text x="130" y="82" class="dg-in">PaymentService</text>
+              <text x="130" y="196" class="dg-in">TinkoffClient</text>
+              <text x="460" y="82" class="dg-in">PaymentService</text>
+              <text x="618" y="82" class="dg-in">BankGateway</text>
+              <text x="618" y="196" class="dg-in">TinkoffAdapter</text>
+            </g>
+            <text x="232" y="52" class="dg-n">payments</text>
+            <text x="232" y="166" class="dg-n">bank.tinkoff</text>
+            <text x="138" y="136" class="dg-bad">import</text>
+            <text x="380" y="52" class="dg-n">payments: политика</text>
+            <text x="380" y="166" class="dg-n">infra: детали</text>
+            <text x="626" y="136" class="dg-ok">implements</text>
+            <text x="416" y="140" class="dg-n">вызов</text>
+            <text x="20" y="244" class="dg-s">Импорт и вызов направлены одинаково.</text>
+            <text x="374" y="244" class="dg-s">Импорт вверх, вызов по-прежнему вниз (пунктир).</text>
+          </svg>
+        </div>
+        <figcaption>Инверсия — про направление зависимости в исходном коде, а не про направление вызова. Платёж всё так же уходит в банк, но пакет payments больше не знает о Тинькофф.</figcaption>
+      </figure>
+      <p>Слева PaymentService импортирует класс SDK банка. Смена банка, обновление SDK, даже тест без сети требуют трогать бизнес-код. Справа PaymentService знает только свой <code>BankGateway</code> с методами вроде <code>charge(Money, CardToken)</code>, описанными в терминах платежей. TinkoffAdapter в пакете инфраструктуры переводит этот язык в вызовы SDK. Новый банк — новый адаптер, бизнес-код не меняется, а в тесте вместо адаптера подставляется заглушка.</p>
+      <p>Частая путаница на собеседовании — смешать DIP, DI и IoC. <b>IoC</b> — общий принцип: управление созданием и вызовами передано фреймворку. <b>DI</b> — способ получить зависимости снаружи, через конструктор; его делает контейнер Spring. <b>DIP</b> — правило о том, кто от кого зависит в исходном коде. Spring внедрит конкретный <code>TinkoffClient</code> в PaymentService так же охотно, как интерфейс: DI не гарантирует DIP. Его гарантирует только то, где лежит интерфейс и что импортирует пакет домена.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Принципы — ответ на боль изменений, и без боли они превращаются в церемонию</h2>
+      <p>SOLID хорошо объясняет, почему код трудно менять. Он плохо подходит как чек-лист «чтобы было правильно». Интерфейс на каждый класс, фабрика на каждый конструктор и три слоя абстракции над вызовом одного метода делают код длиннее и труднее для чтения, ничего не защищая. Каждая граница стоит денег: лишний файл, лишний переход в IDE, лишняя мысль у читателя.</p>
+      <table class="mx">
+        <thead><tr><th>Принцип</th><th>Суть</th><th>Где перебарщивают</th></tr></thead>
+        <tbody>
+          <tr><td>DRY</td><td>Одно знание — в одном месте</td><td>Склеивают одинаковый на вид код с разными причинами изменения; потом его разводят флагами</td></tr>
+          <tr><td>KISS</td><td>Самое простое решение, которое работает</td><td>Путают простое с привычным</td></tr>
+          <tr><td>YAGNI</td><td>Не строить то, что ещё не нужно</td><td>Отказываются от структуры, которая нужна уже сейчас</td></tr>
+          <tr><td>Композиция вместо наследования</td><td>Собирать поведение из объектов, а не из иерархии</td><td>Наследование для настоящего «подтипа» с соблюдённым LSP допустимо</td></tr>
+        </tbody>
+      </table>
+      <p>Про DRY стоит сказать точнее. Два одинаковых метода проверки суммы — для платежа и для выплаты продавцу — выглядят как дублирование. Но лимиты платежей задают риски, а лимиты выплат — юристы. Если их склеить, первое же изменение одного превратит общий метод в набор флагов. DRY — про знание, а не про текст: дублирование одинаковых строк с разными причинами изменения — случайное сходство, и его можно оставить.</p>
+      <p>Хорошая проверка — история изменений. Если два класса всегда меняются вместе, граница между ними лишняя. Если в один класс регулярно приходят правки от разных людей — границы не хватает. Связь между классами при этом должна быть слабой (low coupling): изменение внутри одного не требует правок в другом. Как эти же идеи работают на уровне модулей и пакетов, разобрано в <a href="components.html">Components &amp; Modules</a>, а на уровне всего приложения — в <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>SRP — про заказчиков изменений: одна группа людей, один модуль. Код, который меняется вместе, держат вместе.</li>
+        <li>OCP достигается полиморфизмом и защищает только от предвиденной оси изменений.</li>
+        <li>LSP — про поведение: подтип не бросает неожиданных исключений и не обещает меньше. Признак нарушения — instanceof у вызывающего.</li>
+        <li>DIP — про направление импортов: интерфейс принадлежит бизнес-логике. DI в Spring его не гарантирует.</li>
+        <li>Граница стоит денег; её ставят там, где изменения уже сталкиваются, а не на всякий случай.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="solid-overview" data-freq="3">
+      <h3>Расскажи про SOLID на примере из своей работы</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это пять принципов о границах в коде. SRP: модуль отвечает перед одной группой заказчиков изменений. OCP: новое поведение добавляется новым кодом, как новый способ оплаты новой реализацией интерфейса. LSP: подтип выполняет договор родителя. ISP: клиент видит только нужные ему методы. DIP: бизнес-логика зависит от своих интерфейсов, а инфраструктура их реализует.</p>
+          <p>В платёжном сервисе это выглядело так: switch по способам оплаты заменили на List&lt;PaymentProcessor&gt; из Spring, интерфейс шлюза банка перенесли в пакет домена, а SDK банка спрятали в адаптер. Новый способ оплаты и новый банк перестали трогать бизнес-код.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Принципы отвечают на боль изменений; интерфейс на каждый класс без второй реализации — церемония.</li>
+            <li>OCP закрывает только от предвиденной оси изменений; точки расширения ставят по истории правок.</li>
+            <li>На уровне модулей те же идеи дают принципы компонентов: ацикличность и направление к стабильности.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="solid-srp" data-freq="3">
+      <h3>Что значит «одна ответственность» в SRP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Не «делает одну вещь». У Мартина формулировка такая: модуль должен отвечать перед одним актором — группой людей, которые просят изменений. Если в класс платежей приходят правки и от финансов, и от маркетинга, и от DBA, их изменения сталкиваются и ломают друг друга.</p>
+          <p>Я делю по причинам изменений: расчёт комиссии отдельно, уведомления отдельно, хранение отдельно, а сервис связывает шаги сценария.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Обратная ошибка — дробить по методам: классы, которые всегда меняются вместе, — одна ответственность в нескольких файлах.</li>
+            <li>Проверка по истории git: что меняется вместе и кто приходит с правками.</li>
+            <li>SRP на уровне компонентов — Common Closure Principle: то, что меняется по одной причине, собирают в один модуль.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="solid-lsp" data-freq="3">
+      <h3>Приведи пример нарушения принципа Лисков</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Интерфейс возвратов обещает вернуть деньги, а реализация для кошелька бросает UnsupportedOperationException. Код компилируется, но ночной job возвратов падает на кошельке, и в общий код начинают добавлять instanceof. Подтип не выполнил договор родителя.</p>
+          <p>Пример из JDK — неизменяемые списки: List обещает add, а Collections.unmodifiableList и List.of бросают исключение. JDK сознательно пошла на это, назвав add необязательной операцией.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Формально: подтип не усиливает предусловия, не ослабляет постусловия и сохраняет инварианты.</li>
+            <li>Признак нарушения — проверки типа у вызывающего; исправление — не наследовать то, что не можешь выполнить, и разделить интерфейсы.</li>
+            <li>Квадрат-прямоугольник: «является» в жизни не значит «подставим» в коде, если setWidth меняет и высоту.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>unmodifiableList — это неизменяемый список?</summary>
+          <p>Нет. Это вид на исходный список без методов записи. Если кто-то изменит исходный список, вид покажет изменения: в демо после methods.add("sbp") вид стал [card, sbp]. Неизменяемую копию даёт List.copyOf или List.of.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="solid-dip-di" data-freq="3">
+      <h3>Чем DIP отличается от dependency injection и IoC?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>IoC — общий принцип: управление созданием объектов и вызовами передаётся фреймворку. DI — способ получить зависимости снаружи, например через конструктор; это делает контейнер Spring. DIP — правило о направлении зависимостей в коде: бизнес-логика зависит от абстракции, которую сама и описывает, а инфраструктура её реализует.</p>
+          <p>Spring внедрит конкретный класс SDK банка в сервис так же легко, как интерфейс. DI есть, а DIP нарушен. DIP проверяется по тому, где лежит интерфейс и что импортирует пакет домена.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Инверсия касается зависимости в исходном коде, а не потока вызовов: платёж всё так же идёт в банк.</li>
+            <li>Интерфейс описывают языком домена, а не копией API SDK; иначе детали банка протекают в бизнес-код.</li>
+            <li>Правило зависимостей Clean Architecture — DIP, применённый ко всем слоям сразу.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="solid-composition" data-freq="2">
+      <h3>Почему советуют композицию вместо наследования?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Наследование жёстко связывает подкласс с реализацией родителя: изменение в родителе меняет поведение всех наследников, а подкласс зависит от деталей, которые родитель не обещал. Композиция собирает поведение из объектов через интерфейсы, и части можно заменять независимо, в том числе в тестах.</p>
+          <p>Наследование уместно, когда подкласс действительно подставим вместо родителя и выполняет его договор. Для переиспользования кода его лучше не брать.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Хрупкий базовый класс: родитель вызывает свой переопределяемый метод изнутри, и подкласс ломается при изменении порядка вызовов.</li>
+            <li>Spring сам строит поведение композицией: прокси, декораторы, цепочки фильтров.</li>
+            <li>sealed-иерархии в Java 17+ делают наследование явным и закрытым, когда набор подтипов известен.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Роберт Мартин, «Чистая архитектура», часть III, главы 7–11 — основа урока: SRP через акторов, OCP, LSP, ISP, DIP.</li>
+      <li>Barbara Liskov, Jeannette Wing, «A Behavioral Notion of Subtyping», 1994 — формальное определение подстановки.</li>
+      <li>Joshua Bloch, Effective Java, 3-е изд., пункты 18–20 — композиция вместо наследования, интерфейсы вместо абстрактных классов.</li>
+      <li>Andrew Hunt, David Thomas, The Pragmatic Programmer, 20th Anniversary Edition, раздел «DRY» — дублирование знания, а не текста.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

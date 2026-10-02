@@ -185,7 +185,7 @@ window.KB_TREE = [
           scope: 'exchange и очереди, routing key, ack, prefetch, DLX, отличия от Kafka' },
       ] },
       { id: 'design', title: 'Code Design', source: 'GoF; Clean Architecture (Martin); Learning Domain-Driven Design (Khononov)', items: [
-        { id: 'design-principles', freq: 3, status: 'empty', title: 'SOLID & Principles',
+        { id: 'design-principles', freq: 3, status: 'draft', title: 'SOLID & Principles',
           scope: 'SOLID, coupling и cohesion, DRY, KISS, YAGNI, композиция и агрегация' },
         { id: 'patterns-creational', freq: 2, status: 'empty', title: 'Creational Patterns',
           scope: 'singleton, factory method, abstract factory, builder, prototype, где они в JDK и Spring' },
