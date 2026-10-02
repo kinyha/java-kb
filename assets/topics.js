@@ -107,7 +107,7 @@ window.KB_TREE = [
           scope: 'рукопожатие, управление потоком и перегрузкой, keep-alive, TIME_WAIT, когда нужен UDP' },
         { id: 'http', freq: 3, status: 'draft', title: 'HTTP',
           scope: 'методы, коды ответов, заголовки, cookies, идемпотентность и безопасность методов' },
-        { id: 'http-versions', freq: 2, status: 'empty', title: 'HTTP/2 & HTTP/3',
+        { id: 'http-versions', freq: 2, status: 'draft', title: 'HTTP/2 & HTTP/3',
           scope: 'keep-alive и head-of-line blocking в HTTP/1.1, мультиплексирование в HTTP/2, QUIC в HTTP/3' },
         { id: 'dns', freq: 2, status: 'empty', title: 'DNS',
           scope: 'резолв имени, рекурсивный и авторитативный сервер, записи A, CNAME, MX, TTL и кеш' },

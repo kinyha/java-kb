@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Networking: HTTP/2 &amp; HTTP/3 · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="http-versions">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Networking: HTTP/2 &amp; HTTP/3</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Семантика HTTP — методы, коды, заголовки — одна во всех версиях. Меняется то, как запросы едут по сети. HTTP/1.1 передаёт по соединению один запрос за раз, поэтому клиенты открывают по шесть соединений и платят за каждое рукопожатие. HTTP/2 гонит много запросов параллельно по одному TCP-соединению, но потеря одного пакета TCP тормозит их все. HTTP/3 переносит потоки на QUIC поверх UDP, где каждый поток доставляется независимо, а рукопожатие короче. Для бэкенда это вопрос числа соединений, балансировки долгоживущих соединений и того, где именно завершается HTTP/3.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Страница оплаты делает тридцать запросов, и каждое новое соединение стоит кругов до сервера</h2>
+      <p>Страница оплаты в мобильном браузере загружает HTML, скрипты, шрифты, иконки банков и несколько вызовов API. Каждое новое соединение — рукопожатие TCP и TLS, то есть два-три круга до сервера ещё до запроса, и медленный старт TCP после него. На мобильной сети с задержкой 100 мс одни рукопожатия съедают сотни миллисекунд, как показано в <a href="network.html">How a Request Travels</a>.</p>
+      <p>Версии HTTP — ответы на вопрос, как отправить много запросов, не открывая много соединений и не дожидаясь одного медленного ответа. Опыт ниже — шесть параллельных запросов curl к example.com по HTTP/1.1 и по HTTP/2 на машине автора. Абсолютное время зависит от сети, важно число соединений.</p>
+      <pre><code class="language-bash"># Шесть адресов параллельно; num_connects — сколько новых соединений открыл каждый запрос.
+curl -s --http1.1 --parallel -o /dev/null … -w "%{http_version} new_conn=%{num_connects}\n" URL1 … URL6 | sort | uniq -c
+curl -s --http2   --parallel -o /dev/null … -w "%{http_version} new_conn=%{num_connects}\n" URL1 … URL6 | sort | uniq -c</code></pre>
+      <pre class="out">--http1.1
+   6 1.1 new_conn=1
+--http2
+   5 2 new_conn=0
+   1 2 new_conn=1</pre>
+      <p>HTTP/1.1 открыл шесть соединений, HTTP/2 — одно, и пять запросов пошли по нему. Общее время в обоих опытах оказалось близким, около полсекунды: рукопожатия HTTP/1.1 шли параллельно. Цена шести соединений не во времени одного клиента, а в ресурсах: шесть рукопожатий TLS для процессора сервера, шесть наборов буферов, шесть медленных стартов.</p>
+    </section>
+
+    <section class="step" id="http11">
+      <h2>HTTP/1.1 передаёт по соединению один запрос за раз, поэтому соединений много</h2>
+      <p>HTTP/1.1 ввёл постоянные соединения (keep-alive): после ответа соединение не закрывается, и следующий запрос идёт по нему без нового рукопожатия. Но в каждый момент по соединению идёт только один обмен: следующий запрос можно отправить, когда прочитан весь предыдущий ответ. Медленный ответ задерживает все запросы за ним — это head-of-line blocking на уровне HTTP.</p>
+      <p>Стандарт предусматривал конвейер (pipelining): отправить несколько запросов подряд, не дожидаясь ответов. Но ответы всё равно обязаны прийти строго по порядку, а прокси обрабатывали конвейер с ошибками, и браузеры его так и не включили. Вместо этого клиенты открывают несколько соединений к одному серверу: браузеры — до шести на хост, curl в опыте выше — по соединению на каждый параллельный запрос.</p>
+      <p>Ради обхода лимита сайты раскладывали ресурсы по нескольким доменам и склеивали файлы в один. С HTTP/2 эти приёмы стали вредными: несколько доменов снова означают несколько соединений, а склеенный файл нельзя закешировать частично.</p>
+    </section>
+
+    <section class="step" id="http2">
+      <h2>HTTP/2 мультиплексирует запросы кадрами по одному соединению</h2>
+      <p>HTTP/2 сохранил семантику, но заменил текст бинарными кадрами. Каждый запрос с ответом — поток (stream) со своим номером. Кадры разных потоков чередуются в одном TCP-соединении, и получатель собирает их по номерам. Медленный ответ одного потока не задерживает остальные на уровне HTTP: их кадры идут между его кадрами.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Сверху HTTP/1.1: шесть отдельных соединений, у каждого своё рукопожатие и один запрос. Снизу HTTP/2: одно соединение с одним рукопожатием, кадры потоков s1, s3, s5, s7, s9, s11 чередуются в одном TCP-потоке.">
+            <text x="20" y="22" class="dg-cap">HTTP/1.1: 6 СОЕДИНЕНИЙ</text>
+            <rect x="20" y="34" width="110" height="12" rx="3" class="dg-cell miss"/>
+            <rect x="134" y="34" width="60" height="12" rx="3" class="dg-cell hit"/>
+            <rect x="20" y="50" width="110" height="12" rx="3" class="dg-cell miss"/>
+            <rect x="134" y="50" width="60" height="12" rx="3" class="dg-cell hit"/>
+            <rect x="20" y="66" width="110" height="12" rx="3" class="dg-cell miss"/>
+            <rect x="134" y="66" width="60" height="12" rx="3" class="dg-cell hit"/>
+            <rect x="20" y="82" width="110" height="12" rx="3" class="dg-cell miss"/>
+            <rect x="134" y="82" width="60" height="12" rx="3" class="dg-cell hit"/>
+            <rect x="20" y="98" width="110" height="12" rx="3" class="dg-cell miss"/>
+            <rect x="134" y="98" width="60" height="12" rx="3" class="dg-cell hit"/>
+            <rect x="20" y="114" width="110" height="12" rx="3" class="dg-cell miss"/>
+            <rect x="134" y="114" width="60" height="12" rx="3" class="dg-cell hit"/>
+            <text x="210" y="60" class="dg-n">6 рукопожатий TCP + TLS,</text>
+            <text x="210" y="76" class="dg-n">по одному запросу на соединение</text>
+            <text x="20" y="148" class="dg-cap">HTTP/2: 1 СОЕДИНЕНИЕ, ПОТОКИ ЧЕРЕДУЮТСЯ</text>
+            <rect x="20" y="160" width="110" height="26" rx="4" class="dg-cell miss"/>
+            <text x="75" y="178" class="dg-n" text-anchor="middle">рукопожатие</text>
+            <rect x="136" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="157" y="178" class="dg-n" text-anchor="middle">s1</text>
+            <rect x="182" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="203" y="178" class="dg-n" text-anchor="middle">s3</text>
+            <rect x="228" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="249" y="178" class="dg-n" text-anchor="middle">s5</text>
+            <rect x="274" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="295" y="178" class="dg-n" text-anchor="middle">s7</text>
+            <rect x="320" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="341" y="178" class="dg-n" text-anchor="middle">s9</text>
+            <rect x="366" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="387" y="178" class="dg-n" text-anchor="middle">s11</text>
+            <rect x="412" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="433" y="178" class="dg-n" text-anchor="middle">s1</text>
+            <rect x="458" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="479" y="178" class="dg-n" text-anchor="middle">s5</text>
+            <rect x="504" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="525" y="178" class="dg-n" text-anchor="middle">s3</text>
+            <rect x="550" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="571" y="178" class="dg-n" text-anchor="middle">s11</text>
+            <rect x="596" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="617" y="178" class="dg-n" text-anchor="middle">s7</text>
+            <rect x="642" y="160" width="42" height="26" rx="4" class="dg-cell hit"/>
+            <text x="663" y="178" class="dg-n" text-anchor="middle">s9</text>
+            <text x="20" y="210" class="dg-s">Кадры потоков s1…s11 идут вперемешку; получатель собирает их по номеру потока.</text>
+            <text x="20" y="228" class="dg-s">Один набор буферов, одно окно перегрузки, один медленный старт.</text>
+          </svg>
+        </div>
+        <figcaption>Красное — рукопожатия, зелёное — данные. HTTP/2 платит за рукопожатие один раз, а дальше потоки делят одно соединение.</figcaption>
+      </figure>
+      <p>Кроме мультиплексирования HTTP/2 сжимает заголовки алгоритмом HPACK: повторяющиеся заголовки вроде cookie и user-agent передаются ссылкой на таблицу, а не текстом каждый раз. У каждого потока есть своё управление потоком данных поверх окна TCP. Server push — отправку ресурсов до запроса — браузеры перестали поддерживать: он чаще мешал кешу, чем помогал.</p>
+      <p>Номера потоков от клиента нечётные. Сервер ограничивает число одновременных потоков настройкой <code>SETTINGS_MAX_CONCURRENT_STREAMS</code>, обычно 100–250. Клиент, упёршийся в лимит, ставит запросы в очередь или открывает второе соединение — поэтому HTTP/2-клиенты тоже держат пул соединений, только меньший.</p>
+    </section>
+
+    <section class="step" id="tcp-hol">
+      <h2>Потеря одного пакета TCP останавливает все потоки HTTP/2</h2>
+      <p>HTTP/2 убрал блокировку на уровне HTTP, но все потоки по-прежнему едут в одном потоке байтов TCP. TCP обязан отдать приложению байты по порядку. Если потерян один пакет, все пакеты после него ждут повторной отправки в буфере ядра, даже если они принадлежат другим потокам HTTP. Это та же блокировка, только уровнем ниже.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Шесть пакетов трёх потоков A, B, C. Пакет 2 потока B потерян. В TCP все пакеты после него ждут повтора, и приложение получает только A1. В QUIC потоки A и C получают свои пакеты сразу, ждёт только поток B. После повтора TCP отдаёт всё разом, а QUIC дополняет поток B.">
+            <text x="20" y="36" class="dg-cap">TCP (HTTP/2)</text>
+            <rect x="20" y="50" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="20" y="50" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="51" y="70" class="dg-in" text-anchor="middle">A1</text>
+            <rect x="90" y="50" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="2-3" x="90" y="50" width="62" height="30" rx="5" class="dg-cell miss"/>
+            <rect data-s="4" x="90" y="50" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="121" y="70" class="dg-in" text-anchor="middle">B2</text>
+            <rect x="160" y="50" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="160" y="50" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="191" y="70" class="dg-in" text-anchor="middle">C3</text>
+            <rect x="230" y="50" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="230" y="50" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="261" y="70" class="dg-in" text-anchor="middle">A4</text>
+            <rect x="300" y="50" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="300" y="50" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="331" y="70" class="dg-in" text-anchor="middle">B5</text>
+            <rect x="370" y="50" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="370" y="50" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="401" y="70" class="dg-in" text-anchor="middle">C6</text>
+            <text x="20" y="126" class="dg-cap">QUIC (HTTP/3)</text>
+            <rect x="20" y="140" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="20" y="140" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="51" y="160" class="dg-in" text-anchor="middle">A1</text>
+            <rect x="90" y="140" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="2-3" x="90" y="140" width="62" height="30" rx="5" class="dg-cell miss"/>
+            <rect data-s="4" x="90" y="140" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="121" y="160" class="dg-in" text-anchor="middle">B2</text>
+            <rect x="160" y="140" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="160" y="140" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="191" y="160" class="dg-in" text-anchor="middle">C3</text>
+            <rect x="230" y="140" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="230" y="140" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="261" y="160" class="dg-in" text-anchor="middle">A4</text>
+            <rect x="300" y="140" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="300" y="140" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="331" y="160" class="dg-in" text-anchor="middle">B5</text>
+            <rect x="370" y="140" width="62" height="30" rx="5" class="dg-cell"/>
+            <rect x="370" y="140" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <text x="401" y="160" class="dg-in" text-anchor="middle">C6</text>
+            <rect x="470" y="40" width="230" height="50" rx="8" class="dg-box"/>
+            <rect x="470" y="130" width="230" height="50" rx="8" class="dg-box"/>
+            <text x="482" y="60" class="dg-n">приложению отдано</text>
+            <text x="482" y="150" class="dg-n">приложению отдано</text>
+            <text data-s="1" x="482" y="80" class="dg-in">A1</text>
+            <text data-s="2-3" x="482" y="80" class="dg-bad">A1; B2 потерян — ждут все</text>
+            <text data-s="4" x="482" y="80" class="dg-ok">A1 B2 C3 A4 B5 C6</text>
+            <text data-s="1" x="482" y="170" class="dg-in">A1</text>
+            <text data-s="2-3" x="482" y="170" class="dg-ok">A1 C3 A4 C6; ждёт только B</text>
+            <text data-s="4" x="482" y="170" class="dg-ok">A1 C3 A4 C6 B2 B5</text>
+            <text data-s="1" x="20" y="214" class="dg-t">Пакеты трёх потоков A, B, C в одном соединении.</text>
+            <text data-s="2" x="20" y="214" class="dg-bad">Пакет 2 (поток B) потерян в сети.</text>
+            <text data-s="3" x="20" y="214" class="dg-t">TCP держит всё после дыры; QUIC отдаёт A и C.</text>
+            <text data-s="4" x="20" y="214" class="dg-ok">Повтор пришёл: B догнал, TCP отдал всё разом.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Шесть пакетов трёх потоков отправлены по одному соединению. Первым дошёл A1, и его отдали приложению.</li>
+          <li>Пакет 2 потока B потерян. Пакеты 3–6 дошли, но в TCP лежат в буфере: перед ними дыра.</li>
+          <li>TCP ждёт повтора пакета 2 и никому ничего не отдаёт. QUIC знает, какому потоку принадлежит каждый пакет, и отдаёт потокам A и C всё, что пришло; ждёт только B.</li>
+          <li>Повтор пакета 2 пришёл через круг до сервера. TCP отдаёт всё разом, QUIC дополняет поток B.</li>
+        </ol>
+      </figure>
+      <p>На стабильной проводной сети потери редки, и HTTP/2 почти всегда выигрывает. На мобильной сети с потерями в 1–2 % одно соединение HTTP/2 может работать хуже шести соединений HTTP/1.1: у шести соединений потеря тормозит одно, а у HTTP/2 — всё. Эту проблему и решает HTTP/3.</p>
+    </section>
+
+    <section class="step" id="http3">
+      <h2>HTTP/3 переносит потоки на QUIC поверх UDP и сокращает рукопожатие</h2>
+      <p>QUIC — транспорт поверх UDP, который делает то же, что TCP: надёжность, порядок, управление перегрузкой, — но отдельно для каждого потока. Потеря пакета одного потока не задерживает другие. QUIC работает в пространстве пользователя, а не в ядре, поэтому его можно обновлять вместе с браузером или сервером, не дожидаясь обновления операционных систем.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>HTTP/1.1</th><th>HTTP/2</th><th>HTTP/3</th></tr></thead>
+        <tbody>
+          <tr><td>Транспорт</td><td>TCP</td><td>TCP</td><td>QUIC поверх UDP</td></tr>
+          <tr><td>Запросов на соединение одновременно</td><td>1</td><td>Много, потоки</td><td>Много, независимые потоки</td></tr>
+          <tr><td>Блокировка из-за потери пакета</td><td>Своё соединение</td><td>Все потоки</td><td>Только свой поток</td></tr>
+          <tr><td>Рукопожатие до запроса (TLS 1.3)</td><td>2 RTT</td><td>2 RTT</td><td>1 RTT, 0 при возобновлении</td></tr>
+          <tr><td>Смена сети клиента</td><td>Новое соединение</td><td>Новое соединение</td><td>Продолжает по connection ID</td></tr>
+        </tbody>
+      </table>
+      <p>TLS 1.3 встроен в QUIC: установка транспорта и шифрования совмещены, и до первого запроса нужен один круг вместо двух. При повторном подключении клиент может отправить данные сразу (0-RTT). Но данные 0-RTT можно перехватить и отправить повторно, поэтому сервер должен принимать в них только безопасные идемпотентные запросы: GET тарифа — да, POST платежа — нет. Соединение QUIC опознаётся не по четвёрке адресов, а по идентификатору, поэтому телефон, перешедший с Wi-Fi на мобильную сеть, продолжает загрузку без нового рукопожатия.</p>
+      <p>Клиент узнаёт, что сервер умеет HTTP/3, из заголовка <code>Alt-Svc</code> в ответе HTTP/2 или из DNS-записи HTTPS, и в следующий раз пробует QUIC. Если UDP блокируется корпоративным файрволом, клиент возвращается к HTTP/2 по TCP. curl на машине автора собран без поддержки HTTP/3, поэтому этот раздел описан по RFC 9114 и RFC 9000 без вывода.</p>
+    </section>
+
+    <section class="step" id="backend">
+      <h2>На бэкенде HTTP/2 живёт между сервисами, а HTTP/3 обычно заканчивается на краю</h2>
+      <p>Браузер и мобильное приложение получают HTTP/3 от CDN или балансировщика на краю сети. Дальше, внутри дата-центра, запрос обычно идёт по HTTP/1.1 или HTTP/2: потерь там мало, и выгода QUIC невелика. Включать HTTP/3 в самом Spring-приложении, как правило, не нужно.</p>
+      <p>HTTP/2 внутри системы встречается чаще, чем кажется. gRPC работает только поверх HTTP/2. Java <code>HttpClient</code> по умолчанию пробует HTTP/2: для https версия согласуется в TLS через ALPN, а для http без шифрования — через заголовок Upgrade, который многие серверы игнорируют. В Spring Boot HTTP/2 на встроенном сервере включает <code>server.http2.enabled=true</code>, а для обычного http без TLS (h2c) нужна отдельная настройка сервера.</p>
+      <p>Главная ловушка для бэкенда — балансировка долгоживущих соединений. HTTP/2-клиент держит одно соединение и отправляет по нему все запросы. Балансировщик уровня L4 распределяет соединения, а не запросы, и вся нагрузка клиента попадает на один экземпляр сервиса. Масштабирование до десяти pod-ов ничего не даёт, если клиенты пришли с открытыми соединениями к первым двум. Для gRPC и HTTP/2 нужен балансировщик L7, который распределяет отдельные запросы, или балансировка на стороне клиента и ограничение времени жизни соединения, чтобы клиенты периодически переподключались.</p>
+      <div class="trap">
+        <p class="myth">Перешли на HTTP/2 — значит, запросы стали быстрее во всех случаях.</p>
+        <p class="fact">HTTP/2 экономит соединения и рукопожатия и убирает блокировку на уровне HTTP. Но при потерях пакетов одно соединение тормозит все потоки сразу, а L4-балансировщик перестаёт распределять нагрузку. Выигрыш зависит от сети и от того, как устроена балансировка.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Семантика HTTP одна; версии меняют транспорт запросов.</li>
+        <li>HTTP/1.1 — один обмен на соединение за раз, отсюда шесть соединений на хост; в опыте 6 соединений против одного у HTTP/2.</li>
+        <li>HTTP/2 мультиплексирует потоки кадрами в одном TCP и сжимает заголовки, но потеря пакета TCP тормозит все потоки.</li>
+        <li>HTTP/3 на QUIC доставляет потоки независимо, рукопожатие короче, 0-RTT только для идемпотентных запросов.</li>
+        <li>Долгоживущие HTTP/2-соединения ломают L4-балансировку; HTTP/3 обычно завершается на краю сети.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="hv-diff" data-freq="2">
+      <h3>Чем отличаются HTTP/1.1, HTTP/2 и HTTP/3?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Семантика одна, отличается транспорт. HTTP/1.1 — текстовый, по соединению один запрос за раз, поэтому клиенты открывают несколько соединений. HTTP/2 — бинарные кадры, много потоков параллельно в одном TCP-соединении, сжатие заголовков HPACK. HTTP/3 работает поверх QUIC на UDP: потоки независимы на уровне транспорта, TLS 1.3 встроен, рукопожатие короче.</p>
+          <p>В опыте шесть параллельных запросов по HTTP/1.1 открыли шесть соединений, по HTTP/2 — одно.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>HTTP/2 убрал head-of-line blocking HTTP, но оставил блокировку TCP: потеря пакета тормозит все потоки.</li>
+            <li>QUIC опознаёт соединение по connection ID и переживает смену сети клиента.</li>
+            <li>0-RTT в HTTP/3 уязвим к повтору, поэтому в нём принимают только идемпотентные запросы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="hv-hol" data-freq="2">
+      <h3>Что такое head-of-line blocking и как его решают версии HTTP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это когда одна медленная или потерянная единица данных задерживает всё, что за ней. В HTTP/1.1 медленный ответ задерживает следующие запросы на том же соединении. HTTP/2 убирает это мультиплексированием потоков, но в TCP потеря одного пакета задерживает все байты после него, а значит, все потоки. QUIC в HTTP/3 доставляет потоки независимо, и потеря задерживает только свой поток.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>На сетях с потерями несколько соединений HTTP/1.1 могут работать лучше одного HTTP/2.</li>
+            <li>Pipelining в HTTP/1.1 не решал проблему: ответы обязаны идти по порядку.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="hv-backend" data-freq="2">
+      <h3>Что HTTP/2 меняет для бэкенда и балансировки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Клиент держит одно долгоживущее соединение и шлёт по нему все запросы. Балансировщик L4 распределяет соединения, поэтому вся нагрузка клиента уходит на один экземпляр, и новые pod-ы не получают трафика. Для gRPC и HTTP/2 нужен L7-балансировщик, клиентская балансировка или ограничение времени жизни соединения.</p>
+          <p>Java HttpClient по умолчанию согласует HTTP/2 через ALPN для https; в Spring Boot сервер включают настройкой server.http2.enabled.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Сервер ограничивает число одновременных потоков в соединении; клиент при упоре в лимит открывает ещё одно.</li>
+            <li>HTTP/3 обычно завершается на CDN или балансировщике, внутри дата-центра его выгода мала.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему после масштабирования gRPC-сервиса с двух до десяти pod-ов нагрузка не перераспределилась?</summary>
+          <p>Клиенты открыли HTTP/2-соединения к первым двум pod-ам и держат их. Kubernetes Service балансирует на уровне соединений, а новых соединений клиенты не открывают, поэтому восемь новых pod-ов простаивают. Помогают L7-балансировка запросов (Envoy, service mesh), клиентская балансировка по списку адресов или серверная настройка максимального возраста соединения, после которого клиент переподключается.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Ilya Grigorik, <a href="https://hpbn.co/http2/">High Performance Browser Networking: HTTP/2</a> — основа урока: потоки, кадры, HPACK, почему отказались от шардирования доменов.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9113">RFC 9113: HTTP/2</a> и <a href="https://www.rfc-editor.org/rfc/rfc9114">RFC 9114: HTTP/3</a> — стандарты версий.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9000">RFC 9000: QUIC</a> — независимые потоки, connection ID, рукопожатие.</li>
+      <li><a href="https://grpc.io/blog/grpc-load-balancing/">gRPC Blog: Load Balancing</a> — почему L4-балансировка не работает для долгоживущих HTTP/2-соединений.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
