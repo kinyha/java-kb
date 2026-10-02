@@ -151,7 +151,7 @@ window.KB_TREE = [
           scope: 'хеширование паролей, соль, bcrypt, HMAC, симметричное и асимметричное шифрование, подпись' },
       ] },
       { id: 'cache', title: 'Caching', items: [
-        { id: 'caching', freq: 3, status: 'empty', title: 'Caching Strategies',
+        { id: 'caching', freq: 3, status: 'draft', title: 'Caching Strategies',
           scope: 'cache-aside, read-through, write-through, write-behind, TTL, инвалидация, cache stampede' },
         { id: 'http-cache', freq: 1, status: 'empty', title: 'HTTP Cache & CDN',
           scope: 'Cache-Control, ETag, условные запросы, push и pull CDN' },
