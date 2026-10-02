@@ -271,7 +271,7 @@ window.KB_TREE = [
           scope: 'документы, индексы, replica set, шардинг' },
         { id: 'cassandra', freq: 1, status: 'draft', title: 'Cassandra',
           scope: 'wide column, partition key, consistency level, запись и компакция' },
-        { id: 'elasticsearch', freq: 1, status: 'empty', title: 'Elasticsearch',
+        { id: 'elasticsearch', freq: 1, status: 'draft', title: 'Elasticsearch',
           scope: 'инвертированный индекс, анализаторы, шарды и реплики, релевантность' },
       ] },
     ],

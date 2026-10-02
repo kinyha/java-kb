@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Elasticsearch · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="elasticsearch">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Elasticsearch</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Elasticsearch — поисковый движок на Lucene. Он строит инвертированный индекс: для каждого слова — список документов, где оно встречается. Перед индексацией текст проходит анализатор, который разбивает его на слова и приводит к основе, поэтому «кофейни» находит «кофейнях». Поле <code>text</code> анализируется для полнотекстового поиска, поле <code>keyword</code> хранится целиком для точных совпадений, сортировки и агрегаций. Результаты ранжируются по BM25. Новые документы появляются в поиске после refresh — по умолчанию через секунду. Elasticsearch — вторичный индекс, а не основное хранилище: данные в него доставляют из базы.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Поиск платежей по описанию на LIKE шёл секундами, а в Elasticsearch магазин не находится по названию</h2>
+      <p>Поддержке нужен поиск платежей по описанию: «оплата в кофейне». В PostgreSQL это <code>description ilike '%кофейн%'</code> по сотням миллионов строк — полный проход. Платежи начали индексировать в Elasticsearch, и поиск стал мгновенным, но появились новые вопросы: точный фильтр по магазину «Coffee Point» ничего не находит, только что созданный платёж не ищется, а агрегация по магазинам падает с ошибкой.</p>
+      <p>Тема разбирает инвертированный индекс и анализаторы, типы полей, ранжирование, near-real-time и место Elasticsearch в архитектуре. Индексы для поиска внутри PostgreSQL — GIN и триграммы — в <a href="index-types.html">Index Types</a>, доставка изменений из базы — в <a href="outbox.html">Transactional Outbox</a>. Демо <a href="../examples/elasticsearch/demo.sh">demo.sh</a> работает с Elasticsearch 9.2.0 (Lucene 10.3) в Docker через REST API.</p>
+    </section>
+
+    <section class="step" id="analyzers">
+      <h2>Анализатор превращает текст в термины, и по ним строится инвертированный индекс</h2>
+      <pre class="out">== analyzers: 'Оплата заказов в кофейнях Москвы'
+   standard: ['оплата', 'заказов', 'в', 'кофейнях', 'москвы']
+   russian: ['оплат', 'заказ', 'кофейн', 'москв']</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 190" role="img" aria-label="Инвертированный индекс поля description с русским анализатором: термин оплат встречается в документах p-1, p-3, p-4; кофейн — в p-1, p-3, p-4; кофе — в p-2 и p-3. Запрос кофейни оплата анализируется в те же термины кофейн и оплат, и поиск пересекает их списки.">
+            <text x="20" y="22" class="dg-cap">ТЕРМИН → ДОКУМЕНТЫ</text>
+            <rect x="20" y="34" width="120" height="28" rx="4" class="dg-cell hit"/><text x="30" y="53" class="dg-in">оплат</text>
+            <rect x="150" y="34" width="200" height="28" rx="4" class="dg-cell"/><text x="160" y="53" class="dg-n">p-1, p-3, p-4</text>
+            <rect x="20" y="70" width="120" height="28" rx="4" class="dg-cell hit"/><text x="30" y="89" class="dg-in">кофейн</text>
+            <rect x="150" y="70" width="200" height="28" rx="4" class="dg-cell"/><text x="160" y="89" class="dg-n">p-1, p-3, p-4</text>
+            <rect x="20" y="106" width="120" height="28" rx="4" class="dg-cell"/><text x="30" y="125" class="dg-in">коф</text>
+            <rect x="150" y="106" width="200" height="28" rx="4" class="dg-cell"/><text x="160" y="125" class="dg-n">p-2, p-3</text>
+            <rect x="20" y="142" width="120" height="28" rx="4" class="dg-cell"/><text x="30" y="161" class="dg-in">возврат</text>
+            <rect x="150" y="142" width="200" height="28" rx="4" class="dg-cell"/><text x="160" y="161" class="dg-n">p-2</text>
+            <text x="400" y="53" class="dg-n">запрос «кофейни оплата»</text>
+            <text x="400" y="71" class="dg-n">тем же анализатором →</text>
+            <text x="400" y="89" class="dg-ok">кофейн, оплат</text>
+            <text x="400" y="125" class="dg-n">найти документы по спискам</text>
+            <text x="400" y="143" class="dg-n">и посчитать релевантность</text>
+            <text x="20" y="186" class="dg-s">Индекс и запрос обязаны пройти один анализатор, иначе термины не совпадут.</text>
+          </svg>
+        </div>
+        <figcaption>Поиск — это не сравнение строк, а пересечение списков документов по нормализованным терминам.</figcaption>
+      </figure>
+      <p>Стандартный анализатор только режет текст на слова и приводит к нижнему регистру: «кофейнях» и «кофейни» для него разные термины. Русский анализатор отбрасывает стоп-слова («в») и приводит слова к основе: «кофейн», «оплат». Запрос проходит тот же анализатор, поэтому «кофейни оплата» находит «оплата в кофейне» и «кофейнях». Поиск идёт по готовому списку документов для каждого термина — в отличие от LIKE, которому нужно проверить каждую строку.</p>
+    </section>
+
+    <section class="step" id="relevance">
+      <h2>Документы ранжируются по BM25: редкие слова и короткие поля весят больше</h2>
+      <pre class="out">== match 'кофейни оплата' (russian analyzer), ranked by BM25
+   0.737  p-1  Оплата заказа в кофейне
+   0.652  p-3  Оплата книги о кофе и кофейнях
+   0.652  p-4  Поездка до кофейни, оплата картой</pre>
+      <p>Все три документа содержат оба термина, но p-1 выше: его описание короче, и найденные слова составляют большую его часть. BM25 учитывает три вещи: сколько раз термин встречается в документе (с насыщением — десятый повтор почти ничего не добавляет), насколько термин редок во всём индексе (редкие слова важнее частых) и длину поля. «Возврат за кофе» не найден: «кофе» анализатор превратил в «коф», а это другая основа, чем «кофейн». Ранжирование настраивают весами полей, синонимами и функциями — например, поднимать свежие платежи.</p>
+    </section>
+
+    <section class="step" id="keyword">
+      <h2>text — для поиска по словам, keyword — для точных значений и агрегаций</h2>
+      <pre><code class="language-json">"merchant": {"type": "text", "fields": {"raw": {"type": "keyword"}}}</code></pre>
+      <pre class="out">== term 'Coffee Point' on text field vs keyword field
+   merchant      hits: 0
+   merchant.raw  hits: 2
+== terms aggregation on merchant.raw
+   Coffee Point: 2 payments, 650
+   Book House: 1 payments, 900
+   Taxi Go: 1 payments, 300
+== aggregation on text field
+   Fielddata is disabled on [merchant] in [payments]. Text fields are not optimised for operations that require p</pre>
+      <p>Поле <code>text</code> хранится в индексе как термины «coffee» и «point». Запрос <code>term</code> не анализирует значение и ищет термин «Coffee Point» целиком — его нет, ноль результатов. Это и был «не находится по названию». Поле <code>keyword</code> хранит значение целиком: точный фильтр нашёл оба платежа. Для агрегаций и сортировки нужны колоночные doc values, которые есть у <code>keyword</code> и чисел, а у <code>text</code> нет — отсюда ошибка. Поэтому строковые поля, по которым и ищут, и группируют, делают мультиполем: <code>text</code> плюс подполе <code>keyword</code>. Динамический маппинг делает так по умолчанию, но с ним легко получить неверные типы, и маппинг важных индексов задают явно.</p>
+    </section>
+
+    <section class="step" id="nrt">
+      <h2>Документ попадает в поиск после refresh, а не после ответа на запись</h2>
+      <pre class="out">== near real time: index and search immediately
+   right after index: 0
+   get by id:         True
+   after refresh:     1</pre>
+      <p>Запись подтверждена, но поиск сразу после неё не нашёл документ. Lucene пишет документы в буфер и делает их видимыми для поиска, только когда создаёт новый сегмент индекса — это refresh, по умолчанию раз в секунду. GET по id документ уже находит: он читает из журнала транзакций (translog). Через полторы секунды поиск находит документ. Отсюда near-real-time: секунда задержки. Если поиск должен сразу видеть свою запись, используют <code>refresh=wait_for</code> на конкретном запросе, но не <code>refresh=true</code> на каждый: частые refresh плодят мелкие сегменты и нагружают слияние. При массовой загрузке refresh, наоборот, отключают.</p>
+    </section>
+
+    <section class="step" id="architecture">
+      <h2>Elasticsearch — вторичный индекс: данные приходят из базы, а число шардов фиксировано</h2>
+      <p>Индекс делится на primary-шарды, каждый — отдельный индекс Lucene, и у каждого есть реплики на других узлах. Документ попадает в шард по хешу <code>_id</code> (или routing), поэтому число primary-шардов задаётся при создании индекса и не меняется без переиндексации — та же проблема, что <code>mod N</code> в <a href="sharding.html">Sharding</a>. Поиск идёт на все шарды и сливает их результаты, а глубокая пагинация через <code>from</code> дорога по тем же причинам, что OFFSET; для неё есть <code>search_after</code>.</p>
+      <p>У Elasticsearch нет транзакций, соединений и ограничений целостности, а запись может потеряться при неудачной конфигурации, поэтому основным хранилищем платежей он не бывает. Источник правды — база, а в индекс изменения доставляют асинхронно: событиями через outbox или CDC, с переиндексацией с нуля как запасным вариантом. Поиск, соответственно, отстаёт от базы на доставку плюс refresh, и интерфейс должен это учитывать.</p>
+      <div class="trap">
+        <p class="myth">Elasticsearch можно использовать как основную базу: он хранит документы и быстро их ищет.</p>
+        <p class="fact">В нём нет транзакций и ограничений, видимость новых документов отложена до refresh — в демо поиск сразу после записи вернул 0, — а маппинг и число шардов меняются только переиндексацией. Elasticsearch — вторичный индекс, наполняемый из базы.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Инвертированный индекс: термин → документы; русский анализатор приводит «кофейнях» и «кофейни» к «кофейн».</li>
+        <li>BM25: короче поле и реже термин — выше релевантность; p-1 выше p-3 и p-4.</li>
+        <li>text для поиска по словам, keyword для точных фильтров и агрегаций: term по text — 0, по keyword — 2.</li>
+        <li>Near-real-time: сразу после записи поиск — 0, GET — найден, после refresh — 1.</li>
+        <li>Шарды фиксированы при создании; Elasticsearch — вторичный индекс, данные из базы через outbox или CDC.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="es-inverted" data-freq="2">
+      <h3>Как Elasticsearch ищет по тексту быстрее, чем LIKE в базе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Он строит инвертированный индекс: при индексации текст проходит анализатор — разбивка на слова, нижний регистр, стоп-слова, приведение к основе, — и для каждого термина хранится список документов. Запрос проходит тот же анализатор, и поиск пересекает списки, а не проверяет каждую строку. Результаты ранжируются по BM25.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Анализатор при индексации и при поиске должен совпадать.</li>
+            <li>Для поиска внутри PostgreSQL есть полнотекстовый поиск с GIN и pg_trgm.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="es-text-keyword" data-freq="2">
+      <h3>Чем text отличается от keyword?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>text анализируется и разбивается на термины — для полнотекстового поиска. keyword хранится целиком — для точных фильтров, сортировки и агрегаций, у него есть doc values. Запрос term по text-полю с исходной строкой обычно ничего не находит, а агрегация по text падает. Строки, по которым и ищут, и группируют, делают мультиполем.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Маппинг существующего поля не меняется без переиндексации.</li>
+            <li>Динамический маппинг удобен для прототипа, но важные индексы описывают явно.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот поиск и отчёт работают неправильно?</summary>
+          <pre><code class="language-java">// индекс создан динамическим маппингом
+var hits = es.search(s -&gt; s.index("payments")
+        .query(q -&gt; q.term(t -&gt; t.field("status").value("CAPTURED"))));
+// после сохранения платежа сразу ищем его по описанию и показываем пользователю</code></pre>
+          <p>Динамический маппинг сделал status полем text с подполем keyword, и term по status ищет термин «CAPTURED», а в индексе он хранится как «captured» — ничего не найдётся; нужно status.keyword или явный маппинг keyword. Поиск сразу после сохранения не увидит документ до refresh; для этого случая нужен refresh=wait_for или чтение по id, а платежи в индекс должны приходить из базы через outbox или CDC.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="es-nrt" data-freq="1">
+      <h3>Почему только что записанный документ не находится поиском?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Elasticsearch — near-real-time: документ становится видимым для поиска после refresh, который создаёт новый сегмент Lucene, по умолчанию раз в секунду. GET по id видит документ сразу через translog. Если нужно, на запросе ставят refresh=wait_for.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Частые refresh плодят мелкие сегменты и нагружают слияние.</li>
+            <li>При массовой загрузке refresh_interval выключают.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.elastic.co/docs/manage-data/data-store/text-analysis">Elastic: Text analysis</a> — основа урока: анализаторы и токенизация.</li>
+      <li><a href="https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/keyword">keyword</a> и <a href="https://www.elastic.co/docs/manage-data/data-store/near-real-time-search">Near real-time search</a>.</li>
+      <li>Christopher Manning et al., «Introduction to Information Retrieval» — инвертированный индекс и ранжирование.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
