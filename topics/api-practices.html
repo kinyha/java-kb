@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>API: Design Practices · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="api-practices">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>API: Design Practices</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Хороший API переживает изменения данных и самого себя. Пагинация по смещению ломается, когда между запросами появляются новые записи, и дорожает с глубиной; курсор по ключу сортировки стабилен и быстр. Фильтры и сортировки принимают только из разрешённого списка. Ошибки возвращают в одном формате Problem Details с машинным кодом. Изменения бывают совместимыми — добавить поле — и ломающими — переименовать поле или добавить значение enum для строгих клиентов. Ломающие изменения выпускают новой версией с периодом поддержки старой.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Партнёр выгружает платежи постранично и получает дубли, а старое приложение падает на новом статусе</h2>
+      <p>Магазин-партнёр каждую ночь выгружает свои платежи через API постранично. Однажды сверка показала, что один платёж выгрузился дважды, а другой не выгрузился вовсе. В тот же день вышла новая версия бэкенда со статусом <code>REFUND_PENDING</code>, и старая версия мобильного приложения начала падать при открытии истории. Ни один эндпоинт не изменился, и ни один тест не упал.</p>
+      <p>Обе аварии — про договор API во времени: данные меняются между запросами клиента, а сам API меняется между релизами. REST-основы — ресурсы, методы, коды — разобраны в <a href="api-design.html">REST</a>; здесь — практики, которые делают API устойчивым. Демо <a href="../examples/api/PagingDemo.java">PagingDemo.java</a> воспроизводит обе аварии: <code>java PagingDemo.java</code> на JDK 21. Цена глубокой пагинации измерена в PostgreSQL 17 в контейнере.</p>
+    </section>
+
+    <section class="step" id="paging">
+      <h2>Страница по смещению сдвигается от новых записей, а курсор держится за ключ</h2>
+      <p>Самая простая пагинация — <code>?offset=3&amp;limit=3</code>, в SQL <code>LIMIT 3 OFFSET 3</code>. Страница — это позиция в списке на момент запроса. Если между запросами в начало списка попала новая запись, все позиции сдвигаются на одну:</p>
+      <pre><code class="language-java">offsetPage(0, 3);                        // Первая страница.
+table.add(new Payment(107, "CAPTURED")); // Новый платёж между запросами.
+offsetPage(3, 3);                        // Вторая страница.
+
+cursorPage(null, 3);                     // Первая страница, курсор = последний id.
+table.add(new Payment(107, "CAPTURED"));
+cursorPage(104L, 3);                     // «Всё, что старше 104».</code></pre>
+      <pre class="out">== offset paging while a payment arrives
+page 1 (offset 0): [106, 105, 104]
+page 2 (offset 3): [104, 103, 102]
+== cursor paging while a payment arrives
+page 1: [106, 105, 104], next cursor=104
+page 2 (after 104): [103, 102, 101]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Сверху список после вставки 107: позиции сдвинулись, и offset 3 начинается снова со 104 — это дубль. Снизу курсор: вторая страница — всё меньше 104, то есть 103, 102, 101, вставка не влияет.">
+            <text x="20" y="22" class="dg-cap bad">OFFSET 3 ПОСЛЕ ВСТАВКИ 107</text>
+            <rect x="20" y="36" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="48" y="58" class="dg-in" text-anchor="middle">107</text>
+            <text x="48" y="84" class="dg-n" text-anchor="middle">поз. 0</text>
+            <rect x="82" y="36" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="110" y="58" class="dg-in" text-anchor="middle">106</text>
+            <text x="110" y="84" class="dg-n" text-anchor="middle">поз. 1</text>
+            <rect x="144" y="36" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="172" y="58" class="dg-in" text-anchor="middle">105</text>
+            <text x="172" y="84" class="dg-n" text-anchor="middle">поз. 2</text>
+            <rect x="206" y="36" width="56" height="34" rx="5" class="dg-cell miss"/>
+            <text x="234" y="58" class="dg-in" text-anchor="middle">104</text>
+            <text x="234" y="84" class="dg-n" text-anchor="middle">поз. 3</text>
+            <rect x="268" y="36" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="296" y="58" class="dg-in" text-anchor="middle">103</text>
+            <text x="296" y="84" class="dg-n" text-anchor="middle">поз. 4</text>
+            <rect x="330" y="36" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="358" y="58" class="dg-in" text-anchor="middle">102</text>
+            <text x="358" y="84" class="dg-n" text-anchor="middle">поз. 5</text>
+            <rect x="392" y="36" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="420" y="58" class="dg-in" text-anchor="middle">101</text>
+            <text x="420" y="84" class="dg-n" text-anchor="middle">поз. 6</text>
+            <rect x="202" y="32" width="186" height="42" rx="7" class="dg-sep" fill="none"/>
+            <text x="474" y="58" class="dg-bad">offset 3: 104, 103, 102</text>
+            <text x="474" y="76" class="dg-n">104 уже был на стр. 1</text>
+            <text x="20" y="124" class="dg-cap">КУРСОР: ВСЁ, ЧТО МЕНЬШЕ 104</text>
+            <rect x="20" y="138" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="48" y="160" class="dg-in" text-anchor="middle">107</text>
+            <rect x="82" y="138" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="110" y="160" class="dg-in" text-anchor="middle">106</text>
+            <rect x="144" y="138" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="172" y="160" class="dg-in" text-anchor="middle">105</text>
+            <rect x="206" y="138" width="56" height="34" rx="5" class="dg-cell"/>
+            <text x="234" y="160" class="dg-in" text-anchor="middle">104</text>
+            <rect x="268" y="138" width="56" height="34" rx="5" class="dg-cell hit"/>
+            <text x="296" y="160" class="dg-in" text-anchor="middle">103</text>
+            <rect x="330" y="138" width="56" height="34" rx="5" class="dg-cell hit"/>
+            <text x="358" y="160" class="dg-in" text-anchor="middle">102</text>
+            <rect x="392" y="138" width="56" height="34" rx="5" class="dg-cell hit"/>
+            <text x="420" y="160" class="dg-in" text-anchor="middle">101</text>
+            <text x="474" y="160" class="dg-ok">103, 102, 101</text>
+            <text x="20" y="200" class="dg-s">Смещение считает позиции, курсор сравнивает ключи: вставка в начало курсору не мешает.</text>
+          </svg>
+        </div>
+        <figcaption>Удаление записи в начале даёт обратную ошибку: позиции сдвигаются назад, и одна запись пропадает между страницами — так партнёр и потерял платёж.</figcaption>
+      </figure>
+      <p>Курсорная (keyset) пагинация запоминает не позицию, а ключ последней увиденной записи: «дай 20 платежей с id меньше 104». Вставки и удаления в начале списка на неё не влияют. Второе преимущество — цена. База не умеет перепрыгнуть на позицию 900 000: она читает и отбрасывает все предыдущие строки. Таблица на миллион платежей в PostgreSQL 17:</p>
+      <pre><code class="language-sql">select id from payment order by id desc limit 20 offset 900000;        -- Глубокая страница по смещению.
+select id from payment where id &lt; 100001 order by id desc limit 20;    -- Та же страница по курсору.</code></pre>
+      <pre class="out">== offset 900000
+ Limit (actual time=67.236..67.238 rows=20 loops=1)
+   -&gt;  Index Only Scan Backward using payment_pkey on payment (actual time=0.012..52.818 rows=900020 loops=1)
+ Execution Time: 67.248 ms
+== keyset after 100001
+ Limit (actual time=0.016..0.018 rows=20 loops=1)
+   -&gt;  Index Only Scan Backward using payment_pkey on payment (actual time=0.015..0.017 rows=20 loops=1)
+         Index Cond: (id &lt; 100001)
+ Execution Time: 0.023 ms</pre>
+      <p>Смещение прочитало 900 020 строк индекса ради двадцати и заняло 67 мс; курсор прочитал ровно 20 за сотые доли миллисекунды. Цена смещения растёт линейно с глубиной, цена курсора от глубины не зависит. Время снято на машине автора, отношение будет похожим везде.</p>
+      <p>Курсор отдают клиенту непрозрачной строкой, например закодированными в base64 значениями сортировки, и клиент возвращает её как есть: <code>?cursor=eyJpZCI6MTA0fQ&amp;limit=20</code>. Если сортировка не по уникальному полю, в курсор добавляют id для разрешения равенства: <code>(created_at, id) &lt; (:t, :id)</code>, иначе записи с одинаковым временем потеряются на границе страниц. Минусы курсора: нельзя перейти сразу на 50-ю страницу и показать «страница 7 из 312». Общее количество — отдельный <code>COUNT(*)</code>, который на больших таблицах дорог, поэтому его делают необязательным или приблизительным.</p>
+    </section>
+
+    <section class="step" id="filters">
+      <h2>Фильтр и сортировку принимают из разрешённого списка, а порядок делают однозначным</h2>
+      <p>Фильтры передают параметрами запроса: <code>GET /payments?merchant=m-7&amp;status=CAPTURED&amp;createdFrom=2026-10-01</code>, сортировку — <code>sort=-createdAt</code>. Соблазн — принимать любое поле и подставлять его в запрос. Это сразу три проблемы. Сортировка по полю без индекса превращает запрос в полный перебор таблицы. Имя поля, подставленное в SQL строкой, открывает SQL-инъекцию: параметры PreparedStatement защищают значения, но не имена колонок. А внутренние поля становятся частью договора, и их уже не переименовать.</p>
+      <p>Поэтому API объявляет конечный список: эти поля фильтруются, эти сортируются, для каждого сочетания есть индекс. Неизвестный параметр — ошибка 400, а не молчаливое игнорирование: иначе опечатка <code>?stauts=FAILED</code> вернёт все платежи, и партнёр не заметит. Сортировка обязана быть однозначной: если сортируют по дате, вторым ключом добавляют id. Без этого две записи с одинаковой датой база вправе вернуть в разном порядке на разных страницах.</p>
+    </section>
+
+    <section class="step" id="errors">
+      <h2>Все ошибки приходят в одном формате с машинным кодом</h2>
+      <p>Каждая команда придумывала свой формат ошибок: где-то <code>{"error": "..."}</code>, где-то <code>{"message": ..., "code": 17}</code>, где-то HTML-страница от балансировщика. Клиенту приходится писать разбор на каждый случай. RFC 9457 Problem Details задаёт общий формат с типом <code>application/problem+json</code>:</p>
+      <pre><code class="language-json">{
+  "type": "https://api.pay.example/problems/refund-window-expired",
+  "title": "Refund window expired",
+  "status": 409,
+  "detail": "Payment p-1 was captured 190 days ago, refunds are allowed for 180 days.",
+  "instance": "/payments/p-1/refunds",
+  "errors": [{"field": "amount", "code": "exceeds_captured"}]
+}</code></pre>
+      <p><code>type</code> — стабильный машинный идентификатор проблемы: клиент ветвится по нему, а не по тексту, который может перевестись или поменяться. <code>title</code> и <code>detail</code> — для человека. Дополнительные поля вроде списка ошибок валидации разрешены. В ответ не кладут стектрейсы, SQL и внутренние имена классов: это подсказки атакующему. Для разбора ошибки на стороне сервера достаточно trace id в заголовке или в поле расширения. Spring поддерживает формат через <code>ProblemDetail</code>, как разобрано в <a href="spring-validation.html">Validation &amp; Errors</a>.</p>
+    </section>
+
+    <section class="step" id="compatibility">
+      <h2>Добавить поле безопасно, а добавить значение enum — нет, если клиент строгий</h2>
+      <p>Изменение API совместимо, если старые клиенты продолжают работать без изменений. Добавить новое необязательное поле в ответ, новый эндпоинт, новый необязательный параметр — совместимо. Удалить или переименовать поле, поменять тип, сделать параметр обязательным, поменять смысл кода ответа — ломает. Самый коварный случай — новое значение в перечислении:</p>
+      <pre><code class="language-java">enum Status { AUTHORIZED, CAPTURED, REFUNDED }          // Так клиент знал API при сборке.
+
+static Status strict(String s) { return Status.valueOf(s); }  // Неизвестное — исключение.
+static Optional&lt;Status&gt; tolerant(String s) {                     // Неизвестное — пусто.
+    try { return Optional.of(Status.valueOf(s)); } catch (IllegalArgumentException e) { return Optional.empty(); }
+}</code></pre>
+      <pre class="out">strict CAPTURED -&gt; CAPTURED
+tolerant CAPTURED -&gt; CAPTURED
+strict REFUND_PENDING -&gt; IllegalArgumentException
+tolerant REFUND_PENDING -&gt; UNKNOWN</pre>
+      <p>Сервер ничего не удалил, только добавил статус, а строгий клиент упал — та самая авария с историей платежей. Защищаются с двух сторон. Клиент следует принципу терпимого читателя (tolerant reader): игнорирует неизвестные поля и отображает неизвестные значения как «другое», а не падает. Jackson по умолчанию падает на неизвестном поле, но Spring Boot это отключает; на неизвестное значение enum есть отдельная настройка <code>READ_UNKNOWN_ENUM_VALUES_USING_DEFAULT_VALUE</code>. Сервер в документации заранее предупреждает, что набор значений может расширяться.</p>
+      <p>Проверять совместимость руками ненадёжно. Схему OpenAPI сравнивают между версиями инструментами вроде oasdiff в CI, а договор с конкретными клиентами фиксируют контрактными тестами — это тема <a href="api-contracts.html">OpenAPI &amp; Contracts</a>.</p>
+    </section>
+
+    <section class="step" id="versioning">
+      <h2>Ломающее изменение выходит новой версией, а старая живёт объявленный срок</h2>
+      <p>Когда ломающее изменение неизбежно, его выпускают как новую версию, а старая продолжает работать. Версию передают в пути (<code>/v2/payments</code>), в заголовке (<code>Api-Version: 2026-10-01</code>) или в типе содержимого (<code>Accept: application/vnd.pay.v2+json</code>). Версия в пути самая наглядная: её видно в логах, её легко маршрутизировать на балансировщике. Версия-дата в заголовке, как у Stripe, позволяет менять API мелкими шагами без пересадки клиентов на целиком новую версию.</p>
+      <table class="mx">
+        <thead><tr><th>Шаг</th><th>Что делает сервер</th></tr></thead>
+        <tbody>
+          <tr><td>Расширить</td><td>Добавляет новое поле или эндпоинт рядом со старым, оба работают</td></tr>
+          <tr><td>Объявить</td><td>Помечает старое заголовками <code>Deprecation</code> и <code>Sunset</code> с датой отключения, пишет клиентам</td></tr>
+          <tr><td>Наблюдать</td><td>Метрики показывают, кто ещё вызывает старое</td></tr>
+          <tr><td>Сократить</td><td>После даты отключает старое</td></tr>
+        </tbody>
+      </table>
+      <p>Это схема «расширить — сократить» (expand-contract), та же, что для миграций базы без простоя. Заголовок <code>Sunset</code> стандартизирован в RFC 8594, <code>Deprecation</code> — в RFC 9745. Главное правило — не держать несколько версий вечно: каждая живая версия умножает код, тесты и место для ошибок. Срок поддержки объявляют заранее, а мобильным клиентам дают больше времени, потому что старые версии приложений живут на телефонах годами.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Offset сдвигается от вставок и удалений и дорожает с глубиной: в опыте 900 020 строк ради 20. Курсор по ключу стабилен и не зависит от глубины.</li>
+        <li>Фильтры и сортировки — из разрешённого списка с индексами; неизвестный параметр — 400; сортировка однозначна с id.</li>
+        <li>Ошибки — Problem Details: машинный type, человеческий detail, без стектрейсов.</li>
+        <li>Добавить поле совместимо; новое значение enum ломает строгих клиентов — клиенты читают терпимо.</li>
+        <li>Ломающее изменение — новая версия, Deprecation и Sunset, метрики использования и отключение в срок.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="practices-paging" data-freq="2">
+      <h3>Чем курсорная пагинация лучше пагинации по смещению?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Смещение считает позиции в текущем списке. Если между запросами в начало добавилась запись, следующая страница повторит последнюю запись предыдущей, а если удалилась — одну пропустит. И база читает все строки до смещения: в опыте OFFSET 900000 прочитал 900 020 строк и занял 67 мс.</p>
+          <p>Курсор запоминает ключ последней записи и просит «всё, что меньше него». Вставки в начало не мешают, и запрос идёт по индексу за постоянное время — 0,023 мс в том же опыте.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>При сортировке по неуникальному полю курсор включает id: (created_at, id) &lt; (:t, :id).</li>
+            <li>Курсор отдают непрозрачной строкой, чтобы клиенты не строили его сами и не зависели от формата.</li>
+            <li>Минусы: нельзя прыгнуть на произвольную страницу, общее число — отдельный дорогой COUNT.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="practices-compat" data-freq="2">
+      <h3>Какие изменения API ломают клиентов и как развивать API без поломок?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ломают удаление и переименование полей, смена типа, новый обязательный параметр, изменение смысла кода ответа. Коварный случай — новое значение enum: строгий клиент, который делает Enum.valueOf, падает, хотя ничего не удалено. Совместимо — добавлять необязательные поля, параметры и эндпоинты.</p>
+          <p>Клиенты читают терпимо: игнорируют неизвестные поля и значения. Сервер выпускает ломающее изменение новой версией, помечает старую заголовками Deprecation и Sunset и отключает её в объявленный срок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Схему OpenAPI сравнивают между версиями в CI, договор с клиентами фиксируют контрактными тестами.</li>
+            <li>Expand-contract: сначала добавить новое рядом со старым, перевести клиентов по метрикам, потом убрать старое.</li>
+            <li>Мобильные клиенты живут годами, поэтому для них срок поддержки старой версии длиннее.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что опасного в этой сортировке?</summary>
+          <pre><code class="language-java">@GetMapping("/payments")
+List&lt;Payment&gt; list(@RequestParam String sort) {
+    return jdbc.query("select * from payment order by " + sort + " limit 50", mapper);
+}</code></pre>
+          <p>Имя колонки подставлено строкой: ?sort=amount;drop table payment-- даёт SQL-инъекцию, и параметры PreparedStatement тут не помогут, потому что имена колонок не параметризуются. Даже без атаки клиент может отсортировать по полю без индекса и вызвать полный перебор, а внутренняя колонка становится частью договора. Нужен белый список: имя параметра → колонка, для каждой — индекс, и id вторым ключом для однозначного порядка.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="practices-errors" data-freq="2">
+      <h3>Как оформлять ошибки в API?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В одном формате для всех эндпоинтов. Стандарт — RFC 9457 Problem Details: type — стабильный машинный идентификатор проблемы, title и detail — для человека, status и instance, плюс свои поля вроде списка ошибок валидации. Код HTTP соответствует проблеме: 400, 409, 422, 404.</p>
+          <p>Клиент ветвится по type, а не по тексту. Стектрейсы и SQL в ответ не попадают; для расследования достаточно trace id.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Spring — ProblemDetail и ErrorResponse, единообразно через @ControllerAdvice.</li>
+            <li>Ошибки балансировщика и gateway тоже стоит приводить к этому формату, иначе клиент получит HTML.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://use-the-index-luke.com/no-offset">Markus Winand: We need tool support for keyset pagination</a> — основа урока о пагинации: почему OFFSET медленный и как работает keyset.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9457">RFC 9457: Problem Details for HTTP APIs</a> — формат ошибок.</li>
+      <li><a href="https://martinfowler.com/bliki/TolerantReader.html">Martin Fowler: Tolerant Reader</a> — как клиенту переживать изменения API.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc8594">RFC 8594: Sunset Header</a> и <a href="https://www.rfc-editor.org/rfc/rfc9745">RFC 9745: Deprecation Header</a> — объявление об отключении.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -129,7 +129,7 @@ window.KB_TREE = [
       { id: 'api', title: 'API', source: 'roadmap.sh/backend: Learn about APIs', items: [
         { id: 'api-design', freq: 3, status: 'draft', title: 'REST',
           scope: 'ресурсы, методы и идемпотентность, коды ответов, модель зрелости Ричардсона, HATEOAS' },
-        { id: 'api-practices', freq: 2, status: 'empty', title: 'API Design',
+        { id: 'api-practices', freq: 2, status: 'draft', title: 'API Design',
           scope: 'пагинация, фильтрация и сортировка, версионирование, формат ошибок RFC 9457, обратная совместимость' },
         { id: 'api-styles', freq: 2, status: 'empty', title: 'gRPC, GraphQL, SOAP',
           scope: 'когда что выбирать, Protobuf и стриминг в gRPC, схема и N+1 в GraphQL, WSDL' },

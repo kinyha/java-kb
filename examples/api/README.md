@@ -5,4 +5,5 @@
 ```bash
 cd examples/api
 java RestDemo.java
+java PagingDemo.java
 ```
