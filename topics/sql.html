@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SQL: Queries · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sql">
+<main class="page">
+  <header class="topic-head"><h1>SQL: Queries</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>SQL описывает результат над строками, а база выбирает способ его получить. Чтобы понять запрос, проследи, какие строки прошли фильтр, какие попали в одну группу и какие колонки остались в результате. NULL означает отсутствие известного значения и меняет правила сравнения и подсчёта. Перед оптимизацией отчёта сначала проверь его смысл: быстрый запрос способен совершенно правильно посчитать не то, что требовалось.</p>
+    </div>
+
+    <section class="step" id="report-input">
+      <h2>Одна строка отчёта должна иметь понятную единицу подсчёта</h2>
+      <p>Платёжный сервис строит отчёт для магазинов. Нужны число оплаченных платежей и их сумма; показываем магазины, у которых сумма не меньше 200 минимальных денежных единиц. На входе есть два разных платежа по 100. Есть незавершённые платежи и старая запись с неизвестной суммой. По отдельности все данные читаются легко. Ошибка возникает, когда запрос незаметно меняет, что именно он считает.</p>
+      <p>У исходной таблицы единица — <b>платёж</b>, его отличает <code>id</code>. У отчёта единица — <b>магазин</b>. После группировки в строке уже нельзя без объяснения показать один <code>id</code>: платежей у магазина несколько. После выбора только суммы нельзя отличить два платежа по 100. Эта смена единицы результата объясняет и правила GROUP BY, и опасность DISTINCT.</p>
+      <p>Все опыты выполнены на PostgreSQL 17.11. Полный файл <a href="../examples/sql/Queries.sql">Queries.sql</a> создаёт временную таблицу и эти семь строк. <code>amount_minor</code> и <code>fee_minor</code> — целые минимальные денежные единицы; в данном наборе одна валюта. NULL оставлен намеренно, чтобы увидеть поведение старых неполных данных. Для нового подтверждённого платежа доменная модель должна требовать известную сумму и валюту.</p>
+      <pre><code class="language-sql">CREATE TEMP TABLE payments (
+    id integer PRIMARY KEY,
+    merchant text,
+    status text,
+    amount_minor bigint,
+    fee_minor bigint,
+    created_at timestamp NOT NULL
+);</code></pre>
+      <table class="mx">
+        <thead><tr><th>id</th><th>merchant</th><th>status</th><th>amount_minor</th><th>fee_minor</th><th>created_at</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>A</td><td>paid</td><td>100</td><td>NULL</td><td>09:00</td></tr>
+          <tr><td>2</td><td>A</td><td>paid</td><td>100</td><td>5</td><td>09:01</td></tr>
+          <tr><td>3</td><td>A</td><td>pending</td><td>300</td><td>NULL</td><td>09:02</td></tr>
+          <tr><td>4</td><td>B</td><td>paid</td><td>200</td><td>10</td><td>09:00</td></tr>
+          <tr><td>5</td><td>B</td><td>refunded</td><td>50</td><td>NULL</td><td>09:03</td></tr>
+          <tr><td>6</td><td>B</td><td>NULL</td><td>70</td><td>NULL</td><td>09:04</td></tr>
+          <tr><td>7</td><td>NULL</td><td>paid</td><td>NULL</td><td>NULL</td><td>09:05</td></tr>
+        </tbody>
+      </table>
+      <p>Дата у всех строк — 2026-10-01, время в таблице сокращено для чтения. NULL в результате psql печатается явно; это не строка из четырёх букв. Разделитель колонок в выводах — <code>|</code>, заголовки и служебные сообщения выключены. Запуск создаёт собственный контейнер без опубликованных портов и удаляет его после завершения:</p>
+      <pre><code class="language-bash"># Из корня базы; нужен Docker, Java и сборка для этого опыта не нужны.
+bash examples/sql/run.sh
+# Скрипт использует postgres:17.11-alpine и psql с ON_ERROR_STOP=1.</code></pre>
+      <p>Перед написанием запроса полезно ответить на три вопроса. Что означает одна входная строка? Что означает одна выходная строка? Что делать с отсутствующим значением: пропустить, показать отдельно или отклонить данные? Если эти ответы меняются по ходу запроса, это должно быть видно в его стадиях.</p>
+    </section>
+
+    <section class="step" id="logical-stages">
+      <h2>WHERE выбирает строки, GROUP BY собирает группы, HAVING выбирает группы</h2>
+      <p>SELECT пишется первым, но смысл запроса удобно читать от источника. FROM задаёт входные строки. WHERE оставляет строки с истинным условием. GROUP BY собирает строки по ключу, агрегаты считают значения внутри каждой группы. HAVING отбирает уже готовые группы. SELECT формирует выходные колонки, DISTINCT удаляет повторяющиеся выходные строки, ORDER BY задаёт порядок, LIMIT ограничивает число строк.</p>
+      <p>Это <b>логическая модель</b>, а не расписание физического выполнения. Оптимизатор способен раньше применить безопасный фильтр, выбрать индекс вместо чтения всей таблицы или объединить операции. Но результат должен сохранять смысл запроса. В частности, нельзя перенести условие суммы группы в фильтр отдельных платежей и ждать прежний ответ.</p>
+      <pre><code class="language-sql">SELECT merchant,
+       count(*) AS paid_count,
+       sum(amount_minor) AS total_minor
+FROM payments
+WHERE status = 'paid'              -- Сначала только оплаченные платежи.
+GROUP BY merchant                 -- Теперь одна группа на магазин.
+HAVING sum(amount_minor) &gt;= 200    -- Порог для суммы группы, не для платежа.
+ORDER BY total_minor DESC,
+         merchant ASC NULLS LAST; -- При одинаковой сумме порядок явный.</code></pre>
+      <pre class="out">A|2|200
+B|1|200</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 320" role="img" aria-label="Четыре логические стадии отчёта. Семь платежей превращаются в четыре оплаченных, затем в три группы A, B и NULL. HAVING оставляет A и B: их суммы равны 200; у группы NULL сумма неизвестна, условие не истинно.">
+            <rect x="20" y="46" width="680" height="234" rx="8" class="dg-box"/>
+            <line x1="32" y1="84" x2="688" y2="84" class="dg-sep"/>
+            <g data-s="1">
+              <text x="20" y="26" class="dg-cap">FROM: 7 СТРОК ПЛАТЕЖЕЙ</text>
+              <text x="38" y="72" class="dg-n">id</text><text x="130" y="72" class="dg-n">merchant</text>
+              <text x="330" y="72" class="dg-n">status</text><text x="560" y="72" class="dg-n">amount</text>
+              <g class="dg-in">
+                <text x="38" y="110">1</text><text x="130" y="110">A</text><text x="330" y="110">paid</text><text x="560" y="110">100</text>
+                <text x="38" y="134">2</text><text x="130" y="134">A</text><text x="330" y="134">paid</text><text x="560" y="134">100</text>
+                <text x="38" y="158">3</text><text x="130" y="158">A</text><text x="330" y="158">pending</text><text x="560" y="158">300</text>
+                <text x="38" y="182">4</text><text x="130" y="182">B</text><text x="330" y="182">paid</text><text x="560" y="182">200</text>
+                <text x="38" y="206">5</text><text x="130" y="206">B</text><text x="330" y="206">refunded</text><text x="560" y="206">50</text>
+                <text x="38" y="230">6</text><text x="130" y="230">B</text><text x="330" y="230">NULL</text><text x="560" y="230">70</text>
+                <text x="38" y="254">7</text><text x="130" y="254">NULL</text><text x="330" y="254">paid</text><text x="560" y="254">NULL</text>
+              </g>
+              <text x="20" y="306" class="dg-s">Единица строки: отдельный платёж.</text>
+            </g>
+            <g data-s="2">
+              <text x="20" y="26" class="dg-cap">WHERE: 4 СТРОКИ С STATUS = PAID</text>
+              <text x="38" y="72" class="dg-n">id</text><text x="130" y="72" class="dg-n">merchant</text>
+              <text x="330" y="72" class="dg-n">status</text><text x="560" y="72" class="dg-n">amount</text>
+              <g class="dg-in">
+                <text x="38" y="110">1</text><text x="130" y="110">A</text><text x="330" y="110">paid</text><text x="560" y="110">100</text>
+                <text x="38" y="134">2</text><text x="130" y="134">A</text><text x="330" y="134">paid</text><text x="560" y="134">100</text>
+                <text x="38" y="158">4</text><text x="130" y="158">B</text><text x="330" y="158">paid</text><text x="560" y="158">200</text>
+                <text x="38" y="182">7</text><text x="130" y="182">NULL</text><text x="330" y="182">paid</text><text x="560" y="182">NULL</text>
+              </g>
+              <text x="38" y="250" class="dg-s">NULL в сумме не мешает условию о статусе.</text>
+              <text x="20" y="306" class="dg-s">Удалены 3, 5 и 6: условие не равно TRUE.</text>
+            </g>
+            <g data-s="3-4">
+              <text x="38" y="72" class="dg-n">merchant</text><text x="280" y="72" class="dg-n">count(*)</text>
+              <text x="510" y="72" class="dg-n">sum(amount)</text>
+              <g class="dg-in">
+                <text x="38" y="116">A</text><text x="280" y="116">2</text><text x="510" y="116">200</text>
+                <text x="38" y="158">B</text><text x="280" y="158">1</text><text x="510" y="158">200</text>
+              </g>
+            </g>
+            <g data-s="3">
+              <text x="20" y="26" class="dg-cap">GROUP BY: 3 ГРУППЫ</text>
+              <text x="38" y="200" class="dg-in">NULL</text><text x="280" y="200" class="dg-in">1</text><text x="510" y="200" class="dg-in">NULL</text>
+              <text x="38" y="250" class="dg-s">Платежи 1 и 2 стали одной группой A.</text>
+              <text x="20" y="306" class="dg-s">Единица строки теперь: группа магазина.</text>
+            </g>
+            <g data-s="4">
+              <text x="20" y="26" class="dg-cap">HAVING: 2 ГРУППЫ С СУММОЙ ≥ 200</text>
+              <text x="38" y="250" class="dg-s">У NULL-группы сумма неизвестна: она удалена.</text>
+              <text x="20" y="306" class="dg-ok">SELECT отдаёт merchant, count и sum для A и B.</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>FROM даёт семь платежей. Здесь каждая строка ещё содержит свой id и статус.</li>
+          <li>WHERE пропускает только TRUE. Остались 1, 2, 4 и 7; строка с неизвестным статусом не прошла.</li>
+          <li>GROUP BY собирает три группы. Для A сумма равна 100 + 100, для B — 200, у третьей группы известных сумм нет.</li>
+          <li>HAVING выбирает группы с суммой не меньше 200. SELECT формирует выходные колонки, ORDER BY упорядочивает две строки.</li>
+        </ol>
+        <figcaption>Условие amount_minor ≥ 200 в WHERE потеряло бы оба платежа магазина A, хотя вместе они проходят порог отчёта.</figcaption>
+      </figure>
+      <h3>Почему псевдоним результата не виден в WHERE</h3>
+      <p><code>AS doubled</code> называет выходную колонку SELECT. PostgreSQL разрешает использовать такое имя в ORDER BY и GROUP BY, но не в WHERE или HAVING. В этих местах укажи исходное выражение либо выдели вычисление во вложенный запрос. В GROUP BY неоднозначное имя PostgreSQL трактует как входную колонку, в ORDER BY — как выходную; одинаковые имена лучше не создавать.</p>
+      <pre><code class="language-sql">-- doubled существует как имя результата, но не как колонка payments.
+SELECT amount_minor * 2 AS doubled
+FROM payments WHERE doubled &gt; 200;
+
+-- Группа merchant содержит несколько id: какой из них вернуть?
+SELECT merchant, id, sum(amount_minor)
+FROM payments GROUP BY merchant;</code></pre>
+      <p>В полном демо эти два ошибочных запроса выполняет обвязка <code>pg_temp.query_state</code>. Она перехватывает ожидаемую ошибку и печатает SQLSTATE, поэтому остальные опыты продолжаются. Ниже показаны именно строки этой обвязки, а не текст диагностического сообщения psql.</p>
+      <pre class="out">alias in WHERE|42703
+ungrouped id|42803</pre>
+      <p>Первый код — <code>undefined_column</code>, второй — <code>grouping_error</code>. Агрегат тоже нельзя поставить в WHERE: в этой логической точке группы ещё не образованы. Для фильтра суммы есть HAVING. Исключение из требования перечислять все неагрегированные колонки — доказанная функциональная зависимость: PostgreSQL узнаёт её, когда GROUP BY включает первичный ключ соответствующей таблицы. Это не разрешение выбирать случайную строку группы.</p>
+      <div class="trap"><p class="myth">База обязана сначала выполнить FROM, потом WHERE и только потом SELECT именно в таком порядке.</p><p class="fact">Этот порядок объясняет смысл и доступность данных. Реальные узлы, перестановки и способы доступа смотри в <a href="query-tuning.html">Query Plans</a>. Логическое правило не требует создавать промежуточную таблицу на каждом шаге.</p></div>
+    </section>
+
+    <section class="step" id="unknown-filter">
+      <h2>NULL добавляет UNKNOWN, а фильтр оставляет только TRUE</h2>
+      <p>NULL — маркер отсутствующего значения. Это не ноль, не пустая строка и не ещё один статус. Если неизвестно значение статуса, сравнение <code>status = 'paid'</code> тоже неизвестно. Обычные сравнения с NULL дают логическое UNKNOWN; PostgreSQL представляет этот результат как NULL типа boolean. Поэтому <code>NULL = NULL</code> не даёт TRUE.</p>
+      <p>WHERE и HAVING пропускают только TRUE. FALSE и UNKNOWN одинаково не проходят, но остаются разными результатами. Отрицание UNKNOWN снова UNKNOWN: условие «не paid» не превращает неизвестный статус в подходящий. Для самого маркера отсутствия есть <code>IS NULL</code> и <code>IS NOT NULL</code>; для сравнения с учётом отсутствия — <code>IS DISTINCT FROM</code> и его отрицание.</p>
+      <pre><code class="language-sql">SELECT NULL::bigint = NULL::bigint AS eq_null,
+       NULL::text &lt;&gt; 'paid' AS not_paid,
+       NOT (NULL::text = 'paid') AS negated,
+       TRUE OR NULL::boolean AS true_or_unknown,
+       FALSE AND NULL::boolean AS false_and_unknown;</code></pre>
+      <pre class="out">NULL|NULL|NULL|t|f</pre>
+      <p><code>t</code> и <code>f</code> — формат TRUE и FALSE у psql. UNKNOWN не всегда делает всё выражение неизвестным: TRUE уже достаточно для OR, FALSE — для AND. Остальные комбинации можно восстановить по правилу: если неизвестный операнд способен изменить итог, итог неизвестен.</p>
+      <table class="mx">
+        <thead><tr><th>a</th><th>b</th><th>a AND b</th><th>a OR b</th></tr></thead>
+        <tbody>
+          <tr><td>TRUE</td><td>UNKNOWN</td><td>UNKNOWN</td><td>TRUE</td></tr>
+          <tr><td>FALSE</td><td>UNKNOWN</td><td>FALSE</td><td>UNKNOWN</td></tr>
+          <tr><td>UNKNOWN</td><td>UNKNOWN</td><td>UNKNOWN</td><td>UNKNOWN</td></tr>
+        </tbody>
+      </table>
+      <p>Попросим список платежей, которые не оплачены. Здесь нужны две разные формулировки: «известно, что статус другой» и «статус отличается от paid, включая отсутствие». Они возвращают разные id:</p>
+      <pre><code class="language-sql">SELECT 'status &lt;&gt; paid', string_agg(id::text, ',' ORDER BY id)
+FROM payments WHERE status &lt;&gt; 'paid';
+SELECT 'status DISTINCT FROM paid', string_agg(id::text, ',' ORDER BY id)
+FROM payments WHERE status IS DISTINCT FROM 'paid';
+SELECT 'status IS NULL', string_agg(id::text, ',' ORDER BY id)
+FROM payments WHERE status IS NULL;</code></pre>
+      <pre class="out">status &lt;&gt; paid|3,5
+status DISTINCT FROM paid|3,5,6
+status IS NULL|6</pre>
+      <p><code>IS DISTINCT FROM</code> возвращает обычный boolean: два NULL для него не различаются, NULL и известное значение различаются. Это удобный способ обнаружить изменение nullable-поля без сложного набора OR. Он не назначает NULL бизнес-смысл: в отчёте «не оплачено» неизвестный статус иногда надо показать отдельной категорией, а не смешать с pending.</p>
+      <h3>Подстановка значения меняет смысл данных</h3>
+      <p><code>COALESCE(x, 0)</code> выбирает первое не-NULL значение. Для известного отсутствия комиссии это может быть правильный ноль. Для неизвестной суммы платежа это финансовая ложь. Различай отсутствие строки, отсутствующее поле и известное нулевое значение. Не подставляй ноль только ради удобства Java-примитива или красивого отчёта.</p>
+      <p>В SQL нельзя использовать <code>AND</code> как обещание порядка вызовов. Условие <code>x &lt;&gt; 0 AND 100 / x &gt; 2</code> не является общим способом защитить деление: оптимизатор вправе перестроить выражение. Для такого вычисления вырази допустимую операцию, например <code>100.0 / NULLIF(x, 0)</code>. NULLIF превращает запрещённый делитель в NULL, а дальнейший фильтр решает, что делать с отсутствующим результатом.</p>
+      <details class="deep"><summary>Почему CHECK и WHERE по-разному относятся к UNKNOWN</summary><p>WHERE выбирает только TRUE, а CHECK отклоняет FALSE и допускает TRUE или UNKNOWN. Поэтому <code>CHECK (amount_minor &gt; 0)</code> не запрещает NULL. Если значение обязательно, нужен также NOT NULL. Одинаковое условие в фильтре и ограничении выполняет разные задачи; переносить интуицию из Java boolean без проверки нельзя.</p></details>
+      <div class="trap"><p class="myth">Если условие и его отрицание объединить OR, любая строка пройдёт.</p><p class="fact">Для UNKNOWN выражение <code>p OR NOT p</code> остаётся UNKNOWN. Например, <code>status = 'paid' OR status &lt;&gt; 'paid'</code> исключит строку 6. Полноту категорий нужно обеспечить отдельным случаем IS NULL.</p></div>
+    </section>
+
+    <section class="step" id="group-and-aggregate">
+      <h2>COUNT строк и COUNT известных значений отвечают на разные вопросы</h2>
+      <p>GROUP BY собирает строки с одинаковым ключом. Для группировки несколько NULL в одном ключе попадают в одну группу: это правило групп, а не результат обычного сравнения <code>NULL = NULL</code>. Затем каждый агрегат получает набор входных значений своей группы. COUNT(*) считает строки, COUNT(amount_minor) — только строки с известной суммой, SUM и AVG пропускают NULL-значения.</p>
+      <p>Поэтому у оплаченного платежа 7 число строк равно одному, число известных сумм — нулю, а сумма и среднее неизвестны. Статус paid не создаёт отсутствующее значение суммы. Для сверки качества данных полезно вывести оба счётчика: их разница покажет оплаченные записи, которые требуют разбора.</p>
+      <pre><code class="language-sql">SELECT merchant,
+       count(*) AS rows,
+       count(amount_minor) AS known_amounts, -- Не считает NULL.
+       sum(amount_minor) AS total_minor,
+       round(avg(amount_minor), 2) AS average_minor
+FROM payments WHERE status = 'paid'
+GROUP BY merchant
+ORDER BY merchant ASC NULLS LAST;</code></pre>
+      <pre class="out">A|2|2|200|100.00
+B|1|1|200|200.00
+NULL|1|0|NULL|NULL</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 248" role="img" aria-label="Три группы оплаченных платежей. A содержит платежи 1 и 2 по 100, B содержит платёж 4 на 200, NULL содержит платёж 7 с неизвестной суммой. У последней группы count строк равен 1, count сумм равен 0, sum неизвестна.">
+            <rect x="20" y="40" width="214" height="188" rx="8" class="dg-box"/>
+            <rect x="252" y="40" width="214" height="188" rx="8" class="dg-box"/>
+            <rect x="484" y="40" width="214" height="188" rx="8" class="dg-box"/>
+            <text x="20" y="24" class="dg-cap">ГРУППЫ: MERCHANT</text>
+            <text x="34" y="65" class="dg-t">A</text><text x="266" y="65" class="dg-t">B</text><text x="498" y="65" class="dg-t">NULL</text>
+            <rect x="32" y="78" width="190" height="30" rx="5" class="dg-cell"/>
+            <rect x="32" y="114" width="190" height="30" rx="5" class="dg-cell"/>
+            <rect x="264" y="78" width="190" height="30" rx="5" class="dg-cell"/>
+            <rect x="496" y="78" width="190" height="30" rx="5" class="dg-cell miss"/>
+            <text x="44" y="99" class="dg-in">id=1, сумма=100</text><text x="44" y="135" class="dg-in">id=2, сумма=100</text>
+            <text x="276" y="99" class="dg-in">id=4, сумма=200</text><text x="508" y="99" class="dg-in">id=7, сумма=NULL</text>
+            <line x1="32" y1="156" x2="222" y2="156" class="dg-sep"/>
+            <line x1="264" y1="156" x2="454" y2="156" class="dg-sep"/>
+            <line x1="496" y1="156" x2="686" y2="156" class="dg-sep"/>
+            <text x="34" y="178" class="dg-n">count(*)=2, count=2</text><text x="34" y="203" class="dg-ok">sum=200</text>
+            <text x="266" y="178" class="dg-n">count(*)=1, count=1</text><text x="266" y="203" class="dg-ok">sum=200</text>
+            <text x="498" y="178" class="dg-n">count(*)=1, count=0</text><text x="498" y="203" class="dg-bad">sum=NULL</text>
+          </svg>
+        </div>
+        <figcaption>У каждого магазина одна выходная строка, но в агрегатах участвуют разные наборы: все платежи либо только известные суммы.</figcaption>
+      </figure>
+      <h3>Пустой набор не всегда даёт пустой результат</h3>
+      <p>Агрегаты без GROUP BY считают весь отфильтрованный набор как одну общую группу. Даже если строк не осталось, обычный агрегатный запрос без HAVING вернёт одну строку: COUNT — 0, SUM — NULL. С GROUP BY на пустом наборе не возникнет ни одной группы, и выходных строк не будет. Для клиента это разница между «получили запись с неизвестной суммой» и «записей нет».</p>
+      <pre><code class="language-sql">SELECT count(*) AS rows,
+       count(amount_minor) AS known_amounts,
+       sum(amount_minor) AS total_minor,
+       coalesce(sum(amount_minor), 0) AS chosen_zero -- Явная политика для пустого набора.
+FROM payments WHERE status = 'missing';</code></pre>
+      <pre class="out">0|0|NULL|0</pre>
+      <p>AVG делит сумму на число известных значений, а не на COUNT(*). Если заменить его на SUM(x) / COUNT(*), NULL-строки изменят знаменатель. Ещё проверь типы: деление целых обрезает дробную часть; PostgreSQL AVG для целочисленного входа возвращает numeric. ROUND в опыте сокращает печать до двух десятичных знаков, но не меняет число участников среднего.</p>
+      <h3>Один набор строк можно считать по нескольким условиям</h3>
+      <p>WHERE действует на весь запрос, FILTER — на вход конкретного агрегата. Если поставить paid в WHERE, потеряем pending и refunded из общего числа платежей. Если поставить его в FILTER у COUNT и SUM, сохраним все строки группы и посчитаем оплаченные отдельно.</p>
+      <pre><code class="language-sql">SELECT merchant, count(*) AS all_count,
+       count(*) FILTER (WHERE status = 'paid') AS paid_count,
+       sum(amount_minor) FILTER (WHERE status = 'paid') AS paid_total
+FROM payments
+GROUP BY merchant
+ORDER BY merchant ASC NULLS LAST;</code></pre>
+      <pre class="out">A|3|2|200
+B|3|1|200
+NULL|1|1|NULL</pre>
+      <p>Это полезно для отчёта по нескольким статусам за один и тот же период. Общие ограничения периода и магазина оставляй в WHERE, условия отдельных метрик — в FILTER. CASE внутри SUM тоже возможен, но важно выбрать ELSE: ноль и NULL создают разную семантику для других агрегатов. А для упорядоченных агрегатов вроде STRING_AGG порядок задавай внутри самого агрегата, как в опыте со статусами; внешнее ORDER BY сортирует готовые группы.</p>
+      <div class="note warn"><p>Сумма всех известных оплаченных значений в демо равна 400. Полная сумма оплат неизвестна: у платежа 7 нет суммы. SUM не выдаёт ошибку и не отмечает неполноту, поэтому финансовый отчёт должен отдельно проверять число неизвестных сумм. Иначе технически правильный итог выглядит как подтверждённая полная выручка.</p></div>
+      <details class="deep"><summary>Что группировка требует от памяти и почему HAVING не ускоряет вход само по себе</summary><p>PostgreSQL может построить хеш-таблицу групп или использовать отсортированный поток. Количество групп, ширина данных и доступная рабочая память влияют на объём состояния и запись на диск. HAVING по SUM отбрасывает группу после получения её агрегата; он не позволяет пропустить часть платежей этой группы. Фильтр по самому ключу иногда можно перенести раньше без изменения смысла. Конкретное преобразование проверяют по EXPLAIN, а не по месту слова в запросе.</p></details>
+    </section>
+
+    <section class="step" id="distinct-grain">
+      <h2>DISTINCT удаляет одинаковые результаты, а не повторные бизнес-события</h2>
+      <p>Обычный SELECT сохраняет повторяющиеся строки результата. SQL часто называют работой с множествами, но по умолчанию здесь важна кратность: два платежа по 100 должны участвовать в сумме дважды. SELECT DISTINCT удаляет повторы по <b>всем выбранным выражениям</b>. DISTINCT merchant и DISTINCT merchant, amount_minor — разные вопросы к тем же данным.</p>
+      <p>SUM(DISTINCT amount_minor) сначала оставляет уникальные известные значения сумм, затем складывает их. У оплаченных платежей суммы 100, 100, 200 и NULL. Обычная SUM даёт 400; SUM(DISTINCT) — 300. Два независимых платежа магазина A не становятся одним событием только потому, что их суммы совпали.</p>
+      <pre><code class="language-sql">SELECT count(*) AS paid_rows,
+       sum(amount_minor) AS paid_total,
+       sum(DISTINCT amount_minor) AS distinct_amount_total -- Уникальны суммы, не id.
+FROM payments WHERE status = 'paid';</code></pre>
+      <pre class="out">4|400|300</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 296" role="img" aria-label="Четыре оплаченных платежа сначала проецируются на суммы 100, 100, 200, NULL. DISTINCT объединяет две сотни и оставляет 100, 200, NULL. SUM известных уникальных значений равна 300, хотя сумма платежей равна 400.">
+            <defs><marker id="du-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="24" class="dg-cap">ПЛАТЕЖИ</text><text x="266" y="24" class="dg-cap">СУММЫ</text><text x="512" y="24" class="dg-cap">DISTINCT</text>
+            <rect x="20" y="42" width="188" height="184" rx="8" class="dg-box"/>
+            <rect x="266" y="42" width="188" height="184" rx="8" class="dg-box"/>
+            <rect x="512" y="42" width="188" height="184" rx="8" class="dg-box"/>
+            <rect x="32" y="54" width="164" height="32" rx="5" class="dg-cell"/>
+            <rect x="32" y="96" width="164" height="32" rx="5" class="dg-cell"/>
+            <rect x="278" y="54" width="164" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="278" y="96" width="164" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="524" y="54" width="164" height="32" rx="5" class="dg-cell hit"/>
+            <path d="M208 134 L262 134" class="dg-line" marker-end="url(#du-n)"/>
+            <path d="M454 134 L508 134" class="dg-line" marker-end="url(#du-n)"/>
+            <g class="dg-in">
+              <text x="44" y="76">id=1: 100</text><text x="44" y="118">id=2: 100</text><text x="44" y="160">id=4: 200</text><text x="44" y="202">id=7: NULL</text>
+              <text x="290" y="76">100</text><text x="290" y="118">100</text><text x="290" y="160">200</text><text x="290" y="202">NULL</text>
+              <text x="536" y="76">100</text><text x="536" y="118">200</text><text x="536" y="160">NULL</text>
+            </g>
+            <text x="20" y="254" class="dg-ok">SUM = 400</text><text x="512" y="254" class="dg-bad">SUM = 300</text>
+            <text x="20" y="276" class="dg-s">Идентичность платежа потеряна при выборе только суммы.</text>
+          </svg>
+        </div>
+        <figcaption>Одинаковые значения поля и одно и то же событие — разные виды повторов. DISTINCT знает выбранные колонки, а не бизнес-ключ.</figcaption>
+      </figure>
+      <p>У DISTINCT несколько NULL в одной позиции считаются повторами, хотя обычное сравнение двух NULL неизвестно. А COUNT(DISTINCT merchant) сначала исключает NULL, затем считает уникальные известные магазины. Поэтому список DISTINCT merchant содержит три строки, а COUNT(DISTINCT merchant) равен двум:</p>
+      <pre><code class="language-sql">SELECT DISTINCT merchant
+FROM payments WHERE status = 'paid'
+ORDER BY merchant ASC NULLS LAST;
+SELECT count(DISTINCT merchant) AS known_merchants
+FROM payments WHERE status = 'paid';</code></pre>
+      <pre class="out">A
+B
+NULL
+2</pre>
+      <h3>Один представитель группы требует правила выбора</h3>
+      <p>Иногда нужен не список уникальных значений, а последний оплаченный платёж каждого магазина. PostgreSQL DISTINCT ON оставляет первую строку каждой группы по указанным выражениям. Чтобы «первая» значила «последняя по времени», нужен согласованный ORDER BY: ключ DISTINCT ON идёт в начале, затем время по убыванию и id для разрешения равного времени.</p>
+      <pre><code class="language-sql">SELECT DISTINCT ON (merchant) merchant, id, status
+FROM payments WHERE status = 'paid' -- Последний среди оплаченных, не вообще последний.
+ORDER BY merchant ASC NULLS LAST,
+         created_at DESC, id DESC;  -- Равное время разрешаем однозначно.</code></pre>
+      <pre class="out">A|2|paid
+B|4|paid
+NULL|7|paid</pre>
+      <p>У A вообще последний платёж — 3, но последний оплаченный — 2. У B эти строки — 6 и 4. Если сначала выбрать последний платёж любого статуса, а потом оставить paid, оба магазина исчезнут. Порядок смысловых операций меняет результат. DISTINCT ON — расширение PostgreSQL; переносимый вариант с ROW_NUMBER разобран в <a href="window-functions.html">Window Functions</a>.</p>
+      <div class="trap"><p class="myth">После JOIN сумма завышена — достаточно добавить DISTINCT.</p><p class="fact">Сначала выясни, почему одна строка платежа дала несколько строк соединения. DISTINCT суммы выбросит независимые платежи с одинаковыми значениями. Нужен правильный уровень соединения или предварительная агрегация; это разобрано в <a href="sql-joins.html">Joins</a>.</p></div>
+    </section>
+
+    <section class="step" id="order-and-boundaries">
+      <h2>Порядок и границы результата нужно задавать явно</h2>
+      <p>Без ORDER BY база не обещает порядок строк. Вчера они шли по id, сегодня новый индекс, параллельный план или изменение объёма данных дадут другой порядок. GROUP BY и DISTINCT тоже не являются обещанием сортировки. Если клиент видит «первые три платежа», запрос должен определить, по какому признаку они первые.</p>
+      <p>Одного неуникального признака мало. При одинаковой сумме два платежа по 100 не упорядочены относительно друг друга. Добавление id делает порядок полным для этого набора строк. LIMIT выбирает часть уже упорядоченного результата; это особенно важно для пагинации, повторяемых отчётов и выбора одной строки группы.</p>
+      <pre><code class="language-sql">SELECT id, amount_minor FROM payments WHERE status = 'paid'
+ORDER BY amount_minor DESC NULLS LAST, id ASC LIMIT 3;
+
+-- В PostgreSQL DESC по умолчанию ставит NULL первым.
+SELECT id, amount_minor FROM payments WHERE status = 'paid'
+ORDER BY amount_minor DESC, id ASC LIMIT 1;</code></pre>
+      <pre class="out">4|200
+1|100
+2|100
+7|NULL</pre>
+      <p>Последняя строка — результат второго запроса. Неизвестная сумма оказалась «самой большой» только из-за политики расположения NULL. Для ASC в PostgreSQL по умолчанию NULLS LAST, для DESC — NULLS FIRST. Укажи нужную политику явно, если «первые» значения имеют бизнес-смысл. Сама SUM пропускает NULL, а сортировка обязана куда-то поставить строку с ним: это разные операции.</p>
+      <h3>Правильный ответ и хороший план проверяют отдельно</h3>
+      <p>Для запроса с миллионами строк потребуются индексы, оценка числа групп, память для сортировки и проверка плана. Но LIMIT не означает, что база прочтёт только столько строк: для суммы всех платежей сначала надо получить вход агрегатов. DISTINCT тоже требует доказать уникальность или удалить повторы; большой список результатов не становится бесплатным от одного слова.</p>
+      <p>Сначала проверяй смысл на маленьком наборе: два платежа по одной сумме, NULL, пустой результат, равные ключи сортировки. Затем смотри EXPLAIN ANALYZE на реальном распределении данных. Отдельно сравни ожидаемое и фактическое число строк после JOIN и группировки. Ускорение не должно менять единицу подсчёта, значение отсутствия или порядок выбора.</p>
+      <p>Для пользовательского ввода используй параметры запроса. Значение магазина передают как значение, а не вклеивают в текст SQL. Имена колонок и направления ORDER BY параметром значения не заменить: для них нужен разрешённый набор вариантов. Работа JDBC и PreparedStatement — в <a href="jdbc.html">JDBC &amp; Connection Pools</a>, физические планы — в <a href="query-tuning.html">Query Plans</a>.</p>
+      <p>Полный порядок не сохраняет один снимок данных между отдельными запросами страниц. Пока клиент листает OFFSET-пагинацию, новые записи и изменения ключей могут сдвинуть строки. Курсор и уровень изоляции решают другие части этой задачи; продолжение — в <a href="slow-queries.html">Slow Queries</a> и <a href="db-tx.html">ACID &amp; Isolation</a>. Соединения, вложенные запросы и окна изучаются отдельно: они добавляют новые способы формировать вход, но не отменяют правила NULL, кратности и группировки.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Проследи единицу строки: платёж, группа магазина или выбранные значения. Смена этой единицы меняет правила подсчёта.</li>
+      <li>WHERE фильтрует строки, HAVING — группы. Логические стадии объясняют смысл, а физический порядок выбирает оптимизатор.</li>
+      <li>Обычные сравнения с NULL дают UNKNOWN. WHERE оставляет только TRUE; отрицание не превращает UNKNOWN в TRUE.</li>
+      <li>COUNT(*) считает строки, COUNT(поле) — известные значения. Без GROUP BY пустой вход всё ещё даёт строку агрегатов.</li>
+      <li>DISTINCT удаляет повторы выбранных значений. Два платежа по одной сумме остаются двумя бизнес-событиями.</li>
+      <li>ORDER BY должен разрешать равенство ключей и явно размещать NULL. LIMIT без определённого порядка не выбирает определённые строки.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="select-order" data-freq="3">
+      <h3>В каком порядке работает SELECT и чем WHERE отличается от HAVING?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Я читаю смысл запроса от FROM: получаю строки, фильтрую их WHERE, собираю группы и считаю агрегаты, затем отбираю группы HAVING. SELECT задаёт выходные колонки, DISTINCT удаляет повторы, ORDER BY и LIMIT задают порядок и часть результата. Это логическая последовательность, а не обязательный физический план.</p><p>В отчёте по оплатам WHERE оставляет paid, а HAVING выбирает магазины с общей суммой от 200. Если заменить этот порог на WHERE amount_minor ≥ 200, магазин с двумя платежами по 100 исчезнет. Псевдоним суммы из SELECT в PostgreSQL доступен ORDER BY, но в HAVING я пишу агрегат или использую внешний запрос.</p></div>
+        <div data-level="senior"><ul>
+          <li>Фильтр по ключу группы иногда можно перенести до группировки, фильтр по SUM — не просто фильтр платежей. Возможность переноса определяется сохранением смысла, а не общим правилом «WHERE быстрее».</li>
+          <li>Нельзя выбрать произвольный id из группы merchant. Исключение PostgreSQL с первичным ключом основано на функциональной зависимости, а не на выборе случайного представителя.</li>
+          <li>Оптимизатор может переупорядочивать условия. AND не является контрактом короткого замыкания для опасной операции; выражаю безопасное деление через NULLIF.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="null-logic" data-freq="3">
+      <h3>Почему сравнение с NULL не работает как сравнение с обычным значением?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>NULL означает неизвестное или отсутствующее значение. Обычное сравнение с ним даёт UNKNOWN, в том числе NULL = NULL. WHERE принимает только TRUE, поэтому и равенство paid, и его отрицание исключат строку с неизвестным статусом. Для отсутствия использую IS NULL, а для сравнения двух nullable-значений — IS DISTINCT FROM.</p><p>В платёжном отчёте я не превращаю неизвестную сумму в ноль без бизнес-правила. COALESCE полезен для выбранной политики, но он не восстанавливает отсутствующие данные. Отдельная категория неизвестных записей часто честнее, чем красивый общий итог.</p></div>
+        <div data-level="senior"><ul>
+          <li>TRUE OR UNKNOWN даёт TRUE, FALSE AND UNKNOWN — FALSE. Поэтому наличие nullable-поля не делает автоматически неизвестным любой составной предикат.</li>
+          <li>GROUP BY и DISTINCT объединяют одинаковые NULL-позиции, хотя обычное равенство двух NULL неизвестно. Нельзя выводить правила всех операций из одного оператора =.</li>
+          <li>CHECK допускает UNKNOWN, WHERE его исключает. Ограничение суммы через CHECK(amount &gt; 0) требует отдельного NOT NULL, если сумма обязательна.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью"><summary>Все статусы попали в отчёт по этому условию?</summary>
+        <pre><code class="language-sql">WHERE status = 'paid' OR status &lt;&gt; 'paid'</code></pre>
+        <p>Нет: неизвестный статус даст UNKNOWN OR UNKNOWN. Если нужны все строки, условие вообще не требуется. Если надо явно описать категории, добавь IS NULL и реши, к какой категории относятся такие платежи. Простое отрицание первого условия не закрывает отсутствие значения.</p>
+      </details></div>
+    </article>
+    <article class="q" id="counts-and-empty" data-freq="3">
+      <h3>Чем COUNT(*), COUNT(поле) и SUM отличаются на NULL и пустом наборе?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>COUNT(*) считает входные строки, COUNT(поле) — известные значения поля. SUM и AVG пропускают NULL. Поэтому один paid-платёж с неизвестной суммой даёт count строк 1, count сумм 0, sum NULL. AVG делит на число известных значений, а не на число всех строк.</p><p>Без GROUP BY агрегатный запрос на пустом входе возвращает одну строку: count 0, sum NULL. С GROUP BY групп нет и строк результата тоже нет. Если контракт требует ноль для пустой суммы, выбираю COALESCE явно и отдельно проверяю неполные платежи.</p></div>
+        <div data-level="senior"><ul>
+          <li>FILTER меняет вход конкретного агрегата. WHERE paid удалит pending из всех метрик, а COUNT(*) FILTER(WHERE paid) сохранит общий count рядом.</li>
+          <li>Тип результата важен: SUM(integer) в PostgreSQL возвращает bigint, SUM(bigint) — numeric. AVG целого возвращает numeric, а самостоятельно написанное целочисленное деление может обрезать дробь.</li>
+          <li>COUNT(*) требует посчитать видимые строки конкретного снимка; «точный размер таблицы из метаданных» не заменяет его. Стоимость и выбранный доступ проверяю планом.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="distinct-and-business-key" data-freq="3">
+      <h3>Что удаляет DISTINCT и почему SUM(DISTINCT) не чинит задвоенную сумму?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>DISTINCT сравнивает выбранные выражения, а не идентичность сущности. Если выбрать только сумму, два платежа по 100 станут одним значением 100. SUM(DISTINCT amount) поэтому считает сумму разных сумм, а не сумму разных платежей. Для бизнес-дедупликации нужен ключ события или платежа.</p><p>Если после JOIN отчёт удвоился, сначала проверяю кратность соединения. Возможно, платёж соединился с двумя попытками. Исправляю вход агрегации, а не удаляю одинаковые денежные значения. Когда нужен один представитель группы, задаю правило выбора: в PostgreSQL DISTINCT ON с ORDER BY, либо окно ROW_NUMBER.</p></div>
+        <div data-level="senior"><ul>
+          <li>COUNT(DISTINCT merchant) исключает NULL; SELECT DISTINCT merchant сохраняет одну NULL-строку. Эти результаты отвечают на разные вопросы.</li>
+          <li>В DISTINCT ON фильтр перед выбором определяет набор кандидатов. «Последний paid» и «последний вообще, если paid» — разные отчёты.</li>
+          <li>Ширина выбранной строки и число входных строк влияют на стоимость удаления повторов. DISTINCT в конце способен скрыть ошибку кратности и добавить дорогую сортировку или хеширование.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="stable-result-order" data-freq="2">
+      <h3>Достаточно ли ORDER BY created_at и LIMIT для стабильной страницы?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Если время повторяется, относительный порядок этих строк не задан. Я добавляю уникальный ключ, например id, и явно решаю, где стоят NULL. Без ORDER BY вообще нельзя обещать, какие строки выберет LIMIT: порядок чтения таблицы не часть контракта.</p><p>Даже полный порядок решает только порядок внутри результата. Между запросами страниц данные могут измениться и сдвинуть OFFSET. Для стабильного обхода выбираю подходящий курсор, а для единого снимка — отдельно продумываю транзакцию и изоляцию.</p></div>
+        <div data-level="senior"><ul>
+          <li>В PostgreSQL DESC по умолчанию даёт NULLS FIRST. Неполный платёж способен попасть на вершину рейтинга сумм; для такого контракта пишу NULLS LAST.</li>
+          <li>LIMIT после агрегатов не обещает малое число прочитанных строк. База ещё должна получить данные для группировки и сравнения итоговых сумм.</li>
+          <li>Курсор по изменяемому ключу сортировки тоже требует политики: изменение суммы или времени может перенести запись относительно уже выданной границы.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://www.postgresql.org/docs/17/queries-table-expressions.html">PostgreSQL 17: Table Expressions</a>, §§7.2.2–7.2.3 — основа порядка объяснения: фильтр строк, группы и HAVING; логическую модель в уроке отличаем от физического плана.</li>
+    <li><a href="https://www.postgresql.org/docs/17/sql-select.html">SELECT</a> — доступность псевдонимов, функциональная зависимость, DISTINCT ON, ORDER BY, NULLS FIRST/LAST и LIMIT.</li>
+    <li><a href="https://www.postgresql.org/docs/17/functions-comparison.html">Comparison Functions</a> — UNKNOWN, IS NULL и IS DISTINCT FROM; <a href="https://www.postgresql.org/docs/17/ddl-constraints.html">Constraints</a>, §5.5.1 — почему CHECK допускает UNKNOWN.</li>
+    <li><a href="https://www.postgresql.org/docs/17/functions-aggregate.html">Aggregate Functions</a> — пустой вход, типы SUM/AVG, COUNT и порядок внутри агрегата. <a href="https://www.postgresql.org/docs/17/errcodes-appendix.html">SQLSTATE</a> — коды ожидаемых ошибок демо.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
