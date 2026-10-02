@@ -565,7 +565,7 @@ window.KB_TREE = [
           scope: 'Resource Server, проверка JWT, OAuth2 Client и Login, Keycloak' },
       ] },
       { id: 'integration', title: 'Integration', source: 'Spring Framework Reference: Integration; Spring Boot Reference: Messaging, IO', items: [
-        { id: 'spring-kafka', freq: 2, status: 'empty', title: 'Kafka in Spring',
+        { id: 'spring-kafka', freq: 2, status: 'draft', title: 'Kafka in Spring',
           scope: 'KafkaTemplate, @KafkaListener, контейнеры и concurrency, повторы и DLT, транзакции' },
         { id: 'spring-amqp', freq: 1, status: 'empty', title: 'RabbitMQ in Spring',
           scope: 'RabbitTemplate, @RabbitListener, подтверждения, повторы и DLX' },
