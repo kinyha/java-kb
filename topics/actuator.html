@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Boot: Actuator · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="actuator">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Boot: Actuator</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Actuator добавляет к сервису служебный вход для людей и машин. Kubernetes спрашивает у него, можно ли слать трафик и не пора ли перезапустить pod. Prometheus забирает у него числа: сколько платежей прошло и за сколько миллисекунд. Человек смотрит, какие настройки и бины реально работают. Каждый из этих ответов собирается из обычных бинов приложения, поэтому его можно расширить своим кодом. И каждый можно случайно открыть всему интернету, если не подумать о доступе.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Процесс жив, но платежи не проходят, и снаружи этого не видно</h2>
+      <p>Платёжный сервис работает в трёх pod-ах за общим Service в Kubernetes. Ночью у одного pod-а рвётся соединение с банком. JVM жива, порт открыт, контроллер отвечает. Только каждый третий платёж клиента теперь заканчивается ошибкой, а дежурный узнаёт об этом из жалоб.</p>
+      <p>Чтобы платформа и дежурный реагировали сами, сервис должен отвечать на три вопроса. <b>Можно ли сейчас слать мне запросы?</b> На это отвечает readiness. <b>Не сломан ли я так, что поможет только перезапуск?</b> Это liveness. <b>Как я работаю в цифрах?</b> Это метрики: число платежей, ошибки, задержки. Четвёртый вопрос — где именно застрял конкретный платёж — решает трассировка.</p>
+      <p>Писать эти ответы в каждом сервисе вручную долго и однообразно. Стартер <code>spring-boot-starter-actuator</code> приносит готовые <b>endpoints</b>: health, metrics, prometheus, env, loggers и другие. Под ними лежат Micrometer для метрик и модель доступности приложения. Тема разбирает эти части на одном демо.</p>
+      <p>Демо <a href="../examples/actuator/ActuatorDemo.java">ActuatorDemo.java</a> поднимает веб-сервер на случайном порту. Банк заменён флагом <code>Bank.up</code>, а HTTP-запросы к сервису программа делает сама. Стек: JDK 21, Spring Boot 4.1.1, Micrometer 1.17.</p>
+      <pre><code class="language-bash">cd examples/actuator
+./run.sh ActuatorDemo # Maven и JDK 21; банк, Kubernetes и Prometheus не нужны.</code></pre>
+    </section>
+
+    <section class="step" id="exposure">
+      <h2>Endpoint отвечает, только если он доступен и открыт наружу</h2>
+      <p>У каждого endpoint-а два независимых переключателя. Первый — <b>доступ</b>: существует ли endpoint вообще и что через него можно делать. С Boot 3.4 он задаётся через <code>management.endpoint.&lt;id&gt;.access</code> со значениями <code>none</code>, <code>read-only</code> и <code>unrestricted</code>; старое <code>enabled</code> заменено. Второй — <b>экспозиция</b>: по какому каналу endpoint виден, HTTP или JMX.</p>
+      <p>По умолчанию доступ есть почти у всех endpoint-ов, но по HTTP открыт только <code>health</code>. Поэтому первый запуск демо без настроек выглядит бедно: метрики уже собираются в памяти, но <code>/actuator/metrics</code> отдаёт 404.</p>
+      <pre><code class="language-java">// Первый контекст демо: никаких management.* настроек.
+call("GET", "/actuator");         // Список открытых endpoints.
+call("GET", "/actuator/health");  // Общий статус без подробностей.
+call("GET", "/actuator/metrics"); // Метрики есть, но не открыты по HTTP.</code></pre>
+      <pre class="out">GET /actuator -> 200 {"_links":{"self":{},"health-path":{},"health":{}}}
+GET /actuator/health -> 200 {"groups":["liveness","readiness"],"status":"UP"}
+GET /actuator/metrics -> 404</pre>
+      <p>Ссылки <code>href</code> в выводе вырезаны ради длины строки. Обрати внимание на <code>groups</code>: группы liveness и readiness уже есть, хотя Kubernetes рядом нет. В Boot 4 probes включены по умолчанию; в Boot 3 они включались сами только при запуске в Kubernetes, иначе требовали <code>management.endpoint.health.probes.enabled=true</code>.</p>
+      <p>Во втором контексте демо открывает три endpoint-а и включает подробности health:</p>
+      <pre><code class="language-yaml">management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus # Список, а не "*": открываем только нужное.
+  endpoint:
+    health:
+      show-details: always # В проде обычно when-authorized.</code></pre>
+      <table class="mx">
+        <thead><tr><th>Endpoint</th><th>Что даёт</th><th>Риск при открытом доступе</th></tr></thead>
+        <tbody>
+          <tr><td><code>health</code></td><td>Статус и группы для probes</td><td>Подробности раскрывают устройство инфраструктуры</td></tr>
+          <tr><td><code>metrics</code>, <code>prometheus</code></td><td>Числа для мониторинга</td><td>Нагрузка и бизнес-объёмы видны посторонним</td></tr>
+          <tr><td><code>env</code>, <code>configprops</code></td><td>Источники настроек и связанные объекты</td><td>Значения скрыты по умолчанию (<code>show-values: never</code>), но включить их легко</td></tr>
+          <tr><td><code>loggers</code></td><td>Уровни логов, меняются на лету через POST</td><td>Посторонний включит DEBUG и забьёт диск</td></tr>
+          <tr><td><code>heapdump</code>, <code>threaddump</code></td><td>Снимок памяти и стеков</td><td>В heap dump лежат пароли, токены и данные клиентов</td></tr>
+          <tr><td><code>beans</code>, <code>conditions</code>, <code>mappings</code></td><td>Граф бинов, отчёт условий, маршруты</td><td>Карта приложения для атакующего</td></tr>
+        </tbody>
+      </table>
+      <p>Типичная прод-схема: endpoints слушают отдельный порт <code>management.server.port</code>, который не публикуется наружу через ingress. Kubernetes и Prometheus ходят на него изнутри кластера. Всё, что опаснее health и метрик, закрыто Spring Security или не открыто вовсе. Отдельный порт ещё и отделяет служебные запросы от пула потоков, который обслуживает платежи.</p>
+      <div class="trap">
+        <p class="myth">Endpoints под /actuator безопасны, потому что про этот путь никто не знает.</p>
+        <p class="fact">Путь /actuator стандартный, и сканеры проверяют его первым. Открытый heapdump уже приводил к утечкам ключей из памяти. Защищай endpoints доступом и сетью, а не надеждой на неизвестный адрес.</p>
+      </div>
+    </section>
+
+    <section class="step" id="health">
+      <h2>Health собирает индикаторы в дерево и сводит их к худшему статусу</h2>
+      <p>Каждый бин типа <code>HealthIndicator</code> — один узел дерева health. Boot сам добавляет индикаторы для того, что нашёл в контексте: <code>db</code> для DataSource, <code>redis</code>, <code>diskSpace</code>, <code>ping</code>, <code>ssl</code>. Свой индикатор — обычный бин. Имя компонента берётся из имени бина без суффикса <code>HealthIndicator</code>.</p>
+      <pre><code class="language-java">@Component("bankHealthIndicator") // Компонент health получит имя "bank".
+class BankHealthIndicator implements HealthIndicator {
+    private final Bank bank;
+
+    BankHealthIndicator(Bank bank) { this.bank = bank; }
+
+    @Override
+    public Health health() { // Вызывается на каждый запрос к health.
+        return bank.up.get()
+                ? Health.up().withDetail("latencyMs", 42).build()
+                : Health.down().withDetail("error", "connect timed out").build();
+    }
+}</code></pre>
+      <p>Без явного имени бина вложенный класс из демо получил бы имя <code>actuatorDemo.BankHealthIndicator</code>, а компонент — <code>actuatorDemo.Bank</code>. Так в JSON появляются странные ключи. Имя компонента — часть договора с мониторингом, поэтому задавай его явно.</p>
+      <p>Статус родителя вычисляет <code>StatusAggregator</code>: побеждает самый плохой статус по порядку <code>DOWN</code>, <code>OUT_OF_SERVICE</code>, <code>UP</code>, <code>UNKNOWN</code>. Затем <code>HttpCodeStatusMapper</code> переводит его в HTTP-код: DOWN и OUT_OF_SERVICE дают 503, остальные — 200. Именно код, а не JSON, читают балансировщик и Kubernetes.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 268" role="img" aria-label="Четыре индикатора: bank DOWN, diskSpace UP, ping UP, readinessState UP. Все четыре входят в общий /actuator/health, и он получает худший статус DOWN с кодом 503. Группа readiness по умолчанию включает только readinessState, поэтому отвечает UP и 200.">
+            <defs>
+              <marker id="ah-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ah-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- индикаторы -->
+            <rect x="20" y="40" width="200" height="36" rx="7" class="dg-cell miss"/>
+            <rect x="20" y="90" width="200" height="36" rx="7" class="dg-cell hit"/>
+            <rect x="20" y="140" width="200" height="36" rx="7" class="dg-cell hit"/>
+            <rect x="20" y="190" width="200" height="36" rx="7" class="dg-cell hit"/>
+            <!-- общий health и группа readiness -->
+            <rect x="452" y="44" width="248" height="60" rx="9" class="dg-box"/>
+            <rect x="452" y="176" width="248" height="60" rx="9" class="dg-box"/>
+            <!-- все индикаторы идут в общий health -->
+            <path d="M220 58 C 330 58, 340 68, 448 68" class="dg-line bad" marker-end="url(#ah-bad)"/>
+            <path d="M220 108 C 330 108, 340 74, 448 74" class="dg-line" marker-end="url(#ah-n)"/>
+            <path d="M220 158 C 330 158, 340 80, 448 80" class="dg-line" marker-end="url(#ah-n)"/>
+            <path d="M220 202 C 330 202, 340 86, 448 86" class="dg-line" marker-end="url(#ah-n)"/>
+            <!-- в группу readiness входит только readinessState -->
+            <path d="M220 214 C 330 214, 340 206, 448 206" class="dg-line ok" marker-end="url(#ah-ok)"/>
+            <text x="20" y="26" class="dg-cap">HEALTHINDICATOR-БИНЫ</text>
+            <text x="452" y="34" class="dg-cap">ОТВЕТЫ</text>
+            <text x="34" y="63" class="dg-in">bank: DOWN</text>
+            <text x="34" y="113" class="dg-in">diskSpace: UP</text>
+            <text x="34" y="163" class="dg-in">ping: UP</text>
+            <text x="34" y="213" class="dg-in">readinessState: UP</text>
+            <text x="466" y="68" class="dg-in">/actuator/health</text>
+            <text x="466" y="90" class="dg-bad">DOWN → 503</text>
+            <text x="466" y="200" class="dg-in">/actuator/health/readiness</text>
+            <text x="466" y="222" class="dg-ok">UP → 200</text>
+            <text x="466" y="124" class="dg-n">худший статус побеждает</text>
+            <text x="20" y="254" class="dg-s">Группа берёт только свои индикаторы и агрегирует их отдельно.</text>
+          </svg>
+        </div>
+        <figcaption>Один упавший банк делает общий health красным, но не трогает readiness: в группу по умолчанию входит только состояние самого приложения.</figcaption>
+      </figure>
+      <p>Проверим на демо. Банк падает, два платежа проходят с ошибкой, затем программа спрашивает общий health и обе группы. Из большого JSON общего health оставлены компонент банка, компонент readinessState и итоговый статус.</p>
+      <pre><code class="language-java">bank.up.set(false); // Соединение с банком потеряно.
+call("POST", "/pay?id=p-2");
+call("POST", "/pay?id=p-3");
+call("GET", "/actuator/health");            // Всё дерево.
+call("GET", "/actuator/health/readiness");  // Группа для балансировки.
+call("GET", "/actuator/health/liveness");   // Группа для перезапуска.</code></pre>
+      <pre class="out">health    -> 503 "bank":{"details":{"error":"connect timed out"},"status":"DOWN"} ... "readinessState":{"status":"UP"} ... status=DOWN
+readiness -> 200 {"status":"UP"}
+liveness  -> 200 {"status":"UP"}</pre>
+      <p>Общий health отвечает 503, а readiness и liveness — 200. Это не ошибка, а намеренное решение Boot. Если направить probe Kubernetes на общий <code>/actuator/health</code>, падение банка выключит из балансировки все три pod-а сразу. Сервис перестанет отвечать даже на запросы, которым банк не нужен: статус платежа, история, возвраты из очереди.</p>
+      <p>Индикатор вызывается синхронно на каждый запрос к health. Медленная проверка банка с таймаутом в 10 секунд сделает медленным и сам health, и probe Kubernetes упадёт по своему таймауту. Тяжёлые проверки кешируют или проверяют фоном и отдают последний результат.</p>
+    </section>
+
+    <section class="step" id="probes">
+      <h2>Liveness и readiness отвечают оркестратору на разные вопросы</h2>
+      <p>Kubernetes по-разному реагирует на два ответа. Неудачный <b>readiness</b> исключает pod из Service: новые запросы идут в другие pod-ы, сам pod продолжает работать. Неудачный <b>liveness</b> заставляет kubelet убить контейнер и запустить заново. Первый ответ значит «подожди», второй — «я сломан безнадёжно».</p>
+      <p>Внутри Boot эти ответы хранит <code>ApplicationAvailability</code>. Состояния меняются событием <code>AvailabilityChangeEvent</code>. Liveness бывает <code>CORRECT</code> или <code>BROKEN</code>, readiness — <code>ACCEPTING_TRAFFIC</code> или <code>REFUSING_TRAFFIC</code>. Boot сам переводит readiness в ACCEPTING после запуска runner-ов и обратно в REFUSING при начале остановки; подробно это разобрано в <a href="boot-startup.html">Startup &amp; Packaging</a>.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Слева pod с двумя состояниями: liveness и readiness. Readiness связан с Service, который решает, слать ли запросы. Liveness связан с kubelet, который решает, перезапускать ли контейнер. По шагам: старт, готовность, падение банка без изменений probes, отказ от трафика и поломка liveness с перезапуском.">
+            <defs>
+              <marker id="ap-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">POD PAYMENTS-1</text>
+            <text x="452" y="22" class="dg-cap">KUBERNETES</text>
+            <rect x="20" y="32" width="300" height="182" rx="10" class="dg-box"/>
+            <!-- liveness: верхняя ячейка -->
+            <rect x="36" y="58" width="268" height="40" rx="7" class="dg-cell hit"/>
+            <rect data-s="5" x="36" y="58" width="268" height="40" rx="7" class="dg-cell miss"/>
+            <!-- readiness: нижняя ячейка, цвет по шагам -->
+            <rect data-s="1" x="36" y="122" width="268" height="40" rx="7" class="dg-cell miss"/>
+            <rect data-s="2-3" x="36" y="122" width="268" height="40" rx="7" class="dg-cell hit"/>
+            <rect data-s="4-" x="36" y="122" width="268" height="40" rx="7" class="dg-cell miss"/>
+            <!-- получатели -->
+            <rect x="452" y="118" width="248" height="56" rx="9" class="dg-box"/>
+            <rect x="452" y="40" width="248" height="56" rx="9" class="dg-box"/>
+            <path d="M304 82 C 380 82, 380 68, 448 68" class="dg-line" marker-end="url(#ap-n)"/>
+            <path d="M304 142 C 380 142, 380 146, 448 146" class="dg-line" marker-end="url(#ap-n)"/>
+            <text x="376" y="62" class="dg-n">liveness</text>
+            <text x="376" y="164" class="dg-n">readiness</text>
+            <!-- подписи состояний внутри pod -->
+            <text data-s="1-4" x="50" y="83" class="dg-in">liveness: CORRECT</text>
+            <text data-s="5" x="50" y="83" class="dg-bad">liveness: BROKEN</text>
+            <text data-s="1" x="50" y="147" class="dg-bad">readiness: REFUSING</text>
+            <text data-s="2-3" x="50" y="147" class="dg-in">readiness: ACCEPTING</text>
+            <text data-s="4-" x="50" y="147" class="dg-bad">readiness: REFUSING</text>
+            <text data-s="3" x="50" y="196" class="dg-bad">bank: DOWN, health 503</text>
+            <text data-s="4-" x="50" y="196" class="dg-s">пул потоков переполнен</text>
+            <!-- реакция Kubernetes -->
+            <text x="466" y="63" class="dg-t">kubelet</text>
+            <text data-s="1-4" x="466" y="82" class="dg-s">контейнер не трогает</text>
+            <text data-s="5" x="466" y="82" class="dg-bad">убивает и запускает заново</text>
+            <text x="466" y="141" class="dg-t">Service</text>
+            <text data-s="1" x="466" y="160" class="dg-s">запросы не шлёт</text>
+            <text data-s="2-3" x="466" y="160" class="dg-ok">шлёт запросы в pod</text>
+            <text data-s="4-" x="466" y="160" class="dg-bad">pod исключён из балансировки</text>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="244" class="dg-t">Старт: процесс жив, но готовности ещё нет.</text>
+            <text data-s="2" x="20" y="244" class="dg-ok">Runner-ы завершились: pod получает трафик.</text>
+            <text data-s="3" x="20" y="244" class="dg-t">Банк упал: probes не изменились, трафик идёт.</text>
+            <text data-s="4" x="20" y="244" class="dg-bad">Приложение само отказалось от трафика.</text>
+            <text data-s="5" x="20" y="244" class="dg-bad">Liveness сломан: перезапуск контейнера.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Контекст поднимается. Liveness уже CORRECT: процесс жив, перезапуск не нужен. Readiness REFUSING_TRAFFIC, поэтому Service не шлёт запросы в pod.</li>
+          <li>Контекст поднят, runner-ы отработали. Boot публикует ACCEPTING_TRAFFIC, readiness probe получает 200, и pod попадает в балансировку.</li>
+          <li>Банк недоступен. Общий health стал DOWN, но обе группы не изменились, и Kubernetes ничего не делает. Это правильно: банк одинаково недоступен из всех pod-ов, перезапуск его не починит.</li>
+          <li>Приложение решило, что перегружено, и опубликовало REFUSING_TRAFFIC. Readiness отдаёт 503, Service убирает pod из балансировки. Контейнер продолжает работать и дообрабатывает начатое.</li>
+          <li>Код обнаружил непоправимую поломку, например исчерпанную память кеша, и опубликовал LivenessState.BROKEN. Liveness отдаёт 503, kubelet перезапускает контейнер.</li>
+        </ol>
+      </figure>
+      <p>Шаг 4 демо делает прямо в коде. Readiness сразу отвечает 503 со статусом <code>OUT_OF_SERVICE</code>, а liveness остаётся 200:</p>
+      <pre><code class="language-java">// Сервис сам решил временно не принимать запросы.
+AvailabilityChangeEvent.publish(context, ReadinessState.REFUSING_TRAFFIC);
+call("GET", "/actuator/health/readiness");
+call("GET", "/actuator/health/liveness");</code></pre>
+      <pre class="out">readiness -> 503 {"status":"OUT_OF_SERVICE"}
+liveness  -> 200 {"status":"UP"}</pre>
+      <p>Группы настраиваются. Например, <code>management.endpoint.health.group.readiness.include=readinessState,db</code> добавит базу в readiness. Это разумно, если без базы pod бесполезен, а у других pod-ов база может быть доступна, например при отдельных репликах. Если база общая для всех, её падение одновременно выключит все pod-ы, и клиенты вместо понятной ошибки 503 от сервиса получат отказ от балансировщика.</p>
+      <div class="trap">
+        <p class="myth">В liveness стоит проверять базу и внешние сервисы: если они недоступны, сервис сломан.</p>
+        <p class="fact">Liveness ведёт к перезапуску. Перезапуск не чинит базу, зато все pod-ы одновременно уходят в рестарт, холодный старт и повторное открытие соединений. Короткий сбой базы превращается в полный отказ сервиса. В liveness — только состояние самого процесса.</p>
+      </div>
+      <p>Для медленного старта в Kubernetes используют отдельный <code>startupProbe</code> на тот же путь liveness с большим запасом времени. Пока он не прошёл, liveness не проверяется, и kubelet не убивает pod, который просто долго прогревается.</p>
+    </section>
+
+    <section class="step" id="metrics">
+      <h2>Micrometer записывает измерения, а реестр решает, куда их отдать</h2>
+      <p>Код сервиса пишет измерения в <code>MeterRegistry</code> и не знает, какая система мониторинга их прочитает. Micrometer — то же, что SLF4J для логов: один API, разные реализации. Подключил <code>micrometer-registry-prometheus</code> — появился endpoint <code>/actuator/prometheus</code> в формате Prometheus. Подключил OTLP-реестр — те же метрики уходят в OpenTelemetry Collector.</p>
+      <table class="mx">
+        <thead><tr><th>Тип метра</th><th>Что измеряет</th><th>Пример в платежах</th></tr></thead>
+        <tbody>
+          <tr><td><code>Counter</code></td><td>Число событий, только растёт</td><td>Отклонённые банком платежи</td></tr>
+          <tr><td><code>Timer</code></td><td>Число событий, сумма и максимум длительности, гистограмма</td><td>Время списания</td></tr>
+          <tr><td><code>Gauge</code></td><td>Текущее значение, которое читается при опросе</td><td>Размер очереди возвратов</td></tr>
+          <tr><td><code>DistributionSummary</code></td><td>Распределение величины без времени</td><td>Сумма платежа</td></tr>
+        </tbody>
+      </table>
+      <p>Метр определяется именем и набором тегов. Тег — измерение, по которому потом режут график: <code>outcome</code>, <code>bank</code>, <code>method</code>. В демо контроллер замеряет каждое списание и помечает результат тегом:</p>
+      <pre><code class="language-java">@PostMapping("/pay")
+String pay(@RequestParam String id) {
+    Timer.Sample sample = Timer.start(registry); // Засекаем время начала.
+    String outcome = bank.up.get() ? "ok" : "bank_down";
+    // Тег с малым числом значений; id платежа в тег не кладём.
+    sample.stop(registry.timer("payments.charge", "outcome", outcome));
+    return outcome + ":" + id;
+}</code></pre>
+      <p>Один платёж прошёл при живом банке, два — при упавшем. Программа читает один тег через <code>/actuator/metrics</code> и строки из <code>/actuator/prometheus</code>:</p>
+      <pre class="out">payments.charge outcome=bank_down -> COUNT=2.0
+payments_charge_seconds_count{outcome="bank_down"} 2
+payments_charge_seconds_count{outcome="ok"} 1</pre>
+      <p>Имя изменилось при экспорте. Реестр Prometheus переводит точки в подчёркивания и добавляет базовую единицу таймера: <code>payments.charge</code> становится <code>payments_charge_seconds</code> с рядами <code>_count</code>, <code>_sum</code> и <code>_max</code>. В коде ты всегда пишешь имя через точки, а реестр приводит его к правилам своей системы.</p>
+      <p>Многое Boot измеряет сам: <code>http.server.requests</code> для каждого контроллера с тегами uri, method, status и outcome, пулы HikariCP, память и GC JVM, потоки Tomcat. Шаблон пути попадает в тег <code>uri</code> как <code>/payments/{id}</code>, а не как конкретный адрес. Иначе каждый платёж порождал бы свой временной ряд.</p>
+      <div class="note warn">
+        <p>Каждая уникальная комбинация тегов — отдельный временной ряд в памяти сервиса и в Prometheus. Тег <code>paymentId</code> на миллионе платежей даёт миллион рядов: память сервиса растёт, Prometheus тормозит или отбрасывает данные. В теги кладут значения из короткого известного списка. Идентификатор конкретного платежа нужен в логах и трейсах, а не в метриках.</p>
+      </div>
+      <h3>Перцентили считают по гистограмме, а не по каждому pod-у отдельно</h3>
+      <p>Таймер может считать перцентили прямо в приложении: <code>publishPercentiles(0.95, 0.99)</code>. Но такой p99 посчитан по одному pod-у, и среднее трёх p99 не равно p99 всего сервиса. Для общего перцентиля включают гистограмму: <code>management.metrics.distribution.percentiles-histogram.payments.charge=true</code>. Сервис отдаёт счётчики по корзинам <code>_bucket</code>, а Prometheus складывает корзины всех pod-ов и считает <code>histogram_quantile(0.99, …)</code>. Цена — несколько десятков рядов на каждую комбинацию тегов.</p>
+    </section>
+
+    <section class="step" id="tracing">
+      <h2>Трассировка связывает один платёж через сервисы, а цена и доступ задают границы</h2>
+      <p>Метрика скажет, что p99 списания вырос до двух секунд. Но какой платёж тормозил и в каком сервисе: в нашем, в антифроде или у банка? На это отвечает распределённая трассировка. Каждый запрос получает <b>traceId</b>, каждый участок работы — <b>span</b> с началом, длительностью и родителем.</p>
+      <p>В Spring измерения строятся на <b>Observation API</b>. Одно наблюдение, например обработка HTTP-запроса, сразу даёт и таймер для метрик, и span для трассировки. Micrometer Tracing передаёт span-ы в OpenTelemetry или Brave, а экспортёр отправляет их в Jaeger, Tempo или Zipkin.</p>
+      <ol>
+        <li>Запрос приходит в платёжный сервис без заголовка трассировки. Сервис создаёт traceId и корневой span.</li>
+        <li>Сервис вызывает антифрод через <code>RestClient</code>, собранный из бина <code>RestClient.Builder</code>. Клиент сам добавляет заголовок W3C <code>traceparent</code> с тем же traceId и id текущего span-а.</li>
+        <li>Антифрод читает заголовок и создаёт дочерний span того же trace.</li>
+        <li>Оба сервиса пишут traceId и spanId в MDC логов, поэтому по одному traceId находятся все строки всех сервисов про этот платёж.</li>
+      </ol>
+      <p>Частая поломка — клиент, созданный через <code>RestClient.create()</code> или <code>new RestTemplate()</code>. В нём нет наблюдения, заголовок не передаётся, и trace рвётся на границе сервиса. Клиентов для трассировки берут из билдеров, которые настроил Boot.</p>
+      <p>По умолчанию Boot сохраняет 10% трасс: <code>management.tracing.sampling.probability=0.1</code>. Хранить каждый span дорого. В тестовом окружении ставят 1.0, в проде выбирают долю по объёму трафика. Само решение о выборке принимает первый сервис, и оно передаётся дальше в заголовке, поэтому trace не обрывается на середине. Трассировку в этой теме мы не запускали: для неё нужны коллектор и второй сервис, а поведение описано по документации Boot.</p>
+      <h3>Где Actuator заканчивается</h3>
+      <p>Actuator отдаёт данные, но не хранит историю, не рисует графики и не будит дежурного. Это работа Prometheus, Grafana и Alertmanager или облачного аналога. Сервис отвечает только на вопросы «каков я сейчас» и «что я посчитал с момента старта».</p>
+      <p>Сбор измерений стоит ресурсов. Каждый метр живёт в памяти, каждый таймер добавляет немного работы на запрос, каждый сохранённый span — сетевой трафик. Обычно это проценты, но лишние теги и стопроцентная выборка под нагрузкой делают служебную часть заметной. Проверяй <code>/actuator/metrics</code>: сотни неожиданных имён или тегов с идентификаторами — признак будущей проблемы.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Endpoint работает, если к нему есть доступ и он открыт по HTTP или JMX. По умолчанию по HTTP открыт только health.</li>
+        <li>Health сводит индикаторы к худшему статусу и переводит его в HTTP-код: DOWN и OUT_OF_SERVICE дают 503.</li>
+        <li>Readiness говорит «не шли трафик», liveness — «перезапусти меня». Внешние зависимости в liveness приводят к массовым рестартам.</li>
+        <li>Micrometer отделяет код метрик от системы мониторинга. Каждая комбинация тегов — временной ряд, поэтому id в теги не кладут.</li>
+        <li>Трассировка связывает сервисы через заголовок traceparent и traceId в логах; клиенты для неё берут из билдеров Boot.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="liveness-readiness" data-freq="3">
+      <h3>Чем liveness отличается от readiness и что в них проверять?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Readiness отвечает, можно ли сейчас слать в pod трафик. Если он падает, Kubernetes убирает pod из Service, но не трогает контейнер. Liveness отвечает, жив ли процесс. Если он падает, kubelet перезапускает контейнер. В Boot это группы <code>/actuator/health/readiness</code> и <code>/actuator/health/liveness</code>, а состояния хранит ApplicationAvailability.</p>
+          <p>В liveness я проверяю только сам процесс. Внешние сервисы туда не кладу: если база упала, рестарт всех pod-ов её не починит, а сервис потеряет ещё и прогретые кеши и соединения. Базу в readiness добавляю осознанно, когда без неё pod бесполезен и другие pod-ы могут работать.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Boot переводит readiness в ACCEPTING_TRAFFIC после runner-ов и в REFUSING_TRAFFIC в начале graceful shutdown, чтобы балансировщик успел убрать pod до закрытия соединений.</li>
+            <li>Для долгого старта нужен startupProbe: он откладывает проверки liveness, иначе kubelet убьёт pod во время прогрева.</li>
+            <li>В Boot 4 probes включены по умолчанию; в Boot 3 они включались автоматически только в Kubernetes.</li>
+            <li>Приложение может само опубликовать REFUSING_TRAFFIC при перегрузке, и тогда pod выходит из балансировки без рестарта.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Банк недоступен, общий /actuator/health отдаёт 503. Что сделает Kubernetes, если probes смотрят на группы Boot?</summary>
+          <p>Ничего. В группу readiness по умолчанию входит только readinessState, в liveness — только livenessState, поэтому обе отвечают 200. Трафик продолжает идти, сервис сам возвращает клиентам понятную ошибку или кладёт платёж в очередь. Если бы probe смотрел на общий health, все pod-ы одновременно вышли бы из балансировки.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="actuator-security" data-freq="2">
+      <h3>Какие endpoints Actuator открыты по умолчанию и как их защитить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По HTTP по умолчанию открыт только health, и он показывает статус без подробностей. Остальные endpoints доступны, но их надо явно открыть через <code>management.endpoints.web.exposure.include</code>. Я перечисляю нужные по именам и не ставлю <code>*</code>.</p>
+          <p>В проде я выношу Actuator на отдельный <code>management.server.port</code>, который не публикуется наружу, и закрываю всё, кроме health и метрик, через Spring Security. Особенно опасны heapdump, env и loggers: в дампе памяти лежат секреты, через loggers можно включить DEBUG на проде.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С Boot 3.4 доступ задаётся <code>management.endpoint.&lt;id&gt;.access</code>: none, read-only или unrestricted. Read-only запрещает операции записи, например смену уровня логов.</li>
+            <li>Значения в env и configprops скрыты по умолчанию (<code>show-values: never</code>); <code>when-authorized</code> показывает их только пользователям с нужной ролью.</li>
+            <li>Отдельный порт ещё и отделяет служебные запросы от рабочего пула потоков, поэтому probe отвечает даже при забитом основном пуле.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="custom-metric" data-freq="2">
+      <h3>Как добавить свою бизнес-метрику и что может пойти не так?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я внедряю MeterRegistry и создаю Counter или Timer с понятным именем через точки и тегами, например <code>payments.charge</code> с тегом outcome. Micrometer сам приведёт имя к формату системы: в Prometheus это будет <code>payments_charge_seconds_count</code>. Для замера метода можно повесить <code>@Timed</code> или <code>@Observed</code>, если подключена поддержка аспектов.</p>
+          <p>Главная ошибка — тег с неограниченным числом значений: id платежа, email, полный URL. Каждая комбинация тегов — отдельный временной ряд, и метрики съедают память сервиса и Prometheus. Такие значения пишу в логи и трейсы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Перцентили, посчитанные в приложении, нельзя усреднить между pod-ами. Для общего p99 включаю гистограмму и считаю histogram_quantile в Prometheus.</li>
+            <li>Gauge держит слабую ссылку на объект. Если объект собран GC, gauge начнёт отдавать NaN; передавать нужно долгоживущий объект.</li>
+            <li>Аннотации <code>@Timed</code> работают через прокси, поэтому вызов изнутри того же бина не измеряется.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди проблему в метрике отказов банка</summary>
+          <pre><code class="language-java">void onDecline(Payment p, String reason) {
+    registry.counter("payments.declined",
+            "merchant", p.merchantId(),  // 40 тысяч магазинов
+            "reason", reason)            // текст ошибки от банка
+        .increment();
+}</code></pre>
+          <p>Оба тега неограниченные. Магазинов десятки тысяч, а <code>reason</code> — свободный текст банка, где бывают номера транзакций и даты. Число рядов растёт как произведение значений, память сервиса и Prometheus растёт вместе с ним. Исправление: <code>reason</code> свести к короткому списку кодов (<code>insufficient_funds</code>, <code>fraud</code>, <code>other</code>), а разбивку по магазинам считать в аналитике по логам или событиям. Если разрез по магазину нужен в мониторинге, оставляют только крупнейших и складывают остальных в <code>other</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="health-indicator" data-freq="2">
+      <h3>Как работает health и как написать свой индикатор?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждый бин HealthIndicator — узел дерева. Boot сам добавляет индикаторы для базы, Redis, диска и других найденных компонентов. Общий статус — худший из дочерних по порядку DOWN, OUT_OF_SERVICE, UP, UNKNOWN; DOWN и OUT_OF_SERVICE дают HTTP 503.</p>
+          <p>Свой индикатор — бин с методом health(), который возвращает Health.up() или Health.down() с деталями. Имя компонента берётся из имени бина без суффикса HealthIndicator. Я слежу, чтобы проверка была быстрой: она выполняется на каждый запрос к health.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Группы позволяют выбрать набор индикаторов для конкретного потребителя: readiness, liveness или своя группа для балансировщика.</li>
+            <li>Медленную проверку кешируют или выполняют фоном; иначе таймаут внешнего сервиса превращается в таймаут probe.</li>
+            <li>Подробности health по умолчанию скрыты (<code>show-details: never</code>): они раскрывают устройство инфраструктуры.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-boot/reference/actuator/index.html">Spring Boot Reference: Production-ready Features</a> — основа урока: endpoints и доступ, health и группы, Kubernetes probes, метрики и трассировка.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/spring-application.html#features.spring-application.application-availability">Spring Boot Reference: Application Availability</a> — состояния liveness и readiness и когда Boot их меняет.</li>
+      <li><a href="https://docs.micrometer.io/micrometer/reference/concepts.html">Micrometer: Concepts</a> — типы метров, теги, гистограммы и перцентили.</li>
+      <li><a href="https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/">Kubernetes: Liveness, Readiness and Startup Probes</a> — что делает kubelet при неудачной проверке.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

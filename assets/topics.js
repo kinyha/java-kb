@@ -525,7 +525,7 @@ window.KB_TREE = [
           scope: 'порядок источников настроек, application.yml, @ConfigurationProperties и @Value, профили, секреты' },
         { id: 'boot-startup', freq: 2, status: 'empty', title: 'Startup & Packaging',
           scope: 'что происходит в SpringApplication.run, embedded Tomcat, fat jar и JarLauncher, graceful shutdown, AOT и native image' },
-        { id: 'actuator', freq: 2, status: 'empty', title: 'Actuator',
+        { id: 'actuator', freq: 2, status: 'draft', title: 'Actuator',
           scope: 'endpoints, health, readiness и liveness, метрики Micrometer, tracing' },
       ] },
       { id: 'web', title: 'Web', source: 'Spring Framework Reference: Web on Servlet Stack; Spring Start Here, гл. 7–11', items: [
