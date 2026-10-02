@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Slow Queries · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="slow-queries">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Slow Queries</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Медленную базу чаще всего тормозит не один ужасный запрос, а тысячи быстрых: N+1 из ORM, вставки по одной строке, пагинация через OFFSET. В логе медленных запросов их не видно — каждый выполняется за доли миллисекунды. Видно их в <code>pg_stat_statements</code>, который агрегирует все запросы по тексту и показывает число вызовов, суммарное и среднее время. Искать нужно по суммарному времени, а не по самому медленному вызову. Лечат сокращением кругов по сети: соединение вместо цикла запросов, пакетная запись, keyset-пагинация.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>База загружена на 80 %, а в логе медленных запросов пусто</h2>
+      <p>Сервис платежей растёт, процессор базы загружен на 80 %, страницы кабинета отвечают по секунде. В лог попадают запросы дольше 500 мс — <code>log_min_duration_statement = 500</code>, — и он пуст: ни одного медленного запроса. Ночная выгрузка аудита идёт полчаса, хотя пишет всего несколько миллионов строк.</p>
+      <p>Тема о том, как найти, что на самом деле нагружает базу, и о трёх самых частых антипаттернах приложений. Разбор плана одного запроса — в <a href="query-tuning.html">Query Plans</a>, индексы — в <a href="indexes.html">Indexes</a>, N+1 со стороны JPA — в <a href="jpa-relations.html">Relations &amp; Fetching</a>, OFFSET и keyset — в <a href="api-practices.html">API Design</a>. Демо <a href="../examples/db-tx/SlowQueriesDemo.java">SlowQueriesDemo.java</a> работает с PostgreSQL 17 в Docker, запущенным с <code>pg_stat_statements</code>, и драйвером pgjdbc 42.7.</p>
+    </section>
+
+    <section class="step" id="pgss">
+      <h2>pg_stat_statements собирает все запросы по тексту и считает суммарное время</h2>
+      <pre><code class="language-sql">-- postgresql.conf: shared_preload_libraries = 'pg_stat_statements'
+create extension pg_stat_statements;
+select calls, total_exec_time, mean_exec_time, rows, query
+from pg_stat_statements order by total_exec_time desc limit 10;</code></pre>
+      <pre class="out">== pg_stat_statements, top by total time
+    calls  total_ms  mean_ms    rows  query
+    40000      34.9    0.001   40000  insert into audit values ($1, $2)
+      200      11.4    0.057     200  select sum(amount) from payment where merchant_id = $1
+        1       6.9    6.929     200  select m.id, sum(p.amount) from merchant m join payment p on
+        1       3.9    3.926   16384  insert into audit values ($1, $2),($3, $4),($5, $6),($7, $8)
+        1       0.5    0.475    2048  insert into audit values ($1, $2),($3, $4),($5, $6),($7, $8)
+        1       0.3    0.251    1024  insert into audit values ($1, $2),($3, $4),($5, $6),($7, $8)</pre>
+      <p>Расширение нормализует текст — константы заменяются на <code>$1</code>, — и все вызовы одного запроса складываются в одну строку. Верх списка по суммарному времени — вставка одной строки: каждая выполняется за микросекунду, но их сорок тысяч. Второй — запрос суммы по магазину, 200 вызовов по 0,06 мс. Ни один из них не попал бы в лог медленных запросов. Самый «медленный» единичный запрос, соединение за 6,9 мс, на деле самый полезный: он один заменяет двести.</p>
+      <p>Важно, что <code>total_exec_time</code> — время внутри базы. Время на сеть, разбор и ожидание в пуле соединений приложения сюда не входит, а именно оно у многократных мелких запросов главное. Поэтому смотрят ещё и на <code>calls</code>: тысячи вызовов одного запроса на одну операцию пользователя — почти всегда N+1. Для отдельных медленных запросов включают <code>auto_explain</code>, который пишет в лог план запроса дольше порога, а текущие зависшие запросы ищут в <code>pg_stat_activity</code>.</p>
+    </section>
+
+    <section class="step" id="n-plus-one">
+      <h2>N+1 тратит время на круги по сети, а не на работу базы</h2>
+      <pre><code class="language-java">// Магазины, затем платежи каждого отдельным запросом.
+var shops = c.createStatement().executeQuery("select id from merchant order by id limit 200");
+while (shops.next()) {
+    ps.setInt(1, shops.getInt(1));
+    ps.executeQuery();                       // select sum(amount) from payment where merchant_id = ?
+}</code></pre>
+      <pre class="out">== N+1: 1 + 200 queries, 56 ms
+== one join query, 7 ms (same totals: true)</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 150" role="img" aria-label="Полоса N+1: 56 мс, из них в базе 11 мс, остальное — 201 круг по сети и обработка в драйвере. Полоса одного запроса с соединением: 7 мс, почти всё — работа базы.">
+            <text x="20" y="22" class="dg-cap">ВРЕМЯ НА 200 МАГАЗИНОВ</text>
+            <text x="20" y="54" class="dg-n">N+1</text>
+            <rect x="110" y="38" width="88" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="198" y="38" width="360" height="26" rx="4" class="dg-cell miss"/>
+            <text x="116" y="56" class="dg-n">база 11</text>
+            <text x="206" y="56" class="dg-bad">201 круг по сети, драйвер, разбор — 45 мс</text>
+            <text x="566" y="56" class="dg-bad">56 мс</text>
+            <text x="20" y="100" class="dg-n">JOIN</text>
+            <rect x="110" y="84" width="56" height="26" rx="4" class="dg-cell hit"/>
+            <text x="174" y="102" class="dg-ok">7 мс</text>
+            <text x="20" y="140" class="dg-s">По данным pg_stat_statements: 200 × 0,057 мс в базе против 6,9 мс одного соединения.</text>
+          </svg>
+        </div>
+        <figcaption>В N+1 база тратит на работу меньше четверти времени. Остальное — ожидание: каждый запрос ждёт ответа на предыдущий.</figcaption>
+      </figure>
+      <p>Двести запросов по магазинам заняли 56 мс, из которых в самой базе — 11 мс. Один запрос с соединением и группировкой дал те же суммы за 7 мс. Здесь база и приложение на одной машине; в реальной сети круг — от 0,3 до нескольких миллисекунд, и N+1 на 200 строк превращается в секунду. В JPA N+1 возникает незаметно: ленивая коллекция, к которой обращаются в цикле, или <code>@ManyToOne</code> без JOIN FETCH. Лечат запросом, который сразу достаёт всё нужное: JOIN, <code>where id = any(?)</code> по списку или <code>@BatchSize</code>/<code>default_batch_fetch_size</code> в Hibernate.</p>
+    </section>
+
+    <section class="step" id="batch">
+      <h2>Пакетная запись сокращает круги, а reWriteBatchedInserts — ещё и операторы</h2>
+      <pre><code class="language-java">var ps = c.prepareStatement("insert into audit values (?, ?)");
+for (int i = 0; i &lt; 20_000; i++) {
+    ps.setLong(1, i); ps.setString(2, "payment captured");
+    ps.addBatch();                            // вместо ps.executeUpdate()
+}
+ps.executeBatch();
+// URL: jdbc:postgresql://...&amp;reWriteBatchedInserts=true</code></pre>
+      <pre class="out">== insert 20k rows, row by row:                       1936 ms
+== insert 20k rows, addBatch:                         50 ms
+== insert 20k rows, addBatch + reWriteBatchedInserts: 32 ms</pre>
+      <p>Вставка по одной строке — двадцать тысяч кругов «отправить — дождаться ответа»: почти две секунды. <code>addBatch</code> отправляет операторы пачками без ожидания ответа на каждый — 50 мс, в 39 раз быстрее. Но для базы это всё ещё двадцать тысяч отдельных INSERT: в pg_stat_statements их 40 000 вызовов вместе с построчным вариантом. С <code>reWriteBatchedInserts=true</code> драйвер склеивает пачку в многострочные INSERT по степеням двойки — <code>values ($1, $2),($3, $4),...</code> — и база выполняет единицы операторов: 16 384 строк одним, затем 2048, 1024 и так далее. Для самых больших загрузок есть ещё <code>COPY</code>.</p>
+      <p>В Hibernate пакетная вставка включается <code>hibernate.jdbc.batch_size</code>, но ломается, если id сущности генерируется <code>IDENTITY</code>: чтобы узнать id, Hibernate обязан выполнить каждый INSERT сразу. С последовательностью и <code>allocationSize</code> пакеты работают. Ночная выгрузка аудита из начала темы — именно этот случай.</p>
+    </section>
+
+    <section class="step" id="other">
+      <h2>Остальные частые причины — глубокий OFFSET, лишние колонки и долгие транзакции</h2>
+      <table class="mx">
+        <thead><tr><th>Антипаттерн</th><th>Что происходит</th><th>Что делать</th></tr></thead>
+        <tbody>
+          <tr><td><code>OFFSET 100000</code></td><td>База читает и отбрасывает все строки до смещения</td><td>Keyset-пагинация по индексу</td></tr>
+          <tr><td><code>SELECT *</code></td><td>Читаются ненужные колонки, включая TOAST, Index Only Scan невозможен</td><td>Только нужные колонки, проекции в JPA</td></tr>
+          <tr><td><code>count(*)</code> ради проверки наличия</td><td>Считает все строки</td><td><code>exists (...)</code> или <code>limit 1</code></td></tr>
+          <tr><td>Функция над колонкой в WHERE</td><td>Индекс по колонке не используется</td><td>Индекс по выражению или переписать условие</td></tr>
+          <tr><td>Долгая транзакция</td><td>Держит блокировки и горизонт VACUUM</td><td>Короткие транзакции, таймауты</td></tr>
+          <tr><td>Огромный IN-список</td><td>Долгий разбор и планирование</td><td><code>= any(?)</code> с массивом или временная таблица</td></tr>
+        </tbody>
+      </table>
+      <p>Порядок работы с медленной базой: найти верх <code>pg_stat_statements</code> по суммарному времени и по числу вызовов, для каждого понять, лишний ли он целиком (N+1) или медленный сам по себе, во втором случае — <code>EXPLAIN (ANALYZE, BUFFERS)</code> и разбор по <a href="query-tuning.html">Query Plans</a>. После исправления статистику сбрасывают <code>pg_stat_statements_reset()</code> и смотрят снова.</p>
+      <div class="trap">
+        <p class="myth">Если в логе медленных запросов пусто, база работает хорошо.</p>
+        <p class="fact">Лог видит только запросы дольше порога, а нагрузку часто создают тысячи быстрых: в демо вставка по строке шла почти две секунды, а каждая отдельная — микросекунду. Нагрузку ищут в pg_stat_statements по суммарному времени и числу вызовов.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>pg_stat_statements агрегирует запросы по тексту: сортировать по total_exec_time и смотреть на calls.</li>
+        <li>N+1: 201 запрос за 56 мс, из них в базе 11; соединение — 7 мс. В JPA — JOIN FETCH, any(?), batch fetch.</li>
+        <li>Вставка 20 000 строк: по одной — 1936 мс, addBatch — 50, с reWriteBatchedInserts — 32; IDENTITY ломает пакеты Hibernate.</li>
+        <li>OFFSET, SELECT *, count для проверки наличия, функции над колонкой, долгие транзакции — частые причины.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="slow-find" data-freq="3">
+      <h3>Как найти, какие запросы нагружают PostgreSQL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>pg_stat_statements: агрегирует все запросы по нормализованному тексту и показывает число вызовов, суммарное и среднее время, строки, буферы. Сортируют по суммарному времени — так видны и редкие тяжёлые запросы, и частые лёгкие. Для единичных медленных — log_min_duration_statement и auto_explain, для того, что выполняется сейчас, — pg_stat_activity.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Время в pg_stat_statements — внутри базы; сеть и ожидание пула в него не входят.</li>
+            <li>Огромный calls на одну операцию — признак N+1.</li>
+            <li>Расширение нужно загрузить через shared_preload_libraries, это требует перезапуска.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="slow-n1" data-freq="3">
+      <h3>Что такое проблема N+1 и как её решить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Один запрос получает список из N объектов, а затем для каждого выполняется ещё запрос за связанными данными. Каждый запрос быстрый, но N кругов по сети складываются: в демо 201 запрос шёл 56 мс против 7 мс одного соединения. Решение — достать всё одним запросом: JOIN или JOIN FETCH, выборка по списку id через any(?), batch fetching в Hibernate.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В JPA N+1 дают ленивые связи в цикле и EAGER @ManyToOne в списках.</li>
+            <li>JOIN FETCH коллекций с пагинацией делает пагинацию в памяти — для них лучше два запроса.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот экспорт идёт полчаса?</summary>
+          <pre><code class="language-java">@Transactional
+public void export(List&lt;Long&gt; merchantIds) {
+    for (Long id : merchantIds) {
+        Merchant m = merchants.findById(id).orElseThrow();
+        for (Payment p : m.getPayments()) {          // LAZY
+            auditRepository.save(new Audit(p.getId(), "exported"));   // @Id IDENTITY
+        }
+    }
+}</code></pre>
+          <p>Магазины грузятся по одному, платежи каждого — отдельным ленивым запросом (N+1), и каждая запись аудита вставляется отдельным INSERT: IDENTITY не даёт Hibernate собирать пакеты. Нужно загрузить магазины и платежи одним запросом или пачками по списку id, перейти на последовательность с allocationSize и hibernate.jdbc.batch_size, включить reWriteBatchedInserts и разбить работу на транзакции разумного размера.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="slow-batch" data-freq="2">
+      <h3>Как быстро вставить много строк из Java?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Пакетами: PreparedStatement.addBatch и executeBatch вместо executeUpdate на каждую строку, в одной транзакции. Для PostgreSQL — ещё reWriteBatchedInserts=true, тогда драйвер склеивает пакет в многострочные INSERT. В демо: 1936 мс по одной, 50 мс пакетом, 32 мс с переписыванием. Для миллионов строк — COPY.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Hibernate — hibernate.jdbc.batch_size и order_inserts; генерация IDENTITY отключает пакеты.</li>
+            <li>Слишком большая транзакция держит горизонт VACUUM; загрузку бьют на порции.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/pgstatstatements.html">PostgreSQL 17: pg_stat_statements</a> — основа урока: колонки, нормализация, сброс.</li>
+      <li><a href="https://jdbc.postgresql.org/documentation/use/">pgjdbc: Connection parameters</a> — reWriteBatchedInserts.</li>
+      <li><a href="https://www.postgresql.org/docs/17/auto-explain.html">auto_explain</a> — планы медленных запросов в логе.</li>
+      <li>Vlad Mihalcea, «High-Performance Java Persistence» — N+1, пакетная запись и IDENTITY в Hibernate.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -5902,6 +5902,62 @@ window.KB_SEARCH = [
 "text": "Минимальное окно, которое содержит все символы строки t Даны строки s и t . Найди самую короткую подстроку s , которая содержит все символы t с учётом повторов. Если такой нет — верни пустую строку. s = \"ADOBECODEBANC\", t = \"ABC\" → \"BANC\" s = \"a\", t = \"a\" → \"a\" s = \"a\", t = \"aa\" → \"\" LeetCode 76 · hard · нужно O(n) Заготовка: MinWindow.java import java.util.*; public class MinWindow { static String minWindow(String s, String t) { // твоё решение return \"\"; } public static void main(String[] args) { check(minWindow(\"ADOBECODEBANC\", \"ABC\"), \"BANC\"); check(minWindow(\"a\", \"a\"), \"a\"); check(minWindow(\"a\", \"aa\"), \"\"); check(minWindow(\"aa\", \"aa\"), \"aa\"); } static void check(Object got, Object want) { System.out.println((Objects.equals(got, want) ? \"OK \" : \"FAIL \") + \"got \" + got + \", want \" + want); } } Подсказка 1 Та же схема, что у самого короткого отрезка с суммой ≥ target: расширяй, пока окно не покроет все символы t, потом сжимай, пока покрытие сохраняется. Подсказка 2 Храни need[c] — сколько символа c ещё не хватает — и общий счётчик missing . Окно покрывает t, когда missing == 0 . Значения need могут уходить в минус: это лишние копии символа в окне. Решение static String minWindow(String s, String t) { if (t.isEmpty() || t.length() > s.length()) return \"\"; int[] need = new int[128]; for (char c : t.toCharArray()) need[c]++; int missing = t.length(); // сколько символов t ещё не покрыто окном int bestL = 0, bestLen = Integer.MAX_VALUE, l = 0; for (int r = 0; r < s.length(); r++) { if (need[s.charAt(r)]-- > 0) missing--; while (missing == 0) { // окно покрывает t — пробуем сжать if (r - l + 1 < bestLen) { bestL = l; bestLen = r - l + 1; } if (++need[s.charAt(l++)] > 0) missing++; } } return bestLen == Integer.MAX_VALUE ? \"\" : s.substring(bestL, bestL + bestLen); } Когда символ входит в окно, need уменьшается. Если до этого он был положительным, символ закрыл реальную потребность, и missing уменьшается. При выходе наоборот: если need стал положительным, окно потеряло нужный символ. Время O(|s| + |t|), память O(1) — массив на 128 символов. Почему нельзя просто проверять покрытие, сравнивая два массива частот? Можно, и это тоже O(n) при фиксированном алфавите. Но сравнение на каждом шаге стоит 128 операций, а счётчик missing даёт ответ за O(1). На собесе обычно ждут именно счётчик: он показывает, что ты понимаешь, какое событие делает окно хорошим или плохим."
 },
 {
+"topic": "slow-queries",
+"id": "why",
+"kind": "step",
+"title": "База загружена на 80 %, а в логе медленных запросов пусто",
+"text": "База загружена на 80 %, а в логе медленных запросов пусто Сервис платежей растёт, процессор базы загружен на 80 %, страницы кабинета отвечают по секунде. В лог попадают запросы дольше 500 мс — log_min_duration_statement = 500 , — и он пуст: ни одного медленного запроса. Ночная выгрузка аудита идёт полчаса, хотя пишет всего несколько миллионов строк. Тема о том, как найти, что на самом деле нагружает базу, и о трёх самых частых антипаттернах приложений. Разбор плана одного запроса — в Query Plans , индексы — в Indexes , N+1 со стороны JPA — в Relations & Fetching , OFFSET и keyset — в API Design . Демо SlowQueriesDemo.java работает с PostgreSQL 17 в Docker, запущенным с pg_stat_statements , и драйвером pgjdbc 42.7."
+},
+{
+"topic": "slow-queries",
+"id": "pgss",
+"kind": "step",
+"title": "pg_stat_statements собирает все запросы по тексту и считает суммарное время",
+"text": "pg_stat_statements собирает все запросы по тексту и считает суммарное время -- postgresql.conf: shared_preload_libraries = 'pg_stat_statements' create extension pg_stat_statements; select calls, total_exec_time, mean_exec_time, rows, query from pg_stat_statements order by total_exec_time desc limit 10; == pg_stat_statements, top by total time calls total_ms mean_ms rows query 40000 34.9 0.001 40000 insert into audit values ($1, $2) 200 11.4 0.057 200 select sum(amount) from payment where merchant_id = $1 1 6.9 6.929 200 select m.id, sum(p.amount) from merchant m join payment p on 1 3.9 3.926 16384 insert into audit values ($1, $2),($3, $4),($5, $6),($7, $8) 1 0.5 0.475 2048 insert into audit values ($1, $2),($3, $4),($5, $6),($7, $8) 1 0.3 0.251 1024 insert into audit values ($1, $2),($3, $4),($5, $6),($7, $8) Расширение нормализует текст — константы заменяются на $1 , — и все вызовы одного запроса складываются в одну строку. Верх списка по суммарному времени — вставка одной строки: каждая выполняется за микросекунду, но их сорок тысяч. Второй — запрос суммы по магазину, 200 вызовов по 0,06 мс. Ни один из них не попал бы в лог медленных запросов. Самый «медленный» единичный запрос, соединение за 6,9 мс, на деле самый полезный: он один заменяет двести. Важно, что total_exec_time — время внутри базы. Время на сеть, разбор и ожидание в пуле соединений приложения сюда не входит, а именно оно у многократных мелких запросов главное. Поэтому смотрят ещё и на calls : тысячи вызовов одного запроса на одну операцию пользователя — почти всегда N+1. Для отдельных медленных запросов включают auto_explain , который пишет в лог план запроса дольше порога, а текущие зависшие запросы ищут в pg_stat_activity ."
+},
+{
+"topic": "slow-queries",
+"id": "n-plus-one",
+"kind": "step",
+"title": "N+1 тратит время на круги по сети, а не на работу базы",
+"text": "N+1 тратит время на круги по сети, а не на работу базы // Магазины, затем платежи каждого отдельным запросом. var shops = c.createStatement().executeQuery(\"select id from merchant order by id limit 200\"); while (shops.next()) { ps.setInt(1, shops.getInt(1)); ps.executeQuery(); // select sum(amount) from payment where merchant_id = ? } == N+1: 1 + 200 queries, 56 ms == one join query, 7 ms (same totals: true) ВРЕМЯ НА 200 МАГАЗИНОВ N+1 база 11 201 круг по сети, драйвер, разбор — 45 мс 56 мс JOIN 7 мс По данным pg_stat_statements: 200 × 0,057 мс в базе против 6,9 мс одного соединения. В N+1 база тратит на работу меньше четверти времени. Остальное — ожидание: каждый запрос ждёт ответа на предыдущий. Двести запросов по магазинам заняли 56 мс, из которых в самой базе — 11 мс. Один запрос с соединением и группировкой дал те же суммы за 7 мс. Здесь база и приложение на одной машине; в реальной сети круг — от 0,3 до нескольких миллисекунд, и N+1 на 200 строк превращается в секунду. В JPA N+1 возникает незаметно: ленивая коллекция, к которой обращаются в цикле, или @ManyToOne без JOIN FETCH. Лечат запросом, который сразу достаёт всё нужное: JOIN, where id = any(?) по списку или @BatchSize / default_batch_fetch_size в Hibernate."
+},
+{
+"topic": "slow-queries",
+"id": "batch",
+"kind": "step",
+"title": "Пакетная запись сокращает круги, а reWriteBatchedInserts — ещё и операторы",
+"text": "Пакетная запись сокращает круги, а reWriteBatchedInserts — ещё и операторы var ps = c.prepareStatement(\"insert into audit values (?, ?)\"); for (int i = 0; i < 20_000; i++) { ps.setLong(1, i); ps.setString(2, \"payment captured\"); ps.addBatch(); // вместо ps.executeUpdate() } ps.executeBatch(); // URL: jdbc:postgresql://...&reWriteBatchedInserts=true == insert 20k rows, row by row: 1936 ms == insert 20k rows, addBatch: 50 ms == insert 20k rows, addBatch + reWriteBatchedInserts: 32 ms Вставка по одной строке — двадцать тысяч кругов «отправить — дождаться ответа»: почти две секунды. addBatch отправляет операторы пачками без ожидания ответа на каждый — 50 мс, в 39 раз быстрее. Но для базы это всё ещё двадцать тысяч отдельных INSERT: в pg_stat_statements их 40 000 вызовов вместе с построчным вариантом. С reWriteBatchedInserts=true драйвер склеивает пачку в многострочные INSERT по степеням двойки — values ($1, $2),($3, $4),... — и база выполняет единицы операторов: 16 384 строк одним, затем 2048, 1024 и так далее. Для самых больших загрузок есть ещё COPY . В Hibernate пакетная вставка включается hibernate.jdbc.batch_size , но ломается, если id сущности генерируется IDENTITY : чтобы узнать id, Hibernate обязан выполнить каждый INSERT сразу. С последовательностью и allocationSize пакеты работают. Ночная выгрузка аудита из начала темы — именно этот случай."
+},
+{
+"topic": "slow-queries",
+"id": "other",
+"kind": "step",
+"title": "Остальные частые причины — глубокий OFFSET, лишние колонки и долгие транзакции",
+"text": "Остальные частые причины — глубокий OFFSET, лишние колонки и долгие транзакции Антипаттерн Что происходит Что делать OFFSET 100000 База читает и отбрасывает все строки до смещения Keyset-пагинация по индексу SELECT * Читаются ненужные колонки, включая TOAST, Index Only Scan невозможен Только нужные колонки, проекции в JPA count(*) ради проверки наличия Считает все строки exists (...) или limit 1 Функция над колонкой в WHERE Индекс по колонке не используется Индекс по выражению или переписать условие Долгая транзакция Держит блокировки и горизонт VACUUM Короткие транзакции, таймауты Огромный IN-список Долгий разбор и планирование = any(?) с массивом или временная таблица Порядок работы с медленной базой: найти верх pg_stat_statements по суммарному времени и по числу вызовов, для каждого понять, лишний ли он целиком (N+1) или медленный сам по себе, во втором случае — EXPLAIN (ANALYZE, BUFFERS) и разбор по Query Plans . После исправления статистику сбрасывают pg_stat_statements_reset() и смотрят снова. Если в логе медленных запросов пусто, база работает хорошо. Лог видит только запросы дольше порога, а нагрузку часто создают тысячи быстрых: в демо вставка по строке шла почти две секунды, а каждая отдельная — микросекунду. Нагрузку ищут в pg_stat_statements по суммарному времени и числу вызовов."
+},
+{
+"topic": "slow-queries",
+"id": "slow-find",
+"kind": "q",
+"title": "Как найти, какие запросы нагружают PostgreSQL?",
+"text": "Как найти, какие запросы нагружают PostgreSQL? pg_stat_statements: агрегирует все запросы по нормализованному тексту и показывает число вызовов, суммарное и среднее время, строки, буферы. Сортируют по суммарному времени — так видны и редкие тяжёлые запросы, и частые лёгкие. Для единичных медленных — log_min_duration_statement и auto_explain, для того, что выполняется сейчас, — pg_stat_activity. Время в pg_stat_statements — внутри базы; сеть и ожидание пула в него не входят. Огромный calls на одну операцию — признак N+1. Расширение нужно загрузить через shared_preload_libraries, это требует перезапуска."
+},
+{
+"topic": "slow-queries",
+"id": "slow-n1",
+"kind": "q",
+"title": "Что такое проблема N+1 и как её решить?",
+"text": "Что такое проблема N+1 и как её решить? Один запрос получает список из N объектов, а затем для каждого выполняется ещё запрос за связанными данными. Каждый запрос быстрый, но N кругов по сети складываются: в демо 201 запрос шёл 56 мс против 7 мс одного соединения. Решение — достать всё одним запросом: JOIN или JOIN FETCH, выборка по списку id через any(?), batch fetching в Hibernate. В JPA N+1 дают ленивые связи в цикле и EAGER @ManyToOne в списках. JOIN FETCH коллекций с пагинацией делает пагинацию в памяти — для них лучше два запроса. Почему этот экспорт идёт полчаса? @Transactional public void export(List<Long> merchantIds) { for (Long id : merchantIds) { Merchant m = merchants.findById(id).orElseThrow(); for (Payment p : m.getPayments()) { // LAZY auditRepository.save(new Audit(p.getId(), \"exported\")); // @Id IDENTITY } } } Магазины грузятся по одному, платежи каждого — отдельным ленивым запросом (N+1), и каждая запись аудита вставляется отдельным INSERT: IDENTITY не даёт Hibernate собирать пакеты. Нужно загрузить магазины и платежи одним запросом или пачками по списку id, перейти на последовательность с allocationSize и hibernate.jdbc.batch_size, включить reWriteBatchedInserts и разбить работу на транзакции разумного размера."
+},
+{
+"topic": "slow-queries",
+"id": "slow-batch",
+"kind": "q",
+"title": "Как быстро вставить много строк из Java?",
+"text": "Как быстро вставить много строк из Java? Пакетами: PreparedStatement.addBatch и executeBatch вместо executeUpdate на каждую строку, в одной транзакции. Для PostgreSQL — ещё reWriteBatchedInserts=true, тогда драйвер склеивает пакет в многострочные INSERT. В демо: 1936 мс по одной, 50 мс пакетом, 32 мс с переписыванием. Для миллионов строк — COPY. В Hibernate — hibernate.jdbc.batch_size и order_inserts; генерация IDENTITY отключает пакеты. Слишком большая транзакция держит горизонт VACUUM; загрузку бьют на порции."
+},
+{
 "topic": "sorting-basics",
 "id": "contract",
 "kind": "step",

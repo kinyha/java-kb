@@ -13,4 +13,10 @@ java -cp "$(cat target/classpath.txt)" VacuumDemo.java
 java -cp "$(cat target/classpath.txt)" ArchitectureDemo.java   # перезапускает контейнер kb-pg ради пустого кеша
 java -cp "$(cat target/classpath.txt)" IndexDemo.java
 java -cp "$(cat target/classpath.txt)" QueryPlanDemo.java
+
+# SlowQueriesDemo нужен pg_stat_statements:
+docker rm -f kb-pg
+docker run -d --name kb-pg -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:17-alpine \
+  -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=top
+java -cp "$(cat target/classpath.txt)" SlowQueriesDemo.java
 ```

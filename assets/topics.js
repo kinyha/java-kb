@@ -247,7 +247,7 @@ window.KB_TREE = [
           scope: 'hash, GIN, GiST, BRIN, частичные индексы, индексы по выражению' },
         { id: 'query-tuning', freq: 2, status: 'draft', title: 'Query Plans',
           scope: 'EXPLAIN ANALYZE, seq, index и bitmap scan, nested loop, hash и merge join, статистика' },
-        { id: 'slow-queries', freq: 2, status: 'empty', title: 'Slow Queries',
+        { id: 'slow-queries', freq: 2, status: 'draft', title: 'Slow Queries',
           scope: 'pg_stat_statements, OFFSET и keyset-пагинация, N+1, пакетная запись' },
       ] },
       { id: 'postgres', title: 'PostgreSQL Internals', source: 'PostgreSQL изнутри (Рогов), ч. I–II', items: [
