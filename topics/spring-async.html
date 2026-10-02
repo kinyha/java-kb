@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Scheduling &amp; Async · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-async">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring: Scheduling &amp; Async</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>@Async отдаёт вызов метода в пул потоков и сразу возвращает управление. Делает это прокси, поэтому вызов изнутри класса остаётся синхронным. Пул Boot по умолчанию держит 8 потоков и бесконечную очередь: лишние задачи не создают потоки, а копятся в памяти. В новый поток не переходят ни исключение, ни MDC, ни SecurityContext, ни транзакция. @Scheduled запускает задачи по времени, по умолчанию в одном потоке, и в кластере — на каждом экземпляре сразу.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Платёж ждёт SMS и чек, хотя клиенту они не нужны сразу</h2>
+      <p>После списания платёжный сервис отправляет SMS, формирует PDF-чек и пишет событие в аналитику. Каждое действие ходит во внешний сервис и занимает сотни миллисекунд. Клиент ждёт ответа «оплачено», а ответ задерживают задачи, результат которых ему сейчас не нужен. Когда SMS-шлюз тормозит, тормозят и платежи.</p>
+      <p>Такие действия выносят из потока запроса. В Spring для этого две аннотации. <code>@Async</code> выполняет метод в другом потоке: вызвал и пошёл дальше. <code>@Scheduled</code> запускает метод по расписанию: ночная сверка, очистка устаревших броней, повтор неотправленных уведомлений.</p>
+      <p>Обе выглядят как одна строка, и обе прячут пул потоков с настройками по умолчанию. Демо <a href="../examples/integration/AsyncDemo.java">AsyncDemo.java</a> показывает эти настройки на трёх запусках. Стек: JDK 21, Spring Boot 4.1.1, ShedLock 6.6 и H2.</p>
+      <pre><code class="language-bash">cd examples/integration
+./run.sh AsyncDemo async  # @Async: поток, пул, ошибки, MDC
+./run.sh AsyncDemo sched  # @Scheduled: один поток планировщика
+./run.sh AsyncDemo lock   # ShedLock: два экземпляра с общей базой</code></pre>
+    </section>
+
+    <section class="step" id="async">
+      <h2>@Async отправляет вызов в пул через прокси</h2>
+      <pre><code class="language-java">@EnableAsync // Без неё @Async молча выполняется в потоке вызывающего.
+class App {}
+
+@Service
+class Notifier {
+    @Async
+    public void sendSms(String paymentId) {
+        System.out.println("sendSms " + paymentId + " on " + Thread.currentThread().getName()
+                + ", requestId=" + MDC.get("requestId"));
+    }
+
+    public void notifyAll(String paymentId) { sendSms(paymentId); } // this.sendSms
+}
+
+MDC.put("requestId", "req-42"); // Идентификатор запроса для логов.
+n.sendSms("p-1");
+n.notifyAll("p-2");</code></pre>
+      <pre class="out">caller thread: main
+sendSms p-2 on main, requestId=req-42
+sendSms p-1 on task-1, requestId=null</pre>
+      <p>Порядок строк неожиданный: p-2 напечатан раньше p-1, хотя вызван позже. p-1 ушёл в пул и выполнился в потоке <code>task-1</code>, а <code>notifyAll</code> вызвал <code>sendSms</code> через <code>this</code>, мимо прокси, и p-2 выполнился сразу в <code>main</code>. Это то же ограничение прокси, что у <code>@Transactional</code> и <code>@Cacheable</code>.</p>
+      <p><code>@EnableAsync</code> регистрирует <code>AsyncAnnotationBeanPostProcessor</code>, и бины с <code>@Async</code> получают прокси. Его <code>AsyncExecutionInterceptor</code> заворачивает вызов в задачу и отдаёт её executor-у. Какому именно: указанному в <code>@Async("smsExecutor")</code>, иначе бину <code>AsyncConfigurer</code>, иначе единственному бину <code>TaskExecutor</code> или бину с именем <code>taskExecutor</code>. В Boot это <code>applicationTaskExecutor</code> с потоками <code>task-N</code>.</p>
+      <p>Метод с <code>@Async</code> возвращает <code>void</code> или <code>CompletableFuture</code>. Любое другое значение вызывающий не получит: прокси вернёт управление раньше, чем метод что-то вычислит, и отдаст null.</p>
+    </section>
+
+    <section class="step" id="pool">
+      <h2>Пул Boot: 8 потоков и бесконечная очередь, поэтому max не достигается</h2>
+      <p>Демо отправляет 20 задач по 300 мс и через 100 мс смотрит на пул:</p>
+      <pre><code class="language-java">for (int i = 0; i &lt; 20; i++) n.slow(); // Каждая задача спит 300 мс.
+sleep(100);
+var pool = ctx.getBean("applicationTaskExecutor", ThreadPoolTaskExecutor.class);</code></pre>
+      <pre class="out">pool: core=8, max=2147483647, threads=8, active=8, queued=12</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Восемь потоков пула заняты. Двенадцать задач стоят в очереди без предела. Потоки сверх восьми не создаются, хотя max равен Integer.MAX_VALUE: ThreadPoolExecutor создаёт дополнительные потоки только при полной очереди, а бесконечная очередь никогда не заполняется.">
+            <text x="20" y="22" class="dg-cap">APPLICATIONTASKEXECUTOR</text>
+            <text x="20" y="48" class="dg-n">core: 8 потоков, все заняты</text>
+            <g>
+              <rect x="20" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="62" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="104" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="146" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="188" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="230" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="272" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+              <rect x="314" y="56" width="36" height="36" rx="6" class="dg-cell hit"/>
+            </g>
+            <text x="20" y="122" class="dg-n">очередь: LinkedBlockingQueue без предела</text>
+            <rect x="20" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="48" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="76" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="104" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="132" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="160" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="188" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="216" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="244" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="272" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="300" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="328" y="130" width="24" height="24" rx="4" class="dg-cell"/>
+            <rect x="356" y="130" width="40" height="24" rx="4" class="dg-sep" fill="none"/>
+            <text x="364" y="146" class="dg-n">∞</text>
+            <rect x="452" y="56" width="248" height="98" rx="9" class="dg-sep" fill="none"/>
+            <text x="466" y="80" class="dg-in">потоки 9 … max</text>
+            <text x="466" y="100" class="dg-n">создаются, только когда</text>
+            <text x="466" y="116" class="dg-n">очередь полна, а она</text>
+            <text x="466" y="132" class="dg-bad">не заполняется никогда</text>
+            <g text-anchor="middle">
+              <text x="38" y="79" class="dg-n">1</text>
+              <text x="80" y="79" class="dg-n">2</text>
+              <text x="122" y="79" class="dg-n">3</text>
+              <text x="164" y="79" class="dg-n">4</text>
+              <text x="206" y="79" class="dg-n">5</text>
+              <text x="248" y="79" class="dg-n">6</text>
+              <text x="290" y="79" class="dg-n">7</text>
+              <text x="332" y="79" class="dg-n">8</text>
+            </g>
+            <text x="20" y="190" class="dg-s">20 задач: 8 выполняются, 12 ждут. Ещё 10 000 задач тоже встанут в очередь, в память.</text>
+          </svg>
+        </div>
+        <figcaption>max-size без ограничения очереди ничего не значит: лишние задачи не получают новых потоков, а ждут в памяти.</figcaption>
+      </figure>
+      <p>Причина — устройство <code>ThreadPoolExecutor</code>. Новая задача сначала получает поток, пока их меньше core. Дальше она идёт в очередь. Потоки сверх core создаются, только если очередь отказала, то есть заполнена. У Boot очередь без предела, поэтому она никогда не отказывает, и пул навсегда остаётся на восьми потоках.</p>
+      <p>Если SMS-шлюз завис на минуту, восемь потоков висят вместе с ним, а очередь растёт на каждый платёж. Задачи копятся в heap и пропадут при перезапуске. Настройка для прода задаёт предел очереди и решение на переполнение:</p>
+      <pre><code class="language-yaml">spring:
+  task:
+    execution:
+      pool:
+        core-size: 8
+        max-size: 32        # Сработает, когда очередь заполнится.
+        queue-capacity: 500 # Предел ожидающих задач.
+      thread-name-prefix: notify-</code></pre>
+      <p>Когда заняты и очередь, и все 32 потока, executor отклоняет задачу: по умолчанию <code>TaskRejectedException</code> летит вызывающему, то есть в платёж. Если уведомление можно потерять, его ловят и логируют. Если нельзя, задачу вообще не стоит держать в памяти: её пишут в таблицу или брокер, а <code>@Async</code> оставляют для действительно необязательного.</p>
+      <p>С виртуальными потоками (<code>spring.threads.virtual.enabled=true</code>) Boot заменяет пул на <code>SimpleAsyncTaskExecutor</code>: новый виртуальный поток на каждую задачу, без очереди. Потоки дешёвые, но внешний сервис от этого не становится быстрее. Ограничение одновременных вызовов SMS-шлюза тогда задают явно, например <code>spring.task.execution.simple.concurrency-limit</code> или семафором.</p>
+      <p>Разным задачам — разные пулы. Если SMS и PDF делят один executor, зависший SMS-шлюз забирает все восемь потоков, и чеки перестают формироваться. Отдельный бин <code>ThreadPoolTaskExecutor</code> на каждую интеграцию и <code>@Async("smsExecutor")</code> изолируют сбои — это bulkhead.</p>
+    </section>
+
+    <section class="step" id="context">
+      <h2>Исключение, MDC и транзакция остаются в потоке вызывающего</h2>
+      <p>Метод в пуле выполняется после того, как вызывающий уже ушёл дальше. Исключению из <code>void</code>-метода некуда вернуться:</p>
+      <pre><code class="language-java">n.sendSms("bad"); // Внутри: throw new IllegalStateException("SMS gateway down").
+try {
+    n.receipt("bad").get(); // CompletableFuture: ошибка вернётся в get().
+} catch (ExecutionException e) {
+    System.out.println("receipt failed: " + e.getCause().getMessage());
+}</code></pre>
+      <pre class="out">sendSms bad on task-2, requestId=null
+ERROR [task-2] .a.i.SimpleAsyncUncaughtExceptionHandler : Unexpected exception occurred invoking async method: public void kb.integration.AsyncDemo$Notifier.sendSms(java.lang.String)
+java.lang.IllegalStateException: SMS gateway down
+receipt failed: PDF render failed</pre>
+      <p>Для <code>void</code> единственный след — строка в логе от <code>SimpleAsyncUncaughtExceptionHandler</code>. Вызывающий не узнает об ошибке, повтора не будет. Свой <code>AsyncUncaughtExceptionHandler</code> через <code>AsyncConfigurer</code> может хотя бы считать метрику. Если результат важен, метод возвращает <code>CompletableFuture</code>, и вызывающий решает, что делать с ошибкой. Строка лога в выводе сокращена: убраны дата и pid.</p>
+      <p>Во всех выводах выше <code>requestId=null</code>, хотя вызывающий положил его в MDC. MDC, SecurityContext и контекст транзакции хранятся в ThreadLocal, а у потока пула свои ThreadLocal. Логи асинхронной задачи теряют связь с запросом. Перенести контекст можно через <code>TaskDecorator</code>: он оборачивает задачу в момент отправки, ещё в потоке вызывающего. Boot сам подключает бин TaskDecorator к своему executor-у:</p>
+      <pre><code class="language-java">@Bean
+TaskDecorator mdcCopy() {
+    return task -&gt; {
+        Map&lt;String, String&gt; mdc = MDC.getCopyOfContextMap(); // Поток вызывающего.
+        return () -&gt; {
+            if (mdc != null) MDC.setContextMap(mdc); // Поток пула.
+            try { task.run(); } finally { MDC.clear(); } // Не оставить чужой MDC потоку.
+        };
+    };
+}</code></pre>
+      <pre class="out">sendSms p-3 on task-1, requestId=req-42</pre>
+      <p>Для SecurityContext есть готовый <code>DelegatingSecurityContextAsyncTaskExecutor</code>, разобранный в <a href="spring-security.html">Architecture</a>. Трассировка Micrometer переносит контекст через <code>ContextPropagatingTaskDecorator</code>.</p>
+      <div class="trap">
+        <p class="myth">@Async-метод, вызванный внутри @Transactional, видит то, что транзакция только что записала.</p>
+        <p class="fact">Задача выполняется в другом потоке со своим соединением. Транзакция вызывающего может быть ещё не закоммичена, и задача не найдёт платёж или прочитает старое состояние. А если транзакция откатится, SMS «оплачено» уже уйдёт. Отправку привязывают к коммиту: @TransactionalEventListener(phase = AFTER_COMMIT) вместе с @Async, как в <a href="spring-events.html">Application Events</a>.</p>
+      </div>
+    </section>
+
+    <section class="step" id="scheduled">
+      <h2>@Scheduled по умолчанию выполняет все задачи в одном потоке</h2>
+      <p><code>@EnableScheduling</code> находит методы с <code>@Scheduled</code> и регистрирует их в <code>TaskScheduler</code>. Варианты расписания: <code>fixedRate</code> — запуск через равные промежутки от начала предыдущего, <code>fixedDelay</code> — пауза после окончания предыдущего, <code>cron</code> — по календарю, с часовым поясом в атрибуте <code>zone</code>.</p>
+      <p>Планировщик Boot по умолчанию — пул из одного потока <code>scheduling-1</code>. Все задачи приложения стоят к нему в очередь. Демо запускает две задачи: heartbeat каждые 100 мс и отчёт раз в секунду, который работает 600 мс. Затем то же самое с двумя потоками:</p>
+      <pre><code class="language-java">@Scheduled(fixedRate = 100) // Каждые 100 мс записывает момент запуска.
+public void heartbeat() { heartbeats.add(System.currentTimeMillis() - start); }
+
+@Scheduled(fixedRate = 1000) // Отчёт работает 600 мс.
+public void report() { sleep(600); }</code></pre>
+      <pre class="out">pool.size=1: heartbeats=10 at [655, 655, 655, 656, 656, 656, 656, 752, 849, 953]
+pool.size=2: heartbeats=13 at [15, 121, 220, 320, 417, 519, 617, 721, 818, 918, 1018, 1119, 1221]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Шкала времени 0–1300 мс. С одним потоком отчёт занимает поток с 0 до 600 мс, heartbeat не запускается, а на 655 мс выполняется семь пропущенных запусков подряд. С двумя потоками heartbeat идёт ровно каждые 100 мс параллельно с отчётом.">
+            <text x="70" y="52" class="dg-n">pool.size=1: отчёт и heartbeat в одном потоке</text>
+            <text x="70" y="142" class="dg-n">pool.size=2: у каждой задачи свой поток</text>
+            <!-- pool.size=1 -->
+            <rect x="70.0" y="60" width="288.0" height="22" rx="4" class="dg-cell"/>
+            <rect x="550.0" y="60" width="96.0" height="22" rx="4" class="dg-cell"/>
+            <rect x="68.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="116.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="164.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="212.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="260.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="308.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="356.0" y="90" width="4" height="18" class="dg-sep" fill="none"/>
+            <rect x="382.4" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="387.4" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="392.4" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="382.9" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="387.9" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="392.9" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="397.9" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="429.0" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="475.5" y="90" width="4" height="18" class="dg-cell hit"/>
+            <rect x="525.4" y="90" width="4" height="18" class="dg-cell hit"/>
+            <!-- pool.size=2 -->
+            <rect x="70.0" y="150" width="288.0" height="22" rx="4" class="dg-cell"/>
+            <rect x="550.0" y="150" width="96.0" height="22" rx="4" class="dg-cell"/>
+            <rect x="75.2" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="126.1" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="173.6" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="221.6" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="268.2" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="317.1" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="364.2" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="414.1" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="460.6" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="508.6" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="556.6" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="605.1" y="180" width="4" height="18" class="dg-cell hit"/>
+            <rect x="654.1" y="180" width="4" height="18" class="dg-cell hit"/>
+            <!-- ось времени -->
+            <path d="M70 210 L 700 210" class="dg-line"/>
+            <text x="70" y="224" class="dg-n" text-anchor="middle">0</text>
+            <text x="358" y="224" class="dg-n" text-anchor="middle">600</text>
+            <text x="550" y="224" class="dg-n" text-anchor="middle">1000 мс</text>
+            <text x="20" y="75" class="dg-n">отчёт</text>
+            <text x="20" y="104" class="dg-n">beat</text>
+            <text x="20" y="165" class="dg-n">отчёт</text>
+            <text x="20" y="194" class="dg-n">beat</text>
+            <text x="388" y="126" class="dg-bad">7 запусков подряд на 655 мс</text>
+            <text x="20" y="22" class="dg-cap">МОМЕНТЫ ЗАПУСКА ИЗ ДЕМО</text>
+          </svg>
+        </div>
+        <figcaption>Пунктир — где heartbeat должен был сработать. С одним потоком пропущенные запуски fixedRate не теряются, а выполняются пачкой, как только поток освободился.</figcaption>
+      </figure>
+      <p>С одним потоком heartbeat первые 655 мс не запускался вовсе: поток держал отчёт. Затем семь пропущенных запусков выполнились подряд за одну миллисекунду — так <code>fixedRate</code> догоняет расписание. Если бы heartbeat продлевал аренду или отправлял сигнал «я жив», за эти 655 мс его бы сочли мёртвым. С двумя потоками он идёт ровно.</p>
+      <p>Решение — <code>spring.task.scheduling.pool.size</code> по числу независимых задач или отдельный executor для тяжёлых. Одну и ту же задачу Spring не запускает параллельно с самой собой: следующий запуск ждёт окончания предыдущего. Исключение из <code>@Scheduled</code> логируется, и задача продолжит работать по расписанию: одна ошибка не останавливает ночную сверку навсегда.</p>
+    </section>
+
+    <section class="step" id="cluster">
+      <h2>В кластере задачу запускает каждый экземпляр, если не взять общий замок</h2>
+      <p>Платёжный сервис работает в трёх pod-ах. Ночная сверка с банком помечена <code>@Scheduled</code>, и в 3:00 она стартует трижды: три запроса выписки, три сравнения, три письма бухгалтерии. Планировщик Spring ничего не знает о других экземплярах.</p>
+      <p>ShedLock добавляет общий замок в базе. Перед запуском задача пытается обновить строку в таблице <code>shedlock</code>: поставить <code>lock_until</code> в будущее, если текущее значение уже в прошлом. Это один атомарный UPDATE, и выигрывает ровно один экземпляр. Остальные пропускают запуск.</p>
+      <pre><code class="language-java">@Scheduled(fixedRate = 100)
+@SchedulerLock(name = "reconcile", lockAtLeastFor = "PT0.4S") // Держать замок минимум 400 мс.
+public void reconcile() { runs.incrementAndGet(); }
+
+// Два «экземпляра» сервиса в одной JVM, общая база H2.
+try (var a = start(shared, LockApp.class); var b = start(shared, LockApp.class)) { sleep(1500); }</code></pre>
+      <pre class="out">without lock: A=16, B=16, total=32
+with ShedLock: A=1, B=3, total=4</pre>
+      <p>Без замка за полторы секунды задача выполнилась 32 раза: по 16 на каждом экземпляре. С ShedLock — 4 раза на двоих: каждый запуск держит замок 400 мс, и все попытки в это время пропускаются. Какой экземпляр выиграет, не определено: здесь B взял замок трижды, A — один раз.</p>
+      <p>Два параметра замка решают разные задачи. <code>lockAtMostFor</code> — сколько держать замок, если экземпляр упал посреди задачи и не снял его: после этого срока задачу сможет взять другой. Он должен быть больше самого долгого нормального выполнения, иначе второй экземпляр запустит задачу, пока первый ещё работает. <code>lockAtLeastFor</code> держит замок даже после быстрого окончания задачи, чтобы экземпляр с отстающими часами не запустил её второй раз в ту же секунду. <code>usingDbTime()</code> берёт время из базы, а не с часов pod-ов.</p>
+      <p>ShedLock — не очередь и не гарантия «ровно один раз». Он не запускает пропущенную задачу, если все экземпляры лежали, и не повторяет упавшую. Для задач с историей, повторами и параметрами берут Quartz с кластерным JDBC-хранилищем, db-scheduler или выносят задачу в Kubernetes CronJob. И в любом случае сама задача должна быть идемпотентной: повторный запуск сверки не должен отправлять второе письмо.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>@Async работает через прокси: без @EnableAsync и при вызове через this метод выполняется синхронно.</li>
+        <li>Пул Boot — 8 потоков и бесконечная очередь; max-size без queue-capacity не действует.</li>
+        <li>Исключение void-метода уходит только в лог. MDC, SecurityContext и транзакцию в поток пула переносят явно.</li>
+        <li>@Scheduled по умолчанию делит один поток на все задачи; fixedRate догоняет пропущенные запуски пачкой.</li>
+        <li>В кластере @Scheduled запускается на каждом экземпляре; ShedLock даёт общий замок, но не гарантию ровно одного выполнения.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="async-how" data-freq="3">
+      <h3>Как работает @Async и почему метод может выполниться синхронно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@EnableAsync включает постпроцессор, который оборачивает бины с @Async в прокси. Прокси превращает вызов в задачу и отдаёт её TaskExecutor, а вызывающему сразу возвращает управление. Метод возвращает void или CompletableFuture.</p>
+          <p>Синхронно он выполнится, если нет @EnableAsync или вызов идёт мимо прокси: через this из того же класса, на private или final методе. В демо вызов через this выполнился в потоке main.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Executor выбирается по имени в @Async("..."), затем AsyncConfigurer, затем единственный TaskExecutor или бин taskExecutor; в Boot это applicationTaskExecutor.</li>
+            <li>Метод с другим типом возврата вернёт null: прокси отвечает раньше, чем метод выполнится.</li>
+            <li>Транзакция, MDC и SecurityContext в поток пула не переходят; для MDC и трассировки есть TaskDecorator.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему иногда SMS «оплачено» приходит по платежу, которого нет в базе?</summary>
+          <pre><code class="language-java">@Transactional
+public void pay(Payment p) {
+    repository.save(p);
+    notifier.sendSms(p.getId()); // @Async: читает платёж из базы и шлёт SMS.
+    bank.charge(p);              // Может бросить исключение — транзакция откатится.
+}</code></pre>
+          <p>sendSms выполняется в другом потоке сразу, до коммита. Он может не найти платёж, потому что транзакция ещё не закоммичена, а если charge бросит исключение, транзакция откатится, но SMS уже ушло. Отправку нужно привязать к коммиту: опубликовать событие и обработать его в @TransactionalEventListener(phase = AFTER_COMMIT) с @Async.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="async-pool" data-freq="2">
+      <h3>Какой пул использует @Async в Spring Boot и что с ним не так?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Boot создаёт ThreadPoolTaskExecutor applicationTaskExecutor: 8 core-потоков, очередь без предела и max-size Integer.MAX_VALUE. Потоки сверх core в ThreadPoolExecutor создаются только при полной очереди, а бесконечная очередь не заполняется, поэтому работают всегда 8 потоков, а лишние задачи копятся в памяти.</p>
+          <p>Я задаю queue-capacity и max-size, решаю, что делать при отказе, и выделяю отдельный пул для каждой медленной интеграции, чтобы зависший SMS-шлюз не остановил чеки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Задачи в очереди теряются при перезапуске; обязательную работу пишут в базу или брокер, а не в пул.</li>
+            <li>С виртуальными потоками Boot использует SimpleAsyncTaskExecutor без очереди; ограничение параллельности задают через concurrency-limit.</li>
+            <li>При отказе по умолчанию летит TaskRejectedException прямо в вызывающий код.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="async-exception" data-freq="2">
+      <h3>Что происходит с исключением в @Async-методе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если метод возвращает CompletableFuture, исключение попадает в него, и вызывающий получит его в get или join. Если метод void, вернуть исключение некому: его получает AsyncUncaughtExceptionHandler, который по умолчанию только пишет в лог.</p>
+          <p>Поэтому важные асинхронные операции возвращают CompletableFuture или сами обрабатывают ошибку: повтор, запись в таблицу недоставленных, метрика.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Свой обработчик для void-методов задают через AsyncConfigurer.getAsyncUncaughtExceptionHandler.</li>
+            <li>Повтор через @Retryable поверх @Async работает только при правильном порядке прокси; надёжнее повторять внутри задачи.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="async-scheduled-cluster" data-freq="2">
+      <h3>Как не запустить @Scheduled-задачу на всех экземплярах сервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Планировщик Spring не знает о других экземплярах, поэтому задача стартует на каждом. Обычное решение — ShedLock: перед запуском задача атомарно берёт замок в общей таблице, и выполняет её только тот экземпляр, который его получил. В демо без замка задача выполнилась 32 раза на двух экземплярах, с замком — 4.</p>
+          <p>Я задаю lockAtMostFor больше самого долгого выполнения, чтобы упавший экземпляр не держал замок вечно, и делаю саму задачу идемпотентной.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>ShedLock не повторяет пропущенные и упавшие запуски; для истории и повторов берут Quartz в кластерном режиме или db-scheduler.</li>
+            <li>usingDbTime и lockAtLeastFor защищают от расхождения часов между pod-ами.</li>
+            <li>Альтернатива — Kubernetes CronJob, который запускает отдельный процесс, а не задачу внутри каждого pod-а.</li>
+            <li>Один поток планировщика по умолчанию: долгая задача задерживает остальные, поэтому pool.size увеличивают.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/integration/scheduling.html">Spring Framework Reference: Task Execution and Scheduling</a> — основа урока: @Async, выбор executor-а, @Scheduled, TaskDecorator.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/task-execution-and-scheduling.html">Spring Boot Reference: Task Execution and Scheduling</a> — applicationTaskExecutor, настройки пула, виртуальные потоки.</li>
+      <li><a href="https://github.com/lukas-krecan/ShedLock">ShedLock</a> — lockAtMostFor, lockAtLeastFor, провайдеры замков.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html">ThreadPoolExecutor javadoc</a> — правила создания потоков и очередь.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -571,7 +571,7 @@ window.KB_TREE = [
           scope: 'RabbitTemplate, @RabbitListener, подтверждения, повторы и DLX' },
         { id: 'spring-cache', freq: 2, status: 'draft', title: 'Caching',
           scope: '@Cacheable, @CacheEvict, CacheManager, ловушки с прокси, Redis как кеш' },
-        { id: 'spring-async', freq: 2, status: 'empty', title: 'Scheduling & Async',
+        { id: 'spring-async', freq: 2, status: 'draft', title: 'Scheduling & Async',
           scope: '@Async и его пул, @Scheduled, TaskExecutor, ShedLock в кластере' },
       ] },
       { id: 'spring-testing', freq: 2, status: 'empty', title: 'Testing',
