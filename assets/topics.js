@@ -166,7 +166,7 @@ window.KB_TREE = [
         { id: 'kafka', title: 'Kafka', items: [
           { id: 'kafka-basics', freq: 3, status: 'draft', title: 'Basics',
             scope: 'лог сообщений, топики и партиции, offset, брокеры, retention, чем Kafka отличается от очереди' },
-          { id: 'kafka-producer', freq: 3, status: 'empty', title: 'Producer',
+          { id: 'kafka-producer', freq: 3, status: 'draft', title: 'Producer',
             scope: 'ключ и выбор партиции, порядок сообщений, acks, идемпотентный продюсер, батчи' },
           { id: 'kafka-consumer', freq: 3, status: 'empty', title: 'Consumer Groups',
             scope: 'consumer group, распределение партиций, commit offset, rebalance, lag' },

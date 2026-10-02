@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kafka: Producer · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kafka-producer">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Kafka: Producer</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Продюсер Kafka не отправляет каждое сообщение отдельно: <code>send()</code> кладёт запись в буфер, а фоновый поток собирает батчи по партициям и отправляет их брокерам. Партицию выбирает ключ — хеш ключа по модулю числа партиций, — поэтому события одного платежа идут в одну партицию и сохраняют порядок. <code>linger.ms</code> и <code>batch.size</code> решают, сколько ждать наполнения батча. <code>acks</code> определяет, чьего подтверждения ждать: никого, лидера или всех синхронных реплик. Идемпотентный продюсер, включённый по умолчанию, нумерует батчи, и брокер отбрасывает повторы и не даёт ретраям переставить сообщения.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>События платежа пришли в обратном порядке, а Kafka получала тысячу запросов на тысячу сообщений</h2>
+      <p>Сервис платежей публикует события в топик <code>payments</code>. Сверка видит возврат раньше списания у одного платежа: события ушли без ключа и попали в разные партиции. Мониторинг брокеров показывает почти по запросу на каждое сообщение, хотя сообщения маленькие. А после отключения одного брокера часть событий пропала, хотя <code>send()</code> не бросал исключений.</p>
+      <p>Все три истории — про настройки и устройство продюсера. Что такое топик, партиция и смещение, разобрано в <a href="kafka-basics.html">Basics</a>, отправка через <code>KafkaTemplate</code> — в <a href="spring-kafka.html">Kafka in Spring</a>, реплики и ISR — в <a href="kafka-replication.html">Replication</a>. Демо <a href="../examples/kafka-cluster/ProducerDemo.java">ProducerDemo.java</a> работает с кластером из трёх брокеров Kafka 4.3 в Docker (KRaft) через kafka-clients 4.3.1; топики на 6 партиций с тремя репликами.</p>
+    </section>
+
+    <section class="step" id="send">
+      <h2>send() кладёт запись в буфер, а отправляет фоновый поток</h2>
+      <p>Вызов <code>producer.send(record)</code> сериализует ключ и значение, выбирает партицию и добавляет запись в батч этой партиции в общем буфере (<code>buffer.memory</code>, 32 МБ по умолчанию). Метод сразу возвращает <code>Future</code>. Отдельный поток Sender забирает готовые батчи, группирует их по брокерам-лидерам и отправляет одним запросом на брокер. Результат приходит в callback или в <code>Future</code>.</p>
+      <p>Отсюда несколько следствий. Ошибка сети не придёт из <code>send()</code> — только в callback; код, который не смотрит на результат, теряет сообщения молча, как в истории выше. Если брокеры недоступны и буфер заполнился, <code>send()</code> блокируется до <code>max.block.ms</code> (60 секунд) — поток HTTP-запроса зависает на отправке события. А <code>delivery.timeout.ms</code> ограничивает всё время доставки с повторами: после него запись отбрасывается с ошибкой в callback.</p>
+      <pre class="out">== defaults: acks=-1 enable.idempotence=true max.in.flight=5 linger.ms=5 delivery.timeout.ms=120000</pre>
+      <p>Это умолчания kafka-clients 4.3: <code>acks=-1</code> — то же, что <code>all</code>, идемпотентность включена, до 5 запросов в полёте на соединение, 2 минуты на доставку. <code>linger.ms</code> по умолчанию 5 мс начиная с Kafka 4.0; раньше был 0.</p>
+    </section>
+
+    <section class="step" id="partitioning">
+      <h2>Ключ выбирает партицию, а без ключа партицию держат, пока не заполнится батч</h2>
+      <pre><code class="language-java">for (String key : List.of("p-1", "p-2", "p-3", "p-1", "p-2", "p-1"))
+    p.send(new ProducerRecord&lt;&gt;("payments", key, "event")).get();
+for (int i = 0; i &lt; 6; i++)
+    p.send(new ProducerRecord&lt;&gt;("payments", null, "no-key-" + i));</code></pre>
+      <pre class="out">== key -&gt; partition: {p-1=[4, 4, 4], p-2=[4, 4], p-3=[1]}
+== null key, sent together: partitions [0, 0, 0, 0, 0, 0]</pre>
+      <p>Для записи с ключом партиция — <code>murmur2(key) mod число_партиций</code>. Все события p-1 попали в партицию 4, и консьюмер этой партиции прочитает их в порядке отправки. p-2 тоже в 4 — совпадение по модулю, а не правило. Порядок есть только внутри партиции, поэтому ключ выбирают по сущности, для которой важен порядок: id платежа, счёта, клиента.</p>
+      <p>Без ключа продюсер использует «липкий» партиционер: держит одну партицию, пока не заполнится батч, и только потом переключается. Все шесть записей ушли в партицию 0 одним батчем. Так батчи получаются полнее, чем при старом распределении по кругу, где каждая запись шла в свою партицию. Встроенный партиционер также учитывает загрузку брокеров и реже выбирает медленные.</p>
+      <p>Две ловушки. Горячий ключ — крупный магазин, через который идёт половина платежей, — перегружает одну партицию, и добавление партиций не помогает: все его события всё равно в одной. И изменение числа партиций меняет отображение ключей: после увеличения с 6 до 12 новые события p-1 могут попасть в другую партицию, чем старые, и порядок между ними нарушится. Поэтому число партиций выбирают с запасом заранее.</p>
+    </section>
+
+    <section class="step" id="batching">
+      <h2>linger.ms превращает поток мелких записей в батчи</h2>
+      <p>Батч отправляется, когда он заполнен до <code>batch.size</code> (16 КБ) или когда истёк <code>linger.ms</code>. При высокой нагрузке батчи заполняются сами. При умеренной — каждое сообщение уходит почти отдельным запросом, если продюсер не подождёт. Демо отправляет 1000 сообщений по 200 байт с темпом около 5000 в секунду:</p>
+      <pre class="out">== linger.ms=0  1000 records -&gt; produce requests 904, avg batch 290 bytes
+== linger.ms=5  1000 records -&gt; produce requests 165, avg batch 746 bytes
+== linger.ms=50 1000 records -&gt; produce requests 25, avg batch 5975 bytes</pre>
+      <p>Без ожидания продюсер сделал 904 запроса на 1000 сообщений. Пять миллисекунд по умолчанию сократили запросы в пять с половиной раз, 50 мс — в 36 раз. Меньше запросов — меньше нагрузка на сеть и брокеры, лучше сжатие (<code>compression.type</code> сжимает батч целиком), но каждое сообщение ждёт до <code>linger.ms</code> дольше. Для потока событий задержка в десятки миллисекунд обычно незаметна; для синхронного запроса, где пользователь ждёт подтверждения отправки, её учитывают.</p>
+    </section>
+
+    <section class="step" id="acks">
+      <h2>acks определяет, чьего подтверждения ждёт продюсер</h2>
+      <pre class="out">== acks=0   partition=0 offset=-1
+== acks=1   partition=0 offset=7
+== acks=all partition=0 offset=8</pre>
+      <p>С <code>acks=0</code> продюсер не ждёт ответа вовсе: смещение неизвестно (-1), и если брокер не принял запись, никто об этом не узнает. С <code>acks=1</code> подтверждает лидер партиции, записав сообщение к себе; если лидер упадёт до того, как реплики скопируют запись, она потеряется при выборе нового лидера. С <code>acks=all</code> лидер ждёт, пока запись получат все реплики из ISR, и вместе с <code>min.insync.replicas=2</code> это значит: подтверждённая запись есть хотя бы на двух брокерах. Как это работает и что происходит, когда ISR сокращается, показано в <a href="kafka-replication.html">Replication</a>.</p>
+    </section>
+
+    <section class="step" id="idempotence">
+      <h2>Идемпотентный продюсер не даёт ретраям создать дубли и переставить батчи</h2>
+      <p>Продюсер повторяет батч, если не получил ответ: запрос мог потеряться, а мог дойти, и потерялся только ответ. Без защиты это даёт две проблемы. Повтор батча, который уже записан, — дубль. А при нескольких запросах в полёте повтор первого батча может записаться после второго — порядок нарушен:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Продюсер отправляет батчи 1 и 2 подряд. Батч 1 падает по таймауту, батч 2 записан. Без идемпотентности повтор батча 1 записывается после батча 2, порядок нарушен. С идемпотентностью брокер отклоняет батч 2, пока не записан батч 1, и в логе порядок 1, 2.">
+            <defs>
+              <marker id="ip-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ip-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="40" width="150" height="120" rx="9" class="dg-box"/>
+            <text x="95" y="62" class="dg-in" text-anchor="middle">продюсер</text>
+            <text x="34" y="92" class="dg-n">батч 1: seq 0</text>
+            <text x="34" y="112" class="dg-n">батч 2: seq 1</text>
+            <rect x="430" y="40" width="270" height="120" rx="9" class="dg-box"/>
+            <text x="565" y="62" class="dg-in" text-anchor="middle">лог партиции</text>
+            <rect data-s="2-3" x="446" y="76" width="70" height="28" rx="4" class="dg-cell"/>
+            <text data-s="2-3" x="456" y="95" class="dg-n">батч 2</text>
+            <rect data-s="4" x="446" y="76" width="70" height="28" rx="4" class="dg-cell hit"/>
+            <text data-s="4" x="456" y="95" class="dg-ok">батч 1</text>
+            <rect data-s="4" x="526" y="76" width="70" height="28" rx="4" class="dg-cell hit"/>
+            <text data-s="4" x="536" y="95" class="dg-ok">батч 2</text>
+            <rect data-s="3" x="526" y="76" width="70" height="28" rx="4" class="dg-cell miss"/>
+            <text data-s="3" x="536" y="95" class="dg-bad">батч 1</text>
+            <text data-s="3" x="446" y="140" class="dg-bad">без идемпотентности: 2, 1</text>
+            <text data-s="4" x="446" y="140" class="dg-ok">seq 1 раньше seq 0 — отказ</text>
+            <path data-s="1" d="M170 90 L 426 90" class="dg-line bad" marker-end="url(#ip-bad)"/>
+            <text data-s="1" x="200" y="82" class="dg-bad">батч 1 — таймаут</text>
+            <path data-s="2" d="M170 110 L 426 90" class="dg-line" marker-end="url(#ip-n)"/>
+            <text data-s="2" x="200" y="128" class="dg-n">батч 2 записан</text>
+            <path data-s="3" d="M170 90 L 426 90" class="dg-line bad" marker-end="url(#ip-bad)"/>
+            <text data-s="3" x="200" y="82" class="dg-bad">повтор батча 1</text>
+            <path data-s="4" d="M170 90 L 426 90" class="dg-line ok" marker-end="url(#ip-n)"/>
+            <text data-s="4" x="200" y="82" class="dg-ok">повтор 1, затем 2</text>
+            <text data-s="1" x="20" y="200" class="dg-t">Два батча в полёте; первый не дошёл.</text>
+            <text data-s="2" x="20" y="200" class="dg-t">Второй записан раньше первого.</text>
+            <text data-s="3" x="20" y="200" class="dg-bad">Повтор первого ложится после второго: порядок нарушен.</text>
+            <text data-s="4" x="20" y="200" class="dg-ok">С идемпотентностью батч 2 ждёт батч 1: в логе 1, 2.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Продюсер отправил два батча одной партиции подряд, не дожидаясь ответа на первый. Первый потерялся по дороге.</li>
+          <li>Второй батч дошёл и записан в лог.</li>
+          <li>Без идемпотентности повтор первого батча записывается следом: в логе события идут в порядке 2, 1. Если бы потерялся только ответ, повтор дал бы дубль.</li>
+          <li>С идемпотентностью у продюсера есть producer id, а у каждого батча — номер последовательности в партиции. Брокер принимает только следующий ожидаемый номер: на шаге 2 батч 2 с seq 1 был бы отклонён, потому что seq 0 ещё не записан. Продюсер повторяет оба по порядку, и в логе 1, 2. Повтор уже записанного номера брокер отбрасывает как дубль.</li>
+        </ol>
+      </figure>
+      <p>Идемпотентный продюсер включён по умолчанию с Kafka 3.0 и требует <code>acks=all</code>, повторов и не больше 5 запросов в полёте — ровно умолчания из демо. Он защищает от дублей и перестановок, вызванных повторами внутри одной сессии продюсера. Если сервис перезапустился и отправил событие заново, у нового экземпляра другой producer id, и брокер не узнает дубль. От этого защищают транзакционный продюсер с постоянным <code>transactional.id</code> или идемпотентный консьюмер, о чём — в <a href="kafka-delivery.html">Delivery Semantics</a>.</p>
+      <div class="trap">
+        <p class="myth">Раз send() не бросил исключение, сообщение записано в Kafka.</p>
+        <p class="fact">send() только кладёт запись в буфер и возвращает Future. Ошибки доставки приходят в callback, а если его нет и Future никто не проверяет, сообщение теряется молча. Надёжная отправка проверяет результат: callback с логированием и обработкой или get() там, где нужно знать, что запись принята.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>send() асинхронный: буфер, фоновый поток, ошибки — в callback; при полном буфере блокируется до max.block.ms.</li>
+        <li>Ключ → murmur2 mod партиций: порядок по ключу; без ключа — липкий партиционер; смена числа партиций ломает отображение.</li>
+        <li>linger.ms при умеренном потоке: 0 мс — 904 запроса на 1000 сообщений, 50 мс — 25. В Kafka 4 по умолчанию 5 мс.</li>
+        <li>acks=0 не знает смещения, acks=1 теряет при падении лидера, acks=all с min.insync.replicas=2 держит запись на двух брокерах.</li>
+        <li>Идемпотентный продюсер по умолчанию: producer id и номера последовательности убирают дубли и перестановки от повторов.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="producer-ordering" data-freq="3">
+      <h3>Как Kafka гарантирует порядок сообщений и как продюсер может его нарушить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Порядок гарантируется только внутри партиции. Продюсер выбирает партицию по хешу ключа, поэтому все сообщения с одним ключом попадают в одну партицию и читаются в порядке записи. Сообщения без ключа или с разными ключами порядка между собой не имеют.</p>
+          <p>Нарушить порядок может повтор при нескольких запросах в полёте: первый батч повторяется после второго. Идемпотентный продюсер, включённый по умолчанию, нумерует батчи, и брокер не принимает их не по порядку.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без идемпотентности порядок требует max.in.flight.requests.per.connection=1.</li>
+            <li>Увеличение числа партиций меняет отображение ключей, и новые события ключа могут уйти в другую партицию.</li>
+            <li>Горячий ключ ограничен пропускной способностью одной партиции.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="producer-acks" data-freq="3">
+      <h3>Что означают acks=0, 1 и all?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>acks=0 — продюсер не ждёт ответа, возможна незаметная потеря. acks=1 — подтверждает лидер после записи к себе; если лидер упадёт до репликации, запись потеряется. acks=all — лидер ждёт все реплики из ISR; вместе с min.insync.replicas=2 подтверждённая запись есть минимум на двух брокерах.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>acks=all — умолчание с Kafka 3.0 и условие идемпотентного продюсера.</li>
+            <li>Если ISR меньше min.insync.replicas, запись с acks=all отклоняется с NotEnoughReplicas.</li>
+            <li>Задержка acks=all определяется самой медленной репликой в ISR.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему события иногда пропадают?</summary>
+          <pre><code class="language-java">public void publish(Payment p) {
+    producer.send(new ProducerRecord&lt;&gt;("payments", p.toJson()));
+}
+// props: acks=1, retries=0</code></pre>
+          <p>Результат send() никто не проверяет, поэтому ошибки доставки теряются молча. acks=1 и отключённые повторы теряют записи при смене лидера и сетевых сбоях. Ключа нет, поэтому события одного платежа попадают в разные партиции без порядка. Нужны ключ id платежа, acks=all с идемпотентностью и повторами по умолчанию и callback, который обрабатывает ошибку.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="producer-batching" data-freq="2">
+      <h3>Как продюсер группирует сообщения и как настроить батчи?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>send() кладёт запись в батч её партиции; батч отправляется, когда достиг batch.size или прошло linger.ms. Небольшой linger.ms при умеренном потоке резко сокращает число запросов: в демо 50 мс дали 25 запросов вместо 904 на 1000 сообщений, ценой задержки до 50 мс. Сжатие применяется к батчу целиком, поэтому крупные батчи сжимаются лучше.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Kafka 4 linger.ms по умолчанию 5 мс; раньше 0.</li>
+            <li>Липкий партиционер для записей без ключа заполняет одну партицию до конца батча.</li>
+            <li>buffer.memory и max.block.ms определяют, что будет при недоступном кластере.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://kafka.apache.org/documentation/#producerconfigs">Apache Kafka: Producer Configs</a> — основа урока: acks, linger.ms, batch.size, идемпотентность, таймауты.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-480%3A+Sticky+Partitioner">KIP-480: Sticky Partitioner</a> и <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-794%3A+Strictly+Uniform+Sticky+Partitioner">KIP-794</a> — партиционирование без ключа.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-679%3A+Producer+will+enable+the+strongest+delivery+guarantee+by+default">KIP-679</a> — acks=all и идемпотентность по умолчанию.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-1030%3A+Change+constraints+and+default+values+for+various+configurations">KIP-1030</a> — новые умолчания Kafka 4.0, включая linger.ms=5.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
