@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sharding · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sharding">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Sharding</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Шардирование распределяет строки одной логической таблицы по нескольким серверам баз данных, чтобы запись и объём масштабировались горизонтально. Ключ шардирования определяет, на каком сервере лежит строка: запросы с этим ключом идут на один шард, остальные приходится рассылать на все и собирать результат. Отображение ключа на шард выбирают так, чтобы добавление сервера переносило малую часть данных: <code>hash mod N</code> переносит почти всё, а consistent hashing и фиксированное число виртуальных шардов — долю нового сервера. Цена — транзакции, уникальность, соединения и отчёты через границы шардов, поэтому шардируют последним, после остальных способов.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Один сервер базы перестал справляться с записью платежей</h2>
+      <p>Платёжная система выросла до десятков тысяч платежей в секунду. Самый мощный сервер, реплики для чтения, секционирование по месяцам и архивирование старых данных уже сделаны, но запись упирается в один primary: WAL, блокировки, диски одного сервера. Остаётся разложить данные по нескольким независимым базам. Первая попытка — <code>shard = hash(merchant_id) mod 4</code> — работала, пока не понадобился пятый сервер: перенос занял неделю, потому что переезжали почти все данные. А один крупный маркетплейс перегрузил свой шард.</p>
+      <p>Тема разбирает выбор ключа, отображение ключей на шарды, перешардирование и то, что ломается между шардами. Секционирование внутри одной базы — в <a href="partitioning.html">Partitioning</a>, реплики — в <a href="replication.html">Replication</a>, распределённые транзакции — в <a href="dist-tx.html">Distributed Transactions</a>, глобальные id — в <a href="id-generation.html">Unique ID Generation</a>. Демо <a href="../examples/sharding/ShardingDemo.java">ShardingDemo.java</a> считает перенос ключей и распределение нагрузки на миллионе ключей: <code>java ShardingDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="when">
+      <h2>Шардируют последним: вертикальное масштабирование, реплики и секции дешевле</h2>
+      <table class="mx">
+        <thead><tr><th>Проблема</th><th>Сначала</th><th>Шардирование нужно, если</th></tr></thead>
+        <tbody>
+          <tr><td>Много чтений</td><td>Реплики, кеш</td><td>—</td></tr>
+          <tr><td>Таблица слишком большая</td><td>Секционирование, архивирование</td><td>Не помещается на диски одного сервера</td></tr>
+          <tr><td>Медленные запросы</td><td>Индексы, планы, пакетная запись</td><td>—</td></tr>
+          <tr><td>Много записи</td><td>Больше сервер, быстрее диски, меньше индексов</td><td>Запись упирается в один primary</td></tr>
+        </tbody>
+      </table>
+      <p>Один современный сервер PostgreSQL с NVMe выдерживает десятки тысяч транзакций в секунду и терабайты данных. Шардирование превращает одну базу в распределённую систему: каждый запрос должен знать, куда идти, транзакции через шарды теряют атомарность, уникальность и внешние ключи работают только внутри шарда, а миграции схемы выполняются на каждом. Поэтому его откладывают, пока остальные средства не исчерпаны, или берут готовые решения — Citus для PostgreSQL, Vitess для MySQL, — которые прячут часть сложности.</p>
+    </section>
+
+    <section class="step" id="key">
+      <h2>Ключ шардирования выбирают по запросам, и неравномерный ключ создаёт горячий шард</h2>
+      <p>Хороший ключ — тот, по которому идут почти все запросы и транзакции: тогда каждый запрос обращается к одному шарду, а транзакция остаётся локальной. Для платёжной системы это магазин или счёт: платежи, возвраты и выписка одного магазина живут вместе. Запрос без ключа — «все платежи с картой X» — придётся отправить на все шарды и слить результаты (scatter-gather), и он медленнее самого медленного шарда.</p>
+      <pre class="out">== load per shard when one merchant makes 30% of payments (shard by merchant)
+   shard 0: 17.4%
+   shard 1: 47.5%
+   shard 2: 17.5%
+   shard 3: 17.6%</pre>
+      <p>Вторая сторона ключа — равномерность. Если один маркетплейс делает 30 % платежей, его шард несёт почти половину нагрузки, а добавление шардов не помогает: все платежи магазина всегда на одном сервере. Для таких ключей используют составной ключ — магазин плюс месяц или магазин плюс хеш платежа, — жертвуя локальностью части запросов, или выносят крупного клиента на выделенный шард через таблицу-справочник.</p>
+    </section>
+
+    <section class="step" id="mapping">
+      <h2>hash mod N переносит почти всё при росте, виртуальные шарды — только нужную долю</h2>
+      <pre class="out">== keys that move when growing from 4 to 5 shards
+   hash mod N:                  79.9%
+   consistent hashing (ring):   19.9%
+   1024 virtual shards:         20.0%</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Слева: при hash mod N переход с 4 на 5 серверов меняет номер шарда у 80 процентов ключей. Справа: 1024 виртуальных шарда распределены по серверам таблицей; новый сервер забирает пятую часть слотов, остальные слоты остаются на месте.">
+            <text x="20" y="22" class="dg-cap bad">hash mod N: 4 → 5</text>
+            <rect x="20" y="36" width="300" height="30" rx="4" class="dg-cell miss"/>
+            <rect x="20" y="36" width="60" height="30" rx="4" class="dg-cell"/>
+            <text x="30" y="56" class="dg-n">20%</text>
+            <text x="100" y="56" class="dg-bad">80% ключей сменили сервер</text>
+            <text x="20" y="92" class="dg-n">номер шарда зависит от N,</text>
+            <text x="20" y="110" class="dg-n">меняется почти у каждого ключа</text>
+            <text x="380" y="22" class="dg-cap">1024 СЛОТА → СЕРВЕРЫ</text>
+            <rect x="380" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="394" y="57" class="dg-n" text-anchor="middle">1</text>
+            <rect x="412" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="426" y="57" class="dg-n" text-anchor="middle">2</text>
+            <rect x="444" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="458" y="57" class="dg-n" text-anchor="middle">3</text>
+            <rect x="476" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="490" y="57" class="dg-n" text-anchor="middle">4</text>
+            <rect x="508" y="36" width="28" height="32" rx="3" class="dg-cell hit"/>
+            <text x="522" y="57" class="dg-n" text-anchor="middle">5</text>
+            <rect x="540" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="554" y="57" class="dg-n" text-anchor="middle">2</text>
+            <rect x="572" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="586" y="57" class="dg-n" text-anchor="middle">3</text>
+            <rect x="604" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="618" y="57" class="dg-n" text-anchor="middle">4</text>
+            <rect x="636" y="36" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="650" y="57" class="dg-n" text-anchor="middle">1</text>
+            <rect x="668" y="36" width="28" height="32" rx="3" class="dg-cell hit"/>
+            <text x="682" y="57" class="dg-n" text-anchor="middle">5</text>
+            <rect x="380" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="394" y="97" class="dg-n" text-anchor="middle">3</text>
+            <rect x="412" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="426" y="97" class="dg-n" text-anchor="middle">4</text>
+            <rect x="444" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="458" y="97" class="dg-n" text-anchor="middle">1</text>
+            <rect x="476" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="490" y="97" class="dg-n" text-anchor="middle">2</text>
+            <rect x="508" y="76" width="28" height="32" rx="3" class="dg-cell hit"/>
+            <text x="522" y="97" class="dg-n" text-anchor="middle">5</text>
+            <rect x="540" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="554" y="97" class="dg-n" text-anchor="middle">4</text>
+            <rect x="572" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="586" y="97" class="dg-n" text-anchor="middle">1</text>
+            <rect x="604" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="618" y="97" class="dg-n" text-anchor="middle">2</text>
+            <rect x="636" y="76" width="28" height="32" rx="3" class="dg-cell"/>
+            <text x="650" y="97" class="dg-n" text-anchor="middle">3</text>
+            <rect x="668" y="76" width="28" height="32" rx="3" class="dg-cell hit"/>
+            <text x="682" y="97" class="dg-n" text-anchor="middle">5</text>
+            <text x="380" y="150" class="dg-ok">новый сервер 5 забрал 20% слотов</text>
+            <text x="380" y="168" class="dg-n">слот ключа не меняется никогда,</text>
+            <text x="380" y="186" class="dg-n">меняется только таблица «слот → сервер»</text>
+          </svg>
+        </div>
+        <figcaption>Переносить приходится долю данных, равную доле нового сервера, — меньше нельзя. Отображение с этим свойством называют согласованным.</figcaption>
+      </figure>
+      <p>При <code>hash mod N</code> номер шарда зависит от числа серверов, и переход с 4 на 5 меняет его у 80 % ключей: переносить приходится почти все данные. Consistent hashing размещает серверы и ключи на кольце хешей, и ключ принадлежит ближайшему серверу по часовой стрелке; новый сервер забирает только свои участки — 20 %. Подробно кольцо разобрано в <a href="consistent-hashing.html">Consistent Hashing</a>. Практичнее для баз — фиксированное большое число виртуальных шардов: ключ раз и навсегда отображается в один из 1024 слотов, а слоты распределены по серверам таблицей. Новый сервер забирает пятую часть слотов, и переносятся только они. Так устроены Redis Cluster с 16 384 слотами, Vitess и Citus.</p>
+      <p>Сам перенос — отдельная операция: скопировать данные слота на новый сервер, догнать изменения через логическую репликацию или CDC, на короткое время заблокировать запись в слот, переключить таблицу маршрутизации. Таблица «слот → сервер» живёт в конфигурационном сервисе, и все приложения должны видеть её согласованно.</p>
+    </section>
+
+    <section class="step" id="cross">
+      <h2>Между шардами нет транзакций, уникальности и соединений</h2>
+      <table class="mx">
+        <thead><tr><th>Что ломается</th><th>Почему</th><th>Что делают</th></tr></thead>
+        <tbody>
+          <tr><td>Транзакция через два шарда</td><td>Два независимых коммита</td><td>Держать транзакции внутри шарда; иначе сага или 2PC</td></tr>
+          <tr><td>Уникальность email</td><td>Каждый шард проверяет только себя</td><td>Отдельная таблица уникальных значений, шардированная по самому значению</td></tr>
+          <tr><td>Последовательности id</td><td>У каждого шарда своя</td><td>UUIDv7, Snowflake-подобные id с номером шарда</td></tr>
+          <tr><td>JOIN с данными другого шарда</td><td>Данные на разных серверах</td><td>Справочники копировать на все шарды; остальное — в приложении</td></tr>
+          <tr><td>Отчёты по всем данным</td><td>Scatter-gather на каждый отчёт</td><td>CDC в аналитическое хранилище</td></tr>
+        </tbody>
+      </table>
+      <p>Перевод между счетами разных магазинов — классический пример: списание на одном шарде и зачисление на другом не могут быть одной транзакцией. Его делают сагой с компенсацией или через промежуточный счёт, как разобрано в <a href="dist-tx.html">Distributed Transactions</a>. Справочники, которые нужны всем шардам, — валюты, тарифы, — реплицируют целиком на каждый шард, и соединения с ними остаются локальными.</p>
+      <div class="trap">
+        <p class="myth">Шардирование по hash(id) mod N — простое и достаточное решение.</p>
+        <p class="fact">Оно работает, пока число шардов не меняется: переход с 4 на 5 переносит 80 % данных. Ключ id случайной сущности ещё и разносит связанные данные по разным шардам, превращая обычные транзакции и запросы в распределённые. Нужны ключ по сущности, вокруг которой идут транзакции, и виртуальные шарды или consistent hashing.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Шардирование — последнее средство после вертикального роста, реплик, секций и архивирования; Citus и Vitess берут часть сложности на себя.</li>
+        <li>Ключ — сущность, вокруг которой идут запросы и транзакции; неравномерный ключ даёт горячий шард (47,5 % у шарда крупного магазина).</li>
+        <li>hash mod N переносит 80 % ключей при росте 4 → 5; кольцо и 1024 виртуальных шарда — 20 %.</li>
+        <li>Через шарды нет атомарных транзакций, глобальной уникальности, последовательностей и JOIN; саги, UUIDv7, копии справочников, CDC для отчётов.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="shard-key" data-freq="3">
+      <h3>Как выбрать ключ шардирования?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По основным запросам и транзакциям: ключ должен быть в большинстве запросов, чтобы они шли на один шард, и объединять данные, которые меняются вместе, чтобы транзакции оставались локальными. И он должен распределять данные и нагрузку равномерно. Для платежей — магазин или счёт, а не id платежа.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Горячий ключ перегружает шард; помогают составной ключ или выделенный шард через справочник.</li>
+            <li>Запросы без ключа — scatter-gather на все шарды; их выносят в аналитическое хранилище.</li>
+            <li>Сменить ключ шардирования потом — почти переписать систему.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="shard-reshard" data-freq="2">
+      <h3>Как добавить шард и не перенести все данные?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Не использовать hash mod N: он меняет шард почти у всех ключей. Использовать consistent hashing или фиксированное большое число виртуальных шардов с таблицей «слот → сервер»: новый сервер забирает только свою долю слотов. Перенос слота — копирование, догонка изменений репликацией, короткая блокировка записи и переключение маршрутизации.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В демо: mod N — 80 % ключей, кольцо и 1024 слота — 20 %.</li>
+            <li>Таблица маршрутизации должна обновляться согласованно у всех клиентов.</li>
+            <li>Redis Cluster, Vitess и Citus используют виртуальные шарды.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой схемой шардирования?</summary>
+          <pre><code class="language-java">int shard = Math.abs(payment.getId().hashCode()) % shards.size();
+DataSource ds = shards.get(shard);
+// переводы между счетами: debit на шарде одного платежа, credit — другого, в двух транзакциях</code></pre>
+          <p>Шард зависит от числа серверов — добавление шарда перенесёт почти все данные. Ключ — id платежа, поэтому платежи одного магазина разбросаны, и любые запросы по магазину идут на все шарды. Math.abs(Integer.MIN_VALUE) отрицателен, и индекс станет отрицательным. Перевод в двух независимых транзакциях может списать без зачисления. Нужны ключ по счёту или магазину, виртуальные шарды и сага или промежуточный счёт для межшардовых переводов.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="shard-vs-part" data-freq="2">
+      <h3>Чем шардирование отличается от секционирования?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Секционирование делит таблицу на части внутри одного сервера базы: транзакции, ограничения и запросы работают как обычно, база сама выбирает секции. Шардирование распределяет данные по разным серверам: масштабирует запись и объём, но транзакции, уникальность и соединения между шардами становятся задачей приложения или промежуточного слоя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Секционирование решает управление данными и размер индексов, шардирование — предел одного сервера.</li>
+            <li>Citus совмещает: распределённые таблицы по шардам на разных узлах с SQL поверх.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 6 — основа урока: ключи, перебалансировка, вторичные индексы, маршрутизация.</li>
+      <li><a href="https://vitess.io/docs/concepts/">Vitess: Concepts</a> и <a href="https://docs.citusdata.com/">Citus documentation</a> — готовое шардирование для MySQL и PostgreSQL.</li>
+      <li>Karger et al., «Consistent Hashing and Random Trees» — исходная работа о согласованном хешировании.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
