@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Schema Migrations · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="db-migrations">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Schema Migrations</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Миграции — версионированные скрипты изменения схемы, которые Flyway или Liquibase применяют по порядку и записывают в таблицу истории. Без простоя их делают по схеме «расширить — сократить»: сначала добавить новое так, чтобы работали и старая, и новая версия приложения, затем переключить код, и только потом удалить старое. Опасны не сами изменения, а блокировки: некоторые ALTER переписывают таблицу под эксклюзивной блокировкой, обычный CREATE INDEX останавливает запись. У большинства есть безопасные варианты: <code>CREATE INDEX CONCURRENTLY</code>, ограничения с <code>NOT VALID</code> и отдельной проверкой, <code>lock_timeout</code> с повтором.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Добавление колонки остановило платежи на секунду, а переименование сломало старые поды</h2>
+      <p>Миграция добавила в таблицу платежей колонку <code>created_at</code> со значением по умолчанию <code>clock_timestamp()</code>. На проде с сотнями миллионов строк это заняло минуты, и всё это время ни один платёж не записался. В другой раз колонку <code>amount</code> переименовали в <code>amount_minor</code>: миграция прошла мгновенно, но поды старой версии, которые ещё не обновились при выкатке, начали падать на каждом запросе.</p>
+      <p>Тема разбирает, как устроены инструменты миграций, как менять схему без простоя при выкатке и какие команды PostgreSQL берут опасные блокировки. Очередь блокировок за ожидающим ALTER и <code>lock_timeout</code> — в <a href="db-locks.html">Locks</a>, выкатка нескольких версий приложения — в <a href="deploy-strategies.html">Deployment Strategies</a>. Демо <a href="../examples/db-tx/MigrationDemo.java">MigrationDemo.java</a> выполняет каждое изменение на таблице из трёх миллионов платежей в PostgreSQL 17, а в соседнем соединении всё это время вставляет платежи и меряет самое долгое ожидание вставки.</p>
+    </section>
+
+    <section class="step" id="tools">
+      <h2>Flyway и Liquibase применяют скрипты по порядку и помнят, что уже применено</h2>
+      <pre><code class="language-text">db/migration/
+  V1__create_payment.sql
+  V2__add_currency.sql
+  V3__index_payment_merchant.sql</code></pre>
+      <p>Flyway при старте приложения или в отдельном шаге выкатки сравнивает файлы в каталоге с таблицей <code>flyway_schema_history</code> и применяет недостающие по номеру версии. Для каждого применённого скрипта хранится контрольная сумма: изменить уже применённый файл нельзя, Flyway откажется стартовать. Ошибку исправляют новой миграцией. Liquibase делает то же через changelog с наборами изменений и умеет описывать их в XML или YAML независимо от базы.</p>
+      <p>В PostgreSQL DDL транзакционный, и Flyway выполняет каждую миграцию в транзакции: упавшая миграция откатывается целиком. Исключение — команды, которые нельзя выполнять в транзакции, как <code>CREATE INDEX CONCURRENTLY</code>: такую миграцию помечают как нетранзакционную (<code>executeInTransaction=false</code> в Flyway, <code>runInTransaction="false"</code> в Liquibase) и держат в ней одну команду. Если в кластере несколько подов, миграции запускает один — отдельным Job перед выкаткой или с блокировкой, которую инструменты берут в базе сами.</p>
+    </section>
+
+    <section class="step" id="locks">
+      <h2>Опасна не операция, а блокировка, которую она держит</h2>
+      <pre class="out">== add column, constant default:    DDL     2 ms, worst concurrent insert     2 ms
+== add column, volatile default:    DDL  1034 ms, worst concurrent insert  1018 ms
+== create index:                    DDL   408 ms, worst concurrent insert   401 ms
+== create index concurrently:       DDL   616 ms, worst concurrent insert     7 ms
+== set not null (full scan):        DDL    90 ms, worst concurrent insert    88 ms
+== add check not valid:             DDL     2 ms, worst concurrent insert     2 ms
+== validate constraint:             DDL    92 ms, worst concurrent insert     5 ms
+== set not null (uses valid check): DDL     1 ms, worst concurrent insert     2 ms</pre>
+      <p>Колонка с константным умолчанием добавилась за 2 мс: с PostgreSQL 11 значение хранится в каталоге, и строки не переписываются. С <code>clock_timestamp()</code> значение своё у каждой строки, и база переписала всю таблицу под <code>ACCESS EXCLUSIVE</code>: вставка ждала целую секунду на трёх миллионах строк, на сотнях миллионов — минуты. Безопасно добавить колонку без умолчания или с константой и заполнить её пачками отдельно.</p>
+      <p>Обычный <code>CREATE INDEX</code> держит блокировку, запрещающую запись, всё время построения: 400 мс здесь, часы на большой таблице. <code>CONCURRENTLY</code> строит индекс в несколько проходов, не мешая записи, — дольше по времени, но вставка ждала 7 мс. Если такое построение упадёт, остаётся невалидный индекс, который нужно удалить и создать заново. <code>SET NOT NULL</code> проверяет всю таблицу под эксклюзивной блокировкой. Обходной путь — <code>CHECK (amount is not null) NOT VALID</code>, который проверяет только новые строки, затем <code>VALIDATE CONSTRAINT</code> с лёгкой блокировкой, не мешающей записи, и после этого <code>SET NOT NULL</code> мгновенный: PostgreSQL видит действующий CHECK и не сканирует таблицу. Так же через <code>NOT VALID</code> добавляют внешние ключи.</p>
+      <p>Даже мгновенным командам нужна эксклюзивная блокировка, и они ждут долгие запросы, выстраивая за собой очередь — эффект, разобранный в <a href="db-locks.html">Locks</a>. Поэтому каждую миграцию запускают с <code>SET lock_timeout = '2s'</code> и повторяют при неудаче.</p>
+    </section>
+
+    <section class="step" id="expand-contract">
+      <h2>Переименование без простоя — четыре выкатки, а не одна миграция</h2>
+      <p>Во время выкатки старая и новая версии приложения работают одновременно, и схема должна подходить обеим. Переименование колонки ломает старую версию мгновенно. Поэтому его делают по схеме «расширить — сократить»:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Шаг 1: добавить колонку amount_minor, триггер или код пишет в обе. Шаг 2: заполнить старые строки пачками. Шаг 3: новая версия приложения читает и пишет amount_minor, старая ещё работает. Шаг 4: после выкатки удалить amount и двойную запись.">
+            <rect x="20" y="40" width="200" height="110" rx="9" class="dg-box"/>
+            <text x="120" y="62" class="dg-in" text-anchor="middle">таблица payment</text>
+            <rect x="34" y="74" width="172" height="26" rx="4" class="dg-cell"/>
+            <text data-s="-3" x="44" y="92" class="dg-n">amount</text>
+            <text data-s="4" x="44" y="92" class="dg-bad">amount удалена</text>
+            <rect data-s="1-" x="34" y="110" width="172" height="26" rx="4" class="dg-cell hit"/>
+            <text data-s="1" x="44" y="128" class="dg-ok">amount_minor (пусто)</text>
+            <text data-s="2-" x="44" y="128" class="dg-ok">amount_minor</text>
+            <rect x="300" y="40" width="180" height="50" rx="9" class="dg-box"/>
+            <text x="390" y="62" class="dg-in" text-anchor="middle">версия 1</text>
+            <text data-s="-2" x="390" y="80" class="dg-n" text-anchor="middle">читает amount</text>
+            <text data-s="3" x="390" y="80" class="dg-n" text-anchor="middle">ещё работает</text>
+            <text data-s="4" x="390" y="80" class="dg-n" text-anchor="middle">выключена</text>
+            <rect data-s="3-" x="300" y="110" width="180" height="50" rx="9" class="dg-box"/>
+            <text data-s="3-" x="390" y="132" class="dg-in" text-anchor="middle">версия 2</text>
+            <text data-s="3-" x="390" y="150" class="dg-ok" text-anchor="middle">читает amount_minor</text>
+            <text data-s="1-3" x="510" y="90" class="dg-n">запись в обе колонки:</text>
+            <text data-s="1-3" x="510" y="108" class="dg-n">триггер или код</text>
+            <text data-s="2" x="510" y="138" class="dg-n">update ... where id</text>
+            <text data-s="2" x="510" y="156" class="dg-n">between пачками</text>
+            <text data-s="1" x="20" y="196" class="dg-t">Расширить: новая колонка, запись в обе.</text>
+            <text data-s="2" x="20" y="196" class="dg-t">Заполнить старые строки пачками, без долгих транзакций.</text>
+            <text data-s="3" x="20" y="196" class="dg-ok">Выкатить код, который читает новую колонку; старый ещё работает.</text>
+            <text data-s="4" x="20" y="196" class="dg-ok">Сократить: удалить старую колонку и двойную запись.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Миграция добавляет amount_minor без умолчания. Триггер или код старой версии пишет значение в обе колонки, чтобы новые строки сразу были заполнены.</li>
+          <li>Отдельная задача заполняет старые строки пачками по несколько тысяч в своих транзакциях, чтобы не держать горизонт VACUUM и блокировки.</li>
+          <li>Выкатывается версия, которая читает и пишет amount_minor. Пока идёт выкатка, старые поды продолжают работать с amount, и обе колонки согласованы.</li>
+          <li>Когда старых подов не осталось и откат не нужен, отдельная миграция удаляет amount и двойную запись.</li>
+        </ol>
+      </figure>
+      <p>Каждый шаг совместим с соседними версиями приложения, и любой можно откатить, кроме последнего. Тот же принцип для любых несовместимых изменений: смена типа колонки, разделение таблицы, новое обязательное поле. Обязательность новой колонки включают в самом конце, через <code>NOT VALID</code> и <code>VALIDATE</code>, когда все версии кода её заполняют. Удаление колонки тоже двухшаговое: сначала код перестаёт её использовать — а JPA-сущность перестаёт её упоминать, — и только потом миграция её удаляет.</p>
+      <div class="trap">
+        <p class="myth">Миграция, выполнившаяся за миллисекунды на тестовой базе, безопасна для прода.</p>
+        <p class="fact">Время на тестовой базе ничего не говорит о блокировках на проде. В демо добавление колонки с clock_timestamp() на трёх миллионах строк держало вставку секунду, а на сотнях миллионов — минуты; мгновенная команда может часами стоять в очереди за долгим запросом. Проверяют тип блокировки и переписывание таблицы, а запускают с lock_timeout.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Flyway и Liquibase применяют версионированные скрипты по порядку; применённое не меняют, исправляют новой миграцией.</li>
+        <li>Константное умолчание — 2 мс, volatile — переписывание таблицы и секунда ожидания записи.</li>
+        <li>CREATE INDEX блокирует запись (401 мс), CONCURRENTLY — нет (7 мс), но не в транзакции.</li>
+        <li>SET NOT NULL без сканирования: CHECK NOT VALID, VALIDATE, затем SET NOT NULL за 1 мс.</li>
+        <li>Несовместимые изменения — expand-contract в несколько выкаток; каждая миграция с lock_timeout и повтором.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="mig-zero-downtime" data-freq="3">
+      <h3>Как переименовать колонку или изменить схему без простоя?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По схеме expand-contract: добавить новую колонку, писать в обе (триггером или кодом), заполнить старые строки пачками, выкатить код, который читает новую, и только после полной выкатки удалить старую. На каждом шаге схема совместима и со старой, и с новой версией приложения, которые работают одновременно во время выкатки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Заполнение — пачками в коротких транзакциях, чтобы не держать горизонт VACUUM и блокировки.</li>
+            <li>Обязательность включают в конце через CHECK NOT VALID и VALIDATE.</li>
+            <li>Удаление колонки — после того как ни одна версия кода её не упоминает.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="mig-locks" data-freq="2">
+      <h3>Какие DDL-операции опасны на большой таблице PostgreSQL и как их заменить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>ADD COLUMN с volatile-умолчанием и смена типа колонки переписывают таблицу под ACCESS EXCLUSIVE. CREATE INDEX блокирует запись на всё время построения — заменяют на CREATE INDEX CONCURRENTLY. SET NOT NULL, новые CHECK и внешние ключи сканируют таблицу под блокировкой — заменяют на NOT VALID и отдельный VALIDATE. Любая DDL с эксклюзивной блокировкой встаёт в очередь за долгими запросами — запускают с lock_timeout и повтором.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>ADD COLUMN с константным умолчанием мгновенный с PostgreSQL 11.</li>
+            <li>Упавший CONCURRENTLY оставляет невалидный индекс; его удаляют и строят заново.</li>
+            <li>CONCURRENTLY нельзя в транзакции: в Flyway и Liquibase такую миграцию делают нетранзакционной.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что опасного в этой миграции для таблицы на 500 млн строк?</summary>
+          <pre><code class="language-sql">-- V42__payment_improvements.sql
+alter table payment add column created_at timestamptz not null default now();
+alter table payment alter column amount type numeric(19,2);
+create index on payment(created_at);
+alter table payment add constraint fk_merchant foreign key (merchant_id) references merchant(id);</code></pre>
+          <p>now() — стабильная функция, и колонка добавится мгновенно, но смена типа amount переписывает всю таблицу под ACCESS EXCLUSIVE, обычный CREATE INDEX блокирует запись на время построения, а внешний ключ без NOT VALID сканирует таблицу под блокировкой. Всё в одной транзакции — блокировки держатся до конца. Нужно разнести на отдельные миграции: тип менять через новую колонку по expand-contract, индекс — CONCURRENTLY в нетранзакционной миграции, внешний ключ — NOT VALID и VALIDATE; все с lock_timeout.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mig-tools" data-freq="2">
+      <h3>Как работают Flyway и Liquibase?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Хранят историю применённых миграций в служебной таблице и при запуске применяют недостающие по порядку версий. Flyway работает с SQL-файлами V1__…, V2__… и проверяет контрольные суммы применённых; Liquibase — с changelog и changeSet, может описывать изменения независимо от базы и откатывать их. Изменять уже применённую миграцию нельзя — исправляют новой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Миграции запускает один экземпляр: Job перед выкаткой или встроенная блокировка инструмента.</li>
+            <li>В PostgreSQL миграция идёт в транзакции и откатывается целиком при ошибке.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/sql-altertable.html">PostgreSQL 17: ALTER TABLE</a> — основа урока: какие подкоманды переписывают таблицу и какие блокировки берут.</li>
+      <li><a href="https://documentation.red-gate.com/fd">Flyway documentation</a> и <a href="https://docs.liquibase.com/">Liquibase documentation</a>.</li>
+      <li><a href="https://www.postgresql.org/docs/17/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY">CREATE INDEX CONCURRENTLY</a>.</li>
+      <li><a href="https://martinfowler.com/bliki/ParallelChange.html">Martin Fowler: Parallel Change</a> — expand и contract.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

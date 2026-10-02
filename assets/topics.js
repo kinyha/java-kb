@@ -229,7 +229,7 @@ window.KB_TREE = [
       { id: 'schema', title: 'Schema', items: [
         { id: 'data-modeling', freq: 2, status: 'empty', title: 'Normalization & Keys',
           scope: 'нормальные формы, денормализация, суррогатный и натуральный ключ, связи, constraints' },
-        { id: 'db-migrations', freq: 2, status: 'empty', title: 'Schema Migrations',
+        { id: 'db-migrations', freq: 2, status: 'draft', title: 'Schema Migrations',
           scope: 'Liquibase и Flyway, миграции без простоя, expand и contract, блокировки при ALTER' },
       ] },
       { id: 'tx', title: 'Transactions', source: 'PostgreSQL изнутри, ч. I и III; DDIA, гл. Transactions', items: [
