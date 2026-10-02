@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ACID &amp; Isolation · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="db-tx">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>ACID &amp; Isolation</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Транзакция обещает четыре вещи: всё или ничего, сохранность инвариантов, независимость от параллельных транзакций и сохранность после коммита. Слабее всего на практике изоляция: уровень по умолчанию в PostgreSQL — READ COMMITTED, и на нём «прочитать, посчитать, записать» теряет чужие изменения. REPEATABLE READ в PostgreSQL даёт снимок данных на всю транзакцию и отклоняет конфликтующее обновление ошибкой 40001, но пропускает write skew — когда две транзакции читают одно и то же, а пишут в разные строки. Только SERIALIZABLE ловит и его. Всё, что выше READ COMMITTED, требует повторять транзакцию при ошибке сериализации.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Два списания с одного счёта прошли оба, а правило «один дежурный на смене» нарушили два честных запроса</h2>
+      <p>Сервис счетов списывает деньги так: прочитать баланс, проверить, что хватает, записать новый. Две параллельные операции на 30 и 50 со счёта со 100 оставили на нём 50, а не 20: одно списание потерялось. В соседнем сервисе выплат действует правило: крупную выплату ведёт хотя бы один дежурный. Два дежурных одновременно ушли со смены — каждый проверил, что второй остаётся, — и выплата осталась без ответственного. Обе транзакции в каждом случае были корректны сами по себе.</p>
+      <p>Это аномалии изоляции, и тема разбирает их на настоящем PostgreSQL 17: что видит транзакция, какие изменения могут потеряться и какой уровень что гарантирует. Блокировки строк и <code>SELECT FOR UPDATE</code> — в <a href="db-locks.html">Locks</a>, внутреннее устройство снимков — в <a href="mvcc.html">MVCC</a>, транзакции в Spring — в <a href="spring-tx.html">Transactions</a>. Демо <a href="../examples/db-tx/IsolationDemo.java">IsolationDemo.java</a> ведёт две транзакции в двух соединениях JDBC строго по шагам.</p>
+    </section>
+
+    <section class="step" id="acid">
+      <h2>ACID — это четыре разных обещания, и изоляция среди них самое гибкое</h2>
+      <table class="mx">
+        <thead><tr><th>Буква</th><th>Обещание</th><th>Как обеспечено в PostgreSQL</th></tr></thead>
+        <tbody>
+          <tr><td>Atomicity</td><td>Либо все изменения транзакции, либо ни одного</td><td>Версии строк, видимость по статусу транзакции</td></tr>
+          <tr><td>Consistency</td><td>Инварианты данных сохраняются</td><td>Constraints, внешние ключи — и логика приложения</td></tr>
+          <tr><td>Isolation</td><td>Параллельные транзакции не мешают друг другу</td><td>Снимки MVCC, блокировки, SSI — по уровню изоляции</td></tr>
+          <tr><td>Durability</td><td>Закоммиченное переживает сбой</td><td>WAL сбрасывается на диск до ответа на COMMIT</td></tr>
+        </tbody>
+      </table>
+      <p>Consistency в ACID — свойство приложения больше, чем базы: база проверит <code>check (balance &gt;= 0)</code>, но правило «хотя бы один дежурный на выплате» она не знает. Изоляция настраивается: полная — дорого, поэтому базы предлагают уровни, каждый из которых допускает определённые аномалии. Стандарт SQL описывает их через три явления — грязное чтение, неповторяемое чтение, фантом, — но в реальности важнее два других: потерянное обновление и write skew.</p>
+    </section>
+
+    <section class="step" id="reads">
+      <h2>READ COMMITTED видит чужие коммиты посреди транзакции, REPEATABLE READ — нет</h2>
+      <p>Транзакция A читает баланс, транзакция B меняет его и коммитит, A читает снова. Отчёт A считает сумму счетов, B добавляет новый счёт, A пересчитывает:</p>
+      <pre class="out">== non-repeatable read, READ COMMITTED: A read 100, then 40
+== non-repeatable read, REPEATABLE READ: A read 100, then 100
+== phantom, READ COMMITTED: report saw 2 accounts / 300, then 3 accounts / 800
+== phantom, REPEATABLE READ: report saw 2 accounts / 300, then 2 accounts / 300</pre>
+      <p>На READ COMMITTED каждый запрос видит данные, закоммиченные к его началу. Поэтому в одной транзакции два чтения дали 100 и 40, а отчёт посчитал сначала два счёта, потом три: неповторяемое чтение и фантом. Отчёт, который берёт итог из одного запроса, а детали из другого, на этом уровне может не сойтись сам с собой. На REPEATABLE READ транзакция видит снимок данных на момент первого запроса, и оба чтения согласованы. В PostgreSQL этот уровень — изоляция снимков (snapshot isolation), и фантомов на нём нет, хотя стандарт их допускает. Грязного чтения в PostgreSQL нет вовсе: READ UNCOMMITTED работает как READ COMMITTED.</p>
+    </section>
+
+    <section class="step" id="lost-update">
+      <h2>«Прочитать, посчитать, записать» теряет чужое обновление на READ COMMITTED</h2>
+      <pre><code class="language-java">long ba = balance(a), bb = balance(b);                                    // Оба прочитали 100.
+a.executeUpdate("update account set balance = " + (ba - 30) + " ...");  a.commit();
+b.executeUpdate("update account set balance = " + (bb - 50) + " ...");  b.commit();
+
+// Атомарно: база сама читает текущее значение под блокировкой строки.
+update account set balance = balance - 50 where id = 'acc-1';</code></pre>
+      <pre class="out">== lost update, READ COMMITTED: B committed; balance 50 (expected 20)
+== lost update, REPEATABLE READ: B failed: 40001 ERROR: could not serialize access due to concurrent update; balance 70 (expected 20)
+== atomic update balance = balance - x, READ COMMITTED: balance 20</pre>
+      <p>На READ COMMITTED B записал 100 − 50, вычисленное по старому значению, и затёр списание A: итог 50 вместо 20. Это и есть история с двумя списаниями. На REPEATABLE READ PostgreSQL обнаружил, что строку изменила транзакция, закоммиченная после начала снимка B, и отклонил обновление ошибкой 40001. Данные целы — 70 после списания A, — но B должна повторить транзакцию с начала, иначе её списание пропадёт. Атомарное <code>balance = balance - 50</code> решает задачу без смены уровня: второй UPDATE ждёт блокировку строки, затем перечитывает актуальное значение и вычитает из него. Когда атомарный UPDATE невозможен — проверка сложнее одного выражения, — используют <code>SELECT ... FOR UPDATE</code> или оптимистичную версию, как в <a href="db-locks.html">Locks</a>.</p>
+    </section>
+
+    <section class="step" id="write-skew">
+      <h2>Write skew проходит через снимок: две транзакции читают одно, а пишут разное</h2>
+      <p>Правило: выплату po-1 ведёт хотя бы один дежурный. Анна и Борис одновременно решают уйти со смены. Каждый проверяет, сколько дежурных, видит двоих и снимает с дежурства себя:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Транзакции A и B читают два дежурных из одного снимка. A снимает с дежурства Анну, B — Бориса. Они изменяют разные строки, поэтому на REPEATABLE READ конфликта нет, и обе коммитятся: дежурных ноль. SERIALIZABLE замечает зависимость чтения и записи и отклоняет B.">
+            <rect x="20" y="30" width="150" height="60" rx="9" class="dg-box"/>
+            <rect x="20" y="130" width="150" height="60" rx="9" class="dg-box"/>
+            <text x="95" y="56" class="dg-in" text-anchor="middle">A (Анна)</text>
+            <text x="95" y="156" class="dg-in" text-anchor="middle">B (Борис)</text>
+            <text data-s="1" x="95" y="76" class="dg-n" text-anchor="middle">видит 2 дежурных</text>
+            <text data-s="1" x="95" y="176" class="dg-n" text-anchor="middle">видит 2 дежурных</text>
+            <rect x="300" y="50" width="200" height="120" rx="9" class="dg-box"/>
+            <text x="400" y="72" class="dg-in" text-anchor="middle">payout_approval</text>
+            <rect x="314" y="84" width="172" height="30" rx="5" class="dg-cell"/>
+            <rect x="314" y="124" width="172" height="30" rx="5" class="dg-cell"/>
+            <text data-s="-1" x="324" y="104" class="dg-n">anna on_duty</text>
+            <text data-s="-1" x="324" y="144" class="dg-n">boris on_duty</text>
+            <text data-s="2-" x="324" y="104" class="dg-bad">anna off</text>
+            <text data-s="2-3" x="324" y="144" class="dg-bad">boris off</text>
+            <text data-s="4" x="324" y="144" class="dg-ok">boris on_duty</text>
+            <path data-s="2-" d="M170 60 C 240 60, 250 99, 310 99" class="dg-line" fill="none"/>
+            <path data-s="2-3" d="M170 160 C 240 160, 250 139, 310 139" class="dg-line" fill="none"/>
+            <rect data-s="3" x="516" y="80" width="196" height="60" rx="9" class="dg-cell miss"/>
+            <text data-s="3" x="526" y="104" class="dg-bad">REPEATABLE READ:</text>
+            <text data-s="3" x="526" y="124" class="dg-bad">оба коммита, 0 дежурных</text>
+            <rect data-s="4" x="516" y="80" width="196" height="60" rx="9" class="dg-cell hit"/>
+            <text data-s="4" x="526" y="104" class="dg-ok">SERIALIZABLE:</text>
+            <text data-s="4" x="526" y="124" class="dg-ok">B → 40001, 1 дежурный</text>
+            <text data-s="1" x="20" y="212" class="dg-t">Обе транзакции читают одно и то же из своих снимков.</text>
+            <text data-s="2" x="20" y="212" class="dg-t">Каждая меняет свою строку: конфликта записи нет.</text>
+            <text data-s="3" x="20" y="212" class="dg-bad">Снимки не пересекаются по записи — инвариант нарушен.</text>
+            <text data-s="4" x="20" y="212" class="dg-ok">SSI видит, что B читала то, что изменила A, и отклоняет B.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Обе транзакции читают дежурных по po-1 и видят двоих: Анна и Борис.</li>
+          <li>A снимает с дежурства Анну, B — Бориса. Строки разные, поэтому проверка конфликтующих обновлений, которая спасала от потерянного обновления, молчит.</li>
+          <li>На REPEATABLE READ обе транзакции коммитятся. Каждая была корректна по своему снимку, а вместе они оставили выплату без дежурного.</li>
+          <li>На SERIALIZABLE PostgreSQL отслеживает, какие данные транзакция читала, и видит цикл зависимостей: B читала строку, которую изменила A, и наоборот. Вторая отклоняется ошибкой 40001.</li>
+        </ol>
+      </figure>
+      <pre class="out">== write skew, REPEATABLE READ: both committed; on duty now 0
+== write skew, SERIALIZABLE: B failed: 40001 ERROR: could not serialize access due to read/write dependencies among transactions; on duty now 1</pre>
+      <p>Write skew — это аномалия изоляции снимков: решение принимается по прочитанному, а пишется в другое место. Типичные случаи — двойная бронь, лимит на сумму операций, уникальность, которую нельзя выразить индексом. Защиты три. SERIALIZABLE в PostgreSQL реализован как Serializable Snapshot Isolation: снимки плюс отслеживание зависимостей чтения и записи, без блокировок чтения. Явная блокировка тех строк, на которых строится решение: <code>SELECT ... FOR UPDATE</code> по обоим дежурным. Или превращение правила в ограничение базы, если это возможно: уникальный индекс, exclusion constraint.</p>
+    </section>
+
+    <section class="step" id="levels">
+      <h2>Уровень выбирают по аномалиям, а ошибки сериализации повторяют</h2>
+      <table class="mx">
+        <thead><tr><th>PostgreSQL 17</th><th>Неповторяемое чтение</th><th>Фантом</th><th>Потерянное обновление</th><th>Write skew</th></tr></thead>
+        <tbody>
+          <tr><td>READ COMMITTED</td><td>Да</td><td>Да</td><td>Да</td><td>Да</td></tr>
+          <tr><td>REPEATABLE READ</td><td>Нет</td><td>Нет</td><td>Ошибка 40001</td><td>Да</td></tr>
+          <tr><td>SERIALIZABLE</td><td>Нет</td><td>Нет</td><td>Ошибка 40001</td><td>Ошибка 40001</td></tr>
+        </tbody>
+      </table>
+      <pre class="out">== default isolation: read committed (PostgreSQL 17.11)</pre>
+      <p>Значения по умолчанию у баз разные: READ COMMITTED в PostgreSQL, Oracle и SQL Server, REPEATABLE READ в MySQL InnoDB, причём поведение одноимённых уровней тоже разное. REPEATABLE READ в MySQL читает из снимка, но <code>UPDATE</code> и <code>SELECT ... FOR UPDATE</code> работают с последней версией строки, и потерянное обновление там не отклоняется ошибкой, как в PostgreSQL. Поэтому опираются не на название уровня, а на проверенное поведение конкретной базы.</p>
+      <p>Уровни выше READ COMMITTED отвечают на конфликт ошибкой, а не ожиданием, и приложение обязано повторить транзакцию целиком: заново прочитать и заново принять решение. Повтор без перечитывания вернёт ту же ошибку или, хуже, запишет старое решение. В Spring это отдельная обёртка с повтором на <code>SQLState 40001</code> снаружи <code>@Transactional</code>-метода, а не внутри него. Цена SERIALIZABLE — больше откатов под нагрузкой и память на отслеживание чтений; его включают для транзакций, где инварианты зависят от прочитанного, а не на всё приложение.</p>
+      <div class="trap">
+        <p class="myth">REPEATABLE READ защищает от всех проблем параллельных транзакций, кроме фантомов.</p>
+        <p class="fact">В PostgreSQL REPEATABLE READ как раз не допускает фантомов, но пропускает write skew: в демо оба дежурных ушли со смены и обе транзакции закоммитились. А потерянное обновление он не предотвращает молча, а отклоняет ошибкой 40001, которую нужно обработать повтором.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>ACID: атомарность, инварианты, изоляция, долговечность через WAL; Consistency во многом на приложении.</li>
+        <li>READ COMMITTED видит чужие коммиты между запросами: 100, потом 40; 2 счёта, потом 3.</li>
+        <li>Чтение-расчёт-запись на READ COMMITTED потеряло списание (50 вместо 20); атомарный UPDATE дал 20; REPEATABLE READ — ошибка 40001.</li>
+        <li>Write skew проходит REPEATABLE READ (0 дежурных) и ловится SERIALIZABLE; альтернатива — FOR UPDATE или constraint.</li>
+        <li>Умолчания и поведение уровней различаются между базами; ошибки 40001 повторяют всей транзакцией.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="tx-levels" data-freq="3">
+      <h3>Какие есть уровни изоляции и от каких аномалий они защищают?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>READ UNCOMMITTED допускает грязное чтение; READ COMMITTED видит только закоммиченное, но разные запросы транзакции видят разные коммиты — неповторяемое чтение и фантомы. REPEATABLE READ фиксирует прочитанное; SERIALIZABLE гарантирует результат, как при последовательном выполнении. В PostgreSQL по умолчанию READ COMMITTED, REPEATABLE READ — снимок на всю транзакцию без фантомов, SERIALIZABLE — SSI.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стандартные три явления не описывают потерянное обновление и write skew, а именно они ломают бизнес-логику.</li>
+            <li>В PostgreSQL READ UNCOMMITTED работает как READ COMMITTED.</li>
+            <li>Одноимённые уровни в MySQL и PostgreSQL ведут себя по-разному; в MySQL умолчание — REPEATABLE READ.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tx-lost-update" data-freq="3">
+      <h3>Что такое lost update и как его избежать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Две транзакции читают одно значение, каждая вычисляет новое и записывает; вторая запись затирает первую. На READ COMMITTED это происходит молча. Решения: атомарный UPDATE с выражением (balance = balance - x), SELECT ... FOR UPDATE перед расчётом, оптимистичная блокировка по версии или REPEATABLE READ в PostgreSQL, который отклонит вторую запись ошибкой 40001.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ошибку 40001 обрабатывают повтором всей транзакции с перечитыванием.</li>
+            <li>В MySQL REPEATABLE READ потерянное обновление не отклоняет: UPDATE работает с последней версией строки.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим списанием?</summary>
+          <pre><code class="language-java">@Transactional
+public void charge(String accountId, long amount) {
+    Account acc = accounts.findById(accountId).orElseThrow();
+    if (acc.getBalance() &lt; amount) throw new InsufficientFunds();
+    acc.setBalance(acc.getBalance() - amount);
+    accounts.save(acc);
+}</code></pre>
+          <p>На READ COMMITTED по умолчанию два параллельных списания прочитают один баланс, оба пройдут проверку, и второе затрёт первое: деньги спишутся один раз, а операции пройдут обе, или баланс уйдёт в минус. Нужен атомарный update с условием (balance = balance - :x where balance &gt;= :x и проверка числа строк), SELECT FOR UPDATE при загрузке или @Version с повтором при конфликте.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="tx-write-skew" data-freq="2">
+      <h3>Что такое write skew и почему его пропускает snapshot isolation?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Две транзакции читают одни и те же данные, по ним принимают решения и пишут в разные строки. Конфликта записи нет, поэтому изоляция снимков пропускает обе, и вместе они нарушают инвариант: в демо оба дежурных ушли со смены. Защита — SERIALIZABLE, явная блокировка прочитанных строк через FOR UPDATE или ограничение базы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>SERIALIZABLE в PostgreSQL — SSI: отслеживает зависимости чтения и записи и отклоняет одну из транзакций цикла.</li>
+            <li>Если строк, которые надо заблокировать, ещё нет (двойная бронь), конфликт материализуют отдельной таблицей слотов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/transaction-iso.html">PostgreSQL 17: Transaction Isolation</a> — основа урока: уровни и их поведение в PostgreSQL.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 7 — потерянное обновление, write skew, snapshot isolation.</li>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть I — изоляция и снимки.</li>
+      <li><a href="https://www.microsoft.com/en-us/research/publication/a-critique-of-ansi-sql-isolation-levels/">Berenson et al.: A Critique of ANSI SQL Isolation Levels</a> — почему трёх явлений недостаточно.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
