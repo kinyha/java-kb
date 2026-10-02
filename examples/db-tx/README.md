@@ -13,6 +13,7 @@ java -cp "$(cat target/classpath.txt)" VacuumDemo.java
 java -cp "$(cat target/classpath.txt)" ArchitectureDemo.java   # перезапускает контейнер kb-pg ради пустого кеша
 java -cp "$(cat target/classpath.txt)" IndexDemo.java
 java -cp "$(cat target/classpath.txt)" QueryPlanDemo.java
+java -cp "$(cat target/classpath.txt)" IndexTypesDemo.java
 
 # SlowQueriesDemo нужен pg_stat_statements:
 docker rm -f kb-pg

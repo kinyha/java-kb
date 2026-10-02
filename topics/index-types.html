@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Index Types · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="index-types">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Index Types</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>B-tree отвечает на равенство, диапазон и сортировку, но не на всё. GIN — инвертированный индекс: для каждого элемента — ключа jsonb, слова, триграммы — список строк, где он встречается; он ищет вхождения и подстроки. GiST хранит обобщённые «рамки» и умеет пересечения диапазонов и геометрию, на нём строят exclusion constraint против пересекающихся броней. BRIN хранит только минимум и максимум на группу страниц и весит килобайты, но работает лишь там, где значения коррелируют с физическим порядком. Частичный индекс хранит только нужные строки, индекс по выражению — вычисленное значение.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Поиск по атрибутам платежа и по части email шёл полным проходом, а индекс по времени занял 20 ГБ</h2>
+      <p>Антифрод ищет платежи по атрибутам в jsonb: страна, канал, уровень риска. Поддержка ищет клиента по куску email. Обычные B-tree-индексы не помогли ни там, ни там. Таблица событий, куда только дописывают, получила B-tree по <code>created_at</code> размером с треть самой таблицы. А двум операторам удалось забронировать один и тот же терминал на пересекающееся время.</p>
+      <p>Тема разбирает типы индексов PostgreSQL помимо B-tree и случаи, когда каждый из них нужен. Основы и составные индексы — в <a href="indexes.html">Indexes</a>, write skew и двойные брони — в <a href="db-tx.html">ACID &amp; Isolation</a>. Демо <a href="../examples/db-tx/IndexTypesDemo.java">IndexTypesDemo.java</a> работает с PostgreSQL 17 в Docker на миллионе событий; строка вывода — узел доступа к таблице, прочитанные страницы и время.</p>
+    </section>
+
+    <section class="step" id="gin">
+      <h2>GIN — инвертированный индекс: для каждого элемента список строк</h2>
+      <pre><code class="language-sql">create index ev_attrs_gin on ev using gin (attrs jsonb_path_ops);
+select count(*) from ev where attrs @&gt; '{"country": "KZ", "risk": 3}';
+
+create extension pg_trgm;
+create index ev_email_trgm on ev using gin (email gin_trgm_ops);
+select count(*) from ev where email like '%r777@%';</code></pre>
+      <pre class="out">== jsonb containment attrs @&gt; {country: KZ, risk: 3}
+   Seq Scan on ev (actual rows=14286 loops=1); Buffers: shared hit=16254 read=988; Execution Time: 56.460 ms
+   Bitmap Heap Scan on ev (actual rows=14286 loops=1); Buffers: shared hit=8161 read=6183 written=6145; Execution Time: 25.160 ms
+== substring email like '%r777@%'
+   Seq Scan on ev (actual rows=20 loops=1); Buffers: shared hit=15857 read=1379 written=32; Execution Time: 40.227 ms
+   Bitmap Heap Scan on ev (actual rows=20 loops=1); Buffers: shared hit=44 read=13; Execution Time: 0.193 ms</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 170" role="img" aria-label="GIN хранит для каждого элемента список строк: country=KZ — строки 10, 20, 30…; risk=3 — строки 3, 10, 17…. Запрос с обоими условиями пересекает списки. Триграммы r77, 777, 77@ дают короткие списки, и их пересечение — двадцать строк.">
+            <text x="20" y="22" class="dg-cap">ЭЛЕМЕНТ → СПИСОК СТРОК</text>
+            <rect x="20" y="34" width="150" height="26" rx="4" class="dg-cell"/><text x="30" y="52" class="dg-in">country=KZ</text>
+            <rect x="180" y="34" width="250" height="26" rx="4" class="dg-cell"/><text x="190" y="52" class="dg-n">10, 20, 30, 40, … (100 000)</text>
+            <rect x="20" y="66" width="150" height="26" rx="4" class="dg-cell"/><text x="30" y="84" class="dg-in">risk=3</text>
+            <rect x="180" y="66" width="250" height="26" rx="4" class="dg-cell"/><text x="190" y="84" class="dg-n">3, 10, 17, 24, … (142 857)</text>
+            <rect x="460" y="50" width="240" height="26" rx="4" class="dg-cell hit"/><text x="470" y="68" class="dg-ok">пересечение: 14 286 строк</text>
+            <rect x="20" y="106" width="150" height="26" rx="4" class="dg-cell"/><text x="30" y="124" class="dg-in">«r77» «777» «77@»</text>
+            <rect x="180" y="106" width="250" height="26" rx="4" class="dg-cell"/><text x="190" y="124" class="dg-n">короткие списки</text>
+            <rect x="460" y="106" width="240" height="26" rx="4" class="dg-cell hit"/><text x="470" y="124" class="dg-ok">пересечение: 20 строк</text>
+            <text x="20" y="160" class="dg-s">Чем реже элементы, тем короче списки и тем сильнее выигрыш перед полным проходом.</text>
+          </svg>
+        </div>
+        <figcaption>B-tree хранит значение целиком; GIN раскладывает его на элементы, поэтому ищет вхождения и подстроки.</figcaption>
+      </figure>
+      <p>B-tree упорядочивает значения целиком и не знает, что внутри jsonb-документа или строки. GIN разбирает значение на элементы — пары путь-значение в jsonb, триграммы в тексте — и для каждого хранит список строк. Запрос на вхождение пересекает списки нужных элементов. Для поиска по атрибутам это 25 мс вместо 56: подходит 14 тысяч строк, полтора процента таблицы, и большую часть времени занимает чтение самих строк. Для подстроки в email эффект огромный — 0,19 мс вместо 40: триграммы <code>r77</code>, <code>777</code>, <code>77@</code> встречаются редко, и индекс сразу сужает поиск до двадцати строк.</p>
+      <p>Цена GIN — запись: одна строка добавляет записи для всех своих элементов. Чтобы вставки не тормозили, GIN копит изменения в списке ожидания (<code>fastupdate</code>) и вливает их пачкой, поэтому поиск сразу после массовой вставки бывает медленнее. Триграммный индекс большой: 34 МБ на колонку email миллиона строк. <code>jsonb_path_ops</code> компактнее стандартного класса для jsonb, но поддерживает только оператор вхождения <code>@&gt;</code>.</p>
+    </section>
+
+    <section class="step" id="brin">
+      <h2>BRIN хранит минимум и максимум на группу страниц и весит килобайты</h2>
+      <pre class="out">== time range on append-only table: btree vs brin
+   Bitmap Heap Scan on ev (actual rows=8640 loops=1); Buffers: shared hit=6 read=255 written=255; Execution Time: 1.016 ms
+== index sizes
+   ev_created_brin      24 kB
+   (btree on created_at for comparison: 21 MB)</pre>
+      <p>BRIN (block range index) делит таблицу на диапазоны по 128 страниц и для каждого хранит минимальное и максимальное значение. Запрос за сутки отбрасывает все диапазоны, чьи границы не пересекают сутки, и читает оставшиеся страницы целиком, проверяя строки. Здесь это 261 страница и миллисекунда — почти как у B-tree, а индекс весит 24 КБ против 21 МБ. Для журнала событий, логов и платёжных проводок за годы разница в размере — гигабайты.</p>
+      <p>Условие одно: значения должны коррелировать с физическим положением строк. Таблица, куда события дописываются по времени, подходит идеально. Если строки обновляются и переезжают или время вставки не связано с колонкой, у каждого диапазона границы окажутся широкими, и BRIN не отбросит ничего. Корреляцию показывает <code>pg_stats.correlation</code>: около 1 или −1 — BRIN подходит.</p>
+    </section>
+
+    <section class="step" id="partial">
+      <h2>Частичный индекс хранит только нужные строки, и планировщик предпочитает его</h2>
+      <pre><code class="language-sql">create index ev_failed_partial on ev(created_at) where status = 'FAILED';</code></pre>
+      <pre class="out">== partial index for rare status
+   Index Only Scan using ev_failed_partial on ev (actual rows=4903 loops=1); Buffers: shared hit=1 read=16; Execution Time: 0.177 ms
+   Index Only Scan using ev_failed_partial on ev (actual rows=4903 loops=1); Buffers: shared hit=17; Execution Time: 0.203 ms
+== index sizes
+   ev_status_full       39 MB
+   ev_failed_partial    240 kB</pre>
+      <p>Неудачных платежей — один процент. Частичный индекс содержит только их и весит 240 КБ вместо 39 МБ у полного индекса по <code>(status, created_at)</code>. Запрос по неудачным платежам прочитал 17 страниц, и даже когда рядом создали полный индекс, планировщик остался на частичном (вторая строка): он меньше и дешевле. Частичный индекс используется, только если условие запроса явно включает условие индекса: <code>status = 'FAILED'</code> в запросе обязателен, параметр <code>status = ?</code> со значением при подготовленном запросе может его не задействовать.</p>
+      <p>Частичный уникальный индекс решает задачи, которые иначе требуют блокировок: <code>create unique index on payment(order_id) where status &lt;&gt; 'FAILED'</code> — у заказа может быть сколько угодно неудачных попыток, но только один не неудачный платёж. Индекс по выражению хранит вычисленное значение, например <code>lower(email)</code>, как показано в <a href="indexes.html">Indexes</a>.</p>
+    </section>
+
+    <section class="step" id="gist">
+      <h2>GiST знает о пересечениях, и exclusion constraint запрещает двойные брони</h2>
+      <pre><code class="language-sql">create extension btree_gist;                       -- равенство по int внутри GiST
+create table slot(terminal int, during tstzrange,
+    exclude using gist (terminal with =, during with &amp;&amp;));</code></pre>
+      <pre class="out">== exclusion constraint: no overlapping bookings of one terminal
+   [2026-10-03 11:00, 2026-10-03 12:00) -&gt; inserted
+   [2026-10-03 10:30, 2026-10-03 11:30) -&gt; 23P01 ERROR: conflicting key value violates exclusion constraint "slot_terminal_during_excl"</pre>
+      <p>GiST — каркас для индексов с произвольными «рамками»: диапазоны, геометрия, сети. Он умеет ответить, какие диапазоны пересекаются с данным. Exclusion constraint обобщает уникальность: запрещены две строки, у которых совпадает терминал и пересекается время. Бронь с 11:00 до 12:00 встала рядом с бронью до 11:00 — полуоткрытые диапазоны не пересекаются. Бронь с 10:30 отклонена ошибкой 23P01, даже если две транзакции вставляют её одновременно: проверка идёт через индекс с блокировками, как у уникального ключа. Это защита от write skew из <a href="db-tx.html">ACID &amp; Isolation</a> без SERIALIZABLE.</p>
+      <table class="mx">
+        <thead><tr><th>Тип</th><th>Операции</th><th>Где использовать</th></tr></thead>
+        <tbody>
+          <tr><td>B-tree</td><td>=, &lt;, &gt;, диапазоны, сортировка, префикс LIKE</td><td>По умолчанию почти везде</td></tr>
+          <tr><td>Hash</td><td>Только =</td><td>Редко: длинные значения, только равенство</td></tr>
+          <tr><td>GIN</td><td>Вхождение: <code>@&gt;</code>, <code>?</code>, полнотекст, триграммы</td><td>jsonb, массивы, поиск по тексту и подстрокам</td></tr>
+          <tr><td>GiST</td><td>Пересечение, близость, вложенность</td><td>Диапазоны, гео, exclusion constraints</td></tr>
+          <tr><td>BRIN</td><td>Диапазоны по коррелированной колонке</td><td>Огромные таблицы, куда дописывают по времени</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Для поиска по jsonb или по подстроке достаточно обычного индекса на колонку.</p>
+        <p class="fact">B-tree упорядочивает значение целиком и не видит, что внутри документа или строки. В демо поиск по атрибутам и по куску email шёл полным проходом, пока не появились GIN-индексы: jsonb_path_ops для @&gt; и gin_trgm_ops для LIKE '%…%'.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>GIN — инвертированный индекс: @&gt; по jsonb 25 мс вместо 56, подстрока email 0,19 мс вместо 40; дорогая запись.</li>
+        <li>BRIN — минимум и максимум на 128 страниц: 24 КБ против 21 МБ у B-tree, но только при корреляции с физическим порядком.</li>
+        <li>Частичный индекс: 240 КБ против 39 МБ, планировщик выбирает его, если условие запроса включает условие индекса.</li>
+        <li>GiST и exclusion constraint запрещают пересечения диапазонов: 23P01 для двойной брони.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="itypes-which" data-freq="2">
+      <h3>Какие типы индексов есть в PostgreSQL и когда какой нужен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>B-tree — по умолчанию: равенство, диапазоны, сортировка. Hash — только равенство. GIN — инвертированный индекс для составных значений: jsonb, массивы, полнотекстовый поиск, триграммы для LIKE '%…%'. GiST — для пересечений и близости: диапазоны, геометрия, exclusion constraints. BRIN — сверхкомпактный индекс для огромных таблиц с колонкой, коррелирующей с порядком записи.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Частичные индексы и индексы по выражению работают с любым типом.</li>
+            <li>GIN дорог на запись и копит изменения в fastupdate.</li>
+            <li>BRIN бесполезен без корреляции: pg_stats.correlation.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="itypes-partial" data-freq="2">
+      <h3>Что такое частичный индекс и где он полезен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Индекс с условием WHERE: он содержит только подходящие строки. Полезен для редких значений — неудачные платежи, необработанные задачи, — где он в десятки раз меньше полного и быстрее. Частичный уникальный индекс выражает правила вроде «один активный платёж на заказ».</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Используется, только если условие запроса логически влечёт условие индекса.</li>
+            <li>С подготовленными запросами и generic plan параметр вместо константы может не позволить его выбрать.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Как надёжнее запретить двойную бронь терминала?</summary>
+          <pre><code class="language-java">@Transactional
+public void book(int terminal, Instant from, Instant to) {
+    if (slots.existsOverlap(terminal, from, to)) throw new AlreadyBooked();
+    slots.save(new Slot(terminal, from, to));
+}</code></pre>
+          <p>Проверка и вставка — разные шаги: две транзакции одновременно не увидят пересечения и обе вставят бронь (write skew, на READ COMMITTED и REPEATABLE READ). Надёжно — exclusion constraint в базе: exclude using gist (terminal with =, during with &amp;&amp;) с btree_gist; второй вставке база ответит 23P01, которую приложение превращает в «уже занято».</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="itypes-brin" data-freq="1">
+      <h3>Когда BRIN лучше B-tree?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда таблица огромная, в неё в основном дописывают, а колонка поиска растёт вместе с физическим порядком — время события, автоинкрементный id. BRIN хранит минимум и максимум на группу страниц, весит килобайты вместо гигабайтов и отбрасывает ненужные группы. Для точечных запросов и неупорядоченных данных он проигрывает B-tree.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>pages_per_range настраивает точность и размер.</li>
+            <li>Обновления и вставки в середину размывают границы диапазонов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/indexes-types.html">PostgreSQL 17: Index Types</a> — основа урока: B-tree, Hash, GiST, SP-GiST, GIN, BRIN.</li>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть V — устройство GIN, GiST и BRIN.</li>
+      <li><a href="https://www.postgresql.org/docs/17/pgtrgm.html">pg_trgm</a> и <a href="https://www.postgresql.org/docs/17/btree-gist.html">btree_gist</a>.</li>
+      <li><a href="https://www.postgresql.org/docs/17/indexes-partial.html">Partial Indexes</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
