@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>API: Real-time · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="realtime">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>API: Real-time</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>HTTP устроен так, что спрашивает клиент, а сервер отвечает. Чтобы сервер сообщил о событии сам, есть четыре способа. Short polling — спрашивать по таймеру: просто, но с задержкой и лишней нагрузкой. Long polling — сервер держит запрос, пока не появится событие. Server-Sent Events — один долгий HTTP-ответ, в который сервер дописывает события, а браузер сам переподключается и продолжает с последнего id. WebSocket — постоянное двустороннее соединение для чатов и совместного редактирования. Чем живее соединение, тем больше забот: переподключение, пропущенные события, балансировка и рассылка между экземплярами сервиса.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Экран платежа должен обновиться сам, когда банк подтвердил списание</h2>
+      <p>Пользователь оплатил заказ и смотрит на экран «Платёж обрабатывается». Банк подтверждает списание через секунду или через минуту. Экран должен смениться на «Оплачено» сразу, без кнопки «Обновить». А у оператора поддержки открыта панель, где появляются новые платежи и куда он пишет комментарии, которые видят коллеги.</p>
+      <p>В обычном REST клиент узнаёт о состоянии, только когда спросит; ресурс операции из <a href="api-design.html">REST</a> честно говорит «спросите позже». Тема разбирает, как сервер может сообщить о событии сам, чем способы отличаются по задержке, нагрузке и надёжности, и что ломается при масштабировании. Демо <a href="../examples/api/RealtimeDemo.java">RealtimeDemo.java</a> поднимает на встроенном <code>HttpServer</code> long polling и SSE и обрывает поток посередине, чтобы показать продолжение: <code>java RealtimeDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="polling">
+      <h2>Long polling держит запрос, пока не появится событие</h2>
+      <p>Short polling спрашивает по таймеру: раз в 2 секунды <code>GET /payments/p-1</code>. Задержка — до целого интервала, а почти все запросы возвращают «ничего не изменилось». 100 тысяч открытых экранов — 50 тысяч запросов в секунду ради нескольких событий. Уменьшить интервал — больше нагрузки, увеличить — больше задержки.</p>
+      <p>Long polling меняет одну вещь: сервер не отвечает сразу, а ждёт, пока появится событие новее того, что клиент уже видел, или пока не истечёт таймаут. Клиент передаёт курсор — номер последнего увиденного события — и сразу после ответа отправляет следующий запрос:</p>
+      <pre><code class="language-java">// Сервер: ждёт события новее after не дольше 500 мс.
+int last = awaitAfter(after, 500);
+if (last == after) { ex.sendResponseHeaders(204, -1); return; }   // Ничего нового — 204.
+send(ex, String.join(",", events.subList(after, last)) + " (next after=" + last + ")");</code></pre>
+      <pre class="out">== long polling
+GET /poll?after=0 -&gt; 200 after ~0 ms AUTHORIZED (next after=1)
+GET /poll?after=1 -&gt; 200 after ~200 ms CAPTURED (next after=2)
+GET /poll?after=2 -&gt; 204 after ~500 ms</pre>
+      <p>Первый запрос получил уже случившееся событие сразу. Второй ждал 200 мс и вернулся в момент, когда платёж списали, — задержка близка к нулю. Третий не дождался ничего и через 500 мс вернул 204, после чего клиент спросит снова. Курсор важен: событие, случившееся между двумя запросами, не потеряется, потому что следующий запрос попросит всё после <code>after=2</code>.</p>
+      <p>Цена — запрос, который висит на сервере. С пулом из 200 потоков Tomcat 200 ждущих клиентов занимают весь пул; поэтому long polling делают асинхронно (<code>DeferredResult</code> в Spring MVC) или на виртуальных потоках, как в демо. Таймаут держат меньше, чем у прокси и балансировщиков по пути, иначе они оборвут запрос раньше сервера: у nginx по умолчанию 60 секунд.</p>
+    </section>
+
+    <section class="step" id="sse">
+      <h2>SSE — один долгий ответ, в который сервер дописывает события</h2>
+      <p>Server-Sent Events — стандарт из HTML Living Standard. Клиент делает обычный GET, сервер отвечает <code>Content-Type: text/event-stream</code> и не закрывает ответ, а дописывает в него события в текстовом формате. Каждое событие — несколько строк <code>поле: значение</code> и пустая строка в конце:</p>
+      <pre><code class="language-text">retry: 1000           ← через сколько мс переподключаться при обрыве
+
+id: 3                 ← номер события, браузер его запомнит
+event: status         ← тип события
+data: SETTLED         ← данные; несколько строк data склеиваются
+</code></pre>
+      <p>В браузере это <code>new EventSource("/stream")</code>. Главное его свойство — встроенное переподключение: при обрыве браузер подождёт <code>retry</code> и сам повторит запрос с заголовком <code>Last-Event-ID</code>, а сервер продолжит с этого места. Демо обрывает поток после третьего события и подключается снова, как сделал бы браузер:</p>
+      <pre><code class="language-java">String lastSeen = readStream(client, base, null, 3);  // Читаем три события и рвём соединение.
+readStream(client, base, lastSeen, 99);              // Новый запрос с Last-Event-ID.
+
+// Сервер начинает с события после присланного id.
+String lastId = ex.getRequestHeaders().getFirst("Last-Event-ID");
+int sent = lastId == null ? 0 : Integer.parseInt(lastId);</code></pre>
+      <pre class="out">== server-sent events
+event id=1 data: AUTHORIZED
+event id=2 data: CAPTURED
+event id=3 data: SETTLED
+-- reconnect with Last-Event-ID: 3
+event id=4 data: REFUND_PENDING</pre>
+      <p>Событие <code>REFUND_PENDING</code> появилось, пока клиента не было, и он его получил: продолжение работает, потому что сервер хранит журнал событий с номерами. Если сервер помнит только текущее состояние, переподключившийся клиент пропустит всё, что случилось в разрыве. Поэтому id события — позиция в журнале или в топике Kafka, а не случайное число.</p>
+      <p>Ловушки SSE в основном инфраструктурные. Прокси и сжатие любят буферизовать ответ, и события приходят пачкой через минуту: в nginx для потока выключают буфер (<code>X-Accel-Buffering: no</code>), а сервер вызывает flush после каждого события. Простаивающее соединение обрывают по таймауту, поэтому сервер раз в 15–30 секунд шлёт комментарий-пульс <code>: ping</code>. В браузере по HTTP/1.1 на один домен не больше шести соединений, и седьмая вкладка с SSE зависнет; с HTTP/2 потоки идут по одному соединению. SSE — только от сервера к клиенту и только текст; команды клиент отправляет обычными запросами. В Spring это <code>SseEmitter</code> в MVC или <code>Flux&lt;ServerSentEvent&gt;</code> в WebFlux.</p>
+    </section>
+
+    <section class="step" id="websocket">
+      <h2>WebSocket — двусторонний канал, но переподключение и продолжение приходится писать самим</h2>
+      <p>WebSocket начинается как HTTP-запрос с заголовками <code>Upgrade: websocket</code> и <code>Connection: Upgrade</code>. Сервер отвечает <code>101 Switching Protocols</code>, и дальше TCP-соединение несёт уже не HTTP, а кадры WebSocket в обе стороны: текст, бинарные данные, ping и pong. Задержка минимальна, накладных заголовков на сообщение почти нет. Это то, что нужно чату, совместному редактированию, торговому терминалу, игре.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Четыре способа на одной шкале 6 секунд с событиями на 1,3 и 4,1 секунде. Short polling раз в 2 секунды узнаёт о них с опозданием 0,7 и 1,9 секунды. Long polling держит запрос и отвечает в момент события, потом открывает новый. SSE — один ответ, в который события дописываются сразу. WebSocket — одно соединение, по которому события идут сразу, и клиент тоже может отправлять сообщения.">
+            <text x="20" y="22" class="dg-cap">ДВА СОБЫТИЯ ЗА 6 СЕКУНД: КОГДА КЛИЕНТ О НИХ УЗНАЁТ</text>
+            <path d="M257 34 L 257 214" class="dg-sep" fill="none"/>
+            <text x="261" y="46" class="dg-ok">событие</text>
+            <path d="M509 34 L 509 214" class="dg-sep" fill="none"/>
+            <text x="513" y="46" class="dg-ok">событие</text>
+            <text x="20" y="65" class="dg-n">short poll</text>
+            <text x="20" y="105" class="dg-n">long poll</text>
+            <text x="20" y="145" class="dg-n">SSE</text>
+            <text x="20" y="185" class="dg-n">WebSocket</text>
+            <rect x="135" y="51" width="10" height="18" rx="2" class="dg-cell"/>
+            <rect x="315" y="51" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="495" y="51" width="10" height="18" rx="2" class="dg-cell"/>
+            <rect x="675" y="51" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <text x="330" y="80" class="dg-bad">+0,7 с</text>
+            <text x="670" y="80" class="dg-bad" text-anchor="end">+1,9 с</text>
+            <rect x="140" y="91" width="109" height="18" rx="3" class="dg-cell"/>
+            <rect x="259" y="91" width="242" height="18" rx="3" class="dg-cell"/>
+            <rect x="511" y="91" width="161" height="18" rx="3" class="dg-cell"/>
+            <rect x="251" y="91" width="6" height="18" rx="1" class="dg-cell hit"/>
+            <rect x="503" y="91" width="6" height="18" rx="1" class="dg-cell hit"/>
+            <text x="198" y="105" class="dg-n" text-anchor="middle">запрос 1</text>
+            <text x="384" y="105" class="dg-n" text-anchor="middle">запрос 2</text>
+            <text x="595" y="105" class="dg-n" text-anchor="middle">запрос 3</text>
+            <rect x="140" y="131" width="540" height="18" rx="3" class="dg-cell"/>
+            <rect x="254" y="131" width="6" height="18" rx="1" class="dg-cell hit"/>
+            <rect x="506" y="131" width="6" height="18" rx="1" class="dg-cell hit"/>
+            <text x="536" y="145" class="dg-n">сервер → клиент</text>
+            <rect x="140" y="171" width="540" height="18" rx="3" class="dg-cell"/>
+            <rect x="254" y="171" width="6" height="18" rx="1" class="dg-cell hit"/>
+            <rect x="506" y="171" width="6" height="18" rx="1" class="dg-cell hit"/>
+            <rect x="389" y="171" width="6" height="18" rx="1" class="dg-cell miss"/>
+            <text x="536" y="185" class="dg-n">в обе стороны</text>
+            <text x="140" y="210" class="dg-n" text-anchor="middle">0 с</text>
+            <text x="320" y="210" class="dg-n" text-anchor="middle">2 с</text>
+            <text x="500" y="210" class="dg-n" text-anchor="middle">4 с</text>
+            <text x="680" y="210" class="dg-n" text-anchor="middle">6 с</text>
+            <text x="20" y="232" class="dg-s">Зелёное — клиент узнал о событии; красное в WebSocket — сообщение от клиента по тому же соединению.</text>
+          </svg>
+        </div>
+        <figcaption>Short polling платит задержкой и пустыми запросами. Остальные три доставляют сразу, но держат соединение на каждого клиента.</figcaption>
+      </figure>
+      <p>За гибкость платят тем, что WebSocket — низкоуровневый канал. В нём нет встроенного переподключения, номеров сообщений и продолжения с места обрыва, как в SSE: всё это пишут сами или берут протокол поверх. Обрыв на мобильной сети — обычное дело, и без своего механизма клиент молча пропустит события. Нет и семантики HTTP внутри канала: кодов ответа, кеширования, привычных метрик по запросам. Spring поддерживает WebSocket напрямую и протокол STOMP поверх него с подписками на темы.</p>
+      <p>Аутентификация делается при рукопожатии: браузерный API не позволяет добавить заголовок Authorization, поэтому используют cookie или короткоживущий токен в первом сообщении. Сервер обязан проверять заголовок <code>Origin</code>: браузер отправит cookie на WebSocket и с чужой страницы, и без проверки это атака Cross-Site WebSocket Hijacking. А токен, проверенный при подключении, может истечь, пока соединение живёт часами, — права приходится перепроверять.</p>
+    </section>
+
+    <section class="step" id="scale">
+      <h2>Долгие соединения меняют масштабирование: рассылка между экземплярами и шторм переподключений</h2>
+      <p>Сто тысяч открытых экранов — сто тысяч одновременных соединений, каждое со своими буферами и состоянием. Для этого нужен неблокирующий сервер или виртуальные потоки, а не поток платформы на соединение. Но главное — соединение привязано к одному экземпляру сервиса. Банк подтвердил платёж, событие обработал экземпляр A, а клиент подключён к экземпляру B. Поэтому события раздают через общий канал — Redis Pub/Sub, топик Kafka, брокер для STOMP, — и каждый экземпляр пересылает своим клиентам то, что им адресовано.</p>
+      <p>Деплой обрывает все соединения экземпляра разом, и тысячи клиентов одновременно переподключаются к оставшимся — шторм переподключений. Клиенты ждут перед повтором случайную задержку с экспоненциальным ростом, а сервер при остановке закрывает соединения постепенно. Балансировщик должен поддерживать долгие соединения и Upgrade, а его таймаут простоя — быть больше интервала пульса.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Short polling</th><th>Long polling</th><th>SSE</th><th>WebSocket</th></tr></thead>
+        <tbody>
+          <tr><td>Направление</td><td>Клиент спрашивает</td><td>Клиент спрашивает</td><td>Сервер → клиент</td><td>Обе стороны</td></tr>
+          <tr><td>Задержка</td><td>До интервала</td><td>Почти нулевая</td><td>Почти нулевая</td><td>Почти нулевая</td></tr>
+          <tr><td>Продолжение после обрыва</td><td>Курсор в запросе</td><td>Курсор в запросе</td><td>Встроено: Last-Event-ID</td><td>Пишут сами</td></tr>
+          <tr><td>Инфраструктура</td><td>Обычный HTTP</td><td>Таймауты прокси</td><td>Буферизация прокси</td><td>Upgrade, долгие соединения</td></tr>
+          <tr><td>Где хорош</td><td>Редкие изменения</td><td>Когда SSE недоступен</td><td>Статусы, ленты, уведомления</td><td>Чаты, совместная работа</td></tr>
+        </tbody>
+      </table>
+      <div class="trap">
+        <p class="myth">Для обновлений в реальном времени всегда нужен WebSocket.</p>
+        <p class="fact">Большинству экранов нужен поток только от сервера: статус платежа, уведомления, лента. SSE работает поверх обычного HTTP, сам переподключается и продолжает с последнего события. WebSocket оправдан, когда клиент часто пишет в тот же канал, и тогда переподключение и продолжение придётся строить самим.</p>
+      </div>
+      <p>Если событие должно дойти, даже когда экран закрыт, ни один из способов не подходит: соединения нет. Тогда нужны push-уведомления через APNs и FCM или вебхук для серверных клиентов.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Short polling — задержка до интервала и пустые запросы; long polling держит запрос до события или таймаута и передаёт курсор.</li>
+        <li>SSE — text/event-stream с id, event, data, retry; браузер переподключается с Last-Event-ID, в демо событие из разрыва дошло.</li>
+        <li>Продолжение работает, только если сервер хранит журнал событий с номерами.</li>
+        <li>WebSocket — двусторонний канал без встроенного переподключения; проверка Origin и токена обязательна.</li>
+        <li>Долгие соединения требуют рассылки между экземплярами через общий канал и защиты от шторма переподключений.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="realtime-choose" data-freq="2">
+      <h3>Чем отличаются long polling, SSE и WebSocket и что когда выбрать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Long polling — обычный запрос, который сервер держит, пока не появится событие или не истечёт таймаут; клиент сразу шлёт следующий с курсором. SSE — один долгий HTTP-ответ text/event-stream, в который сервер дописывает события; только от сервера к клиенту, браузер сам переподключается с Last-Event-ID. WebSocket — после рукопожатия 101 двусторонний канал кадров поверх TCP.</p>
+          <p>Для статусов и уведомлений хватает SSE. WebSocket — когда клиент часто пишет в тот же канал: чат, совместное редактирование. Long polling — запасной вариант, когда потоковые ответы режет инфраструктура.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В WebSocket нет встроенного продолжения после обрыва: номера сообщений и догрузку пропущенного пишут сами.</li>
+            <li>SSE ломают буферизующие прокси; нужны flush, X-Accel-Buffering: no и пульс-комментарии.</li>
+            <li>По HTTP/1.1 браузер держит не больше шести соединений на домен, HTTP/2 снимает ограничение для SSE.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="realtime-scale" data-freq="2">
+      <h3>Как масштабировать WebSocket или SSE на несколько экземпляров сервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Соединение живёт на одном экземпляре, а событие может произойти на другом. Поэтому события публикуют в общий канал — Redis Pub/Sub, Kafka, брокер сообщений, — и каждый экземпляр пересылает своим подключённым клиентам. Балансировщик должен поддерживать долгие соединения и Upgrade.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Деплой рвёт все соединения экземпляра: клиенты переподключаются со случайной экспоненциальной задержкой, сервер закрывает соединения постепенно.</li>
+            <li>Чтобы переподключившийся клиент догрузил пропущенное, события хранят в журнале с номерами, а не только рассылают.</li>
+            <li>Сотни тысяч соединений требуют неблокирующего сервера или виртуальных потоков.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему клиенты иногда не видят смену статуса?</summary>
+          <pre><code class="language-java">@GetMapping("/payments/{id}/events")
+SseEmitter events(@PathVariable String id) {
+    var emitter = new SseEmitter(0L);
+    emitters.put(id, emitter);              // Локальная Map в этом экземпляре.
+    return emitter;
+}
+
+@KafkaListener(topics = "payment-status", groupId = "notifier")
+void onStatus(PaymentStatus s) {
+    var e = emitters.get(s.paymentId());
+    if (e != null) e.send(SseEmitter.event().data(s.status()));
+}</code></pre>
+          <p>Все экземпляры в одной группе потребителей, поэтому каждое событие получает только один из них, а клиент может быть подключён к другому — событие теряется. Нужно, чтобы каждый экземпляр получал все события: отдельная группа на экземпляр или Redis Pub/Sub. Кроме того, у событий нет id, и после обрыва клиент не догрузит пропущенное; emitter не удаляется из Map при завершении и ошибке, и Map растёт.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="realtime-ws-security" data-freq="1">
+      <h3>Какие особенности безопасности у WebSocket?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Аутентификация — при рукопожатии: браузерный API не даёт задать Authorization, поэтому используют cookie или токен в первом сообщении. Сервер проверяет заголовок Origin, иначе чужая страница откроет соединение с cookie пользователя — Cross-Site WebSocket Hijacking.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Соединение живёт часами, а токен истекает и права меняются: их перепроверяют или рвут соединение по сроку токена.</li>
+            <li>Входящие сообщения валидируют и ограничивают по размеру и частоте, как обычные запросы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://html.spec.whatwg.org/multipage/server-sent-events.html">HTML Living Standard: Server-sent events</a> — основа урока о SSE: формат потока, retry, Last-Event-ID.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc6455">RFC 6455: The WebSocket Protocol</a> — рукопожатие, кадры, проверка Origin.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc6202">RFC 6202: Known Issues and Best Practices for the Use of Long Polling and Streaming</a> — long polling и потоковые ответы через прокси.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/web/websocket.html">Spring Framework: WebSockets</a> — WebSocket, SockJS и STOMP в Spring.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -6,4 +6,5 @@
 cd examples/api
 java RestDemo.java
 java PagingDemo.java
+java RealtimeDemo.java
 ```

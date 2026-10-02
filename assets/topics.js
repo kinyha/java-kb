@@ -135,7 +135,7 @@ window.KB_TREE = [
           scope: 'когда что выбирать, Protobuf и стриминг в gRPC, схема и N+1 в GraphQL, WSDL' },
         { id: 'api-contracts', freq: 2, status: 'draft', title: 'OpenAPI & Contracts',
           scope: 'contract-first и code-first, генерация клиентов, проверка совместимости контракта' },
-        { id: 'realtime', freq: 1, status: 'empty', title: 'Real-time',
+        { id: 'realtime', freq: 1, status: 'draft', title: 'Real-time',
           scope: 'short и long polling, SSE, WebSocket' },
       ] },
       { id: 'security', title: 'Security', source: 'roadmap.sh/backend: Authentication, Web Security; OWASP Top 10', items: [
