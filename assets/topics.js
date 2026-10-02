@@ -227,7 +227,7 @@ window.KB_TREE = [
           scope: 'процедуры и функции, триггеры, PL/pgSQL и PL/SQL, курсоры, когда логика живёт в БД' },
       ] },
       { id: 'schema', title: 'Schema', items: [
-        { id: 'data-modeling', freq: 2, status: 'empty', title: 'Normalization & Keys',
+        { id: 'data-modeling', freq: 2, status: 'draft', title: 'Normalization & Keys',
           scope: 'нормальные формы, денормализация, суррогатный и натуральный ключ, связи, constraints' },
         { id: 'db-migrations', freq: 2, status: 'draft', title: 'Schema Migrations',
           scope: 'Liquibase и Flyway, миграции без простоя, expand и contract, блокировки при ALTER' },
