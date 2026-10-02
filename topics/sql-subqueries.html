@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Subqueries &amp; CTE · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sql-subqueries">
+<main class="page">
+  <header class="topic-head"><h1>Subqueries &amp; CTE</h1></header>
+  <div class="lesson">
+    <div class="note tip"><p>Подзапрос описывает результат, которым пользуется другая часть SQL: одно значение, факт существования или набор строк. Корреляция добавляет зависимость от текущей внешней строки. CTE даёт промежуточному результату имя, LATERAL позволяет зависимому подзапросу вернуть несколько строк и столбцов, а рекурсивный CTE повторяет шаг над очередной порцией найденных строк. Сначала определи форму результата и зависимости, затем смотри физический план.</p></div>
+
+    <section class="step" id="result-shape">
+      <h2>Подзапрос должен вернуть результат нужной формы</h2>
+      <p>В кабинете клиента нужно показать счета и максимальный успешный платёж для каждого. У Alice несколько платежей, у Bob два, у Carol ни одного. Если сделать отдельный запрос из Java для каждого счёта, появится N+1 с сетевыми задержками. SQL позволяет описать вычисление рядом со строкой счёта, но сначала нужно решить, что должно вернуться: одно число, несколько платежей или только ответ «есть».</p>
+      <p>Данные всех примеров ниже одинаковы. Суммы храним целыми в минимальных единицах одной валюты. У платежей Bob намеренно одинаковое время: позже это заставит нас явно выбрать порядок при равенстве дат.</p>
+      <pre><code class="language-sql">CREATE TEMP TABLE accounts (id integer PRIMARY KEY, owner text NOT NULL);
+CREATE TEMP TABLE payments (
+  id integer PRIMARY KEY,
+  account_id integer NOT NULL REFERENCES accounts(id),
+  amount bigint NOT NULL,
+  status text NOT NULL,
+  created_at timestamp NOT NULL
+);
+INSERT INTO accounts VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol');
+INSERT INTO payments VALUES
+  (101, 1, 100, 'PAID',   '2026-01-01 10:00'),
+  (102, 1, 300, 'FAILED', '2026-01-02 10:00'),
+  (103, 1, 250, 'PAID',   '2026-01-03 10:00'),
+  (201, 2,  50, 'PAID',   '2026-01-03 10:00'),
+  (202, 2,  70, 'PAID',   '2026-01-03 10:00');</code></pre>
+      <p><b>Скалярный подзапрос</b> в выражении должен иметь один столбец и не более одной строки. Одна строка даёт значение, ноль строк — SQL NULL, больше одной — ошибку cardinality violation. Поэтому имя «скалярный» описывает контракт результата, а не обещание, что написанный SELECT действительно ему соответствует.</p>
+      <pre><code class="language-sql">SELECT a.id,
+       (SELECT max(p.amount) FROM payments p
+        WHERE p.account_id = a.id AND p.status = 'PAID') AS max_paid,
+       (SELECT p.amount FROM payments p
+        WHERE p.account_id = a.id AND p.id = 103) AS amount_103
+FROM accounts a ORDER BY a.id;</code></pre>
+      <pre class="out">id|max_paid|amount_103
+1|250|250
+2|70|NULL
+3|NULL|NULL</pre>
+      <p>Вторая колонка использует агрегат без GROUP BY: он создаёт одну строку даже при пустом входе, а MAX пустого набора равен NULL. Третья колонка ограничена уникальным <code>p.id</code>; у Bob и Carol подзапрос не вернул строк. Снаружи оба пути дают NULL, хотя внутри произошло разное. <code>COALESCE(..., 0)</code> допустим, только если бизнесу действительно не нужно различать «платежей не было» и «максимум равен нулю».</p>
+      <p>Удалим агрегат и ограничение по уникальному ID. Для Alice останутся три строки; SQL не выберет из них первую. В полном демо ожидаемая ошибка перехвачена отдельно, остальные ошибки останавливают запуск:</p>
+      <pre><code class="language-sql">DO $$
+BEGIN
+  PERFORM (SELECT p.amount FROM payments p WHERE p.account_id = 1);
+  RAISE EXCEPTION 'expected cardinality_violation';
+EXCEPTION WHEN cardinality_violation THEN
+  RAISE NOTICE 'scalar multirow SQLSTATE = %', SQLSTATE;
+END $$;</code></pre>
+      <pre class="out">NOTICE:  scalar multirow SQLSTATE = 21000</pre>
+      <table class="mx">
+        <thead><tr><th>Куда подставляем результат</th><th>Что требуется</th><th>Если строк нет</th></tr></thead>
+        <tbody>
+          <tr><td>Скалярное выражение: <code>(SELECT ...)</code></td><td>Один столбец, максимум одна строка</td><td>Значение NULL</td></tr>
+          <tr><td><code>EXISTS (SELECT ...)</code></td><td>Проверка наличия хотя бы одной строки</td><td>false</td></tr>
+          <tr><td><code>FROM (SELECT ...) AS x</code></td><td>Табличный результат: строки и столбцы</td><td>Пустая таблица</td></tr>
+        </tbody>
+      </table>
+      <p>Все выводы сняты с PostgreSQL 17.11 через psql: разделитель <code>|</code>, NULL показан явно, служебный счётчик строк выключен. <a href="../examples/sql-subqueries/run.sh">run.sh</a> запускает <a href="../examples/sql-subqueries/demo.sql">demo.sql</a> в собственном контейнере, создаёт только временные таблицы и удаляет контейнер после завершения. Команда из корня репозитория:</p>
+      <pre><code class="language-bash">bash examples/sql-subqueries/run.sh
+# Docker; postgres:17.11-alpine закреплён digest в run.sh.
+# Порты и постоянные volumes не создаются, локальный PostgreSQL не используется.</code></pre>
+    </section>
+
+    <section class="step" id="correlation-exists">
+      <h2>Корреляция передаёт внешние значения, EXISTS проверяет строки</h2>
+      <p>В условии <code>p.account_id = a.id</code> имя <code>p</code> принадлежит внутреннему SELECT, а <code>a</code> — внешнему. Такой подзапрос <b>коррелирован</b>: его результат зависит от текущего счёта. Для понимания можно мысленно подставить сначала 1, затем 2 и 3. Это логическая модель зависимости, а не обязательный цикл из трёх отдельных сканирований в плане PostgreSQL.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Внешний запрос содержит три счёта. Значение account id связывается с подходящими платежами; EXISTS возвращает true для счетов 1 и 2 и false для счёта 3. Каждая внешняя строка получает один boolean независимо от числа совпадений.">
+            <defs><marker id="sq-e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="48" width="150" height="36" rx="6" class="dg-box"/>
+            <rect x="20" y="112" width="150" height="36" rx="6" class="dg-box"/>
+            <rect x="20" y="176" width="150" height="36" rx="6" class="dg-box"/>
+            <rect x="270" y="48" width="216" height="36" rx="6" class="dg-cell"/>
+            <rect x="270" y="112" width="216" height="36" rx="6" class="dg-cell"/>
+            <rect x="270" y="176" width="216" height="36" rx="6" class="dg-sep" fill="none"/>
+            <rect x="578" y="48" width="122" height="36" rx="6" class="dg-cell hit"/>
+            <rect x="578" y="112" width="122" height="36" rx="6" class="dg-cell hit"/>
+            <rect x="578" y="176" width="122" height="36" rx="6" class="dg-cell miss"/>
+            <path d="M170 66 L266 66" class="dg-line" marker-end="url(#sq-e)"/>
+            <path d="M170 130 L266 130" class="dg-line" marker-end="url(#sq-e)"/>
+            <path d="M170 194 L266 194" class="dg-line" marker-end="url(#sq-e)"/>
+            <path d="M486 66 L574 66" class="dg-line" marker-end="url(#sq-e)"/>
+            <path d="M486 130 L574 130" class="dg-line" marker-end="url(#sq-e)"/>
+            <path d="M486 194 L574 194" class="dg-line" marker-end="url(#sq-e)"/>
+            <text x="20" y="24" class="dg-cap">ACCOUNTS</text><text x="270" y="24" class="dg-cap">PAID PAYMENTS</text><text x="578" y="24" class="dg-cap">EXISTS</text>
+            <text x="34" y="71" class="dg-in">1 / Alice</text><text x="34" y="135" class="dg-in">2 / Bob</text><text x="34" y="199" class="dg-in">3 / Carol</text>
+            <text x="187" y="55" class="dg-n">a.id=1</text><text x="187" y="119" class="dg-n">a.id=2</text><text x="187" y="183" class="dg-n">a.id=3</text>
+            <text x="284" y="71" class="dg-in">101, 103</text><text x="284" y="135" class="dg-in">201, 202</text><text x="284" y="199" class="dg-s">нет строк</text>
+            <text x="600" y="71" class="dg-ok">true</text><text x="600" y="135" class="dg-ok">true</text><text x="600" y="199" class="dg-bad">false</text>
+          </svg>
+        </div>
+        <figcaption>Два совпадения не размножают строку счёта. EXISTS отвечает на вопрос о наличии, не присоединяя все найденные платежи.</figcaption>
+      </figure>
+      <p><code>EXISTS</code> возвращает boolean: true, если подзапрос произвёл хотя бы одну строку, false — если ни одной. Содержимое найденной строки обычно не нужно, поэтому пишут <code>SELECT 1</code>. Это соглашение о намерении, а не оптимизация значения 1. Нельзя помещать туда действия, на выполнение которых рассчитывает приложение: PostgreSQL не обязан вычислять всё содержимое и читать все строки подзапроса.</p>
+      <pre><code class="language-sql">SELECT a.id,
+       EXISTS (SELECT 1 FROM payments p
+               WHERE p.account_id = a.id AND p.status = 'PAID') AS has_paid,
+       -- Ловушка: count(*) без GROUP BY создаёт строку даже для пустого входа.
+       EXISTS (SELECT count(*) FROM payments p
+               WHERE p.account_id = a.id AND p.status = 'PAID') AS count_row_exists
+FROM accounts a ORDER BY a.id;</code></pre>
+      <pre class="out">id|has_paid|count_row_exists
+1|t|t
+2|t|t
+3|f|t</pre>
+      <p>У Carol агрегат вычисляет число 0, но EXISTS видит строку с этим нулём и возвращает true. Для вопроса «есть ли успешный платёж» нужен первый вариант. Выражение <code>(SELECT count(*) ...) &gt; 0</code> тоже проверяет наличие, но требует выразить и посчитать число там, где оно не нужно; предпочитай прямой EXISTS. При этом конкретный объём работы определяется планом, а не только синтаксисом.</p>
+      <p>Для отбора счетов перенеси первый EXISTS в WHERE. Для счетов без подходящих платежей используй NOT EXISTS с тем же коррелирующим условием. Различие с NOT IN при NULL, semi/anti join и размножение строк при обычном соединении разобраны в <a href="sql-joins.html">Joins</a>. Здесь важна граница: проверка наличия не возвращает столбцы платежа.</p>
+      <div class="trap"><p class="myth">Коррелированный подзапрос обязательно выполняется N раз и поэтому всегда медленнее JOIN.</p><p class="fact">Корреляция описывает зависимость от внешних значений. Планировщик может преобразовать EXISTS в semi join; скалярный подзапрос может остаться SubPlan с повторными запусками. Сравнивай реальные планы и число loops на своих данных. Замена формы SQL без сохранения NULL и числа строк может изменить ответ, даже если ускоряет запрос.</p></div>
+      <p>Всегда квалифицируй поля алиасами. Если во внутреннем SELECT ошибиться именем столбца, PostgreSQL может найти одноимённый столбец во внешнем scope. Запрос останется корректным синтаксически, но получит другую корреляцию. Явные <code>p.account_id</code> и <code>a.id</code> делают зависимость видимой при ревью.</p>
+    </section>
+
+    <section class="step" id="lateral">
+      <h2>LATERAL возвращает таблицу для текущей внешней строки</h2>
+      <p>Теперь кабинету нужны два последних успешных платежа каждого счёта: ID и сумма, а не одно число. Скалярный подзапрос не подходит по форме. Обычный подзапрос в FROM не может просто сослаться на соседний <code>a.id</code>. <code>LATERAL</code> разрешает правой части использовать строки, стоящие слева от неё, и вернуть для каждой ноль, одну или несколько строк.</p>
+      <pre><code class="language-sql">SELECT a.id AS account_id, p.id AS payment_id, p.amount
+FROM accounts a
+LEFT JOIN LATERAL (
+  SELECT p.id, p.amount, p.created_at FROM payments p
+  WHERE p.account_id = a.id AND p.status = 'PAID'
+  ORDER BY p.created_at DESC, p.id DESC -- id разрешает равенство времени
+  LIMIT 2                              -- два на счёт, а не на весь результат
+) p ON true
+ORDER BY a.id, p.created_at DESC, p.id DESC;</code></pre>
+      <pre class="out">account_id|payment_id|amount
+1|103|250
+1|101|100
+2|202|70
+2|201|50
+3|NULL|NULL</pre>
+      <p><code>LEFT JOIN ... ON true</code> сохраняет Carol: зависимая таблица пуста, поэтому столбцы платежа заполняются NULL. <code>CROSS JOIN LATERAL</code> в этой ситуации убрал бы её строку. Условие <code>ON true</code> здесь не связывает счета с платежами: связь уже задана внутри, а ON лишь принимает все строки полученного результата. Правила outer join остаются обычными.</p>
+      <p>Два ORDER BY решают разные задачи. Внутренний выбирает, какие именно два платежа попадут в результат для счёта. Внешний определяет порядок готового ответа. Без <code>p.id DESC</code> у Bob нет определённого победителя при LIMIT 1: время одинаковое. Внешняя сортировка не исправит произвольный выбор, уже сделанный внутри LIMIT.</p>
+      <p>Под эту форму доступа подходит индекс с account_id первым и последующими ключами в порядке top-N. В демо он создан так:</p>
+      <pre><code class="language-sql">CREATE INDEX payments_account_latest
+ON payments(account_id, created_at DESC, id DESC)
+WHERE status = 'PAID'; -- индекс хранит только нужное подмножество</code></pre>
+      <p>На большой таблице такой индекс позволяет найти диапазон одного счёта и остановиться после двух записей. На наших пяти платежах PostgreSQL вправе предпочесть последовательное чтение: наличие подходящего индекса не принуждает планировщик его выбрать. Если нужны последние платежи миллионов счетов, миллионы коротких обращений тоже стоят дорого. Сравни LATERAL с обработкой общего набора и ранжированием из <a href="window-functions.html">Window Functions</a>; выбирай по селективности внешнего набора.</p>
+      <details class="deep"><summary>Корреляция задаёт область видимости, но не заменяет план</summary><p>LATERAL — полезная модель «параметризованной таблицы»: слева получен account_id, справа найден его top-N. Зависимость ограничивает возможные перестановки соединений. В плане часто видны Nested Loop и внутренний Limit с параметром внешней строки; если зависимость удаётся устранить, план может выглядеть иначе. Не считай ключевое слово обещанием определённого алгоритма или кеширования результатов для повторяющихся значений.</p></details>
+    </section>
+
+    <section class="step" id="cte-planning">
+      <h2>CTE даёт имя результату, но не обещает отдельное вычисление</h2>
+      <p><code>WITH c AS (...)</code> определяет именованный результат в пределах одного SQL-оператора. Это удобно, когда запрос распадается на смысловые этапы: отобрать успешные платежи, посчитать итоги, сравнить их с порогом. Имя CTE можно использовать несколько раз. Оно не создаёт постоянную таблицу, не становится кешем между запросами и само по себе не задаёт порядок вычислений.</p>
+      <p>Начиная с PostgreSQL 12, нерекурсивный CTE на SELECT без побочных эффектов может быть встроен в родительский запрос. Здесь «без побочных эффектов» означает, в частности, отсутствие volatile-функций. По умолчанию при одной ссылке подходящий CTE встраивается; при нескольких обычно вычисляется отдельно и используется повторно. Поэтому правило «WITH всегда является барьером оптимизации» описывает старое поведение, а не современный PostgreSQL.</p>
+      <p>Для подходящего CTE <code>MATERIALIZED</code> запрещает такое объединение, а <code>NOT MATERIALIZED</code> разрешает его и при нескольких ссылках. Это выбор между повторным использованием результата и возможностью протолкнуть разные внешние фильтры внутрь. NOT MATERIALIZED не заставляет встроить рекурсивный CTE или SELECT с volatile-функциями: условия применимости сохраняются.</p>
+      <p>Проверим механизм на 20 000 строках. У <code>ledger.id</code> есть индекс первичного ключа, статистика собрана ANALYZE. Сначала обычный CTE, используемый один раз:</p>
+      <pre><code class="language-sql">CREATE TEMP TABLE ledger (id integer PRIMARY KEY, amount integer NOT NULL);
+INSERT INTO ledger SELECT n, n % 1000 FROM generate_series(1, 20000) n;
+ANALYZE ledger;
+
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+WITH c AS (SELECT id, amount FROM ledger)
+SELECT amount FROM c WHERE id = 42;</code></pre>
+      <pre class="out">Index Scan using ledger_pkey on ledger (actual rows=1 loops=1)
+  Index Cond: (id = 42)</pre>
+      <p>Узла CTE Scan нет: условие по ID попало прямо в индексное чтение. Теперь запрещаем встраивание, сохраняя тот же логический ответ:</p>
+      <pre><code class="language-sql">EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+WITH c AS MATERIALIZED (SELECT id, amount FROM ledger)
+SELECT amount FROM c WHERE id = 42;</code></pre>
+      <pre class="out">CTE Scan on c (actual rows=1 loops=1)
+  Filter: (id = 42)
+  Rows Removed by Filter: 19999
+  CTE c
+    -&gt;  Seq Scan on ledger (actual rows=20000 loops=1)</pre>
+      <p>CTE произвёл 20 000 строк, внешний фильтр отбросил 19 999. Это фактические счётчики выполнения, не оценка cost. Мы не утверждаем универсальный выигрыш во столько же раз: время включает другие расходы. Но лишняя работа видна без сравнения микросекунд на маленьком стенде. В другом запросе родитель может запросить лишь часть результата материализованного SELECT; MATERIALIZED не означает безусловно «всегда прочитать всё до конца».</p>
+      <details class="deep">
+        <summary>Две ссылки: дешевле вычислить дважды или сохранить всё?</summary>
+        <p>Для двух разных ID можно разрешить независимое проталкивание фильтров. На этих данных получаются два точечных чтения вместо общего результата из 20 000 строк:</p>
+        <pre><code class="language-sql">EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+WITH c AS NOT MATERIALIZED (SELECT id, amount FROM ledger)
+SELECT (SELECT amount FROM c WHERE id = 42) AS first,
+       (SELECT amount FROM c WHERE id = 43) AS second;</code></pre>
+        <pre class="out">Result (actual rows=1 loops=1)
+  InitPlan 1
+    -&gt;  Index Scan using ledger_pkey on ledger (actual rows=1 loops=1)
+          Index Cond: (id = 42)
+  InitPlan 2
+    -&gt;  Index Scan using ledger_pkey on ledger ledger_1 (actual rows=1 loops=1)
+          Index Cond: (id = 43)</pre>
+        <p>Обратный случай — дорогой расчёт, один и тот же результат которого нужен несколько раз. Встраивание способно повторить расчёт, а материализация — выполнить его один раз. Если промежуточный набор велик, хранение требует памяти и может использовать временные файлы. Выбирай по плану и нагрузке, а не по длине текста запроса. Не путай CTE MATERIALIZED с materialized view: у view другой жизненный цикл и явное обновление.</p>
+      </details>
+    </section>
+
+    <section class="step" id="recursive-worktable">
+      <h2>Рекурсивный CTE обрабатывает очередной фронт найденных строк</h2>
+      <p>У исходного платежа 101 есть связанные операции 301 и 302, а у 301 — дальнейшая корректировка 401. Чтобы собрать всю цепочку зависимостей неизвестной глубины, одного фиксированного JOIN недостаточно. Храним рёбра <code>parent_id → child_id</code> и повторяем один шаг: для текущих операций найти их непосредственных потомков.</p>
+      <pre><code class="language-sql">CREATE TEMP TABLE operation_edges (
+  parent_id integer NOT NULL, child_id integer NOT NULL,
+  PRIMARY KEY (parent_id, child_id)
+);
+INSERT INTO operation_edges VALUES (101,301), (101,302), (301,401);
+
+WITH RECURSIVE related(id, depth) AS (
+  VALUES (101, 0)                         -- начальная строка, anchor
+  UNION ALL
+  SELECT e.child_id, r.depth + 1
+  FROM related r JOIN operation_edges e ON e.parent_id = r.id
+)
+SELECT id, depth FROM related ORDER BY depth, id;</code></pre>
+      <pre class="out">id|depth
+101|0
+301|1
+302|1
+401|2</pre>
+      <p>Начальная часть выполняется один раз, её строки попадают и в результат, и в рабочую таблицу. Затем рекурсивная часть использует <code>related</code> как <b>текущую рабочую таблицу</b>, а не как все строки, когда-либо найденные запросом. Новые строки добавляются в общий результат и заменяют рабочую таблицу на следующей итерации. Когда следующая порция пуста, вычисление заканчивается. Внутри это итерация над наборами, а не рекурсивные вызовы Java-метода.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 294" role="img" aria-label="Граф 101 ведёт к 301 и 302, 301 ведёт к 401. По четырём шагам рабочая таблица содержит 101, затем 301 и 302, затем 401, затем пуста. Накопленный результат растёт до четырёх строк и не подставляется целиком в следующую итерацию.">
+            <defs><marker id="sq-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="98" y="45" width="64" height="36" rx="6" class="dg-cell"/>
+            <rect x="24" y="133" width="64" height="36" rx="6" class="dg-cell"/>
+            <rect x="172" y="133" width="64" height="36" rx="6" class="dg-cell"/>
+            <rect x="24" y="221" width="64" height="36" rx="6" class="dg-cell"/>
+            <rect x="270" y="58" width="186" height="116" rx="8" class="dg-box"/>
+            <rect x="522" y="58" width="178" height="196" rx="8" class="dg-box"/>
+            <rect data-s="1" x="98" y="45" width="64" height="36" rx="6" class="dg-cell hit"/>
+            <g data-s="2"><rect x="24" y="133" width="64" height="36" rx="6" class="dg-cell hit"/><rect x="172" y="133" width="64" height="36" rx="6" class="dg-cell hit"/></g>
+            <rect data-s="3" x="24" y="221" width="64" height="36" rx="6" class="dg-cell hit"/>
+            <path d="M112 81 L62 129" class="dg-line" marker-end="url(#sq-r)"/>
+            <path d="M148 81 L198 129" class="dg-line" marker-end="url(#sq-r)"/>
+            <path d="M56 169 L56 217" class="dg-line" marker-end="url(#sq-r)"/>
+            <path data-s="1-3" d="M456 112 L518 112" class="dg-line" marker-end="url(#sq-r)"/>
+            <path data-s="1" d="M162 63 C220 63, 230 108, 266 108" class="dg-line" marker-end="url(#sq-r)"/>
+            <path data-s="2" d="M236 151 L266 151" class="dg-line" marker-end="url(#sq-r)"/>
+            <path data-s="3" d="M88 239 C180 239, 210 146, 266 146" class="dg-line" marker-end="url(#sq-r)"/>
+            <text x="24" y="24" class="dg-cap">РЁБРА ОПЕРАЦИЙ</text>
+            <text x="270" y="24" class="dg-cap">РАБОЧАЯ ТАБЛИЦА</text>
+            <text x="522" y="24" class="dg-cap">РЕЗУЛЬТАТ</text>
+            <g text-anchor="middle" class="dg-in"><text x="130" y="68">101</text><text x="56" y="156">301</text><text x="204" y="156">302</text><text x="56" y="244">401</text></g>
+            <text x="284" y="83" class="dg-n">id / depth</text><text x="536" y="83" class="dg-n">id / depth</text>
+            <g data-s="1"><text x="284" y="112" class="dg-in">101 / 0</text><text x="270" y="281" class="dg-s">всего строк: 1</text></g>
+            <g data-s="2"><text x="284" y="112" class="dg-in">301 / 1</text><text x="284" y="142" class="dg-in">302 / 1</text><text x="270" y="281" class="dg-s">всего строк: 3</text></g>
+            <g data-s="3"><text x="284" y="112" class="dg-in">401 / 2</text><text x="270" y="281" class="dg-s">всего строк: 4</text></g>
+            <g data-s="4"><text x="284" y="112" class="dg-ok">пусто: стоп</text><text x="270" y="281" class="dg-s">всего строк: 4</text></g>
+            <text x="536" y="112" class="dg-in">101 / 0</text>
+            <text data-s="2-4" x="536" y="142" class="dg-in">301 / 1</text>
+            <text data-s="2-4" x="536" y="172" class="dg-in">302 / 1</text>
+            <text data-s="3-4" x="536" y="202" class="dg-in">401 / 2</text>
+            <text data-s="1-3" x="468" y="98" class="dg-n">добавить</text>
+
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Anchor создаёт (101, 0). Это одновременно первая порция рабочей таблицы и первая строка накопленного результата.</li>
+          <li>Для текущего 101 найдены 301 и 302. Они заменяют рабочую таблицу; 101 остаётся только в накопленном результате. Всего найдено три строки.</li>
+          <li>Теперь рекурсивный шаг видит только 301 и 302. У 301 есть потомок 401, у 302 нет. Рабочая таблица становится одной строкой (401, 2).</li>
+          <li>У 401 потомков нет. Следующая рабочая таблица пуста, поэтому новых шагов не будет; в результате остаются четыре строки.</li>
+        </ol>
+      </figure>
+      <h3>Цикл определяется по выбранной identity, а не по слову RECURSIVE</h3>
+      <p>Добавим ошибочное ребро <code>401 → 101</code>. Теперь исходная форма с UNION ALL бесконечно получает новые порции. В PostgreSQL нет автоматического бизнес-ограничения глубины: нужен критерий остановки. В демо действует <code>statement_timeout = '5s'</code> как страховка запуска, но правильное завершение задаёт сам запрос.</p>
+      <pre><code class="language-sql">INSERT INTO operation_edges VALUES (401,101);
+WITH RECURSIVE related(id, depth) AS (
+  VALUES (101, 0)
+  UNION ALL
+  SELECT e.child_id, r.depth + 1
+  FROM related r JOIN operation_edges e ON e.parent_id = r.id
+) CYCLE id SET is_cycle USING path
+SELECT id, depth, is_cycle FROM related ORDER BY depth, id;</code></pre>
+      <pre class="out">id|depth|is_cycle
+101|0|f
+301|1|f
+302|1|f
+401|2|f
+101|3|t</pre>
+      <p><code>CYCLE</code> отслеживает повтор ID в текущем пути. Строка, замыкающая цикл, попадает в результат с <code>is_cycle = true</code>, но из неё поиск дальше не продолжается. Для ответа без этой строки добавь <code>WHERE NOT is_cycle</code> в финальный SELECT; для диагностики её полезно оставить. Два разных пути до одной операции — не обязательно цикл: CYCLE проверяет путь, а не глобальную уникальность результата.</p>
+      <p><code>UNION</code> вместо UNION ALL удаляет дубликаты целых строк, в том числе уже встречавшихся на прошлых итерациях. Если CTE возвращает только ID, повторный 101 исчезнет и этот граф завершится. Но с <code>(id, depth)</code> строки (101, 0) и (101, 3) различаются: смена UNION не спасает. Ниже отдельная проверка этой развилки в карточке.</p>
+      <details class="deep"><summary>SEARCH задаёт ключ сортировки, а не порядок обхода движком</summary><p>Начиная с PostgreSQL 14 доступны SEARCH и CYCLE. <code>SEARCH DEPTH FIRST BY id SET ordercol</code> или BREADTH FIRST добавляет служебный столбец для желаемого порядка вывода; затем нужен внешний <code>ORDER BY ordercol</code>. Это не команда планировщику выполнять рекурсивные шаги именно в таком порядке. Наша сортировка <code>ORDER BY depth, id</code> уже явно показывает уровни и стабильный порядок внутри них.</p><p>Для графа с большим числом путей результат может расти гораздо быстрее числа вершин даже без циклов. Если нужны уникальные достижимые операции, форма с одним ID и UNION выражает другую задачу, чем перечисление всех путей с UNION ALL и path. Определи требуемую уникальность до выбора защиты от циклов.</p></details>
+    </section>
+
+    <section class="step" id="limits-plans">
+      <h2>Форма SQL выбирается по смыслу, стоимость проверяется планом</h2>
+      <p>Один результат часто можно получить подзапросом, соединением или оконной функцией. Начни с вопроса: нужны столбцы связанных строк, факт наличия, одно агрегированное значение или повторяемый шаг по графу? Так проще сохранить пустые случаи и число строк. Затем проверь стоимость: читабельная форма сама по себе не гарантирует хороший доступ к данным.</p>
+      <table class="mx">
+        <thead><tr><th>Нужно</th><th>Естественная форма</th><th>Главная проверка</th></tr></thead>
+        <tbody>
+          <tr><td>Одно число на счёт</td><td>Скалярный подзапрос или предварительный агрегат</td><td>Не более одной строки; смысл NULL при отсутствии</td></tr>
+          <tr><td>Хотя бы один платёж</td><td>EXISTS с явной корреляцией</td><td>Проверяется нужный набор строк, а не строка COUNT</td></tr>
+          <tr><td>Несколько последних платежей на выбранные счета</td><td>LATERAL с ORDER BY и LIMIT</td><td>Индекс, tie-breaker, сохранение пустых счетов</td></tr>
+          <tr><td>Назвать промежуточные этапы</td><td>Нерекурсивный CTE</td><td>Встраивание, число ссылок, повтор вычислений</td></tr>
+          <tr><td>Все связанные операции произвольной глубины</td><td>WITH RECURSIVE</td><td>Рабочая таблица, identity, циклы и число путей</td></tr>
+        </tbody>
+      </table>
+      <p>В <code>EXPLAIN (ANALYZE, BUFFERS)</code> для подзапроса ищи SubPlan/InitPlan, для материализации — CTE Scan, для рекурсии — Recursive Union и WorkTable Scan. Названия показывают организацию работы. Счётчик <code>loops</code> объясняет, сколько раз запущен внутренний узел; actual rows при нескольких loops — среднее число строк за запуск. Дешёвый внутренний поиск, повторённый миллион раз, перестаёт быть дешёвым в сумме.</p>
+      <p>Большое число Rows Removed by Filter подсказывает, что данные отсекаются поздно. В нашем CTE-примере причина видна прямо в дереве: фильтр расположен над материализацией. При временных файлах смотри объём промежуточного результата и память на операции, а при LATERAL — сколько внешних строк породило индексные обращения. Детали чтения плана вынесены в <a href="query-tuning.html">EXPLAIN</a>; здесь важно не выводить скорость из наличия слова WITH или EXISTS.</p>
+      <p>Не лечи нарушение скалярности случайным LIMIT 1. Если данные должны быть уникальны, закрепи это ограничением, иначе запрос скроет ошибку модели. Если нужна последняя запись, задай полный порядок. Если нужна сумма, агрегируй явно. При переписывании в JOIN проверь, не исчезли ли счета без платежей и не размножились ли строки; те же проверки нужны при переходе на окна.</p>
+      <div class="note warn"><p>Внешний LIMIT не является надёжной защитой бесконечной рекурсии. Некоторые запросы смогут остановиться после первых строк, но ORDER BY или соединение выше могут потребовать весь результат. Остановка должна следовать из рекурсивного условия, устранения дубликатов или контроля цикла; timeout ограничивает ущерб, а не доказывает корректность.</p></div>
+      <p>В этой теме CTE используется для чтения. Изменяющие данные CTE, транзакционная видимость, блокировки и побочные эффекты функций требуют отдельных правил; их нельзя переносить из модели обычного SELECT по аналогии. Задачи на массовое ранжирование принадлежат <a href="window-functions.html">Window Functions</a>, комбинации соединений — <a href="sql-joins.html">Joins</a>, тренировка запросов — <a href="sql-practice.html">SQL Practice</a>.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Скалярный подзапрос: одна строка — значение, ноль — NULL, несколько — ошибка. Форма результата важнее расположения скобок.</li>
+      <li>EXISTS проверяет наличие строк. COUNT без GROUP BY сам создаёт строку, поэтому EXISTS над ним не проверяет наличие платежей.</li>
+      <li>LATERAL выражает зависимый табличный результат; LEFT сохраняет пустые внешние строки, внутренний ORDER BY задаёт выбор top-N.</li>
+      <li>CTE — имя в одном SQL-операторе. В PostgreSQL 12+ подходящий SELECT CTE может встраиваться; материализация меняет возможности оптимизации.</li>
+      <li>Рекурсивный шаг видит текущую рабочую таблицу. UNION устраняет повтор целой строки, CYCLE проверяет выбранную identity внутри пути.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="correlated-lateral" data-freq="2">
+      <h3>Что такое коррелированный подзапрос и когда нужен LATERAL?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Коррелированный подзапрос использует значения внешней строки: например, ищет платежи с account_id текущего счёта. Я сначала определяю форму ответа. Для одного максимума подходит скалярный подзапрос; если он вернёт несколько строк, будет ошибка, а при отсутствии строк получится NULL. Для нескольких последних платежей с несколькими столбцами использую LATERAL в FROM.</p><p>LATERAL разрешает правой части ссылаться на строки слева. LEFT JOIN LATERAL сохраняет счёт без платежей, CROSS JOIN LATERAL убирает его. Если внутри LIMIT, обязательно задаю ORDER BY с правилом разрешения равенства, иначе выбор «последнего» не определён.</p></div>
+        <div data-level="senior"><ul>
+          <li>Корреляция — зависимость в SQL, а не гарантия N физических запусков. Смотрю SubPlan, параметризованные узлы и loops; оптимизатор может преобразовать запрос.</li>
+          <li>Top-N через LATERAL удобен для небольшого внешнего набора с индексом по ключу и порядку. Для всех групп большого набора сравниваю с ранжированием общего потока.</li>
+          <li>LIMIT 1 не заменяет уникальность. Он либо выражает осмысленный выбор по полному порядку, либо маскирует несколько строк там, где модель обещала одну.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="exists-semantics" data-freq="2">
+      <h3>Что именно проверяет EXISTS и почему SELECT COUNT(*) внутри него — ловушка?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>EXISTS проверяет, вернул ли подзапрос хотя бы одну строку, и выдаёт true или false. Сами значения обычно не важны, поэтому я пишу SELECT 1. Для счёта с несколькими платежами внешний счёт остаётся одной строкой: EXISTS не присоединяет каждое совпадение.</p><p>COUNT без GROUP BY возвращает одну строку даже для пустого набора, со значением 0. Поэтому EXISTS над таким агрегатом равен true и для счёта без платежей. Я проверяю существование строк платежей напрямую, а агрегат беру, только если нужен сам счётчик.</p></div>
+        <div data-level="senior"><ul>
+          <li>Не рассчитываю на побочные эффекты внутри EXISTS: содержимое SELECT и весь вход не обязаны вычисляться. Возможность остановиться после найденной строки не означает конкретный план на любых данных.</li>
+          <li>NOT EXISTS ищет отсутствие совпадения по выбранному условию. Его нельзя механически заменить на NOT IN, не проверив NULL и требуемую логику сравнения.</li>
+          <li>Случайно найденное во внешнем scope неквалифицированное имя способно изменить корреляцию без синтаксической ошибки. Алиасы — часть проверки корректности.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="cte-materialization" data-freq="2">
+      <h3>Материализуется ли CTE? Чем отличаются MATERIALIZED и NOT MATERIALIZED?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>CTE даёт промежуточному результату имя в одном операторе, но не гарантирует временную таблицу. В PostgreSQL 12+ нерекурсивный SELECT CTE без volatile-функций может объединяться с родительским запросом: по умолчанию при одной ссылке встраивается, при нескольких обычно вычисляется отдельно для повторного использования.</p><p>MATERIALIZED запрещает объединение, NOT MATERIALIZED разрешает его для подходящего CTE и при нескольких ссылках. Встраивание помогает протолкнуть внешние фильтры внутрь; материализация помогает избежать повторения дорогого вычисления. Выбираю по плану: в демо одна форма прочитала индексом одну строку, другая сначала произвела 20 000.</p></div>
+        <div data-level="senior"><ul>
+          <li>NOT MATERIALIZED не отменяет ограничения для рекурсивных и содержащих volatile-функции CTE. Это не универсальная команда «оптимизируй всё».</li>
+          <li>Материализация может хранить большой промежуточный набор и использовать временные файлы. Встраивание нескольких ссылок может повторить дорогое выражение: оба направления требуют измерений.</li>
+          <li>Отдельно вычисляемый SELECT CTE не всегда читается до конца: потребитель может запросить лишь часть. В примере полный проход нужен из-за фильтра над материализованным набором.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="recursive-termination" data-freq="2">
+      <h3>Как выполняется рекурсивный CTE и почему UNION не всегда останавливает цикл?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Начальная часть даёт первые строки и рабочую таблицу. Рекурсивный шаг читает текущую рабочую таблицу, добавляет найденное в результат и заменяет рабочую таблицу новой порцией. Когда порция пуста, запрос завершается. Он не перечитывает весь накопленный результат на каждом шаге.</p><p>UNION убирает дубликаты целых строк. Если возвращаю только ID, повторный ID можно удалить; если вместе с ID растёт depth, каждая строка новая и цикл продолжается. Для циклов по ID использую CYCLE либо явный путь и проверку посещения. Ограничение глубины нужно, когда сама задача ограничена глубиной.</p></div>
+        <div data-level="senior"><ul>
+          <li>CYCLE проверяет повтор в конкретном пути и включает замыкающую строку с отметкой. Это не глобальная дедупликация вершин, достижимых несколькими путями.</li>
+          <li>SEARCH строит ключ порядка вывода, а не диктует порядок физического исполнения. Результат всё равно сортирую явно.</li>
+          <li>Даже ациклический граф способен породить огромное число путей. Решаю заранее, нужны уникальные вершины, все пути или ограниченный обход.</li>
+        </ul></div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Рёбра 101 → 301 → 401 → 101 образуют цикл. Что меняет добавление depth?</summary>
+          <p>Используй граф из урока, включая ветку 101 → 302. Первый запрос возвращает только ID:</p>
+          <pre><code class="language-sql">WITH RECURSIVE related(id) AS (
+  VALUES (101)
+  UNION
+  SELECT e.child_id
+  FROM related r JOIN operation_edges e ON e.parent_id = r.id
+)
+SELECT id FROM related ORDER BY id;</code></pre>
+          <pre class="out">id
+101
+301
+302
+401</pre>
+          <p>Теперь добавь depth. Чтобы опыт гарантированно завершился, ограничение задано внутри рекурсивной части:</p>
+          <pre><code class="language-sql">WITH RECURSIVE related(id, depth) AS (
+  VALUES (101, 0)
+  UNION
+  SELECT e.child_id, r.depth + 1
+  FROM related r JOIN operation_edges e ON e.parent_id = r.id
+  WHERE r.depth &lt; 4
+)
+SELECT id, depth FROM related ORDER BY depth, id;</code></pre>
+          <pre class="out">id|depth
+101|0
+301|1
+302|1
+401|2
+101|3
+301|4
+302|4</pre>
+          <p>Во втором запросе повторились 101, 301 и 302: UNION сравнивает пару столбцов. Завершение обеспечил только предел depth. Если убрать его, строки с новыми глубинами продолжат появляться. Для прекращения конкретного циклического пути нужно отслеживать identity операции, например CYCLE id.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://www.postgresql.org/docs/17/queries-with.html">PostgreSQL 17: WITH Queries</a> — основа урока: именованные этапы, рабочая таблица рекурсии, SEARCH/CYCLE, условия встраивания и материализации.</li>
+    <li><a href="https://www.postgresql.org/docs/17/functions-subquery.html">Subquery Expressions</a> и <a href="https://www.postgresql.org/docs/17/sql-expressions.html#SQL-SYNTAX-SCALAR-SUBQUERIES">Scalar Subqueries</a> — форма результата, EXISTS и скалярность.</li>
+    <li><a href="https://www.postgresql.org/docs/17/queries-table-expressions.html#QUERIES-LATERAL">LATERAL Subqueries</a> — зависимость от строк слева и сохранение внешних строк через LEFT JOIN.</li>
+    <li><a href="https://www.postgresql.org/docs/12/release-12.html">PostgreSQL 12 Release Notes</a> — появление управляемого CTE inlining; <a href="https://www.postgresql.org/docs/14/release-14.html">PostgreSQL 14 Release Notes</a> — SEARCH и CYCLE.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -217,7 +217,7 @@ window.KB_TREE = [
           scope: 'порядок выполнения SELECT, WHERE и HAVING, GROUP BY, NULL и трёхзначная логика, DISTINCT' },
         { id: 'sql-joins', freq: 3, status: 'draft', title: 'Joins',
           scope: 'INNER, LEFT, FULL, CROSS, self join, semi и anti join, NOT IN и NULL' },
-        { id: 'sql-subqueries', freq: 2, status: 'empty', title: 'Subqueries & CTE',
+        { id: 'sql-subqueries', freq: 2, status: 'draft', title: 'Subqueries & CTE',
           scope: 'коррелированные подзапросы, EXISTS, CTE, рекурсивные CTE, LATERAL' },
         { id: 'window-functions', freq: 3, status: 'empty', title: 'Window Functions',
           scope: 'ROW_NUMBER, RANK и DENSE_RANK, LAG и LEAD, нарастающий итог, топ-N в группе' },
