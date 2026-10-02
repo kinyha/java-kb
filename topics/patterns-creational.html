@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Design: Creational Patterns · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="patterns-creational">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Design: Creational Patterns</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Порождающие паттерны отвечают на вопрос, кто и как создаёт объект. Фабричный метод прячет за именем выбор класса и кеширование. Builder собирает объект с многими полями и проверяет его целиком. Singleton даёт один экземпляр, но только в пределах загрузчика классов, а singleton Spring — в пределах контекста. Abstract factory выдаёт согласованное семейство объектов. Prototype копирует готовый объект, и clone() копирует ссылки, а не содержимое. В Spring почти всё создание забирает контейнер, поэтому эти паттерны чаще встречаются в его API, чем в твоём коде.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Платёж создают в двадцати местах, и каждое собирает его по-своему</h2>
+      <p>Объект платежа нужен контроллеру, импорту из CSV, повтору из очереди и тестам. В каждом месте свой вызов конструктора с семью параметрами, половина из которых <code>null</code> или <code>false</code>. Кто-то забыл валюту, кто-то перепутал местами две строки одного типа, и компилятор этого не заметил.</p>
+      <pre><code class="language-java">new Payment("p-1", 500, null, "coffee", false, null, true); // Что значат null и true?</code></pre>
+      <p>Порождающие паттерны выносят создание в одно место с понятным именем. Банда четырёх (GoF) описала пять: фабричный метод, абстрактную фабрику, строителя, одиночку и прототип. Джошуа Блох в Effective Java добавил к ним статический фабричный метод, который в Java встречается чаще всех. Демо <a href="../examples/design/CreationalDemo.java">CreationalDemo.java</a> запускается командой <code>java CreationalDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="factory-method">
+      <h2>Статический фабричный метод выбирает класс и может вернуть готовый объект</h2>
+      <p>У конструктора три ограничения: у него нет имени, он всегда создаёт новый объект и всегда объект ровно этого класса. Статический метод снимает все три. JDK пользуется этим повсюду:</p>
+      <pre><code class="language-java">List.of(1).getClass();        // Класс выбирает фабрика, не вызывающий.
+List.of(1, 2, 3).getClass();
+Integer a = 127, b = 127, c = 128, d = 128; // Автоупаковка — это Integer.valueOf.
+System.out.println((a == b) + ", " + (c == d)); // Сравниваем ссылки.</code></pre>
+      <pre class="out">List.of(1): List12, List.of(1,2,3): ListN
+valueOf(127) same object: true, valueOf(128) same object: false</pre>
+      <p><code>List.of</code> возвращает разные скрытые классы: компактный для одного-двух элементов и общий для остальных. Вызывающий видит только <code>List</code>, и JDK может поменять реализацию в любой версии. <code>Integer.valueOf</code> отдаёт заранее созданные объекты для чисел от −128 до 127 и новые для остальных. Поэтому <code>==</code> для <code>Integer</code> «работает» на маленьких числах и ломается на больших — классическая ошибка с суммами платежей.</p>
+      <p>На собеседовании полезно различать два понятия. <b>Статический фабричный метод</b> из Effective Java — метод класса вместо конструктора: <code>Money.of(500, RUB)</code>, <code>Payment.refundOf(original)</code>. <b>Factory Method</b> из GoF — переопределяемый метод, через который базовый класс поручает подклассу решить, какой объект создать. В Spring второе встречается в виде методов <code>@Bean</code>: класс конфигурации решает, какую реализацию создать, а остальной код получает интерфейс.</p>
+    </section>
+
+    <section class="step" id="builder">
+      <h2>Builder собирает объект с многими полями и проверяет его целиком</h2>
+      <p>Когда полей много, а часть необязательна, конструкторы множатся: с тремя параметрами, с четырьмя, с пятью. Сеттеры решают проблему ценой изменяемого объекта, который какое-то время существует наполовину собранным. Builder копит значения в отдельном объекте и создаёт результат одним вызовом <code>build()</code>, где можно проверить всё сразу:</p>
+      <pre><code class="language-java">record Payment(String id, long cents, String currency, String description, boolean recurring) {
+    static final class Builder {
+        private String id, currency = "RUB", description = ""; // Значения по умолчанию в одном месте.
+        private long cents;
+        private boolean recurring;
+
+        Builder id(String v) { id = v; return this; }
+        Builder cents(long v) { cents = v; return this; }
+        Builder currency(String v) { currency = v; return this; }
+
+        Payment build() { // Проверка инварианта всего объекта.
+            Objects.requireNonNull(id, "id");
+            if (cents &lt;= 0) throw new IllegalStateException("amount must be positive, got " + cents);
+            return new Payment(id, cents, currency, description, recurring);
+        }
+    }
+}
+
+Payment.builder().id("p-1").cents(500).description("coffee").build();
+Payment.builder().id("p-2").currency("USD").build(); // Сумму забыли.</code></pre>
+      <pre class="out">Payment[id=p-1, cents=500, currency=RUB, description=coffee, recurring=false]
+build failed: amount must be positive, got 0</pre>
+      <p>Вызов читается как описание: видно, какое значение к какому полю относится, и порядок неважен. Объект Payment неизменяемый, а получить неправильный нельзя: <code>build()</code> не выпустит платёж без суммы. Цена — второй класс с копией всех полей, поэтому для трёх-четырёх обязательных параметров обычный конструктор record проще.</p>
+      <p>Lombok <code>@Builder</code> генерирует такой класс, но не проверяет инварианты: <code>build()</code> вызовет конструктор как есть. Проверку переносят в компактный конструктор record или пишут свой <code>build()</code>. Ещё одна ловушка Lombok: значение по умолчанию у поля без <code>@Builder.Default</code> builder игнорирует. В Spring builder — основной способ настройки: <code>RestClient.builder()</code>, <code>UriComponentsBuilder</code>, <code>MockMvcRequestBuilders</code>, <code>SpringApplicationBuilder</code>.</p>
+    </section>
+
+    <section class="step" id="singleton">
+      <h2>Singleton даёт один экземпляр, но один на что</h2>
+      <p>Классический singleton — приватный конструктор и статическое поле. Он защищает от случайного <code>new</code>, но не от сознательного обхода. Демо создаёт второй экземпляр двумя способами:</p>
+      <pre><code class="language-java">static final class BankRegistry implements Serializable {
+    static final BankRegistry INSTANCE = new BankRegistry();
+    private BankRegistry() {}
+}
+enum Banks { INSTANCE } // Singleton по Блоху.
+
+var ctor = BankRegistry.class.getDeclaredConstructor();
+ctor.setAccessible(true);
+ctor.newInstance() == BankRegistry.INSTANCE;          // Рефлексия.
+roundTrip(BankRegistry.INSTANCE) == BankRegistry.INSTANCE; // Сериализация туда и обратно.</code></pre>
+      <pre class="out">reflection copy == INSTANCE: false
+deserialized == INSTANCE: false
+enum via reflection: Cannot reflectively create enum objects
+enum deserialized == INSTANCE: true</pre>
+      <p>Рефлексия вызвала приватный конструктор, десериализация собрала новый объект в обход конструктора. Для класса защита пишется вручную: проверка в конструкторе и метод <code>readResolve</code>, возвращающий INSTANCE. Enum защищён языком: JVM запрещает создавать его константы рефлексией, а сериализация хранит только имя константы. Поэтому Effective Java называет enum с одним элементом лучшим способом сделать singleton. Ленивую инициализацию без синхронизации даёт идиома holder-класса: вложенный класс с полем загружается при первом обращении, а JVM гарантирует потокобезопасную инициализацию класса.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Слева JVM с двумя загрузчиками классов: каждый загрузил свой класс BankRegistry, и у каждого свой INSTANCE, всего два объекта. Справа два контекста Spring: в первом два определения бина FeeCalculator, cardFees и sbpFees, дают два объекта, во втором ещё один. Singleton Spring означает один объект на определение бина в контейнере.">
+            <path d="M360 24 L 360 228" class="dg-sep"/>
+            <text x="20" y="22" class="dg-cap">GOF SINGLETON: НА ЗАГРУЗЧИК</text>
+            <text x="374" y="22" class="dg-cap">SPRING SINGLETON: НА ОПРЕДЕЛЕНИЕ</text>
+            <!-- JVM -->
+            <rect x="20" y="36" width="320" height="170" rx="10" class="dg-sep" fill="none"/>
+            <rect x="36" y="64" width="140" height="120" rx="8" class="dg-box"/>
+            <rect x="188" y="64" width="140" height="120" rx="8" class="dg-box"/>
+            <rect x="48" y="128" width="116" height="40" rx="6" class="dg-cell hit"/>
+            <rect x="200" y="128" width="116" height="40" rx="6" class="dg-cell hit"/>
+            <!-- Spring -->
+            <rect x="374" y="36" width="190" height="170" rx="10" class="dg-box"/>
+            <rect x="574" y="36" width="126" height="170" rx="10" class="dg-box"/>
+            <rect x="386" y="80" width="166" height="40" rx="6" class="dg-cell hit"/>
+            <rect x="386" y="136" width="166" height="40" rx="6" class="dg-cell hit"/>
+            <rect x="584" y="80" width="106" height="40" rx="6" class="dg-cell hit"/>
+            <text x="30" y="52" class="dg-n">одна JVM</text>
+            <g text-anchor="middle">
+              <text x="106" y="86" class="dg-in">app loader</text>
+              <text x="106" y="106" class="dg-n">BankRegistry</text>
+              <text x="258" y="86" class="dg-in">plugin loader</text>
+              <text x="258" y="106" class="dg-n">BankRegistry</text>
+              <text x="106" y="153" class="dg-in">INSTANCE #1</text>
+              <text x="258" y="153" class="dg-in">INSTANCE #2</text>
+              <text x="469" y="62" class="dg-in">контекст 1</text>
+              <text x="469" y="105" class="dg-in">cardFees</text>
+              <text x="469" y="161" class="dg-in">sbpFees</text>
+              <text x="637" y="62" class="dg-in">контекст 2</text>
+              <text x="637" y="105" class="dg-in">cardFees</text>
+            </g>
+            <text x="20" y="226" class="dg-s">Загружен дважды — два INSTANCE.</text>
+            <text x="374" y="226" class="dg-s">Три объекта FeeCalculator, все «singleton».</text>
+          </svg>
+        </div>
+        <figcaption>Оба «одиночки» уникальны только внутри своей области. В серверах приложений, плагинах и тестах с несколькими контекстами это уже не один объект.</figcaption>
+      </figure>
+      <p>Singleton Spring — не паттерн GoF. Scope <code>singleton</code> значит «один объект на определение бина в контейнере». Два метода <code>@Bean</code>, возвращающих FeeCalculator, дают два объекта, а второй контекст — ещё по одному. Конструктор при этом обычный и открытый: тест создаёт объект через <code>new</code> с заглушками.</p>
+      <p>Поэтому в коде на Spring классический singleton почти не нужен и даже вреден. Статическое глобальное состояние нельзя подменить в тесте, оно живёт между тестами одного JVM и прячет зависимость: по сигнатуре класса не видно, что он ходит в реестр банков. Бин-синглтон, внедрённый через конструктор, даёт ту же единственность без этих проблем.</p>
+    </section>
+
+    <section class="step" id="abstract-factory">
+      <h2>Abstract factory выдаёт семейство объектов, которые работают только вместе</h2>
+      <p>Для работы с банком нужны три объекта: HTTP-клиент, проверка подписи ответов и перевод кодов ошибок банка в коды сервиса. Каждый банк поставляет свой комплект. Ошибка, от которой защищает абстрактная фабрика, — смешать комплекты: клиент Тинькофф и проверку подписи Сбера. Каждый объект по отдельности рабочий, а вместе они отклоняют все ответы.</p>
+      <pre><code class="language-java">interface BankKit {                       // Абстрактная фабрика.
+    BankClient client();
+    SignatureVerifier verifier();
+    ErrorMapper errors();
+}
+
+class TinkoffKit implements BankKit { /* три согласованных объекта Тинькофф */ }
+class SberKit implements BankKit { /* три объекта Сбера */ }
+
+// Код платежа получает весь комплект сразу и не может собрать чужую смесь.
+PaymentService(BankKit bank) { … }</code></pre>
+      <p>В Spring абстрактную фабрику обычно выражают конфигурацией: класс <code>@Configuration</code> на каждый банк с <code>@ConditionalOnProperty(name = "payments.bank", havingValue = "tinkoff")</code> создаёт все три бина. Сам <code>BeanFactory</code> — фабрика в самом общем смысле: он создаёт любые объекты по описаниям. Разбор того, как Boot выбирает такие конфигурации, — в <a href="spring-boot.html">Auto-configuration</a>.</p>
+    </section>
+
+    <section class="step" id="prototype">
+      <h2>Prototype копирует готовый объект, а clone() копирует ссылки</h2>
+      <p>Прототип нужен, когда новый объект проще получить копией настроенного, чем собирать заново: шаблон тарифа с двадцатью комиссиями, из которого делают тариф для конкретного магазина. В Java для этого есть <code>Cloneable</code> и <code>clone()</code>, и с ними легко ошибиться:</p>
+      <pre><code class="language-java">class Tariff implements Cloneable {
+    String bank;
+    List&lt;String&gt; fees = new ArrayList&lt;&gt;(List.of("1.5%"));
+
+    public Tariff clone() { return (Tariff) super.clone(); } // Поверхностная копия.
+
+    Tariff(Tariff other) {                       // Конструктор копирования.
+        this.bank = other.bank;
+        this.fees = new ArrayList&lt;&gt;(other.fees); // Копия списка явная.
+    }
+}
+
+var cloned = base.clone();
+cloned.fees.add("promo -1%");   // Скидка только для одного магазина.
+var copied = new Tariff(base);
+copied.fees.add("vip -0.5%");</code></pre>
+      <pre class="out">base after changing clone: [1.5%, promo -1%]
+base after changing copy:  [1.5%, promo -1%]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Объект base и его clone ссылаются на один и тот же ArrayList fees, поэтому скидка promo, добавленная в clone, появилась и в base. Объект copied, созданный конструктором копирования, ссылается на свой отдельный список, и скидка vip осталась только в нём.">
+            <defs>
+              <marker id="pr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="pr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">ОБЪЕКТЫ</text>
+            <text x="420" y="22" class="dg-cap">СПИСКИ FEES В HEAP</text>
+            <rect x="20" y="36" width="220" height="40" rx="7" class="dg-box"/>
+            <rect x="20" y="96" width="220" height="40" rx="7" class="dg-box"/>
+            <rect x="20" y="156" width="220" height="40" rx="7" class="dg-box"/>
+            <rect x="420" y="56" width="280" height="44" rx="7" class="dg-cell miss"/>
+            <rect x="420" y="152" width="280" height="44" rx="7" class="dg-cell hit"/>
+            <path d="M240 56 C 330 56, 330 70, 416 70" class="dg-line bad" marker-end="url(#pr-bad)"/>
+            <path d="M240 116 C 330 116, 330 88, 416 88" class="dg-line bad" marker-end="url(#pr-bad)"/>
+            <path d="M240 176 L 416 174" class="dg-line" marker-end="url(#pr-n)"/>
+            <g text-anchor="middle">
+              <text x="130" y="61" class="dg-in">base</text>
+              <text x="130" y="121" class="dg-in">cloned = clone()</text>
+              <text x="130" y="181" class="dg-in">copied = new Tariff(base)</text>
+              <text x="560" y="83" class="dg-bad">[1.5%, promo -1%]</text>
+              <text x="560" y="179" class="dg-in">[1.5%, promo -1%, vip -0.5%]</text>
+            </g>
+            <text x="270" y="140" class="dg-n">одна ссылка на двоих</text>
+          </svg>
+        </div>
+        <figcaption>clone() скопировал поле fees — то есть ссылку. Скидка одного магазина стала скидкой базового тарифа и всех будущих копий.</figcaption>
+      </figure>
+      <p>Во второй строке вывода в базовом тарифе осталась промо-скидка из первого опыта, но vip-скидки нет: конструктор копирования сделал свой список. <code>Object.clone()</code> создаёт поверхностную копию, и глубокое копирование каждого изменяемого поля надо писать вручную. Ещё у механизма неудобный контракт: <code>Cloneable</code> не объявляет метод <code>clone</code>, а <code>final</code>-поля в копии не переназначить. Effective Java советует конструктор копирования или статический метод <code>copyOf</code>.</p>
+      <p>Лучшая защита — неизменяемость. Если тариф — record с <code>List.copyOf</code> в компактном конструкторе, делить его между магазинами безопасно, а «копия с изменением» — это новый объект с одним другим полем. Scope <code>prototype</code> в Spring — другое понятие: контейнер создаёт новый объект на каждый запрос бина по его описанию, ничего не копируя. Он разобран в <a href="bean-scopes.html">Bean Scopes</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Статический фабричный метод даёт имя, кеширование и выбор класса; Integer.valueOf кеширует −128…127, поэтому == для Integer ненадёжно.</li>
+        <li>Builder нужен для многих необязательных полей и проверяет инвариант в build(); Lombok @Builder сам ничего не проверяет.</li>
+        <li>Singleton уникален в загрузчике, singleton Spring — на определение бина в контейнере. Enum защищён от рефлексии и сериализации.</li>
+        <li>Abstract factory выдаёт согласованное семейство; в Spring это условная конфигурация.</li>
+        <li>clone() копирует ссылки; вместо него — конструктор копирования или неизменяемые объекты.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="creational-singleton" data-freq="3">
+      <h3>Как правильно реализовать singleton в Java?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Самый надёжный способ — enum с одним элементом. JVM гарантирует одну константу на загрузчик, запрещает создать её рефлексией и при десериализации возвращает ту же константу. Классический вариант с приватным конструктором и static final полем обходится рефлексией и сериализацией, если не добавить проверку в конструктор и readResolve.</p>
+          <p>Для ленивой инициализации подходит holder-класс: вложенный класс со статическим полем загрузится при первом обращении, а потокобезопасность даёт инициализация класса в JVM. Double-checked locking требует volatile и сложнее читается.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Singleton уникален только в своём загрузчике классов: в серверах приложений и плагинах их может быть несколько.</li>
+            <li>Глобальное статическое состояние плохо тестируется и прячет зависимость; в Spring вместо него используют бин-синглтон.</li>
+            <li>Volatile в double-checked locking нужен из-за возможной публикации не до конца сконструированного объекта.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем singleton Spring отличается от паттерна singleton?</summary>
+          <p>Scope singleton означает один объект на определение бина в контейнере. Два метода @Bean одного типа дают два объекта, второй контекст — ещё объекты. Конструктор обычный, объект можно создать через new в тесте. Паттерн GoF запрещает второй экземпляр в пределах загрузчика классов и делает доступ глобальным.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="creational-builder" data-freq="2">
+      <h3>Когда нужен builder и чем он лучше конструктора или сеттеров?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда у объекта много параметров и часть необязательна. Конструктор с семью аргументами нечитаем, и легко перепутать два параметра одного типа. Сеттеры дают изменяемый объект, который какое-то время существует наполовину собранным. Builder копит значения и создаёт неизменяемый объект одним вызовом build, где можно проверить инварианты сразу для всех полей.</p>
+          <p>Для трёх-четырёх обязательных полей обычный конструктор или record проще.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Lombok @Builder не проверяет инварианты и игнорирует инициализаторы полей без @Builder.Default.</li>
+            <li>Step builder через цепочку интерфейсов заставляет задать обязательные поля на этапе компиляции.</li>
+            <li>В Spring builder — основной API настройки: RestClient.builder, UriComponentsBuilder, SpringApplicationBuilder.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="creational-factory" data-freq="2">
+      <h3>Что такое фабричный метод и где он в JDK и Spring?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В обиходе так называют статический метод вместо конструктора: List.of, Integer.valueOf, Optional.of. У него есть имя, он может вернуть закешированный объект и выбрать подкласс: List.of возвращает разные скрытые реализации в зависимости от числа элементов.</p>
+          <p>Factory Method из GoF — другое: переопределяемый метод, через который базовый класс поручает подклассу создать объект. В Spring близкий аналог — методы @Bean в конфигурации, а сам BeanFactory — фабрика объектов по описаниям.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Integer.valueOf кеширует −128…127, поэтому == для Integer ломается на 128; верхнюю границу можно поднять флагом JVM.</li>
+            <li>Минус статических фабрик — их труднее найти в API, чем конструкторы; помогают соглашения об именах of, from, valueOf, getInstance.</li>
+            <li>Abstract factory создаёт согласованное семейство объектов; в Spring её роль играет условная @Configuration.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="creational-clone" data-freq="2">
+      <h3>Что не так с clone() в Java?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Object.clone делает поверхностную копию: поля-ссылки копируются как ссылки. Копия тарифа делит с оригиналом тот же список комиссий, и изменение копии меняет оригинал. Глубокое копирование нужно писать вручную для каждого изменяемого поля.</p>
+          <p>Вместо clone лучше конструктор копирования или статический метод copyOf, а ещё лучше — неизменяемые объекты, которые копировать не нужно.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Cloneable не объявляет clone, это интерфейс-маркер, меняющий поведение защищённого метода Object.</li>
+            <li>final-поля в копии не переназначить, поэтому clone плохо сочетается с неизменяемыми полями.</li>
+            <li>Scope prototype в Spring не копирует объект, а создаёт новый по описанию бина.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Gamma, Helm, Johnson, Vlissides, Design Patterns, глава 3 — основа урока: пять порождающих паттернов.</li>
+      <li>Joshua Bloch, Effective Java, 3-е изд., пункты 1–3 и 13 — статические фабрики, builder, singleton через enum, осторожно с clone.</li>
+      <li><a href="https://refactoring.guru/design-patterns/creational-patterns">Refactoring.Guru: Creational Patterns</a> — схемы и примеры для каждого паттерна.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html">Spring Framework Reference: Bean Scopes</a> — singleton и prototype в контейнере.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

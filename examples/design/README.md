@@ -5,4 +5,5 @@
 ```bash
 cd examples/design
 java SolidDemo.java
+java CreationalDemo.java
 ```

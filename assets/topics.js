@@ -187,7 +187,7 @@ window.KB_TREE = [
       { id: 'design', title: 'Code Design', source: 'GoF; Clean Architecture (Martin); Learning Domain-Driven Design (Khononov)', items: [
         { id: 'design-principles', freq: 3, status: 'draft', title: 'SOLID & Principles',
           scope: 'SOLID, coupling и cohesion, DRY, KISS, YAGNI, композиция и агрегация' },
-        { id: 'patterns-creational', freq: 2, status: 'empty', title: 'Creational Patterns',
+        { id: 'patterns-creational', freq: 2, status: 'draft', title: 'Creational Patterns',
           scope: 'singleton, factory method, abstract factory, builder, prototype, где они в JDK и Spring' },
         { id: 'patterns-structural', freq: 2, status: 'empty', title: 'Structural Patterns',
           scope: 'adapter, decorator, proxy, facade, composite, чем декоратор отличается от прокси' },
