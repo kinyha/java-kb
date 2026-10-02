@@ -115,7 +115,7 @@ window.KB_TREE = [
           scope: 'TLS-рукопожатие, сертификаты и цепочка доверия, HTTPS, mTLS' },
       ] },
       { id: 'data', title: 'Data Representation', items: [
-        { id: 'data-repr', freq: 1, status: 'empty', title: 'Numbers & Text',
+        { id: 'data-repr', freq: 1, status: 'draft', title: 'Numbers & Text',
           scope: 'дополнительный код, переполнение, IEEE 754, Unicode, UTF-8' },
         { id: 'serialization', freq: 2, status: 'empty', title: 'Serialization Formats',
           scope: 'JSON, XML, Protobuf, Avro, эволюция схемы' },

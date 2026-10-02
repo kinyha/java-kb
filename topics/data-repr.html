@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Numbers &amp; Text · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="data-repr">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Numbers &amp; Text</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сумма платежа и его назначение хранятся в конечных последовательностях битов. Для суммы важны ширина числа и правила арифметики, для текста — номера знаков и кодировка. При странном результате восстанови цепочку: значение → тип или кодировка → операция → результат. Так становится видно, где потерялись разряды или изменился смысл байтов.</p>
+    </div>
+
+    <section class="step" id="symptoms">
+      <h2>Правильные входные данные ещё не обещают правильный результат</h2>
+      <p>Сервис складывает два пакета платежей: 15 млн и 10 млн рублей, суммы хранит в копейках. Каждый пакет помещается в <code>int</code>, сумма за день становится отрицательной, а исключения нет. Рядом сверка комиссии не признаёт равными <code>0.1 + 0.2</code> и <code>0.3</code>. В чеке четыре видимых знака, но лимит в пять байт превышен вдвое.</p>
+      <p>Ошибки возникают ещё до базы и сети. Целое число, двоичная дробь, позиция в строке и байт после кодирования — разные меры. Каждая полезна для своей задачи; сбой начинается, когда от неё ждут свойств другой.</p>
+      <p>Все фрагменты ниже взяты из одного <a href="../examples/cs/DataRepresentationDemo.java">DataRepresentationDemo.java</a>, без библиотек и сборки. Запуск проверен на OpenJDK JBR 21.0.11; в каждом шаге показан вывод соответствующего метода, без служебной строки с его именем.</p>
+      <pre><code class="language-bash"># Из корня базы; java -version должен показывать 21.
+java examples/cs/DataRepresentationDemo.java</code></pre>
+      <pre><code class="language-java">int firstBatch = 1_500_000_000;               // Копейки, оба пакета по отдельности влезают в int.
+int secondBatch = 1_000_000_000;
+int dailyTotal = firstBatch + secondBatch;  // Сумма уже не влезает в 32 знаковых бита.
+System.out.println(&quot;daily total = &quot; + dailyTotal);
+System.out.println(&quot;0.1 + 0.2 == 0.3: &quot; + (0.1 + 0.2 == 0.3));
+String receipt = &quot;A\u042F\u20AC\uD83D\uDCB3&quot;; // AЯ€💳: последний знак занимает два char.
+System.out.println(&quot;receipt chars/bytes = &quot; + receipt.length() + &quot;/&quot;
+        + receipt.getBytes(StandardCharsets.UTF_8).length);</code></pre>
+      <pre class="out">daily total = -1794967296
+0.1 + 0.2 == 0.3: false
+receipt chars/bytes = 5/10</pre>
+      <p>Дневная сумма <code>2_500_000_000</code> копеек превышает максимум <code>int</code>. <code>double</code> хранит ближайшие доступные двоичные дроби вместо точных десятых. <code>length()</code> считает единицы UTF-16, <code>getBytes(UTF_8).length</code> — байты передачи. Разберём, что сохраняет каждое представление.</p>
+    </section>
+
+    <section class="step" id="twos-complement">
+      <h2>Дополнительный код даёт старшему биту отрицательный вес</h2>
+      <p>У восьми битов ровно 256 комбинаций. В unsigned их значения идут от 0 до 255, веса разрядов — 128, 64, 32, 16, 8, 4, 2, 1. У целых Java <b>дополнительный код</b>, two’s complement: старший вес становится <code>−128</code>, остальные сохраняются.</p>
+      <p><code>11111011</code> как <code>byte</code> равен <code>−128 + 64 + 32 + 16 + 8 + 2 + 1 = −5</code>. В unsigned те же биты дают 251: изменилось правило чтения, а не данные. Старший бит показывает знак, но остальные семь не являются модулем числа.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 268" role="img" aria-label="Восемь битов 11111011. В дополнительном коде старший бит имеет вес минус 128, сумма весов установленных битов равна минус пяти. В беззнаковой трактовке старший вес плюс 128 и те же биты дают 251. Ниже получение минус пяти: инвертировать 00000101 и прибавить один.">
+            <text x="20" y="24" class="dg-cap">ОДНИ БИТЫ, ДВА ПРАВИЛА ЧТЕНИЯ</text>
+            <!-- Позиция ячейки задаёт вес; старший разряд отличается знаком веса. -->
+            <g text-anchor="middle">
+              <text x="191" y="52" class="dg-bad">−128</text>
+              <text x="249" y="52" class="dg-n">64</text>
+              <text x="307" y="52" class="dg-n">32</text>
+              <text x="365" y="52" class="dg-n">16</text>
+              <text x="423" y="52" class="dg-n">8</text>
+              <text x="481" y="52" class="dg-n">4</text>
+              <text x="539" y="52" class="dg-n">2</text>
+              <text x="597" y="52" class="dg-n">1</text>
+            </g>
+            <text x="20" y="84" class="dg-in">byte −5</text>
+            <g>
+              <rect x="166" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="224" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="282" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="340" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="398" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="456" y="62" width="50" height="32" rx="5" class="dg-cell"/>
+              <rect x="514" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="572" y="62" width="50" height="32" rx="5" class="dg-cell hit"/>
+            </g>
+            <g text-anchor="middle" class="dg-in">
+              <text x="191" y="84">1</text><text x="249" y="84">1</text>
+              <text x="307" y="84">1</text><text x="365" y="84">1</text>
+              <text x="423" y="84">1</text><text x="481" y="84">0</text>
+              <text x="539" y="84">1</text><text x="597" y="84">1</text>
+            </g>
+            <text x="20" y="120" class="dg-s">unsigned: заменить −128 на +128 → значение больше на 256 → 251</text>
+            <line x1="20" y1="137" x2="700" y2="137" class="dg-sep"/>
+            <!-- Три ряда данных выровнены по разрядам: видно инверсию и перенос +1. -->
+            <text x="20" y="164" class="dg-in">+5</text>
+            <text x="20" y="190" class="dg-in">инверсия</text>
+            <text x="20" y="216" class="dg-in">ещё +1</text>
+            <g text-anchor="middle" class="dg-in">
+              <text x="191" y="164">0</text><text x="249" y="164">0</text>
+              <text x="307" y="164">0</text><text x="365" y="164">0</text>
+              <text x="423" y="164">0</text><text x="481" y="164">1</text>
+              <text x="539" y="164">0</text><text x="597" y="164">1</text>
+              <text x="191" y="190">1</text><text x="249" y="190">1</text>
+              <text x="307" y="190">1</text><text x="365" y="190">1</text>
+              <text x="423" y="190">1</text><text x="481" y="190">0</text>
+              <text x="539" y="190">1</text><text x="597" y="190">0</text>
+              <text x="191" y="216">1</text><text x="249" y="216">1</text>
+              <text x="307" y="216">1</text><text x="365" y="216">1</text>
+              <text x="423" y="216">1</text><text x="481" y="216">0</text>
+              <text x="539" y="216">1</text><text x="597" y="216">1</text>
+            </g>
+            <text x="20" y="243" class="dg-s">00000101 + 11111011 = 1 00000000; в восьми битах остаётся ноль</text>
+          </svg>
+        </div>
+        <figcaption>Разница между unsigned и signed для установленного старшего бита всегда равна 2ⁿ; здесь это 256.</figcaption>
+      </figure>
+      <p>В <code>n</code> битах отрицание равно <code>~x + 1</code>. Число и его инверсия в сумме дают <code>2ⁿ − 1</code>; ещё единица даёт <code>2ⁿ</code>, от которого в <code>n</code> битах остаётся ноль. Поэтому один двоичный сумматор работает и с положительными, и с отрицательными числами.</p>
+      <p>Диапазон несимметричен: <code>−2ⁿ⁻¹ … 2ⁿ⁻¹−1</code>. Для <code>byte</code> это −128…127, для <code>int</code> −2 147 483 648…2 147 483 647. Ноль занимает одну комбинацию <code>000…0</code>, поэтому отрицательных значений на одно больше. Положительный партнёр минимума в том же типе не помещается.</p>
+      <pre><code class="language-java">byte delta = -5;
+String bits = String.format(Locale.ROOT, &quot;%8s&quot;,
+        Integer.toBinaryString(delta &amp; 0xff)).replace(&#x27; &#x27;, &#x27;0&#x27;); // Только младшие 8 бит.
+System.out.println(&quot;-5 bits = &quot; + bits);
+System.out.println(&quot;unsigned byte = &quot; + Byte.toUnsignedInt(delta)); // Та же восьмёрка бит.
+System.out.printf(Locale.ROOT, &quot;widen to int = %08X%n&quot;, (int) delta); // Знак расширяется.
+byte min = Byte.MIN_VALUE;
+System.out.println(&quot;-min as int/byte = &quot; + (-min) + &quot;/&quot; + (byte) -min);</code></pre>
+      <pre class="out">-5 bits = 11111011
+unsigned byte = 251
+widen to int = FFFFFFFB
+-min as int/byte = 128/-128</pre>
+      <p>При расширении <code>byte</code> −5 до <code>int</code> слева добавляются единицы: <code>FB → FFFFFFFB</code>. <b>Расширение знака</b> сохраняет значение. Для байта протокола со смыслом 0…255 нужны <code>Byte.toUnsignedInt(b)</code> или <code>b &amp; 0xff</code>: сохранить младшие восемь битов, обнулить старшие.</p>
+      <div class="trap">
+        <p class="myth">Знаковое число — это один бит знака и положительный модуль в остальных битах.</p>
+        <p class="fact">У целых Java старший бит имеет отрицательный вес. Например, <code>10000000</code> — это −128, а не «минус ноль». Модель «знак и модуль» даст неверные ответы про диапазон, отрицание и переполнение.</p>
+      </div>
+    </section>
+
+    <section class="step" id="operation-width">
+      <h2>Ширину вычисления выбирают операнды, а не переменная результата</h2>
+      <p>При сложении и умножении фиксированная ширина оставляет только младшие биты результата. Это арифметика по модулю <code>2ⁿ</code>: сумма из первого шага <code>2_500_000_000</code> читается как отрицательная, потому что старший бит 32-битного результата установлен. Её знаковое значение равно <code>2_500_000_000 − 4_294_967_296 = −1_794_967_296</code>. Java не выбрасывает исключение при таком переполнении.</p>
+      <p><code>long total</code> не расширяет всю правую часть. Перед обычной целочисленной арифметикой <code>byte</code>, <code>short</code>, <code>char</code> расширяются до <code>int</code>. Есть операнд <code>long</code> — вычисление в <code>long</code>; иначе в <code>int</code>. Переменная слева получает уже готовый результат.</p>
+      <p>Переведём 30 млн рублей в копейки. Множитель 100 помещается в <code>int</code>, произведение 3 млрд — нет. Нужно расширить операнд <em>до</em> умножения или явно отклонить переполнение.</p>
+      <pre><code class="language-java">int rubles = 30_000_000;
+long late = rubles * 100;          // Сначала int * int, затем расширение повреждённого результата.
+long early = (long) rubles * 100;  // long участвует в умножении: вычисление сразу 64-битное.
+System.out.println(&quot;late/early = &quot; + late + &quot;/&quot; + early);
+try {
+    System.out.println(Math.multiplyExact(rubles, 100)); // int-версия сообщает о переполнении.
+} catch (ArithmeticException e) {
+    System.out.println(&quot;multiplyExact = &quot; + e.getClass().getSimpleName());
+}
+byte count = 127;
+System.out.println(&quot;count + 1 = &quot; + (count + 1)); // byte расширяется до int перед сложением.
+count++;                                       // Сложение сужается обратно до byte.
+System.out.println(&quot;count++ = &quot; + count);</code></pre>
+      <pre class="out">late/early = -1294967296/3000000000
+multiplyExact = ArithmeticException
+count + 1 = 128
+count++ = -128</pre>
+      <p><code>(long) (rubles * 100)</code> даёт тот же повреждённый результат, что <code>late</code>, а <code>rubles * 100L</code> — правильный, как <code>early</code>. Правило действует на каждый узел выражения: в <code>(long) (a * b) + c</code> произведение всё ещё считается в <code>int</code>.</p>
+      <table class="mx">
+        <thead><tr><th>Выражение</th><th>Что происходит</th><th>Результат или граница</th></tr></thead>
+        <tbody>
+          <tr><td><code>byte + byte</code></td><td>Оба операнда расширяются до <code>int</code></td><td>Результат <code>int</code>; присвоение в <code>byte</code> требует сужения</td></tr>
+          <tr><td><code>int * int</code></td><td>32-битное умножение</td><td><code>long</code> слева не спасёт</td></tr>
+          <tr><td><code>int * long</code></td><td><code>int</code> расширяется до <code>long</code></td><td>64-битное умножение, у него тоже конечный диапазон</td></tr>
+          <tr><td><code>b++</code>, <code>b += 1</code></td><td>Вычисление с последующим неявным сужением к типу <code>b</code></td><td>У <code>byte</code> после 127 получится −128</td></tr>
+          <tr><td><code>Math.addExact</code>, <code>multiplyExact</code></td><td>Проверка переполнения выбранного типа</td><td><code>ArithmeticException</code>, если точный результат не помещается</td></tr>
+        </tbody>
+      </table>
+      <p>Для денег выбирай единицу и диапазон вместе. Целые копейки в <code>long</code> точны, но комиссия в процентах потребует правила округления. Проверяемые операции превращают тихое переполнение в управляемую ошибку. Дополнительно нужны бизнес-границы: помещающееся число ещё не допустимый платёж.</p>
+      <div class="note warn">
+        <p>Comparator на <code>a − b</code> может переполниться и перевернуть порядок. Используй <code>Integer.compare(a, b)</code> или <code>Long.compare(a, b)</code>. Более широкий тип тоже не отменяет проверку промежуточных значений.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: минимальное число не становится положительным от минуса</summary>
+        <p><code>−Integer.MIN_VALUE</code> и <code>Math.abs(Integer.MIN_VALUE)</code> остаются отрицательным минимумом: положительное 2³¹ не помещается. <code>Integer.MIN_VALUE / −1</code> тоже возвращает минимум без исключения; деление целого на ноль бросает <code>ArithmeticException</code>. У <code>long</code> та же граница.</p>
+        <p><code>−Byte.MIN_VALUE</code> даёт 128, потому что отрицание выполняется в <code>int</code>. Сужение обратно в <code>byte</code> даёт −128. Promotion меняет ответ о переполнении: правило минимального <code>int</code> нельзя механически переносить на <code>byte</code>.</p>
+      </details>
+    </section>
+
+    <section class="step" id="binary64">
+      <h2>Double меняет абсолютную точность вместе с величиной числа</h2>
+      <p><code>double</code> охватывает огромные и маленькие числа в 64 битах, задавая отдельно значащую часть и двоичный порядок. В нормальном binary64: один бит знака, 11 битов порядка, 52 бита дробной части. Неявная ведущая единица даёт <b>53 значащих двоичных бита</b>.</p>
+      <p>Формула нормального числа: <code>(−1)ˢ × (1 + fraction / 2⁵²) × 2^(exponent − 1023)</code>. Поле порядка смещено на bias 1023. Двигается двоичная точка, а число значащих разрядов остаётся фиксированным. У <code>float</code> поля 1/8/23 и 24 значащих бита.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 294" role="img" aria-label="Поле binary64 состоит из знака в один бит, порядка в 11 битов и дробной части в 52 бита. На числовой прямой возле 2 в степени 53 представлены 9007199254740992 и 9007199254740994, а целое между ними отсутствует: прибавление единицы округляется к левому числу.">
+            <defs>
+              <marker id="fp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">BINARY64: ШИРИНА ПОЛЯ И ЕГО СМЫСЛ</text>
+            <rect x="20" y="42" width="58" height="58" rx="6" class="dg-cell"/>
+            <rect x="86" y="42" width="160" height="58" rx="6" class="dg-cell"/>
+            <rect x="254" y="42" width="446" height="58" rx="6" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="49" y="64" class="dg-in">s</text>
+              <text x="49" y="85" class="dg-n">1 бит</text>
+              <text x="166" y="64" class="dg-in">exponent</text>
+              <text x="166" y="85" class="dg-n">11 битов</text>
+              <text x="477" y="64" class="dg-in">fraction</text>
+              <text x="477" y="85" class="dg-n">52 бита + неявная ведущая 1</text>
+            </g>
+            <text x="20" y="122" class="dg-s">0.1: s = 0; exponent = 1019 → порядок −4; fraction = 0x999999999999A</text>
+            <line x1="20" y1="139" x2="700" y2="139" class="dg-sep"/>
+            <!-- Отсутствующее целое расположено между двумя соседними представимыми числами. -->
+            <text x="20" y="161" class="dg-cap">ШАГ МЕЖДУ СОСЕДНИМИ DOUBLE РАВЕН 2</text>
+            <path d="M40 196 L 686 196" class="dg-line" marker-end="url(#fp-n)"/>
+            <rect x="172" y="184" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="532" y="184" width="16" height="24" rx="3" class="dg-cell hit"/>
+            <rect x="352" y="184" width="16" height="24" rx="3" class="dg-cell miss"/>
+            <g text-anchor="middle">
+              <text x="180" y="229" class="dg-in">9007199254740992</text>
+              <text x="360" y="179" class="dg-bad">+1: нет значения</text>
+              <text x="540" y="229" class="dg-in">9007199254740994</text>
+              <text x="180" y="249" class="dg-n">2^53, представимо</text>
+              <text x="540" y="249" class="dg-n">2^53 + 2, представимо</text>
+            </g>
+            <text x="20" y="269" class="dg-s">2^53 + 1 — середина: ties-to-even выбирает 2^53</text>
+          </svg>
+        </div>
+        <figcaption>Большой диапазон достигается сдвигом точки; дополнительные точные цифры от этого не появляются.</figcaption>
+      </figure>
+      <p>Конечная двоичная дробь после сокращения имеет знаменатель — степень двойки: <code>1/2</code>, <code>3/8</code>. У <code>1/10</code> остаётся множитель 5, запись бесконечна: <code>0.0001100110011…₂</code>. Литерал <code>0.1</code> округляется до binary64, операция округляет результат ещё раз. Десятичная печать не меняет внутреннее представление.</p>
+      <p>Арифметика округляет к ближайшему числу, при равном расстоянии — к чётному младшему значащему биту, ties-to-even. Все целые <code>−2⁵³ … 2⁵³</code> точны. После <code>2⁵³</code> расстояние до следующего значения равно 2; с ростом порядка шаг удваивается. Отдельные большие целые, например <code>2⁵³ + 2</code>, тоже точны.</p>
+      <pre><code class="language-java">double sum = 0.1 + 0.2; // Оба литерала и результат округляются до доступного binary64.
+System.out.println(&quot;sum = &quot; + sum);
+System.out.println(&quot;0.1 hex = &quot; + Double.toHexString(0.1));
+System.out.printf(Locale.ROOT, &quot;0.1 raw = %016X%n&quot;, Double.doubleToRawLongBits(0.1));
+double big = 9_007_199_254_740_992d; // 2^53: расстояние до следующего double равно двум.
+System.out.println(&quot;2^53 + 1 == 2^53: &quot; + (big + 1 == big));
+System.out.println(&quot;ulp(2^53) = &quot; + Math.ulp(big));
+System.out.println(&quot;order = &quot; + ((1e16 + -1e16) + 1) + &quot;/&quot; + (1e16 + (-1e16 + 1)));
+double invalid = 0.0 / 0.0; // NaN проходит проверку только на отрицательность.
+System.out.println(&quot;NaN &lt; 0 / NaN == NaN = &quot; + (invalid &lt; 0) + &quot;/&quot; + (invalid == invalid));
+System.out.println(&quot;1/+0 / 1/-0 = &quot; + (1.0 / 0.0) + &quot;/&quot; + (1.0 / -0.0));</code></pre>
+      <pre class="out">sum = 0.30000000000000004
+0.1 hex = 0x1.999999999999ap-4
+0.1 raw = 3FB999999999999A
+2^53 + 1 == 2^53: true
+ulp(2^53) = 2.0
+order = 1.0/0.0
+NaN &lt; 0 / NaN == NaN = false/false
+1/+0 / 1/-0 = Infinity/-Infinity</pre>
+      <p><code>Math.ulp(x)</code> показывает шаг точности. Допуск <code>1e−9</code> не универсален: около <code>1e16</code> он меньше шага представления. Для измерений выбирай абсолютную и относительную ошибки по задаче. Для точных денег — целую минимальную единицу или <a href="bigdecimal.html">BigDecimal &amp; Money</a> с явным округлением.</p>
+      <h3>Специальные значения тоже участвуют в вычислениях</h3>
+      <p>Порядок из единиц отведён под бесконечности и NaN. Переполнение даёт бесконечность, <code>0.0 / 0.0</code> — NaN без исключения. NaN не равен себе, сравнения <code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code> с ним ложны. Поэтому проверка <code>amount &lt; 0</code> его пропускает: отдельно нужна <code>Double.isFinite(amount)</code>.</p>
+      <p><code>+0.0 == −0.0</code>, но деление единицы различает их знаком бесконечности. При нулевом поле порядка ведущая единица исчезает: это ноль или <b>subnormal</b>. Subnormal дают постепенную потерю точности около нуля. Для платежа граница проще: сумма должна быть конечной и допустимой.</p>
+      <div class="trap">
+        <p class="myth">Double — это long с возможностью хранить дробную часть.</p>
+        <p class="fact">У него другая раскладка битов. Порядок расширяет диапазон, а 53 значащих бита ограничивают точность. Перевод идентификатора из <code>long</code> в <code>double</code> может потерять единицы задолго до максимума <code>long</code>; обратное приведение не восстановит потерянное.</p>
+      </div>
+    </section>
+
+    <section class="step" id="unicode-units">
+      <h2>Unicode задаёт номера знаков, а кодировка задаёт их запись</h2>
+      <p>Unicode назначает знакам <b>code points</b>: <code>Я</code> — U+042F, <code>€</code> — U+20AC, <code>💳</code> — U+1F4B3. UTF-8 и UTF-16 задают запись этих номеров. Unicode не означает «один знак — один байт»: это смысловой слой над конкретной кодировкой.</p>
+      <p>Диапазон code points — U+0000…U+10FFFF, область U+D800…U+DFFF отведена под <b>surrogates</b>. Отдельный surrogate не является Unicode scalar value и не кодируется в правильном UTF-8. Java <code>char</code> — 16-битная единица UTF-16: для scalar value в BMP достаточно одной, выше U+FFFF нужна пара high/low surrogate.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 272" role="img" aria-label="Строка AЯ€💳 состоит из четырёх code points. В UTF-16 первые три занимают по одной единице, карта — пару D83D DCB3, всего пять единиц. UTF-8 даёт соответственно 41, D0 AF, E2 82 AC, F0 9F 92 B3, всего десять байт. Каждый столбец связывает один code point с его представлениями.">
+            <text x="20" y="24" class="dg-cap">ЧЕТЫРЕ CODE POINTS В ТРЁХ ПРЕДСТАВЛЕНИЯХ</text>
+            <!-- Вложенные группы удерживают границы одного code point при разной длине записи. -->
+            <rect x="20" y="39" width="90" height="186" rx="8" class="dg-sep" fill="none"/>
+            <rect x="126" y="39" width="140" height="186" rx="8" class="dg-sep" fill="none"/>
+            <rect x="282" y="39" width="188" height="186" rx="8" class="dg-sep" fill="none"/>
+            <rect x="486" y="39" width="214" height="186" rx="8" class="dg-sep" fill="none"/>
+            <g text-anchor="middle">
+              <text x="65" y="61" class="dg-t">A</text>
+              <text x="196" y="61" class="dg-t">Я</text>
+              <text x="376" y="61" class="dg-t">€</text>
+              <text x="593" y="61" class="dg-t">💳</text>
+              <text x="65" y="82" class="dg-in">U+0041</text>
+              <text x="196" y="82" class="dg-in">U+042F</text>
+              <text x="376" y="82" class="dg-in">U+20AC</text>
+              <text x="593" y="82" class="dg-in">U+1F4B3</text>
+            </g>
+            <text x="30" y="108" class="dg-n">UTF-16</text>
+            <rect x="30" y="115" width="70" height="32" rx="5" class="dg-cell"/>
+            <rect x="152" y="115" width="88" height="32" rx="5" class="dg-cell"/>
+            <rect x="332" y="115" width="88" height="32" rx="5" class="dg-cell"/>
+            <rect x="507" y="115" width="82" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="597" y="115" width="82" height="32" rx="5" class="dg-cell hit"/>
+            <g text-anchor="middle" class="dg-in">
+              <text x="65" y="136">0041</text><text x="196" y="136">042F</text>
+              <text x="376" y="136">20AC</text><text x="548" y="136">D83D</text>
+              <text x="638" y="136">DCB3</text>
+            </g>
+            <text x="30" y="171" class="dg-n">UTF-8</text>
+            <rect x="42" y="178" width="46" height="32" rx="5" class="dg-cell"/>
+            <rect x="144" y="178" width="46" height="32" rx="5" class="dg-cell"/>
+            <rect x="202" y="178" width="46" height="32" rx="5" class="dg-cell"/>
+            <rect x="295" y="178" width="46" height="32" rx="5" class="dg-cell"/>
+            <rect x="353" y="178" width="46" height="32" rx="5" class="dg-cell"/>
+            <rect x="411" y="178" width="46" height="32" rx="5" class="dg-cell"/>
+            <rect x="500" y="178" width="40" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="548" y="178" width="40" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="596" y="178" width="40" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="644" y="178" width="40" height="32" rx="5" class="dg-cell hit"/>
+            <g text-anchor="middle" class="dg-in">
+              <text x="65" y="199">41</text><text x="167" y="199">D0</text>
+              <text x="225" y="199">AF</text><text x="318" y="199">E2</text>
+              <text x="376" y="199">82</text><text x="434" y="199">AC</text>
+              <text x="520" y="199">F0</text><text x="568" y="199">9F</text>
+              <text x="616" y="199">92</text><text x="664" y="199">B3</text>
+            </g>
+            <text x="20" y="249" class="dg-s">code points: 4; единицы UTF-16: 5; UTF-8 bytes: 10</text>
+          </svg>
+        </div>
+        <figcaption>Пара surrogate — запись одного номера в UTF-16. В UTF-8 кодируется этот номер, а не два surrogate по отдельности.</figcaption>
+      </figure>
+      <p><code>String</code> считает индексы в единицах UTF-16: <code>length()</code>, <code>charAt()</code>, <code>substring()</code>. Здесь <code>charAt(3)</code> даёт high surrogate, <code>codePointAt(3)</code> — полный U+1F4B3. Для обхода есть <code>codePoints()</code>, для сдвига на число code points — <code>offsetByCodePoints()</code>. Полученный индекс по-прежнему измеряется в UTF-16.</p>
+      <pre><code class="language-java">String receipt = &quot;A\u042F\u20AC\uD83D\uDCB3&quot;; // AЯ€💳.
+System.out.println(&quot;UTF-16 units = &quot; + receipt.length());
+System.out.println(&quot;code points = &quot; + receipt.codePointCount(0, receipt.length()));
+System.out.println(&quot;UTF-8 bytes = &quot; + receipt.getBytes(StandardCharsets.UTF_8).length);
+System.out.printf(Locale.ROOT, &quot;charAt(3) / codePointAt(3) = %04X/%X%n&quot;,
+        (int) receipt.charAt(3), receipt.codePointAt(3));
+System.out.println(&quot;bytes = &quot; + HexFormat.of().withUpperCase().withDelimiter(&quot; &quot;)
+        .formatHex(receipt.getBytes(StandardCharsets.UTF_8)));
+String composed = &quot;\u00E9&quot;;       // é: одна code point.
+String decomposed = &quot;e\u0301&quot;;   // Та же буква на экране: e и combining acute accent.
+System.out.println(&quot;e-acute units = &quot; + composed.length() + &quot;/&quot; + decomposed.length());
+System.out.println(&quot;equals / NFC equals = &quot; + composed.equals(decomposed) + &quot;/&quot;
+        + composed.equals(Normalizer.normalize(decomposed, Normalizer.Form.NFC)));</code></pre>
+      <pre class="out">UTF-16 units = 5
+code points = 4
+UTF-8 bytes = 10
+charAt(3) / codePointAt(3) = D83D/1F4B3
+bytes = 41 D0 AF E2 82 AC F0 9F 92 B3
+e-acute units = 1/2
+equals / NFC equals = false/true</pre>
+      <p>Видимый знак — <b>grapheme cluster</b>. <code>é</code> бывает одной code point U+00E9 или двумя: U+0065 и U+0301. Вид совпадает, длины различаются. Emoji с модификаторами и ZWJ тоже объединяют несколько code points. Для курсора и обрезки пользовательского текста нужна сегментация grapheme clusters.</p>
+      <p>NFC приводит канонически эквивалентные записи <code>é</code> к одной форме. Применяй её, если контракт сравнения требует такой эквивалентности. <code>String.equals()</code> сравнивает единицы без нормализации. NFC не объединяет все визуально похожие знаки и не заменяет правила идентификатора.</p>
+      <div class="note warn">
+        <p>Лимит протокола измеряй в закодированных байтах, число code points — через их подсчёт, видимые знаки — через grapheme clusters. Для ограничения поля базы уточни его единицу. Обрезка <code>substring(0, n)</code> способна оставить половину surrogate pair.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: как U+1F4B3 превращается в два char</summary>
+        <p>Из U+1F4B3 вычитают 0x10000: получается <code>0xF4B3</code>. Деление на две десятки битов даёт верхние <code>0x3D</code> и нижние <code>0xB3</code>. Пара: <code>0xD800 + 0x3D = 0xD83D</code>, <code>0xDC00 + 0xB3 = 0xDCB3</code>. Диапазоны половинок позволяют распознать пару.</p>
+        <p>Java допускает одинокий surrogate. <code>codePointAt()</code> и <code>codePoints()</code> его не валидируют: могут вернуть непарную единицу отдельно. Для строгого Unicode используй <code>CharsetEncoder</code> с <code>REPORT</code>. Модель API UTF-16 не описывает физическую раскладку <code>String</code> в heap.</p>
+      </details>
+    </section>
+
+    <section class="step" id="utf8-boundary">
+      <h2>На границе байтов нужны кодировка и политика ошибок</h2>
+      <p>UTF-8 записывает scalar value в 1–4 байтах, ASCII сохраняет однобайтные значения. Первый байт задаёт длину, продолжения начинаются с <code>10</code> и несут по шесть полезных битов. Поэтому <code>Я</code> занимает два байта, <code>€</code> три, карта четыре. Знаковый Java <code>byte</code> не меняет этих восьми битов.</p>
+      <table class="mx">
+        <thead><tr><th>Диапазон scalar value</th><th>Шаблон байтов</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td>U+0000…U+007F</td><td><code>0xxxxxxx</code></td><td><code>A → 41</code></td></tr>
+          <tr><td>U+0080…U+07FF</td><td><code>110xxxxx 10xxxxxx</code></td><td><code>Я → D0 AF</code></td></tr>
+          <tr><td>U+0800…U+FFFF, кроме surrogates</td><td><code>1110xxxx 10xxxxxx 10xxxxxx</code></td><td><code>€ → E2 82 AC</code></td></tr>
+          <tr><td>U+10000…U+10FFFF</td><td><code>11110xxx 10xxxxxx 10xxxxxx 10xxxxxx</code></td><td><code>💳 → F0 9F 92 B3</code></td></tr>
+        </tbody>
+      </table>
+      <p>Биты U+20AC <code>0010 0000 1010 1100</code> делятся на группы <code>0010 | 000010 | 101100</code>. С префиксами получаются <code>11100010 10000010 10101100</code>, то есть <code>E2 82 AC</code>. Копирование первых <code>n</code> байтов может обрезать последовательность внутри знака.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 288" role="img" aria-label="Пошаговое кодирование евро. Номер U+20AC делится на группы 0010, 000010, 101100; добавление префиксов UTF-8 даёт E2 82 AC. На последнем шаге последний байт потерян, остаётся незаконченное E2 82, для которого нельзя получить исходный знак без третьего байта.">
+            <defs>
+              <marker id="u8-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">€: U+20AC → БАЙТЫ В ПОЛЕ ПРОТОКОЛА</text>
+            <rect x="20" y="40" width="680" height="56" rx="8" class="dg-box"/>
+            <text x="32" y="62" class="dg-n">16 битов номера</text>
+            <text x="32" y="84" class="dg-in">0x20AC</text>
+            <g text-anchor="middle" class="dg-in">
+              <text x="247" y="76">0010</text>
+              <text x="417" y="76">000010</text>
+              <text x="587" y="76">101100</text>
+            </g>
+            <rect x="175" y="143" width="144" height="66" rx="6" class="dg-cell"/>
+            <rect x="345" y="143" width="144" height="66" rx="6" class="dg-cell"/>
+            <rect data-s="1-3" x="515" y="143" width="144" height="66" rx="6" class="dg-cell"/>
+            <rect data-s="4" x="515" y="143" width="144" height="66" rx="6" class="dg-cell miss"/>
+            <g data-s="2-3">
+              <path d="M247 96 L 247 139" class="dg-line" marker-end="url(#u8-n)"/>
+              <path d="M417 96 L 417 139" class="dg-line" marker-end="url(#u8-n)"/>
+              <path d="M587 96 L 587 139" class="dg-line" marker-end="url(#u8-n)"/>
+              <text x="255" y="123" class="dg-n" text-anchor="start">4 бита</text>
+              <text x="425" y="123" class="dg-n" text-anchor="start">6 битов</text>
+              <text x="595" y="123" class="dg-n" text-anchor="start">6 битов</text>
+            </g>
+            <g data-s="1" text-anchor="middle">
+              <text x="247" y="170" class="dg-in">1110xxxx</text>
+              <text x="417" y="170" class="dg-in">10xxxxxx</text>
+              <text x="587" y="170" class="dg-in">10xxxxxx</text>
+              <text x="360" y="236" class="dg-n">x — место для битов номера</text>
+              <text x="360" y="270" class="dg-s">Длина: 3 байта; полезных битов: 4 + 6 + 6</text>
+            </g>
+            <g data-s="2" text-anchor="middle">
+              <text x="247" y="170" class="dg-in">1110 | 0010</text>
+              <text x="417" y="170" class="dg-in">10 | 000010</text>
+              <text x="587" y="170" class="dg-in">10 | 101100</text>
+              <text x="360" y="270" class="dg-s">Добавлены префиксы: 1110, 10, 10</text>
+            </g>
+            <g data-s="3" text-anchor="middle">
+              <text x="247" y="170" class="dg-in">11100010</text>
+              <text x="417" y="170" class="dg-in">10000010</text>
+              <text x="587" y="170" class="dg-in">10101100</text>
+              <text x="247" y="195" class="dg-ok">E2</text>
+              <text x="417" y="195" class="dg-ok">82</text>
+              <text x="587" y="195" class="dg-ok">AC</text>
+              <text x="360" y="270" class="dg-ok">Получено 3 из 3 байтов: можно восстановить U+20AC</text>
+            </g>
+            <g data-s="4" text-anchor="middle">
+              <text x="247" y="170" class="dg-in">11100010</text>
+              <text x="417" y="170" class="dg-in">10000010</text>
+              <text x="247" y="195" class="dg-in">E2</text>
+              <text x="417" y="195" class="dg-in">82</text>
+              <text x="587" y="182" class="dg-bad">байта нет</text>
+              <text x="360" y="270" class="dg-bad">Получено 2 из 3 байтов: завершённой строки нет</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>U+20AC попадает в диапазон трёхбайтовой записи. Шаблон оставляет 16 полезных битов: четыре в первом байте и по шесть в остальных.</li>
+          <li>Группы номера попадают на свои места, слева к ним добавляются префиксы. Последовательность байтов несёт и значение, и сведения о границах знака.</li>
+          <li>Готовая запись равна E2 82 AC. Decoder видит префикс 1110 и ожидает два continuation bytes, затем собирает U+20AC.</li>
+          <li>Обрезка до двух байтов убрала AC. Если это конец поля, ввод испорчен; если кусок потока ещё не закончился, нужно сохранить E2 82 и дождаться продолжения.</li>
+        </ol>
+        <figcaption>Граница сетевого чтения может пройти внутри знака. Потеря байта и временно неполный ввод требуют разных решений.</figcaption>
+      </figure>
+      <p>На входе платежного API фиксируй кодировку и политику ошибок. <code>new String(bytes, UTF_8)</code> заменяет испорченный ввод U+FFFD; успешный вызов не доказывает корректность. <code>CharsetDecoder</code> с <code>REPORT</code> отклоняет ошибку; это его default, явно заданный для ясности контракта. Он также отвергает overlong encoding, surrogates и номера выше U+10FFFF.</p>
+      <pre><code class="language-java">byte[] euro = &quot;\u20AC&quot;.getBytes(StandardCharsets.UTF_8); // E2 82 AC — один знак в трёх байтах.
+byte[] cut = Arrays.copyOf(euro, 2);                     // E2 82: последовательность оборвана.
+String replaced = new String(cut, StandardCharsets.UTF_8); // Конструктор заменяет ошибку.
+System.out.printf(Locale.ROOT, &quot;replacement = U+%04X%n&quot;, replaced.codePointAt(0));
+try {
+    StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)  // На границе платежного API нужен отказ.
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(cut));
+} catch (CharacterCodingException e) {
+    System.out.println(&quot;strict = &quot; + e.getClass().getSimpleName());
+}
+String wrong = new String(euro, StandardCharsets.ISO_8859_1); // Все байты допустимы, смысл другой.
+System.out.println(&quot;wrong charset = &quot; + wrong.codePoints()
+        .mapToObj(cp -&gt; String.format(Locale.ROOT, &quot;U+%04X&quot;, cp)).toList());
+String recovered = new String(wrong.getBytes(StandardCharsets.ISO_8859_1), StandardCharsets.UTF_8);
+System.out.println(&quot;recover known mistake = &quot; + recovered.equals(&quot;\u20AC&quot;));</code></pre>
+      <pre class="out">replacement = U+FFFD
+strict = MalformedInputException
+wrong charset = [U+00E2, U+0082, U+00AC]
+recover known mistake = true</pre>
+      <p>В ISO-8859-1 байты <code>E2 82 AC</code> допустимы, но означают три других номера. Строгая проверка не угадывает правильную кодировку. Обратное преобразование в демо возможно: ошибка точно известна, байты сохранились. После U+FFFD, отбрасывания или неизвестных преобразований общего восстановления нет.</p>
+      <p>Не декодируй каждый кусок потока отдельным <code>new String()</code>. Сохраняй непотреблённые байты после <code>UNDERFLOW</code>, продолжай тем же decoder. Финальный <code>endOfInput = true</code> превращает неполный хвост в ошибку. <code>UNDERFLOW</code> не доказывает корректность завершённого поля. Один decoder хранит состояние одной операции и не разделяется между потоками.</p>
+      <p>Для диагностики возьми обезличенные сырые байты и известную кодировку. Выведи hex, длину байтов, UTF-16 и code points, как в демо. Правильный UTF-8 гарантирует уровень текста; разбор JSON и совместимость схем относятся к <a href="serialization.html">Serialization Formats</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Дополнительный код задаёт старшему разряду отрицательный вес; те же биты можно прочитать как unsigned с другим значением.</li>
+        <li>Приводи операнд к <code>long</code> до вычисления. Присваивание повреждённого <code>int</code> в <code>long</code> уже ничего не восстанавливает.</li>
+        <li>У <code>double</code> 53 значащих бита: порядок увеличивает диапазон, а шаг точности растёт с величиной. NaN требует отдельной проверки.</li>
+        <li>UTF-16 units, Unicode code points, grapheme clusters и UTF-8 bytes — разные меры длины с разными задачами.</li>
+        <li>На границе байтов фиксируй кодировку, сохраняй неполный ввод и решай, отклонять ошибки или заменять их. Ни успешный <code>new String</code>, ни валидность выбранной кодировки не гарантируют исходного смысла.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="integer-model" data-freq="2">
+      <h3>Как хранятся отрицательные целые и что произойдёт при переполнении?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я представляю <code>byte</code>, <code>short</code>, <code>int</code> и <code>long</code> как дополнительный код фиксированной ширины. У старшего бита отрицательный вес, поэтому для n битов диапазон равен −2ⁿ⁻¹…2ⁿ⁻¹−1. Отрицание получается инверсией и прибавлением единицы; минимум не имеет положительного партнёра в том же типе.</p>
+          <p>Обычная арифметика сохраняет младшие биты и не сообщает о переполнении. Для суммы платежей я выбираю диапазон промежуточных результатов и проверяемые операции вроде <code>Math.addExact</code>. Если нужно вычисление в <code>long</code>, расширяю операнд заранее: переменная <code>long</code> слева не расширяет умножение двух <code>int</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Promotion делает арифметику <code>byte</code> и <code>short</code> 32-битной. Поэтому <code>−Byte.MIN_VALUE</code> — 128, а <code>−Integer.MIN_VALUE</code> — снова минимум; тип промежуточного выражения меняет ответ.</li>
+            <li>При чтении протокола отрицательный Java <code>byte</code> не означает отрицательное поле. <code>b &amp; 0xff</code> даёт беззнаковое значение в <code>int</code>; обычное расширение сохраняет знак.</li>
+            <li>Проверяю каждый промежуточный результат, например произведение до деления в расчёте процента. Математически маленький итог не спасает переполнившееся произведение.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Вернёт ли long точную сумму в копейках?</summary>
+          <pre><code class="language-java">long toCents(int rubles) {
+    return (long) (rubles * 100);
+}</code></pre>
+          <p>Нет. При 30 млн рублей умножение уже переполнилось в <code>int</code>, а cast расширяет повреждённое значение. Выбор зависит от контракта: <code>(long) rubles * 100</code> сохраняет точный результат для любого <code>int</code>, а <code>Math.multiplyExact(rubles, 100)</code> отклоняет результат, который не помещается именно в <code>int</code>. Отдельно нужны допустимый знак и бизнес-лимит суммы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="floating-precision" data-freq="2">
+      <h3>Почему 0.1 + 0.2 не равно 0.3 и почему double не подходит для любых денег?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я начинаю с основания системы счисления: десятая часть не имеет конечной двоичной записи. В <code>double</code> хранится ближайшее доступное значение, а результат операции округляется ещё раз. У binary64 53 значащих бита, поэтому он даёт приближённые числа с большим диапазоном, а абсолютный шаг точности растёт вместе с порядком.</p>
+          <p>Для точных сумм беру целое число минимальных единиц или <code>BigDecimal</code> с правилами округления. Для измерений <code>double</code> удобен, но сравнение задаю через допустимую ошибку самой задачи. Вывод <code>0.3</code> — формат печати, он не доказывает наличие точной десятичной дроби внутри.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Округление делает сложение неассоциативным: порядок агрегации влияет на итог. Поэтому параллельная сумма и последовательная могут отличаться, даже если обе выполняют правильный код.</li>
+            <li>Большие целочисленные ID нельзя безоговорочно передавать через <code>double</code>. Точная непрерывная сетка целых заканчивается на 2⁵³; дальше отдельные кратные шагу точны, а соседние значения могут слиться.</li>
+            <li>Для внешнего числового ввода проверяю конечность до бизнес-сравнений: NaN проходит проверку <code>amount &lt; 0</code>, а бесконечность способна испортить расчёт без исключения.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Какое значение пройдёт обе проверки допустимой суммы?</summary>
+          <pre><code class="language-java">if (amount &lt; 0 || amount &gt; 1_000_000) {
+    throw new IllegalArgumentException("amount");
+}</code></pre>
+          <p>NaN пройдёт: обе части сравнения ложны. Исправление для такого контракта — сначала <code>!Double.isFinite(amount)</code>, затем границы диапазона. Альтернатива <code>!(amount &gt;= 0 &amp;&amp; amount &lt;= 1_000_000)</code> тоже отклонит NaN, но явная проверка конечности лучше выражает причину отказа. Корректность представления не заменяет выбор подходящего типа для денег.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="text-length" data-freq="2">
+      <h3>Чем char отличается от Unicode-символа и что считает String.length()?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я уточняю, что значит «символ». <code>char</code> — 16-битная unit UTF-16, code point — номер в Unicode, а пользовательский знак может состоять из нескольких code points. <code>String.length()</code> считает units UTF-16. Поэтому supplementary code point занимает две позиции, и <code>charAt()</code> может вернуть половину surrogate pair.</p>
+          <p>Если нужно число code points, использую <code>codePointCount()</code>; если размер сообщения, кодирую его в нужную кодировку и считаю байты. Для ограничения видимых знаков нужна сегментация grapheme clusters. У строки <code>AЯ€💳</code> четыре code points, пять units UTF-16 и десять байтов UTF-8.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Канонически эквивалентные последовательности вроде <code>é</code> и <code>e + U+0301</code> не равны через <code>String.equals()</code>. Нормализацию назначает контракт данных; применение её перед подписью изменит подписываемые байты.</li>
+            <li>Проход по code points сохраняет supplementary знаки, но всё ещё может разрезать grapheme cluster. Для обрезки отображаемого имени сначала определяю единицу, которую обещает интерфейс.</li>
+            <li>Строка Java может содержать непарный surrogate. API code points его не валидирует; строгий encoder с <code>REPORT</code> позволяет остановиться перед отправкой некорректного Unicode.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="utf8-errors" data-freq="1">
+      <h3>Как устроен UTF-8 и как обнаружить испорченный текст на входе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>UTF-8 кодирует Unicode scalar value в один–четыре байта. ASCII остаётся однобайтным; у многобайтной записи первый префикс задаёт длину, а продолжения начинаются с <code>10</code>. Поэтому граница произвольного байтового куска может оказаться внутри знака.</p>
+          <p>Я фиксирую кодировку в контракте и выбираю политику ошибок. <code>new String(bytes, UTF_8)</code> заменяет испорченную запись, а строгий <code>CharsetDecoder</code> сообщает ошибку. При поточном чтении сохраняю непотреблённый хвост и продолжаю декодирование; если ввод закончился посреди знака, отклоняю его.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Валидность байтов в выбранной кодировке не доказывает, что выбрана правильная кодировка. ISO-8859-1 примет байты евро из UTF-8 и даст три других code points без ошибки.</li>
+            <li>UTF-8 допускает только кратчайшую запись code point и запрещает кодирование surrogate values. Строгая проверка нужна до дальнейшей интерпретации, иначе разные декодеры могут прочитать разные строки.</li>
+            <li>После замены ошибочных байтов символом U+FFFD исходные данные не восстановить в общем случае. Для диагностики сохраняю обезличенные исходные байты до преобразования, а не только получившийся текст.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>E2 82 пришло в первом чтении, AC — во втором. Ввод испорчен?</summary>
+          <p>Если это части одного потока, нет: вместе они составляют правильный UTF-8 для евро. После первого чтения нужно оставить E2 82 в буфере и сообщить decoder, что ввод ещё продолжается. Если первый кусок объявлен отдельным завершённым полем, он испорчен и должен вызвать ошибку. Развилка определяется границей сообщения, а не числом вызовов чтения.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.cs.cmu.edu/afs/cs/academic/class/15213-s25/www/lectures/02-bits-bytes-ints.pdf">CMU 15-213: From Bits through Integers</a> и <a href="https://www.cs.cmu.edu/afs/cs/academic/class/15213-m22/www/lectures/04-float.pdf">Floating Point</a> — основа урока: позиционные веса, дополнительный код, ограниченная ширина, значащая часть и порядок. Подача опирается на Computer Systems: A Programmer’s Perspective, главу 2; правила C из курса здесь заменены правилами Java.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-4.html#jls-4.2">JLS 21 §4.2</a>, <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-5.html#jls-5.6">§5.6</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Math.html">Math</a> — диапазоны, IEEE 754, numeric promotion, операции с проверкой переполнения и <code>ulp</code>.</li>
+      <li><a href="https://www.unicode.org/versions/Unicode16.0.0/core-spec/chapter-3/">Unicode, глава 3</a>, §§3.6, 3.8–3.11 — grapheme clusters, surrogates, encoding forms и каноническая нормализация.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc3629.html#section-3">RFC 3629, §§3–4</a> — шаблоны UTF-8 и ограничения допустимых последовательностей; §10 — почему разные трактовки ошибочных байтов опасны.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/String.html">String</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Character.html">Character</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/charset/CharsetDecoder.html">CharsetDecoder</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/text/Normalizer.html">Normalizer</a> — единицы API, замена ошибок, <code>REPORT</code>, поточное декодирование и NFC.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
