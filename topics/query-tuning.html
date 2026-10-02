@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Query Plans · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="query-tuning">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Query Plans</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>План запроса — дерево операций, которое выбрал планировщик: как читать каждую таблицу и как соединять результаты. Выбор он делает по оценкам: сколько строк вернёт каждый узел и сколько это стоит. <code>EXPLAIN ANALYZE</code> выполняет запрос и показывает рядом оценку и факт, и почти любая плохая производительность начинается с расхождения между ними. Соединение выполняется вложенным циклом, хешем или слиянием, и каждый способ хорош при своих объёмах. Неверная статистика, коррелированные колонки и нехватка <code>work_mem</code> — частые причины плохих планов.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Отчёт по городу шёл секунды, хотя по одному магазину — миллисекунды</h2>
+      <p>Запрос платежей одного магазина выполняется за доли миллисекунды. Тот же запрос по всем магазинам города — уже десятки миллисекунд на тестовой базе и секунды на проде. После загрузки справочника новых магазинов отчёт внезапно стал медленным, а через час сам «вылечился». Чтобы разбираться в таком, нужно уметь читать план и понимать, откуда планировщик берёт свои решения.</p>
+      <p>Тема разбирает <code>EXPLAIN ANALYZE</code>, алгоритмы соединения, статистику и память под операции. Индексы и способы доступа к таблице — в <a href="indexes.html">Indexes</a>, поиск медленных запросов в проде — в <a href="slow-queries.html">Slow Queries</a>. Демо <a href="../examples/db-tx/QueryPlanDemo.java">QueryPlanDemo.java</a> работает с PostgreSQL 17 в Docker: 10 тысяч магазинов и миллион платежей; в выводе стоимость показана только конечным числом.</p>
+    </section>
+
+    <section class="step" id="read">
+      <h2>EXPLAIN ANALYZE показывает дерево операций, оценку и факт</h2>
+      <pre class="out">== join: one merchant's payments
+   Nested Loop  (cost=...561.46 rows=100 width=16) (actual rows=100 loops=1)
+     -&gt;  Seq Scan on merchant m  (cost=...189.00 rows=1 width=4) (actual rows=1 loops=1)
+           Filter: (name = 'shop-42'::text)
+           Rows Removed by Filter: 9999
+     -&gt;  Bitmap Heap Scan on payment p  (cost=...371.46 rows=100 width=20) (actual rows=100 loops=1)
+           Recheck Cond: (m.id = merchant_id)
+   Execution Time: 0.317 ms</pre>
+      <p>План читают от листьев к корню: вложенные узлы выполняются первыми и отдают строки родителю. Здесь Seq Scan по магазинам нашёл один нужный, отбросив 9999, а для него Bitmap Heap Scan по индексу <code>merchant_id</code> достал сто платежей. В каждом узле две пары чисел. <code>cost</code> — оценка стоимости в условных единицах (последняя цифра — полная стоимость узла), <code>rows</code> — сколько строк планировщик ожидает. В скобках <code>actual</code> — что было на самом деле, а <code>loops</code> — сколько раз узел выполнялся; итог узла — rows, умноженное на loops.</p>
+      <p>Главное, на что смотреть, — расхождение <code>rows</code> и <code>actual rows</code>. Ошибка в разы на нижнем узле множится вверх, и планировщик выбирает соединения и порядок для объёмов, которых нет. Здесь оценки точные: 1 и 1, 100 и 100. Добавляйте <code>BUFFERS</code>, чтобы видеть, сколько страниц прочитано, как в <a href="indexes.html">Indexes</a>; время узлов на загруженном сервере полезнее с <code>timing on</code>, но оно само замедляет выполнение.</p>
+    </section>
+
+    <section class="step" id="joins">
+      <h2>Вложенный цикл хорош для малого, хеш — для большого, слияние — для отсортированного</h2>
+      <pre class="out">== join: all merchants of a city, sum of payments
+   GroupAggregate  (cost=...20692.33 rows=1 width=39) (actual rows=1 loops=1)
+     -&gt;  Hash Join  (cost=...20193.11 rows=199681 width=15) (actual rows=200000 loops=1)
+           Hash Cond: (p.merchant_id = m.id)
+           -&gt;  Seq Scan on payment p  (cost=...17353.00 rows=1000000 width=12) (actual rows=1000000 loops=1)
+           -&gt;  Hash  (cost=...189.00 rows=2000 width=11) (actual rows=2000 loops=1)
+                 Buckets: 2048  Batches: 1  Memory Usage: 102kB
+                 -&gt;  Seq Scan on merchant m  (cost=...189.00 rows=2000 width=11) (actual rows=2000 loops=1)
+   Execution Time: 41.379 ms
+== same query, hash and merge join disabled
+   GroupAggregate  (cost=...39805.68 rows=1 width=39) (actual rows=1 loops=1)
+     -&gt;  Nested Loop  (cost=...39306.46 rows=199681 width=15) (actual rows=200000 loops=1)
+           -&gt;  Seq Scan on merchant m  (cost=...189.00 rows=2000 width=11) (actual rows=2000 loops=1)
+                 Filter: (city = 'Almaty'::text)
+                 Rows Removed by Filter: 8000
+           -&gt;  Index Scan using payment_merchant_id_idx on payment p  (cost=...18.56 rows=100 width=12) (actual rows=100 loops=2000)
+                 Index Cond: (merchant_id = m.id)
+   Execution Time: 35.772 ms</pre>
+      <table class="mx">
+        <thead><tr><th>Алгоритм</th><th>Как работает</th><th>Когда хорош</th></tr></thead>
+        <tbody>
+          <tr><td>Nested Loop</td><td>Для каждой строки внешнего набора ищет пары во внутреннем, обычно по индексу</td><td>Внешних строк мало, у внутренней таблицы индекс по ключу соединения</td></tr>
+          <tr><td>Hash Join</td><td>Строит хеш-таблицу по меньшему набору, проходит больший и ищет пары в хеше</td><td>Большие наборы без нужного порядка; хеш помещается в work_mem</td></tr>
+          <tr><td>Merge Join</td><td>Идёт по двум отсортированным наборам одновременно</td><td>Оба набора уже отсортированы по ключу, например индексами</td></tr>
+        </tbody>
+      </table>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Три алгоритма соединения. Nested Loop: для каждой из немногих внешних строк поиск по индексу внутренней таблицы. Hash Join: хеш-таблица по меньшему набору в памяти, затем один проход по большему. Merge Join: два отсортированных набора идут параллельно.">
+            <defs><marker id="jn-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">NESTED LOOP</text>
+            <text x="260" y="22" class="dg-cap">HASH JOIN</text>
+            <text x="500" y="22" class="dg-cap">MERGE JOIN</text>
+            <rect x="20" y="36" width="60" height="100" rx="6" class="dg-cell"/>
+            <text x="50" y="152" class="dg-n" text-anchor="middle">мало</text>
+            <rect x="130" y="36" width="80" height="100" rx="6" class="dg-cell hit"/>
+            <text x="170" y="152" class="dg-n" text-anchor="middle">индекс</text>
+            <path d="M80 56 L 126 70" class="dg-line" marker-end="url(#jn-n)"/>
+            <path d="M80 86 L 126 96" class="dg-line" marker-end="url(#jn-n)"/>
+            <path d="M80 116 L 126 122" class="dg-line" marker-end="url(#jn-n)"/>
+            <rect x="260" y="36" width="70" height="60" rx="6" class="dg-cell hit"/>
+            <text x="295" y="70" class="dg-n" text-anchor="middle">хеш</text>
+            <rect x="370" y="36" width="80" height="100" rx="6" class="dg-cell"/>
+            <text x="410" y="152" class="dg-n" text-anchor="middle">проход</text>
+            <path d="M366 86 L 334 70" class="dg-line" marker-end="url(#jn-n)"/>
+            <text x="260" y="116" class="dg-n">в work_mem</text>
+            <rect x="500" y="36" width="70" height="100" rx="6" class="dg-cell"/>
+            <rect x="620" y="36" width="70" height="100" rx="6" class="dg-cell"/>
+            <text x="535" y="152" class="dg-n" text-anchor="middle">сорт.</text>
+            <text x="655" y="152" class="dg-n" text-anchor="middle">сорт.</text>
+            <path d="M574 60 L 616 60" class="dg-line"/>
+            <path d="M574 90 L 616 90" class="dg-line"/>
+            <path d="M574 120 L 616 120" class="dg-line"/>
+            <text x="20" y="188" class="dg-s">Цена: число поисков × глубина индекса · память под хеш · стоимость сортировки, если порядка нет.</text>
+          </svg>
+        </div>
+        <figcaption>Каждый алгоритм дешев в своём диапазоне объёмов. Неверная оценка строк заставляет выбрать алгоритм для чужого диапазона.</figcaption>
+      </figure>
+      <p>Для одного магазина планировщик выбрал вложенный цикл: одна внешняя строка — один поиск по индексу. Для двух тысяч магазинов города — хеш: прочитать миллион платежей подряд и сопоставить с хешем на 2000 магазинов дешевле, чем 2000 раз искать по индексу. Когда хеш запретили, вложенный цикл выполнил индексный поиск 2000 раз (<code>loops=2000</code>), и его оценка стоимости вышла вдвое выше.</p>
+      <p>Но по факту он оказался даже чуть быстрее: 35,8 мс против 41,4. Стоимость — модель, а не измерение. Она исходит из того, что случайное чтение страницы в четыре раза дороже последовательного (<code>random_page_cost = 4</code>) — это правда для HDD, а данные демо целиком в памяти. На SSD и при большом кеше <code>random_page_cost</code> снижают до 1,1–1,5, и планировщик чаще выбирает индексы. Переключатели <code>enable_hashjoin</code> и подобные годятся только для экспериментов, как здесь; в проде лечат причину — статистику, индексы, параметры стоимости.</p>
+    </section>
+
+    <section class="step" id="statistics">
+      <h2>Планировщик считает условия независимыми и ошибается на коррелированных колонках</h2>
+      <p>Оценки строк берутся из статистики, которую собирает <code>ANALYZE</code>: для каждой колонки — частые значения, гистограмма, число различных. Для условия по двум колонкам планировщик по умолчанию перемножает их доли, как если бы колонки были независимы. Город и страна — не независимы: Алматы всегда в Казахстане.</p>
+      <pre class="out">== correlated columns: country = 'KZ' and city = 'Almaty'
+   Aggregate  (cost=...215.01 rows=1 width=8) (actual rows=1 loops=1)
+     -&gt;  Seq Scan on merchant  (cost=...214.00 rows=400 width=0) (actual rows=2000 loops=1)
+   Execution Time: 0.325 ms
+== after CREATE STATISTICS (dependencies)
+   Aggregate  (cost=...219.01 rows=1 width=8) (actual rows=1 loops=1)
+     -&gt;  Seq Scan on merchant  (cost=...214.00 rows=2000 width=0) (actual rows=2000 loops=1)
+   Execution Time: 0.296 ms</pre>
+      <p>20 % магазинов в KZ и 20 % в Алматы — планировщик перемножил и ожидал 4 %, 400 строк, а их 2000. В этом запросе ошибка ни на что не повлияла, но если бы от этого узла зависело соединение с миллионом платежей, в пять раз заниженная оценка могла бы выбрать вложенный цикл вместо хеша. <code>CREATE STATISTICS ... (dependencies)</code> собирает статистику зависимости между колонками, и после ANALYZE оценка стала точной.</p>
+      <p>Вторая частая причина — устаревшая статистика. После массовой загрузки таблица выросла, а статистика описывает старые данные, пока autovacuum не запустит ANALYZE — это и был отчёт, который «вылечился» через час. После массовых загрузок ANALYZE запускают явно. Для колонок с неравномерным распределением увеличивают число собираемых значений: <code>alter table ... alter column ... set statistics 1000</code>.</p>
+    </section>
+
+    <section class="step" id="work-mem">
+      <h2>Сортировка и хеш, не уместившиеся в work_mem, уходят на диск</h2>
+      <pre class="out">== sort 1M payments by amount, work_mem = 4MB
+   Sort  (cost=...140020.84 rows=1000000 width=24) (actual rows=1000000 loops=1)
+     Sort Key: amount, created_at
+     Sort Method: external merge  Disk: 33296kB
+   Execution Time: 185.774 ms
+== sort 1M payments by amount, work_mem = 64MB
+   Sort  (cost=...119510.84 rows=1000000 width=24) (actual rows=1000000 loops=1)
+     Sort Key: amount, created_at
+     Sort Method: quicksort  Memory: 63639kB
+   Execution Time: 158.134 ms</pre>
+      <p>С умолчанием <code>work_mem = 4MB</code> сортировка миллиона строк не поместилась в память и пошла внешним слиянием через временные файлы на 33 МБ. С 64 МБ сортировка прошла в памяти. Разница здесь небольшая, потому что временные файлы попали в кеш ОС; на настоящем диске и под нагрузкой она растёт в разы. Хеш-соединение с нехваткой памяти показывает <code>Batches</code> больше единицы. Временные файлы видны в <code>log_temp_files</code> и <code>pg_stat_database.temp_bytes</code>.</p>
+      <p>Поднимать <code>work_mem</code> глобально опасно: лимит действует на каждый узел сортировки или хеша в каждом запросе каждого соединения, и сотня соединений со сложными запросами может взять гигабайты. Его повышают точечно — <code>SET LOCAL work_mem</code> в транзакции отчёта — или для роли, под которой работают тяжёлые запросы. А лучше убрать саму сортировку: индекс, который отдаёт строки в нужном порядке, как в <a href="indexes.html">Indexes</a>.</p>
+      <div class="trap">
+        <p class="myth">Чем меньше cost в плане, тем быстрее выполнится запрос.</p>
+        <p class="fact">Cost — оценка по модели с параметрами вроде random_page_cost и по статистике, которая может быть неточной. В демо вложенный цикл с вдвое большей стоимостью выполнился быстрее хеш-соединения. Сравнивают фактическое время и actual rows из EXPLAIN ANALYZE, а не cost.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>План читают от листьев; rows — оценка, actual rows × loops — факт; расхождение — первая улика.</li>
+        <li>Nested Loop для малого внешнего набора с индексом, Hash Join для больших наборов, Merge Join для отсортированных.</li>
+        <li>Cost — модель: вложенный цикл с вдвое большей стоимостью оказался быстрее; на SSD снижают random_page_cost.</li>
+        <li>Коррелированные колонки: оценка 400 при факте 2000; CREATE STATISTICS исправил. После массовых загрузок — ANALYZE.</li>
+        <li>Нехватка work_mem — external merge на диске; повышают точечно или убирают сортировку индексом.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="plan-read" data-freq="3">
+      <h3>Как читать EXPLAIN ANALYZE и что в нём искать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>План — дерево узлов, читается от вложенных к корню. В каждом узле оценка (cost, rows) и факт (actual rows, loops, время). Ищут узлы, где оценка строк сильно расходится с фактом, полные проходы больших таблиц с большим Rows Removed by Filter, вложенные циклы с огромным loops, сортировки и хеши на диске. С BUFFERS видно, сколько страниц прочитано.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Итог узла — actual rows × loops; время узла тоже на одну итерацию.</li>
+            <li>EXPLAIN без ANALYZE не выполняет запрос и показывает только оценки.</li>
+            <li>EXPLAIN ANALYZE на UPDATE и DELETE реально меняет данные — выполняют в транзакции с ROLLBACK.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="plan-joins" data-freq="2">
+      <h3>Какие алгоритмы соединения есть и когда какой выбирается?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Nested Loop: для каждой строки одного набора ищет пары в другом — хорош, когда внешних строк мало и у внутренней таблицы есть индекс по ключу. Hash Join: строит хеш по меньшему набору и проходит больший — для больших объёмов без порядка. Merge Join: слияние двух отсортированных по ключу наборов. Выбор делает планировщик по оценкам числа строк.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Заниженная оценка внешнего набора ведёт к вложенному циклу с огромным loops.</li>
+            <li>Hash Join с Batches больше 1 не уместился в work_mem.</li>
+            <li>random_page_cost и effective_cache_size влияют на выбор между индексами и полным проходом.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что подозрительно в этом плане?</summary>
+          <pre><code class="language-text">Nested Loop  (rows=12) (actual rows=480000 loops=1)
+  -&gt;  Index Scan using merchant_city_idx on merchant (rows=3) (actual rows=1200 loops=1)
+  -&gt;  Index Scan using payment_merchant_idx on payment (rows=4) (actual rows=400 loops=1200)
+Execution Time: 9412 ms</code></pre>
+          <p>Планировщик ждал 3 магазина, а получил 1200, и вложенный цикл выполнил 1200 индексных поисков вместо одного хеш-соединения. Нужно понять, почему оценка занижена в 400 раз: устаревшая статистика после загрузки справочника, коррелированные условия или неравномерное распределение. Лечат ANALYZE, CREATE STATISTICS или увеличением статистики колонки, а не переключателями enable_*.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="plan-stats" data-freq="2">
+      <h3>Откуда планировщик берёт оценки и почему они ошибаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Из статистики, которую собирает ANALYZE: частые значения, гистограмма, число различных значений для каждой колонки. Ошибки бывают из-за устаревшей статистики после массовых изменений, из-за коррелированных колонок — планировщик считает условия независимыми, — и из-за неравномерных распределений, которые не попали в выборку.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>CREATE STATISTICS для зависимостей и совместных распределений колонок.</li>
+            <li>ALTER COLUMN SET STATISTICS увеличивает выборку для сложных колонок.</li>
+            <li>Параметризованные запросы с generic plan могут планироваться без учёта конкретных значений.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/using-explain.html">PostgreSQL 17: Using EXPLAIN</a> — основа урока: узлы, оценки, ANALYZE и BUFFERS.</li>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть IV — планировщик, статистика, способы соединения.</li>
+      <li><a href="https://www.postgresql.org/docs/17/planner-stats.html">Statistics Used by the Planner</a> и <a href="https://www.postgresql.org/docs/17/sql-createstatistics.html">CREATE STATISTICS</a>.</li>
+      <li><a href="https://explain.dalibo.com/">explain.dalibo.com</a> — визуализация планов.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

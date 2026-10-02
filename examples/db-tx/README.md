@@ -12,4 +12,5 @@ java -cp "$(cat target/classpath.txt)" MvccDemo.java   # номера транз
 java -cp "$(cat target/classpath.txt)" VacuumDemo.java
 java -cp "$(cat target/classpath.txt)" ArchitectureDemo.java   # перезапускает контейнер kb-pg ради пустого кеша
 java -cp "$(cat target/classpath.txt)" IndexDemo.java
+java -cp "$(cat target/classpath.txt)" QueryPlanDemo.java
 ```
