@@ -157,7 +157,7 @@ window.KB_TREE = [
           scope: 'Cache-Control, ETag, условные запросы, push и pull CDN' },
         { id: 'redis', freq: 3, status: 'draft', title: 'Redis Basics',
           scope: 'структуры данных, TTL и политики вытеснения, однопоточная модель, pipelining' },
-        { id: 'redis-ops', freq: 2, status: 'empty', title: 'Redis in Production',
+        { id: 'redis-ops', freq: 2, status: 'draft', title: 'Redis in Production',
           scope: 'RDB и AOF, репликация, Sentinel, Cluster, распределённые блокировки' },
       ] },
       { id: 'messaging', title: 'Messaging', items: [

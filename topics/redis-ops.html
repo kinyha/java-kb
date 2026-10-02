@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Redis in Production · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="redis-ops">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Redis in Production</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Redis держит данные в памяти, и на диск их сохраняет только если включить персистентность: снимки RDB или журнал команд AOF. Реплики получают изменения асинхронно, поэтому при отказе мастера подтверждённые записи, не дошедшие до реплики, теряются. Sentinel следит за мастером и переключает клиентов на реплику, а Redis Cluster ещё и делит ключи по 16 384 слотам между мастерами, разрешая операции над несколькими ключами только внутри одного слота. Распределённая блокировка на Redis — это <code>SET NX PX</code> с уникальным токеном и освобождением через проверку токена, но от пауз процесса защищает только fencing token на стороне хранилища.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>После перезапуска Redis исчезли ключи идемпотентности, а при failover вернулся старый баланс</h2>
+      <p>Платёжный сервис хранит в Redis ключи идемпотентности, лимиты и блокировки на выплаты. После планового перезапуска пода Redis все ключи пропали, и повторные запросы клиентов провели платежи второй раз. В другой раз мастер упал, Sentinel переключил клиентов на реплику, и счётчик лимита откатился на несколько секунд назад. А блокировка на выплату магазину однажды оказалась у двух экземпляров сразу.</p>
+      <p>Тема разбирает, что Redis гарантирует в проде: сохранность на диске, поведение репликации и отказов, шардирование в кластере и пределы распределённых блокировок. Модель выполнения и структуры данных — в <a href="redis.html">Redis Basics</a>, кеширование — в <a href="caching.html">Caching Strategies</a>. Демо в <a href="../examples/redis-ops/">examples/redis-ops</a> работают с Redis 8 в Docker: <code>persistence.sh</code> и <code>cluster.sh</code> поднимают контейнеры сами, <code>LockDemo.java</code> использует Jedis 8.</p>
+    </section>
+
+    <section class="step" id="persistence">
+      <h2>Без RDB или AOF данные живут до перезапуска процесса</h2>
+      <pre><code class="language-bash">redis-server --save "" --appendonly no                            # без персистентности
+redis-server --save "" --appendonly yes --appendfsync everysec    # журнал команд</code></pre>
+      <pre class="out">== persistence: restart after 3 writes
+no persistence: dbsize=0
+AOF everysec:   dbsize=3</pre>
+      <p>Без персистентности перезапуск стёр все три ключа. С AOF Redis дописывает каждую изменяющую команду в журнал и при старте проигрывает его. Политика <code>appendfsync</code> решает, как часто журнал сбрасывается на диск: <code>always</code> — на каждую команду, медленно; <code>everysec</code> — раз в секунду, при падении теряется до секунды записей; <code>no</code> — когда решит ОС. Журнал растёт, и Redis периодически переписывает его в компактный вид.</p>
+      <p>RDB — снимок всей памяти в файл по расписанию (<code>save 3600 1 300 100 60 10000</code>) или по команде. Он компактный и быстро загружается, но теряет всё после последнего снимка. Снимок делает дочерний процесс через <code>fork</code>, и пока он пишет, изменяемые страницы памяти копируются: под интенсивной записью Redis может временно занять почти вдвое больше памяти. По умолчанию AOF пишется с RDB-преамбулой: перезапись журнала начинается со снимка, а дальше идут команды. Для кеша персистентность часто выключают; для ключей идемпотентности, лимитов и сессий — включают AOF everysec и понимают, что секунда может потеряться.</p>
+    </section>
+
+    <section class="step" id="replication">
+      <h2>Реплика получает изменения асинхронно, и failover теряет подтверждённые записи</h2>
+      <p>Мастер отвечает клиенту OK сразу после выполнения команды и отправляет её репликам в фоне. Команда <code>WAIT</code> позволяет дождаться, пока запись получат N реплик, — для записей своего соединения. Демо разрывает сеть между мастером и репликой, пишет, убивает мастер и делает реплику новым мастером:</p>
+      <pre class="out">== async replication and failover
+SET 100 + WAIT 1 replica 1000 ms -&gt; OK 1
+replica sees balance: 100
+SET 40  + WAIT 1 replica 500 ms  -&gt; OK 0
+after failover balance: 100</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Мастер и реплика согласованы: баланс 100. Сеть между ними разорвана, мастер принимает SET 40 и отвечает OK, реплика не получает. Мастер падает. Реплику повышают до мастера, и баланс снова 100: подтверждённая запись потеряна.">
+            <defs><marker id="rp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="40" width="150" height="70" rx="9" class="dg-box"/>
+            <text x="95" y="66" class="dg-in" text-anchor="middle">клиент</text>
+            <rect x="280" y="40" width="160" height="70" rx="9" class="dg-box"/>
+            <text x="360" y="66" class="dg-in" text-anchor="middle">мастер</text>
+            <text data-s="1" x="360" y="92" class="dg-n" text-anchor="middle">balance=100</text>
+            <text data-s="2" x="360" y="92" class="dg-n" text-anchor="middle">balance=40</text>
+            <text data-s="3-" x="360" y="92" class="dg-bad" text-anchor="middle">упал</text>
+            <rect x="540" y="40" width="160" height="70" rx="9" class="dg-box"/>
+            <text data-s="-3" x="620" y="66" class="dg-in" text-anchor="middle">реплика</text>
+            <text data-s="4" x="620" y="66" class="dg-ok" text-anchor="middle">новый мастер</text>
+            <text x="620" y="92" class="dg-n" text-anchor="middle">balance=100</text>
+            <path data-s="1" d="M440 75 L 536 75" class="dg-line" marker-end="url(#rp-n)"/>
+            <path data-s="2-3" d="M440 75 L 536 75" class="dg-sep" fill="none"/>
+            <text data-s="2-3" x="470" y="66" class="dg-bad">разрыв</text>
+            <path data-s="2" d="M170 75 L 276 75" class="dg-line" marker-end="url(#rp-n)"/>
+            <text data-s="2" x="180" y="66" class="dg-n">SET 40 → OK</text>
+            <rect data-s="4" x="20" y="130" width="680" height="34" rx="6" class="dg-cell miss"/>
+            <text data-s="4" x="32" y="152" class="dg-bad">клиент получил OK на 40, а в кластере снова 100</text>
+            <text data-s="1" x="20" y="190" class="dg-t">Реплика получила запись, WAIT вернул 1.</text>
+            <text data-s="2" x="20" y="190" class="dg-t">Сеть разорвана: мастер ответил OK, WAIT вернул 0.</text>
+            <text data-s="3" x="20" y="190" class="dg-bad">Мастер умер, не передав запись.</text>
+            <text data-s="4" x="20" y="190" class="dg-bad">Failover: подтверждённая запись потеряна.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Мастер и реплика согласованы, WAIT подтвердил, что реплика получила баланс 100.</li>
+          <li>Сеть между ними разорвана. Мастер принимает SET 40 и отвечает клиенту OK; WAIT за 500 мс не дождался ни одной реплики.</li>
+          <li>Мастер падает, так и не передав запись.</li>
+          <li>Реплику повышают до мастера. Клиент получил подтверждение записи 40, а в кластере снова 100.</li>
+        </ol>
+      </figure>
+      <p>WAIT вернул 0 — честный сигнал, что запись есть только на мастере, но клиенту уже ответили OK. WAIT не делает Redis строго согласованным: он только сообщает, сколько реплик успело, и не откатывает запись, если их не хватило. <code>min-replicas-to-write 1</code> с <code>min-replicas-max-lag 10</code> заставляет мастер отказывать в записи, если реплики давно не отвечали, и сужает окно потерь до этих секунд. Поэтому Redis не хранят как единственную копию данных, потеря которых недопустима: деньги и балансы живут в базе, а Redis — ускоритель и вспомогательные структуры.</p>
+    </section>
+
+    <section class="step" id="sentinel-cluster">
+      <h2>Sentinel переключает мастер, а Cluster ещё и делит ключи по слотам</h2>
+      <p><b>Sentinel</b> — отдельные процессы, обычно три, которые следят за мастером. Если большинство из них считает мастер недоступным, они выбирают реплику, повышают её и сообщают клиентам новый адрес; клиент спрашивает у Sentinel, где мастер, а не хранит адрес жёстко. Данные при этом целиком на одном мастере. <b>Redis Cluster</b> добавляет шардирование: пространство из 16 384 слотов делится между мастерами, у каждого свои реплики, и отказ мастера переключается внутри кластера без Sentinel.</p>
+      <pre class="out">== slots per master
+slots 0-5460
+slots 5461-10922
+slots 10923-16383
+== key -&gt; slot
+payment:p-1 -&gt; 9759
+payment:p-2 -&gt; 5756
+{m-7}:limit -&gt; 12084
+{m-7}:tariff -&gt; 12084
+== client without cluster support
+MOVED 5756 172.23.0.3:6379
+
+== cluster-aware client (-c) follows MOVED
+OK
+== multi-key command across slots
+CROSSSLOT Keys in request don't hash to the same slot
+
+== same hash tag, same slot
+OK</pre>
+      <p>Слот ключа — CRC16 от имени по модулю 16 384. Узел, которому достался не свой ключ, отвечает <code>MOVED</code> с адресом владельца, и клиент с поддержкой кластера — Jedis, Lettuce, <code>redis-cli -c</code> — переходит туда и запоминает карту слотов. Команда над несколькими ключами работает, только если все ключи в одном слоте: <code>payment:p-1</code> и <code>payment:p-2</code> лежат даже на одном узле, но в разных слотах, и <code>MSET</code> получил <code>CROSSSLOT</code>. Это касается и транзакций, и Lua-скриптов. Решение — hash tag: если в имени есть <code>{...}</code>, слот считается только от этой части, и все ключи магазина <code>{m-7}</code> попадают в слот 12084. Злоупотреблять им нельзя: один огромный тег — одна перегруженная шарда.</p>
+    </section>
+
+    <section class="step" id="locks">
+      <h2>Блокировку освобождают по токену, а от пауз процесса защищает только fencing token</h2>
+      <p>Простая блокировка в Redis — <code>SET lock owner NX PX 30000</code>: ключ создаётся, только если его нет, и сам истекает, если владелец упал. Опасности две. Если освобождать обычным <code>DEL</code>, процесс, у которого блокировка уже истекла, удалит чужую. Демо: A берёт блокировку на 100 мс и замирает на 200 мс — пауза GC, — блокировка истекает, её берёт B, а проснувшийся A удаляет ключ:</p>
+      <pre class="out">== release with plain DEL
+B acquires: true
+A wakes up and releases: deleted 1
+C acquires: true -&gt; inside critical section: [B, C]
+== release with Lua compare-and-delete
+B acquires: true
+A wakes up and releases: deleted 0
+C acquires: false -&gt; inside critical section: [B]</pre>
+      <p>С <code>DEL</code> A удалил блокировку B, и C зашёл в критическую секцию, пока B ещё там: два владельца сразу. Освобождение Lua-скриптом, который удаляет ключ только если значение равно своему токену, это исправляет: A ничего не удалил, и C подождёт. Но вторая опасность остаётся: пока A спал, B уже работал, а A после пробуждения продолжит, думая, что блокировка его. Никакая проверка в Redis этого не отменит — A не знает, что спал.</p>
+      <pre class="out">== fencing token
+B write with token 2 accepted
+A write with token 1 rejected (last 2)</pre>
+      <p>Защита — fencing token: вместе с блокировкой выдаётся монотонно растущий номер, и хранилище, куда идёт запись, отвергает операции с номером меньше уже виденного. A пришёл с номером 1 после B с номером 2 и получил отказ. Для этого хранилище должно уметь проверять номер — условный update в базе по версии делает то же самое. Алгоритм Redlock с блокировкой на нескольких независимых Redis спорен ровно по этой причине: он полагается на время и не даёт fencing token. Если корректность критична — выплата не должна уйти дважды, — опираются на ограничения базы: уникальный ключ, версию, <code>SELECT ... FOR UPDATE</code>, а блокировку в Redis используют как оптимизацию, чтобы не делать лишнюю работу.</p>
+      <div class="trap">
+        <p class="myth">SET NX с TTL и освобождением по токену — надёжная распределённая блокировка.</p>
+        <p class="fact">Токен защищает от удаления чужой блокировки, но не от того, что владелец заснул дольше TTL и продолжил работать параллельно с новым. В демо A и B оказались бы в секции вместе. Нужен fencing token, который проверяет хранилище, или ограничения в самой базе.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Без RDB или AOF рестарт стирает данные; AOF everysec теряет до секунды, RDB — всё после снимка; fork под записью удваивает память.</li>
+        <li>Репликация асинхронная: подтверждённый SET 40 пропал при failover. WAIT только сообщает, min-replicas-to-write сужает окно.</li>
+        <li>Sentinel переключает мастер; Cluster делит 16 384 слота, клиент следует MOVED, мультиключевые команды — только в одном слоте, hash tags.</li>
+        <li>Блокировка: SET NX PX с токеном и Lua-освобождением; от пауз — fencing token или ограничения базы.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="redisops-persistence" data-freq="2">
+      <h3>Чем RDB отличается от AOF?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>RDB — периодический снимок всей памяти в компактный файл: быстро загружается, но теряет всё после последнего снимка. AOF — журнал изменяющих команд, который проигрывается при старте; с appendfsync everysec теряется не больше секунды. По умолчанию AOF пишется с RDB-преамбулой, сочетая быстрый старт и малые потери.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Снимок делает fork, и при интенсивной записи copy-on-write может почти удвоить память.</li>
+            <li>appendfsync always медленный; no отдаёт решение ОС.</li>
+            <li>Для чистого кеша персистентность выключают.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="redisops-ha" data-freq="2">
+      <h3>Чем Sentinel отличается от Redis Cluster и какие гарантии дают реплики?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Sentinel следит за одним мастером с репликами и при отказе повышает реплику, сообщая клиентам новый адрес; все данные на одном мастере. Cluster делит 16 384 слота между несколькими мастерами с репликами и сам переключает отказавшие. Репликация в обоих случаях асинхронная: подтверждённые записи, не дошедшие до реплики, теряются при failover.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>WAIT сообщает число реплик, получивших запись своего соединения, но не откатывает её.</li>
+            <li>В Cluster мультиключевые команды, транзакции и скрипты — только в одном слоте; hash tags.</li>
+            <li>Клиент обязан поддерживать MOVED и ASK и кешировать карту слотов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="redisops-lock" data-freq="3">
+      <h3>Как сделать распределённую блокировку на Redis и в чём её пределы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>SET key token NX PX ttl — ключ создаётся, только если его нет, и истекает сам, если владелец упал. Освобождают Lua-скриптом, который удаляет ключ только при совпадении токена, иначе можно удалить чужую блокировку. TTL выбирают больше времени работы и продлевают, если работа идёт дольше.</p>
+          <p>Предел: если владелец заснул дольше TTL — GC, сеть, — блокировку получит другой, а первый продолжит, думая, что она его.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Fencing token: монотонный номер с блокировкой, хранилище отвергает старые номера.</li>
+            <li>Redlock опирается на время и не даёт fencing token, поэтому спорен для корректности.</li>
+            <li>Когда важна корректность, опираются на ограничения базы; блокировка в Redis — оптимизация.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой блокировкой выплаты?</summary>
+          <pre><code class="language-java">if (redis.setnx("lock:payout:" + merchant, "1") == 1) {
+    try {
+        payouts.sendToBank(merchant);
+    } finally {
+        redis.del("lock:payout:" + merchant);
+    }
+}</code></pre>
+          <p>У ключа нет срока: если процесс упадёт внутри try, блокировка останется навсегда и выплаты магазину встанут. Значение не уникально, и DEL удалит чужую блокировку, если своя истекла бы. А если добавить срок, долгий вызов банка может его пережить, и выплату отправит второй экземпляр. Нужны SET NX PX с уникальным токеном, Lua-освобождение по токену и идемпотентность выплаты на стороне базы или банка по ключу выплаты.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/">Redis: Persistence</a> — основа урока о RDB и AOF.</li>
+      <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/management/replication/">Redis: Replication</a> и <a href="https://redis.io/docs/latest/commands/wait/">WAIT</a> — асинхронная репликация и её гарантии.</li>
+      <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/">Redis Cluster specification</a> — слоты, MOVED, hash tags.</li>
+      <li><a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html">Martin Kleppmann: How to do distributed locking</a> — fencing tokens и критика Redlock.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
