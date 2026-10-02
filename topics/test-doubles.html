@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Test Doubles · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="test-doubles">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Test Doubles</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Тестовый двойник заменяет настоящую зависимость, которая медленна, недетерминирована или недоступна в тесте. Dummy только заполняет параметр, стаб возвращает заданные ответы, фейк — рабочая упрощённая реализация вроде репозитория в памяти, мок проверяет, какие вызовы были, а spy оборачивает настоящий объект. Стабы и фейки проверяют результат и состояние, моки — взаимодействие. Проверять взаимодействие стоит только там, где оно и есть результат: ушло уведомление, отправлено событие. Тест, который фиксирует каждый вызов, ломается при рефакторинге, не меняющем поведения.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Рефакторинг без изменения поведения уронил тест, а настоящая ошибка прошла</h2>
+      <p>Разработчик заменил в сервисе платежей <code>repo.findById(id).isPresent()</code> на <code>repo.existsById(id)</code> — проще и быстрее, поведение то же. Упал тест: он проверял моком, что вызван именно <code>findById</code>. Тест «починили», поменяв ожидание на <code>existsById</code>. Через месяц кто-то перестал отправлять уведомление для части платежей, и ни один тест не упал: все они проверяли вызовы репозитория, а не то, что получает пользователь.</p>
+      <p>Так выглядит неправильное использование двойников: тесты знают реализацию, а не поведение. Тема разбирает виды двойников, когда проверять состояние, а когда взаимодействие, что подменять и что нет. Общая стратегия тестов — в <a href="testing-strategy.html">Testing Strategy</a>, <code>@MockitoBean</code> в контексте Spring — в <a href="spring-testing.html">Testing</a>. Демо — тесты <a href="../examples/testing-strategy/src/test/java/kb/payments/DoublesTest.java">DoublesTest.java</a> на JUnit 6.1 и Mockito 5.24 гоняют одни и те же проверки на двух версиях сервиса: исходной V1 и отрефакторенной V2.</p>
+    </section>
+
+    <section class="step" id="kinds">
+      <h2>Пять видов двойников различаются тем, что они умеют и что проверяет тест</h2>
+      <table class="mx">
+        <thead><tr><th>Вид</th><th>Что делает</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td>Dummy</td><td>Заполняет параметр, не вызывается</td><td><code>id -&gt; {}</code> вместо уведомителя</td></tr>
+          <tr><td>Stub</td><td>Возвращает заданные ответы</td><td>Антифрод всегда отвечает 95</td></tr>
+          <tr><td>Fake</td><td>Рабочая упрощённая реализация</td><td>Репозиторий на <code>HashMap</code></td></tr>
+          <tr><td>Mock</td><td>Запоминает вызовы, тест проверяет их</td><td><code>verify(notifier).paymentAccepted("p-2")</code></td></tr>
+          <tr><td>Spy</td><td>Настоящий объект, вызовы которого записываются или частично подменяются</td><td><code>spy(realFraudCheck)</code></td></tr>
+        </tbody>
+      </table>
+      <p>В Mockito <code>mock()</code> создаёт объект, который годится и как стаб (<code>when(...).thenReturn</code>), и как мок (<code>verify</code>), поэтому в речи всё называют моками. Различие важно не в библиотеке, а в том, что проверяет тест. Стабу задают ответы на входящие запросы, и тест смотрит на результат. Моку задают ожидания исходящих команд, и тест смотрит на сами вызовы. Стаб или dummy часто удобнее написать лямбдой, без библиотеки: функциональный интерфейс с одной строкой читается лучше, чем три строки настройки Mockito.</p>
+    </section>
+
+    <section class="step" id="state">
+      <h2>Стаб и фейк проверяют результат, и рефакторинг их не ломает</h2>
+      <pre><code class="language-java">var repo = new InMemoryPaymentRepository();                 // Fake.
+FraudCheck highRisk = amount -&gt; 95;                         // Stub: лямбда.
+var service = factory.create(repo, highRisk, id -&gt; {});     // Dummy-уведомитель.
+
+assertThat(service.accept("p-1", 500)).isEqualTo("DECLINED");
+assertThat(repo.rows.get("p-1").status()).isEqualTo("DECLINED");
+assertThat(service.accept("p-1", 500)).isEqualTo("DUPLICATE");</code></pre>
+      <p>Тест знает только поведение: рискованный платёж отклонён, отклонение сохранено, повтор — дубль. Как сервис спрашивает репозиторий, через <code>findById</code> или <code>existsById</code>, ему неважно, потому что фейк реализует оба метода честно. Фейк хорош для зависимостей с состоянием: репозиториев, кешей, очередей. Его цена — он может разойтись с настоящей реализацией. Поэтому для фейка и настоящего репозитория пишут общий набор контрактных тестов и гоняют его на обоих: на фейке — быстро, на JDBC-реализации — в Testcontainers.</p>
+    </section>
+
+    <section class="step" id="interaction">
+      <h2>Мок проверяет исходящую команду — и ломается, если проверяет внутреннюю кухню</h2>
+      <p>Уведомление — исходящая команда: сервис ничего не получает назад, и единственный способ увидеть результат — проверить, что вызов был. Здесь мок на месте:</p>
+      <pre><code class="language-java">service.accept("p-2", 500);
+service.accept("p-2", 500);                        // Дубль — без второго уведомления.
+verify(notifier, times(1)).paymentAccepted("p-2");</code></pre>
+      <p>А вот тест, который проверяет обращения к репозиторию — запросы, а не команды:</p>
+      <pre><code class="language-java">when(repo.findById("p-3")).thenReturn(Optional.empty());
+service.accept("p-3", 500);
+verify(repo).findById("p-3");
+verify(repo).save(any());
+verifyNoMoreInteractions(repo);</code></pre>
+      <pre><code class="language-bash">mvn test -Dtest=DoublesTest -Dfragile=none   # хрупкий тест исключён по умолчанию
+python3 report.py                            # [1] — V1, [2] — V2</code></pre>
+      <pre class="out">spy_callsRealMethodInsideWhen                     passed
+overMocked_verifiesEveryCall(String, Factory)[1]  passed
+overMocked_verifiesEveryCall(String, Factory)[2]  FAILED
+stubAndFake_checkState(String, Factory)[1]        passed
+stubAndFake_checkState(String, Factory)[2]        passed
+mock_verifiesOutgoingCommand(String, Factory)[1]  passed
+mock_verifiesOutgoingCommand(String, Factory)[2]  passed</pre>
+      <p>Поведение V1 и V2 одинаково, и тесты на состояние и на уведомление прошли на обеих. Упал только тест, который фиксировал вызовы репозитория. Mockito объясняет почему:</p>
+      <pre class="out">Wanted but not invoked:
+-&gt; at kb.payments.DoublesTest.overMocked_verifiesEveryCall(DoublesTest.java:63)
+However, there were exactly 2 interactions with this mock:
+-&gt; at kb.payments.Payments$PaymentServiceV2.accept(Payments.java:39)
+-&gt; at kb.payments.Payments$PaymentServiceV2.accept(Payments.java:41)</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Сервис платежей между тестами. Тест на результат смотрит на вход, ответ и уведомление — они одинаковы у V1 и V2. Тест на вызовы смотрит на обращения к репозиторию внутри: в V1 это findById и save, в V2 existsById и save, поэтому он падает.">
+            <defs>
+              <marker id="td-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="200" y="30" width="320" height="150" rx="9" class="dg-box"/>
+            <text x="360" y="52" class="dg-in" text-anchor="middle">PaymentService</text>
+            <rect x="216" y="66" width="140" height="48" rx="5" class="dg-cell"/>
+            <text x="226" y="86" class="dg-n">V1: findById</text>
+            <text x="226" y="104" class="dg-n">     save</text>
+            <rect x="364" y="66" width="140" height="48" rx="5" class="dg-cell miss"/>
+            <text x="374" y="86" class="dg-bad">V2: existsById</text>
+            <text x="374" y="104" class="dg-n">     save</text>
+            <text x="216" y="140" class="dg-n">внутри: как спросить репозиторий</text>
+            <rect x="216" y="150" width="288" height="22" rx="5" class="dg-cell hit"/>
+            <text x="226" y="166" class="dg-ok">снаружи: ответ, запись, уведомление</text>
+            <rect x="20" y="130" width="150" height="56" rx="9" class="dg-cell hit"/>
+            <text x="30" y="152" class="dg-ok">тест на результат</text>
+            <text x="30" y="172" class="dg-n">V1 ✓  V2 ✓</text>
+            <path d="M170 160 L 212 160" class="dg-line ok" marker-end="url(#td-n)"/>
+            <rect x="550" y="40" width="150" height="56" rx="9" class="dg-cell miss"/>
+            <text x="560" y="62" class="dg-bad">тест на вызовы</text>
+            <text x="560" y="82" class="dg-n">V1 ✓  V2 ✗</text>
+            <path d="M550 76 L 508 88" class="dg-line bad" marker-end="url(#td-n)"/>
+            <text x="20" y="212" class="dg-s">Рефакторинг меняет внутренний слой; тест, который опирается на него, ломается без ошибки.</text>
+          </svg>
+        </div>
+        <figcaption>Чем ближе тест к наблюдаемому поведению, тем дольше он живёт. Проверка вызовов оправдана только для команд, которые сами являются поведением.</figcaption>
+      </figure>
+      <p>Это ложная тревога: тест ломается не от ошибки, а от изменения реализации, и учит команду, что красный тест надо «подогнать». Правило простое. Запросы, которые возвращают данные, стабят и не проверяют через <code>verify</code>: если сервис не спросил, он не получит данных, и результат будет неверным — это поймает проверка результата. Команды с побочным эффектом наружу — отправить письмо, событие, платёж в банк — проверяют моком. <code>verifyNoMoreInteractions</code> почти всегда делает тест хрупким.</p>
+    </section>
+
+    <section class="step" id="what-to-mock">
+      <h2>Подменяют границы системы, а не собственные классы и не чужие API напрямую</h2>
+      <p>Двойник нужен там, где настоящая зависимость мешает тесту: внешний HTTP-сервис, брокер, часы, генератор случайных чисел, отправка писем. Собственные классы с логикой — калькуляторы, валидаторы, маппинги — подменять не нужно: тест с настоящими классами проверяет больше и не ломается при переносе кода между ними. Value-объекты и DTO не мокают никогда: <code>mock(Money.class)</code> вместо <code>new Money(500, RUB)</code> только прячет данные.</p>
+      <p>«Не мокай то, чем не владеешь»: не стоит мокать <code>RestClient</code>, <code>KafkaTemplate</code> или SDK банка напрямую. Мок повторит ваше представление о чужом API, а не его реальное поведение, и тест пройдёт с неверными заголовками, сериализацией и обработкой ошибок. Вместо этого вводят свой порт — интерфейс <code>BankGateway</code> с методами в терминах домена — и мокают его в тестах сервиса, а адаптер, реализующий порт, проверяют интеграционным тестом против WireMock или контейнера. Это та же граница, что в <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a>.</p>
+    </section>
+
+    <section class="step" id="spy">
+      <h2>Spy вызывает настоящий метод даже там, где его хотели подменить</h2>
+      <pre><code class="language-java">RecordingFraudCheck spy = spy(real);
+when(spy.score(500)).thenReturn(99);       // Здесь настоящий score(500) уже вызван.
+doReturn(99).when(spy).score(700);         // А здесь — нет.</code></pre>
+      <pre class="out">spy real calls: [real score(500)]</pre>
+      <p>В <code>when(spy.score(500))</code> выражение <code>spy.score(500)</code> вычисляется раньше, чем Mockito узнаёт о подмене, и вызывает настоящий метод. Если он ходит в сеть или бросает исключение, тест упадёт ещё на настройке. Форма <code>doReturn(...).when(spy)</code> настоящий метод не вызывает. Сама потребность в spy обычно говорит о классе, который делает слишком много: часть его поведения хочется оставить, а часть заменить. Чаще правильнее вынести заменяемую часть в отдельную зависимость.</p>
+      <div class="trap">
+        <p class="myth">Хороший unit-тест изолирует класс, замокав все его зависимости.</p>
+        <p class="fact">Изолировать нужно от медленного и недетерминированного — сети, базы, времени, — а не от каждого соседнего класса. Тест, где замокано всё, проверяет, что код вызывает моки в заданном порядке, и ломается при любом рефакторинге. В демо он единственный упал на версии с тем же поведением.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Dummy заполняет, стаб отвечает, фейк работает упрощённо, мок записывает вызовы, spy оборачивает настоящий объект.</li>
+        <li>Стабы и фейки проверяют результат и переживают рефакторинг; фейк сверяют с настоящей реализацией общими контрактными тестами.</li>
+        <li>Мок проверяет исходящие команды; проверка запросов к репозиторию упала на V2 с тем же поведением.</li>
+        <li>Подменяют границы через свои порты; чужие клиенты проверяют интеграционно, value-объекты не мокают.</li>
+        <li>when(spy.m()) вызывает настоящий метод; нужен doReturn().when(spy).</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="doubles-stub-mock" data-freq="3">
+      <h3>Чем стаб отличается от мока, а мок от фейка?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Стаб возвращает заданные ответы на входящие запросы, и тест проверяет результат. Мок записывает вызовы, и тест проверяет сами взаимодействия: был ли вызов, с какими аргументами, сколько раз. Фейк — рабочая упрощённая реализация, например репозиторий в памяти: он ведёт себя как настоящий, но без базы.</p>
+          <p>В Mockito один объект может быть и стабом, и моком; различие в том, что проверяет тест.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Запросы стабят, команды наружу проверяют моком.</li>
+            <li>Фейк сверяют с настоящей реализацией общим набором контрактных тестов.</li>
+            <li>Classicist-подход проверяет состояние с настоящими объектами, mockist — взаимодействия; на практике сочетают.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="doubles-what" data-freq="3">
+      <h3>Что стоит мокать, а что нет?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Мокают границы: внешние HTTP-сервисы, брокеры, часы, отправку писем — то, что медленно, недетерминировано или недоступно. Не мокают собственные классы с логикой, value-объекты и DTO. Чужие клиенты вроде RestClient и SDK лучше не мокать напрямую: оборачивают их своим интерфейсом-портом, мокают порт, а адаптер проверяют интеграционно с WireMock.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Тест, где замокано всё, проверяет порядок вызовов и ломается при рефакторинге.</li>
+            <li>verifyNoMoreInteractions делает тесты хрупкими; использовать редко.</li>
+            <li>Время подменяют через Clock, а не мокая статический LocalDate.now().</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот тест будет мешать?</summary>
+          <pre><code class="language-java">@Test
+void acceptsPayment() {
+    when(repo.findById("p-1")).thenReturn(Optional.empty());
+    when(mapper.toEntity(any())).thenReturn(entity);
+    when(fees.calculate(500)).thenReturn(10L);
+    service.accept(request);
+    InOrder order = inOrder(repo, mapper, fees);
+    order.verify(repo).findById("p-1");
+    order.verify(fees).calculate(500);
+    order.verify(mapper).toEntity(any());
+    verifyNoMoreInteractions(repo, mapper, fees);
+}</code></pre>
+          <p>Тест фиксирует порядок внутренних вызовов, а не результат: перестановка расчёта комиссии и маппинга или замена findById на existsById уронят его без изменения поведения. Маппер и калькулятор комиссий — собственная логика, их лучше использовать настоящими. Нужно проверить сохранённый платёж и его комиссию через фейк-репозиторий, а моком — только исходящие команды.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="doubles-spy" data-freq="1">
+      <h3>Когда использовать spy и в чём его ловушка?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spy оборачивает настоящий объект: методы работают по-настоящему, а отдельные можно подменить или проверить. Ловушка — when(spy.method()) вызывает настоящий метод во время настройки; нужно писать doReturn(value).when(spy).method().</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Частичная подмена — признак класса с лишней ответственностью; заменяемую часть лучше вынести.</li>
+            <li>Spy полезен для унаследованного кода, который пока нельзя разделить.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://martinfowler.com/articles/mocksArentStubs.html">Martin Fowler: Mocks Aren't Stubs</a> — основа урока: виды двойников, проверка состояния и поведения.</li>
+      <li><a href="http://xunitpatterns.com/Test%20Double.html">Gerard Meszaros: xUnit Test Patterns — Test Double</a> — исходная классификация.</li>
+      <li><a href="https://javadoc.io/doc/org.mockito/mockito-core/latest/org/mockito/Mockito.html">Mockito javadoc</a> — spy, doReturn, verify и предупреждения о частичных моках.</li>
+      <li>Steve Freeman, Nat Pryce, «Growing Object-Oriented Software, Guided by Tests» — «не мокай то, чем не владеешь».</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

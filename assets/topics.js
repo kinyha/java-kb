@@ -203,7 +203,7 @@ window.KB_TREE = [
       { id: 'testing', title: 'Testing', items: [
         { id: 'testing-strategy', freq: 2, status: 'draft', title: 'Testing Strategy',
           scope: 'пирамида тестов, unit, интеграционные, контрактные, e2e, тестовые данные' },
-        { id: 'test-doubles', freq: 2, status: 'empty', title: 'Test Doubles',
+        { id: 'test-doubles', freq: 2, status: 'draft', title: 'Test Doubles',
           scope: 'stub, mock, spy и fake, чем стаб отличается от мока, что мокать и что нет' },
       ] },
     ],

@@ -11,3 +11,10 @@ mvn test-compile org.pitest:pitest-maven:mutationCoverage -DtargetTests=kb.fees.
 ```
 
 Отчёт PIT: target/pit-reports/index.html.
+
+Тест-двойники (тема Test Doubles). Хрупкий тест `overMocked_verifiesEveryCall` намеренно падает на V2 и по умолчанию исключён тегом `fragile`:
+
+```bash
+mvn test -Dtest=DoublesTest -Dfragile=none
+python3 report.py
+```
