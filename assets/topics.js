@@ -168,7 +168,7 @@ window.KB_TREE = [
             scope: 'лог сообщений, топики и партиции, offset, брокеры, retention, чем Kafka отличается от очереди' },
           { id: 'kafka-producer', freq: 3, status: 'draft', title: 'Producer',
             scope: 'ключ и выбор партиции, порядок сообщений, acks, идемпотентный продюсер, батчи' },
-          { id: 'kafka-consumer', freq: 3, status: 'empty', title: 'Consumer Groups',
+          { id: 'kafka-consumer', freq: 3, status: 'draft', title: 'Consumer Groups',
             scope: 'consumer group, распределение партиций, commit offset, rebalance, lag' },
           { id: 'kafka-delivery', freq: 3, status: 'empty', title: 'Delivery Semantics',
             scope: 'at-most-once, at-least-once, exactly-once, транзакции, идемпотентный консьюмер' },

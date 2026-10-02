@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kafka: Consumer Groups · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kafka-consumer">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Kafka: Consumer Groups</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Консьюмеры с одним <code>group.id</code> делят партиции топика: каждая партиция принадлежит ровно одному члену группы, поэтому консьюмеров больше, чем партиций, держать бесполезно. Своё место в партиции группа хранит как закоммиченное смещение во внутреннем топике <code>__consumer_offsets</code>; после перезапуска чтение продолжается с него, и всё, что обработано, но не закоммичено, придёт снова. Lag — разница между концом партиции и закоммиченным смещением. Если обработка пачки дольше <code>max.poll.interval.ms</code>, консьюмера исключают из группы, его партиции отдают другим, и коммит падает.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Добавили консьюмеров — быстрее не стало, а после деплоя заказы обработались дважды</h2>
+      <p>Сервис биллинга читает топик <code>orders</code> из шести партиций. Отставание растёт, и команда увеличивает число подов с трёх до семи. Пропускная способность выросла в два раза, а не в два с третью, и один под не делает ничего. После деплоя часть заказов выставлена в счёт дважды. А раз в день в логах <code>CommitFailedException</code>, и после него — волна повторной обработки.</p>
+      <p>Тема разбирает, как группа делит партиции, где хранится прогресс, что такое lag и rebalance и почему медленная обработка выкидывает консьюмера из группы. Основы топиков и групп — в <a href="kafka-basics.html">Basics</a>, листенеры Spring — в <a href="spring-kafka.html">Kafka in Spring</a>. Демо <a href="../examples/kafka-cluster/ConsumerDemo.java">ConsumerDemo.java</a> работает с кластером из трёх брокеров Kafka 4.3 в Docker через kafka-clients 4.3.1; топик <code>orders</code> на 6 партиций, 60 записей.</p>
+    </section>
+
+    <section class="step" id="assignment">
+      <h2>Каждая партиция принадлежит одному консьюмеру группы, и лишние простаивают</h2>
+      <pre class="out">== 3 consumers, 6 partitions: {c1=[0, 1], c2=[4, 5], c3=[2, 3]}
+== 7 consumers, 6 partitions: {c1=[1], c2=[4], c3=[3], c4=[2], c5=[0], c6=[], c7=[5]}</pre>
+      <p>Три консьюмера получили по две партиции. Семь консьюмеров на шесть партиций — шесть по одной, и c6 без партиций: он подключён, шлёт heartbeat и ждёт, пока кто-то уйдёт. Параллелизм группы ограничен числом партиций, поэтому число партиций выбирают под будущий максимум экземпляров. Внутри одного экземпляра параллелить обработку одной партиции можно, но тогда порядок и коммиты приходится собирать самим.</p>
+      <p>Разные группы независимы: биллинг и аналитика с разными <code>group.id</code> читают один топик целиком, каждая со своими смещениями. Так Kafka совмещает очередь и публикацию-подписку, как разобрано в <a href="messaging.html">Brokers &amp; Guarantees</a>.</p>
+    </section>
+
+    <section class="step" id="offsets">
+      <h2>Закоммиченное смещение — это место, откуда группа продолжит после перезапуска</h2>
+      <p>Консьюмер читает пачками через <code>poll()</code> и после обработки коммитит смещение — номер следующей записи, которую нужно прочитать. Демо обрабатывает 30 записей, коммитит только первые 20 и «падает»:</p>
+      <pre><code class="language-java">while (processed &lt; 25) {
+    var records = c.poll(Duration.ofMillis(500));   // max.poll.records=10
+    processed += records.count();
+    if (processed &lt;= 20) c.commitSync();           // Третью пачку обработали, но не закоммитили.
+}</code></pre>
+      <pre class="out">== processed 30, committed 20, lag 40 of 60
+== after restart the group reads 40 records: 10 of them already processed</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 170" role="img" aria-label="Шкала 60 записей. Первые 20 обработаны и закоммичены. Записи с 20 по 30 обработаны, но не закоммичены: после перезапуска они придут снова. Записи с 30 по 60 ещё не прочитаны. Lag — от закоммиченного смещения 20 до конца 60, то есть 40.">
+            <text x="20" y="22" class="dg-cap">60 ЗАПИСЕЙ ГРУППЫ BILLING</text>
+            <rect x="20" y="40" width="226" height="40" rx="5" class="dg-cell hit"/>
+            <rect x="250" y="40" width="110" height="40" rx="5" class="dg-cell miss"/>
+            <rect x="364" y="40" width="336" height="40" rx="5" class="dg-cell"/>
+            <text x="133" y="65" class="dg-ok" text-anchor="middle">0–19: обработаны, коммит</text>
+            <text x="305" y="65" class="dg-bad" text-anchor="middle">20–29: повтор</text>
+            <text x="532" y="65" class="dg-n" text-anchor="middle">30–59: не прочитаны</text>
+            <path d="M248 34 L 248 96" class="dg-line"/>
+            <text x="248" y="112" class="dg-n" text-anchor="middle">committed = 20</text>
+            <path d="M700 34 L 700 96" class="dg-line"/>
+            <text x="700" y="112" class="dg-n" text-anchor="end">end = 60</text>
+            <path d="M252 132 L 696 132" class="dg-line"/>
+            <text x="474" y="152" class="dg-n" text-anchor="middle">lag = 60 − 20 = 40</text>
+          </svg>
+        </div>
+        <figcaption>Позиция консьюмера в памяти дошла до 30, но после падения важна только закоммиченная: группа начнёт с 20, и десять записей обработаются второй раз.</figcaption>
+      </figure>
+      <p>После перезапуска группа начала с закоммиченного смещения 20 и прочитала 40 записей, из них 10 уже были обработаны. Это нормальное поведение at-least-once: окно между обработкой и коммитом есть всегда, и дубли после деплоя — его следствие. Защита — идемпотентная обработка, о которой — в <a href="messaging.html">Brokers &amp; Guarantees</a>. Чем реже коммит, тем больше окно повтора; чем чаще, тем больше нагрузка на брокер.</p>
+      <p>По умолчанию <code>enable.auto.commit=true</code>: смещения коммитятся раз в 5 секунд внутри <code>poll()</code>, и коммитится позиция, отданная предыдущим <code>poll()</code>. Пока обработка синхронна в том же потоке, это at-least-once. Если записи передаются в другой поток и <code>poll()</code> вызывается снова до их обработки, автокоммит закоммитит необработанное, и падение потеряет записи. Spring Kafka по умолчанию автокоммит выключает и коммитит сам после обработки.</p>
+      <p>Lag в записях — главная метрика консьюмера. Растущий lag значит, что группа не успевает за продюсерами; lag, застывший на одной партиции, — что её обработка застряла, например на ядовитом сообщении. Мониторинг смотрит lag по партициям и время, на которое группа отстала, а не только сумму.</p>
+    </section>
+
+    <section class="step" id="rebalance">
+      <h2>Медленная обработка выкидывает консьюмера из группы, и его коммит отклоняется</h2>
+      <p>Консьюмер обязан вызывать <code>poll()</code> чаще, чем раз в <code>max.poll.interval.ms</code> (5 минут по умолчанию). Если нет, клиент считает, что поток обработки завис, и покидает группу; координатор отдаёт его партиции другим. Демо ставит интервал 3 секунды и обрабатывает пачку 5 секунд:</p>
+      <pre class="out">== slow batch 5 records, 5 s &gt; max.poll.interval.ms=3000 -&gt; CommitFailedException
+   rebalance callbacks: [assigned 6, lost 6, assigned 6]</pre>
+      <p>Коммит отклонён: консьюмер больше не владеет партициями, и смещение могло уже продвинуть другой член группы. Колбэк <code>onPartitionsLost</code> сообщает, что партиции отобраны без возможности закоммитить, а затем консьюмер вернулся в группу и получил их заново — и прочитает ту же пачку ещё раз. В группе из нескольких экземпляров эту пачку тем временем обработал бы другой, и одна и та же работа выполнилась бы дважды. Если обработка каждой пачки дольше интервала, получается бесконечный цикл: обработать, вылететь, начать сначала.</p>
+      <p>Лечат с двух сторон: уменьшают <code>max.poll.records</code>, чтобы пачка гарантированно укладывалась в интервал, и ограничивают время обработки одной записи — таймауты на вызовы банка и базы. Увеличить интервал можно, но тогда и настоящее зависание обнаружится позже. Отдельно работает <code>session.timeout.ms</code> (45 секунд): его отсчитывает фоновый heartbeat-поток, и он ловит упавший процесс, а не медленную обработку.</p>
+    </section>
+
+    <section class="step" id="protocols">
+      <h2>Rebalance раньше останавливал всю группу, новые протоколы двигают только нужные партиции</h2>
+      <p>В исходном протоколе каждый вход или выход консьюмера запускал rebalance всей группы: все отдавали все партиции, лидер группы пересчитывал распределение, все получали новые. Пока это шло, группа не читала ничего. Деплой из десяти подов, которые перезапускаются по одному, давал десяток остановок подряд. Кооперативное распределение (<code>CooperativeStickyAssignor</code>, входит в список по умолчанию) отбирает только те партиции, которые переезжают, а остальные продолжают читаться.</p>
+      <p>В Kafka 4.0 стал общедоступным новый протокол групп консьюмеров (KIP-848), который включается <code>group.protocol=consumer</code>. Распределение считает координатор на брокере, а не лидер среди клиентов, и изменения доходят до участников инкрементально через heartbeat. Клиентская логика упрощается, остановок группы нет. Умолчанием у клиента по-прежнему остаётся <code>classic</code>, поэтому демо использует его. Для подов в Kubernetes помогает и статическое членство: <code>group.instance.id</code> с именем пода позволяет перезапуститься в пределах <code>session.timeout.ms</code> без rebalance.</p>
+      <div class="trap">
+        <p class="myth">Чтобы ускорить обработку топика, достаточно добавить экземпляров сервиса.</p>
+        <p class="fact">Каждая партиция читается одним консьюмером группы, поэтому параллелизм не выше числа партиций: в демо седьмой консьюмер на шести партициях простаивал. Сначала нужно столько партиций, сколько экземпляров планируется, а увеличение числа партиций меняет распределение ключей.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Партиция принадлежит одному консьюмеру группы: 3 на 6 — по две, 7 на 6 — один простаивает.</li>
+        <li>Группа продолжает с закоммиченного смещения: обработано 30, закоммичено 20 — десять придут повторно.</li>
+        <li>Lag = конец партиции минус закоммиченное смещение; смотрят по партициям.</li>
+        <li>Обработка дольше max.poll.interval.ms: консьюмер вылетает, коммит падает с CommitFailedException, пачка обрабатывается снова.</li>
+        <li>Кооперативный rebalance и протокол KIP-848 двигают только нужные партиции; статическое членство спасает от rebalance при рестарте пода.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="consumer-group" data-freq="3">
+      <h3>Как работает consumer group и сколько консьюмеров имеет смысл запускать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Консьюмеры с одним group.id делят партиции подписанных топиков: каждая партиция читается ровно одним членом группы, поэтому порядок внутри партиции сохраняется. Консьюмеров больше, чем партиций, — лишние простаивают. Разные группы читают топик независимо, каждая со своими смещениями.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Число партиций задаёт предел параллелизма группы; его выбирают с запасом.</li>
+            <li>Rebalance при входе и выходе членов; кооперативный протокол и KIP-848 не останавливают всю группу.</li>
+            <li>group.instance.id даёт статическое членство: рестарт пода без rebalance.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="consumer-commit" data-freq="3">
+      <h3>Когда коммитить смещение и что будет при падении?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>После обработки — это at-least-once: при падении между обработкой и коммитом записи придут снова, поэтому обработка должна быть идемпотентной. Коммит до обработки — at-most-once, записи теряются. Закоммиченное смещение хранится в __consumer_offsets, и после перезапуска группа продолжает с него.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Автокоммит раз в 5 секунд коммитит позицию предыдущего poll; при асинхронной обработке в другом потоке он теряет записи.</li>
+            <li>Коммитят следующий offset, то есть последний обработанный плюс один.</li>
+            <li>commitSync надёжнее, commitAsync быстрее, но без повторов; часто сочетают: async в цикле, sync при закрытии и в onPartitionsRevoked.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим консьюмером?</summary>
+          <pre><code class="language-java">// enable.auto.commit=true (по умолчанию)
+while (true) {
+    for (var record : consumer.poll(Duration.ofMillis(500))) {
+        executor.submit(() -&gt; billing.charge(record.value()));
+    }
+}</code></pre>
+          <p>Записи уходят в пул потоков, а poll сразу вызывается снова, и автокоммит закоммитит смещения ещё не обработанных записей. При падении они потеряются. Кроме того, порядок внутри партиции нарушается параллельной обработкой, а ошибки в задачах никто не видит. Нужно обрабатывать в потоке консьюмера или вести учёт завершённых смещений по партициям и коммитить вручную только непрерывно обработанный префикс.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="consumer-poll-interval" data-freq="2">
+      <h3>Почему консьюмер может вылететь из группы, хотя процесс жив?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если между вызовами poll прошло больше max.poll.interval.ms, клиент считает обработку зависшей и покидает группу; партиции отдаются другим, а коммит падает с CommitFailedException. Лечат уменьшением max.poll.records и таймаутами на внешние вызовы, чтобы пачка укладывалась в интервал.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>session.timeout.ms и heartbeat ловят умерший процесс, max.poll.interval.ms — зависшую обработку.</li>
+            <li>Вылет посреди пачки ведёт к повторной обработке этой пачки другим членом группы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://kafka.apache.org/documentation/#consumerconfigs">Apache Kafka: Consumer Configs</a> — основа урока: group.id, enable.auto.commit, max.poll.interval.ms, session.timeout.ms.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-848%3A+The+Next+Generation+of+the+Consumer+Rebalance+Protocol">KIP-848: The Next Generation of the Consumer Rebalance Protocol</a>.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol">KIP-429: Incremental Rebalance Protocol</a> и <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-345%3A+Introduce+static+membership+protocol+to+reduce+consumer+rebalances">KIP-345: Static Membership</a>.</li>
+      <li><a href="https://kafka.apache.org/documentation/#consumerapi">KafkaConsumer javadoc</a> — смещения, коммиты, ConsumerRebalanceListener.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

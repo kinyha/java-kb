@@ -7,6 +7,7 @@ cd examples/kafka-cluster
 docker compose -p kbkafka up -d
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
 java -cp "$(cat target/classpath.txt)" ProducerDemo.java
+java -cp "$(cat target/classpath.txt)" ConsumerDemo.java
 ```
 
 Номера партиций для записей без ключа и смещения меняются от запуска к запуску.
