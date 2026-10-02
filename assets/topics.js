@@ -97,7 +97,7 @@ window.KB_TREE = [
           scope: 'виртуальная память, страницы, page fault, swap, кеши CPU, OOM killer' },
         { id: 'os-io', freq: 2, status: 'draft', title: 'I/O Models',
           scope: 'файловые дескрипторы, блокирующий и неблокирующий I/O, select и epoll, page cache, zero-copy' },
-        { id: 'linux', freq: 2, status: 'empty', title: 'Linux Basics',
+        { id: 'linux', freq: 2, status: 'draft', title: 'Linux Basics',
           scope: 'процессы и сигналы, права, pipes, grep, top, ss, lsof, df, где смотреть логи' },
       ] },
       { id: 'net', title: 'Networking', source: 'Kurose, Ross: сверху вниз по стеку; High Performance Browser Networking', items: [
