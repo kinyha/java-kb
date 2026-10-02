@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Processes &amp; Threads · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="processes">
+<main class="page">
+  <header class="topic-head"><h1>Processes &amp; Threads</h1></header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Процесс даёт программе собственное адресное пространство и набор ресурсов. Потоки выполняют её код: у каждого свой стек и положение в программе, а память процесса у них общая. Ядро распределяет между готовыми потоками время CPU и снимает с CPU тех, кому пока нечего делать. Отсюда следуют два разных вида ожидания: поток может ждать своей очереди или ждать внешнего события. Если их различать, становится понятнее и зависший платёж, и цена сотни рабочих потоков, и остановка сервиса сигналом.</p>
+    </div>
+
+    <section class="step" id="child-backpressure">
+      <h2>Дочерняя программа зависла на логах, пока родитель ждал её завершения</h2>
+      <p>Платёжный сервис запускает отдельную программу для формирования квитанции. Она пишет результат в stdout, логи — в stderr. Родитель вызывает <code>waitFor()</code>, чтобы дождаться результата. Программа уже запустилась, но вызов не возвращается. CPU почти свободен: оба процесса ждут.</p>
+      <p>У запущенного через <code>ProcessBuilder</code> ребёнка по умолчанию три канала. Их названия в API относятся к родителю:</p>
+      <table class="mx">
+        <thead><tr><th>Поток Java у родителя</th><th>Куда идут байты</th></tr></thead>
+        <tbody>
+          <tr><td><code>getOutputStream()</code></td><td>Родитель пишет в stdin ребёнка.</td></tr>
+          <tr><td><code>getInputStream()</code></td><td>Родитель читает stdout ребёнка.</td></tr>
+          <tr><td><code>getErrorStream()</code></td><td>Родитель читает stderr ребёнка.</td></tr>
+        </tbody>
+      </table>
+      <p>В <a href="../examples/os/ProcessDemo.java">ProcessDemo.java</a> ребёнок сообщает о готовности и пишет 32 МиБ в stderr. Родитель читает их позже. Короткий срок <code>waitFor</code> позволяет увидеть зависание и продолжить опыт. Фрагмент режима <code>pipe</code>:</p>
+      <pre><code class="language-java">Process process = child("log-child");               // Отдельная JVM, stderr пока не читается.
+System.out.println("ready=" + output.readLine());   // Ребёнок уже сообщил child ready.
+boolean finished = process.waitFor(150, TimeUnit.MILLISECONDS);
+System.out.println("finished without reading stderr=" + finished);
+
+long bytes = process.getErrorStream()
+    .transferTo(OutputStream.nullOutputStream());   // Освобождаем место в канале.
+System.out.println("drained stderr bytes=" + bytes);
+System.out.println("finished after drain=" + process.waitFor(5, TimeUnit.SECONDS));
+System.out.println("stdout=" + output.readLine());
+System.out.println("exit=" + process.exitValue());</code></pre>
+      <pre class="out">ready=child ready
+finished without reading stderr=false
+drained stderr bytes=33554432
+finished after drain=true
+stdout=child done
+exit=0</pre>
+      <p>Запись в заполненный pipe ждёт, пока родитель освободит место чтением. Родитель ждёт выхода ребёнка. Продвижения нет: <code>waitFor</code> не забирает вывод. Такое взаимное ожидание возникает через ресурсы ОС, без Java-мониторов.</p>
+      <p>Демо запускается из <code>examples/os</code>: <code>java ProcessDemo.java pipe</code>. Нужен JDK 21, сборки и банковского сервера нет. Полные команды — в <a href="../examples/os/README.md">README</a>. POSIX-примеры fork ниже написаны на C: Java не даёт клонировать работающую JVM через публичный API. Все показанные результаты проверены на macOS; описанные отдельно средства Linux отмечены явно.</p>
+    </section>
+
+    <section class="step" id="process-thread-boundary">
+      <h2>Потоки делят память процесса, но продолжают работу каждый со своего места</h2>
+      <p>Программа — файл с кодом. Процесс — её работающий экземпляр: виртуальное адресное пространство, открытые файлы, права, сведения о выполнении. Два запуска одного JAR создают два процесса с отдельными Java heap. Одинаковый числовой адрес в них может указывать на разные данные. Передать ссылку <code>Payment</code> соседней JVM через обычный вызов метода нельзя.</p>
+      <p>У потока свои регистры, следующая инструкция, стек и локальное состояние. Код, heap и таблица файлов общие. Поток уведомления получает ссылку на тот же объект платежа, с которым работает его сосед. Собственный стек не делает объект по этой ссылке частным.</p>
+      <table class="mx">
+        <thead><tr><th>Ресурс</th><th>Между потоками одного процесса</th><th>Между обычными процессами</th></tr></thead>
+        <tbody>
+          <tr><td>Адресное пространство, heap, глобальные данные</td><td>Общие.</td><td>Раздельные; общая память подключается явно.</td></tr>
+          <tr><td>Стек и регистры</td><td>Свои у каждого потока.</td><td>Свои у каждого потока каждого процесса.</td></tr>
+          <tr><td>Открытые файлы и сокеты</td><td>Общая таблица процесса.</td><td>Свои таблицы; после fork записи могут вести к общим объектам ядра.</td></tr>
+          <tr><td>Изоляция отказа</td><td>Фатальная ошибка JVM затрагивает весь процесс.</td><td>Выход одного процесса не уничтожает память другого.</td></tr>
+        </tbody>
+      </table>
+      <p>Режим <code>threads</code> использует именно платформенный поток. Рабочий поток меняет поле класса, затем завершается из-за исключения. Обработчик исключения печатает причину, а <code>main</code> дожидается окончания:</p>
+      <pre><code class="language-java">private static int captured = 41;                 // Одно поле на эту JVM.
+
+Thread worker = Thread.ofPlatform().unstarted(() -&gt; {
+    captured = 99;
+    System.out.println("worker captured=" + captured);
+    throw new IllegalStateException("bank refused");
+});
+worker.setUncaughtExceptionHandler((thread, error) -&gt;
+    System.out.println("worker failed=" + error.getClass().getSimpleName()));
+worker.start();
+worker.join();                                    // После join запись worker видна main.
+System.out.println("main after join: captured=" + captured + ", alive=true");</code></pre>
+      <pre class="out">worker captured=99
+worker failed=IllegalStateException
+main after join: captured=99, alive=true</pre>
+      <p><code>main</code> видит 99 в общем поле. Исключение завершило только worker. Видимость записи обеспечил <code>join</code>; переключение CPU само по себе не заменяет правила <a href="jmm.html">Java Memory Model</a>. Одновременно выполняющиеся команды требуют согласования доступа.</p>
+      <p>В Linux каждый поток имеет TID. Потоки процесса объединены в группу с общим TGID — его возвращает <code>getpid()</code>. Ядро планирует отдельные задачи-потоки. Платформенные потоки JVM соответствуют потокам ОС. <a href="virtual-threads.html">Виртуальные потоки Java</a> планирует JVM на потоки-носители; ядро распределяет CPU между носителями. Их количество не равно количеству виртуальных потоков.</p>
+    </section>
+
+    <section class="step" id="schedule-and-switch">
+      <h2>Готовый поток ждёт CPU, заблокированный — события, которое вернёт его в очередь</h2>
+      <p>Один логический CPU выполняет один поток; другие готовые потоки ждут выбора планировщика. Читатель пустого сокета ждёт данные. Когда они приходят, ядро делает его снова готовым. Пробуждение и получение CPU — разные события.</p>
+      <p>В упрощённой модели OSTEP есть три состояния: <strong>Running</strong> — выполняется, <strong>Ready</strong> — может выполняться, <strong>Blocked</strong> — ждёт событие. В Linux в инструментах часто видны R для выполняющегося или готового потока, S для прерываемого ожидания и D для непрерываемого ожидания в ядре. Они не равны состояниям <code>Thread.State</code> Java: Java RUNNABLE тоже не доказывает, что поток сейчас получил CPU.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 350" role="img" aria-label="Один логический CPU, потоки pay и audit. Сначала pay выполняется, audit готов. При ожидании ответа банка pay блокируется, audit занимает CPU. Ответ делает pay готовым, но audit ещё выполняется. Затем планировщик выбирает pay, а audit возвращается в очередь готовых.">
+            <defs><marker id="proc-state-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="22" y="25" class="dg-cap">ОДИН ЛОГИЧЕСКИЙ CPU</text>
+            <rect x="20" y="58" width="220" height="90" rx="8" class="dg-box"/>
+            <text x="34" y="82" class="dg-t">Ready · очередь готовых</text>
+            <rect x="470" y="58" width="220" height="90" rx="8" class="dg-box"/>
+            <text x="484" y="82" class="dg-t">Running · на CPU</text>
+            <rect x="245" y="230" width="220" height="90" rx="8" class="dg-box"/>
+            <text x="259" y="254" class="dg-t">Blocked · ждёт банк</text>
+            <path d="M240 95 L466 95" class="dg-line" marker-end="url(#proc-state-a)"/>
+            <text x="293" y="81" class="dg-s">выбор планировщика</text>
+            <path d="M470 130 L244 130" class="dg-line" marker-end="url(#proc-state-a)"/>
+            <text x="305" y="151" class="dg-s">вытеснение</text>
+            <path d="M580 148 V195 H355 V226" class="dg-line" marker-end="url(#proc-state-a)"/>
+            <text x="593" y="176" class="dg-s">ждёт I/O</text>
+            <path d="M245 275 H130 V152" class="dg-line" marker-end="url(#proc-state-a)"/>
+            <text x="144" y="191" class="dg-s">данные готовы</text>
+            <g data-s="1"><rect x="34" y="98" width="192" height="34" rx="6" class="dg-cell"/><text x="48" y="120" class="dg-in">audit</text><rect x="484" y="98" width="192" height="34" rx="6" class="dg-cell hit"/><text x="498" y="120" class="dg-in">pay</text><text x="259" y="292" class="dg-s">пусто</text></g>
+            <g data-s="2"><text x="34" y="120" class="dg-s">пусто</text><rect x="484" y="98" width="192" height="34" rx="6" class="dg-cell hit"/><text x="498" y="120" class="dg-in">audit</text><rect x="259" y="270" width="192" height="34" rx="6" class="dg-cell"/><text x="273" y="292" class="dg-in">pay</text></g>
+            <g data-s="3"><rect x="34" y="98" width="192" height="34" rx="6" class="dg-cell"/><text x="48" y="120" class="dg-in">pay</text><rect x="484" y="98" width="192" height="34" rx="6" class="dg-cell hit"/><text x="498" y="120" class="dg-in">audit</text><text x="259" y="292" class="dg-s">пусто</text></g>
+            <g data-s="4"><rect x="34" y="98" width="192" height="34" rx="6" class="dg-cell"/><text x="48" y="120" class="dg-in">audit</text><rect x="484" y="98" width="192" height="34" rx="6" class="dg-cell hit"/><text x="498" y="120" class="dg-in">pay</text><text x="259" y="292" class="dg-s">пусто</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>pay выполняет инструкции. audit готов, но единственный CPU уже занят.</li>
+          <li>pay ждёт чтения ответа банка и уходит в Blocked. Планировщик отдаёт CPU потоку audit.</li>
+          <li>Ответ банка пришёл. pay переходит в Ready; в этой истории audit пока продолжает работать.</li>
+          <li>Планировщик вытеснил audit и выбрал pay. Теперь pay разбирает ответ, а audit ждёт в Ready.</li>
+        </ol>
+        <figcaption>Стрелки — допустимые переходы состояний. Пробуждение и получение CPU показаны разными шагами.</figcaption>
+      </figure>
+      <p><strong>Переключение контекста</strong> сохраняет состояние уходящего потока и восстанавливает другой: регистры, стек, место продолжения и сведения ядра. Java heap при этом не копируется. Для другого процесса меняется адресное пространство; у соседних потоков оно общее. Цена включает работу ядра и потерю локальности кешей. Маркировка адресных пространств помогает сохранять часть TLB, поэтому его полный сброс при каждом переключении не обязателен.</p>
+      <p>Системный вызов — другой переход: тот же поток входит из пользовательского режима в ядро. Если <code>read</code> сразу нашёл данные, он может вернуться без выбора другого потока. Если данных нет и чтение блокирующее, появляется причина снять его с CPU. Вытесняющая многозадачность также позволяет ядру сменить поток по таймеру: бесконечный цикл пользователя не получает CPU навсегда.</p>
+      <p>Планировщик задаёт <em>политику</em> выбора, переключение — <em>механизм</em>. С Linux 6.6 обычный справедливый класс начал переходить от CFS к EEVDF. Его выбор учитывает полученную долю CPU и виртуальный срок выполнения; это не простая круговая очередь с одним неизменным квантом. <code>nice</code> влияет на относительный вес конкурирующих задач, а не обещает срок ответа банка. На нескольких CPU добавляются очереди, распределение нагрузки и миграция потоков.</p>
+    </section>
+    <section class="step" id="fork-exec-wait">
+      <h2>fork отделяет память, exec заменяет программу, wait забирает результат выхода</h2>
+      <p>В Unix <code>fork()</code> создаёт ребёнка, который продолжает выполнение после того же вызова. Родитель получает PID ребёнка, ребёнок — 0; ошибка даёт −1. После успешного fork у них отдельные адресные пространства с исходно одинаковым содержимым. Linux использует copy-on-write: сначала страницы могут ссылаться на общую физическую память, а запись вызывает создание отдельной копии нужной страницы. Это не общий изменяемый Java heap.</p>
+      <p>Файлы устроены иначе. Ребёнок наследует копию таблицы дескрипторов; соответствующие записи обеих таблиц ссылаются на одну <em>open file description</em> в ядре. У неё общая позиция чтения. Режим <code>copy</code> из <a href="../examples/os/ForkDemo.c">ForkDemo.c</a> показывает обе границы сразу. Фрагмент без проверок ошибок:</p>
+      <pre><code class="language-c">int captured = 41;
+int fd = mkstemp(name);                // Временный файл открыт один раз, до fork.
+write(fd, "ABC", 3);
+lseek(fd, 0, SEEK_SET);                // Оба начнут с одной записи ядра: позиция 0.
+
+pid_t child = fork();
+if (child == 0) {
+    captured = 99;                    // Собственная копия памяти.
+    char letter;
+    read(fd, &amp;letter, 1);              // A; общая позиция становится 1.
+    printf("child captured=%d, file=%c\n", captured, letter);
+    fflush(stdout);                   // _exit не выгружает буферы stdio.
+    _exit(0);
+}
+waitpid(child, &amp;status, 0);            // Родитель читает строго после ребёнка.
+char letter;
+read(fd, &amp;letter, 1);                  // B: закрытие fd ребёнка позицию не сбросило.
+printf("parent captured=%d, file=%c\n", captured, letter);</code></pre>
+      <pre class="out">child captured=99, file=A
+parent captured=41, file=B</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="После fork ребёнок записал captured=99 и прочитал A. В памяти родителя осталось 41. Раздельные таблицы файловых дескрипторов указывают на одну запись открытого файла в ядре с позицией 1. Ребёнок ещё не вышел; после его выхода родитель прочитает B.">
+            <defs><marker id="proc-fork-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="24" class="dg-cap">РОДИТЕЛЬ</text>
+            <text x="480" y="24" class="dg-cap">РЕБЁНОК</text>
+            <rect x="20" y="40" width="220" height="146" rx="8" class="dg-box"/>
+            <rect x="480" y="40" width="220" height="146" rx="8" class="dg-box"/>
+            <text x="34" y="64" class="dg-t">своя память</text>
+            <text x="494" y="64" class="dg-t">своя память</text>
+            <rect x="34" y="78" width="192" height="36" rx="6" class="dg-cell"/>
+            <text x="48" y="102" class="dg-in">captured = 41</text>
+            <rect x="494" y="78" width="192" height="36" rx="6" class="dg-cell"/>
+            <text x="508" y="102" class="dg-in">captured = 99</text>
+            <rect x="34" y="134" width="192" height="36" rx="6" class="dg-cell"/>
+            <text x="48" y="158" class="dg-in">таблица fd → файл</text>
+            <rect x="494" y="134" width="192" height="36" rx="6" class="dg-cell"/>
+            <text x="508" y="158" class="dg-in">таблица fd → файл</text>
+            <rect x="260" y="166" width="200" height="88" rx="8" class="dg-box"/>
+            <text x="274" y="188" class="dg-t">общая запись ядра</text>
+            <text x="274" y="214" class="dg-in">файл: ABC</text>
+            <text x="274" y="240" class="dg-in">позиция: 1</text>
+            <path d="M226 152 H246 V206 H256" class="dg-line" marker-end="url(#proc-fork-a)"/>
+            <path d="M494 152 H474 V206 H464" class="dg-line" marker-end="url(#proc-fork-a)"/>
+          </svg>
+        </div>
+        <figcaption>Снимок после чтения A, до выхода ребёнка. Если бы каждый процесс независимо открыл файл заново, позиции чтения были бы раздельными.</figcaption>
+      </figure>
+      <p><code>exec</code> загружает другую программу в тот же процесс: PID сохраняется, прежняя память и код заменяются. При успехе старый вызов не возвращается; при ошибке выполнение продолжается в старой программе. Так оболочка может сначала создать ребёнка, затем запустить в нём <code>java</code>. Дескрипторы, помеченные close-on-exec, закрываются. Это позволяет отделить создание процесса от выбора новой программы.</p>
+      <p>Ядро сохраняет статус завершившегося ребёнка. <code>waitpid</code> получает статус и освобождает оставшуюся запись. До этого ребёнок — <strong>zombie</strong>: код уже не выполняется, прежней памяти нет, но запись о завершении занимает место. Если родитель вышел раньше ребёнка, ребёнок становится сиротой и получает нового родителя. В Linux им может быть subreaper или init соответствующего пространства PID.</p>
+      <details class="deep">
+        <summary>Под капотом: fork многопоточного процесса копирует замки без их владельцев</summary>
+        <p>У ребёнка остаётся только поток, который вызвал fork, но память остальных потоков, включая состояния mutex, скопирована. Замок мог быть занят потоком, который в ребёнке вообще не существует. Поэтому до exec в ребёнке многопоточной программы разрешены только async-signal-safe операции. Прямой fork работающей JVM ради фоновой задачи — плохая граница: JVM, аллокатор и библиотеки уже имеют потоки и замки. Для новой программы Java предоставляет ProcessBuilder; конкретный способ запуска выбирает реализация JDK.</p>
+      </details>
+    </section>
+
+    <section class="step" id="ipc-and-eof">
+      <h2>Процессы общаются через явный канал, а EOF зависит от всех его писателей</h2>
+      <p><strong>IPC</strong> связывает процессы: нужно определить данные, ожидание и окончание обмена. Pipe удобен родителю и ребёнку, Unix-сокет — независимым локальным процессам, TCP — для сети. Разделяемая память сокращает копирование и требует синхронизации.</p>
+      <table class="mx">
+        <thead><tr><th>Средство</th><th>Что передаёт</th><th>Что нужно решить</th></tr></thead>
+        <tbody>
+          <tr><td>Pipe</td><td>Поток байтов, одно направление; файловые дескрипторы.</td><td>Чтение и запись частями, конечный буфер, закрытие ненужных концов.</td></tr>
+          <tr><td>Unix domain socket</td><td>Локальный обмен; возможны двусторонняя связь и передача дескрипторов.</td><td>Формат сообщений, доступ к endpoint и поведение при выходе соседа.</td></tr>
+          <tr><td>TCP-сокет</td><td>Поток байтов между приложениями по сети.</td><td>Границы сообщений, сроки ожидания, повторы и разрыв соединения.</td></tr>
+          <tr><td>Shared memory</td><td>Общая область памяти разных процессов.</td><td>Владение, межпроцессные средства согласования и восстановление после сбоя.</td></tr>
+          <tr><td>Сигнал</td><td>Уведомление о событии или запрос управления.</td><td>Обработку и состояние процесса; для потока бизнес-сообщений нужен другой канал.</td></tr>
+        </tbody>
+      </table>
+      <p>У pipe чтение возвращает 0 после исчерпания данных, когда закрыты <em>все</em> дескрипторы, удерживающие конец записи. Завершение ребёнка закрывает его дескрипторы. Если у родителя осталась унаследованная копия, читатель продолжает ждать будущие байты. Режим <code>eof</code> намеренно оставляет эту копию открытой:</p>
+      <pre><code class="language-c">pipe(ends);                           // ends[0] — чтение, ends[1] — запись.
+pid_t child = fork();
+if (child == 0) {
+    close(ends[0]);
+    write(ends[1], "paid", 4);
+    close(ends[1]);
+    _exit(0);
+}
+waitpid(child, &amp;status, 0);            // Ребёнок уже завершился.
+read(ends[0], text, 4);                // Забрали четыре готовых байта.
+poll(&amp;ready, 1, 0);                   // Пусто, EOF ещё нет: у родителя открыт ends[1].
+close(ends[1]);                       // Закрыли последнюю копию писателя.
+read(ends[0], &amp;next, 1);              // Теперь возвращает 0, то есть EOF.</code></pre>
+      <pre class="out">child exited=true, message=paid
+EOF while parent owns writer=false
+EOF after closing parent writer=true</pre>
+      <p>Отсюда два правила для запуска программы квитанций. Вывод и ошибки читают параллельно либо сразу направляют в файл. Если оба канала можно объединить, <code>redirectErrorStream(true)</code> оставляет один поток для чтения. Когда ребёнку больше не будут посылать вход, родитель закрывает его stdin: иначе ребёнок сам может ждать EOF и не выходить. Чтение только stdout не освобождает stderr.</p>
+      <p>Отложенное чтение stderr — намеренная ошибка демо. В сервисе оба потока читают с момента старта, ограничивают сохраняемые логи и ставят общий срок. <code>waitFor(timeout)</code> сам ребёнка не убивает: остановка требуется отдельно. После выхода проверяют код и квитанцию.</p>
+    </section>
+
+    <section class="step" id="signals-and-shutdown">
+      <h2>SIGTERM даёт программе остановиться, SIGKILL обрывает её без очистки</h2>
+      <p>Сигнал — механизм ОС, а не Java-исключение. При доставке ядро учитывает действие для сигнала: стандартное поведение, игнорирование или обработчик. <code>SIGTERM</code> по умолчанию завершает процесс, но приложение может перехватить его и выполнить свою остановку. <code>SIGKILL</code> и <code>SIGSTOP</code> нельзя перехватить, заблокировать или проигнорировать. <code>SIGSTOP</code> приостанавливает выполнение; <code>SIGCONT</code> позволяет продолжить.</p>
+      <p>При обычной остановке JVM на Unix выполняются shutdown hooks — потоки Java для завершения работы. Они работают вне низкоуровневого POSIX-обработчика сигнала. Режим <code>signals</code> регистрирует hook в дочерней JVM, ждёт её готовности и сравнивает запросы через <code>ProcessHandle</code>:</p>
+      <pre><code class="language-java">// В дочерней JVM, до сообщения child ready.
+Runtime.getRuntime().addShutdownHook(new Thread(() -&gt; {
+    System.out.println("hook ran");
+    System.out.flush();
+}));
+new CountDownLatch(1).await();          // Ожидание остаётся до остановки процесса.
+
+// В родителе: отдельный ребёнок для каждого варианта.
+process.toHandle().destroy();          // В этом Unix-запуске: обычная остановка, SIGTERM.
+process.waitFor(5, TimeUnit.SECONDS);
+
+process.toHandle().destroyForcibly();   // Во втором опыте: SIGKILL, hook не выполнится.</code></pre>
+      <pre class="out">destroy hook=hook ran
+destroy exited=true
+destroyForcibly hook=&lt;none&gt;
+destroyForcibly exited=true</pre>
+      <p>Это результат Unix-запуска; Java API не задаёт номер сигнала для каждой ОС. <code>ProcessHandle</code> запрашивает остановку, объект <code>Process</code> остаётся для чтения и ожидания. После принудительного запроса всё равно нужен wait, чтобы подтвердить выход.</p>
+      <p><code>Thread.interrupt()</code> помогает кооперативно остановить задачу внутри JVM. SIGTERM всей JVM он не посылает; сам SIGTERM также не превращается в <code>InterruptedException</code> каждого потока. Приложение определяет порядок остановки платежей: прекратить приём, закончить или отменить работу, сохранить состояние и освободить ресурсы. В Spring это разобрано в <a href="boot-startup.html">Boot Startup &amp; Shutdown</a>.</p>
+      <details class="deep">
+        <summary>Под капотом: маска принадлежит потоку, а обычные сигналы могут сливаться</summary>
+        <p>Действия для сигналов общие у потоков процесса, но маска блокируемых сигналов своя у каждого. Сигнал, адресованный процессу, ядро доставляет подходящему потоку; заблокированный сигнал остаётся ожидающим. Несколько одинаковых стандартных сигналов могут слиться в один ожидающий сигнал. Поэтому SIGUSR1 не подходит как счётчик «пришло пять платежей». Низкоуровневый обработчик ограничен async-signal-safe функциями; работу с очередью и данными лучше продолжать в обычном контексте выполнения.</p>
+      </details>
+    </section>
+
+    <section class="step" id="production-limits">
+      <h2>Для задержки платежа сначала различают очередь CPU, ожидание и ограничение ресурсов</h2>
+      <p>Готовые потоки конкурируют за CPU. Потоки, ожидающие банк, могут оставлять CPU свободным: задержка определяется внешним событием или блокировкой. Размер пула и количество CPU решают разные задачи.</p>
+      <table class="mx">
+        <thead><tr><th>Наблюдение</th><th>Что выяснить</th><th>Направление решения</th></tr></thead>
+        <tbody>
+          <tr><td>CPU занят, много готовых потоков.</td><td>Где тратится CPU и сколько рабочих задач одновременно допущено?</td><td>Профиль CPU, ограничение параллелизма, оптимизация горячего кода.</td></tr>
+          <tr><td>CPU свободен, запросы долго ждут.</td><td>Сокет, очередь пула, замок, pipe или ожидание процесса?</td><td>Стек потока и состояние ОС, сроки ожидания, диагностика конкретного ресурса.</td></tr>
+          <tr><td>Контейнер тормозит при свободном CPU хоста.</td><td>Есть ли квота CPU, ограничение доступных CPU и накопленное throttling?</td><td>Сопоставить нагрузку с ограничениями контейнера.</td></tr>
+          <tr><td>Новые процессы или потоки не создаются.</td><td>Исчерпана память, системный лимит задач или <code>pids.max</code> cgroup?</td><td>Проверить лимит и утечку задач; рост heap не всегда исправляет причину.</td></tr>
+        </tbody>
+      </table>
+      <p>В Linux cgroup v2 квота <code>cpu.max</code> задаёт доступное время CPU за период, а <code>cpu.stat</code> показывает в том числе ограничения времени выполнения. Нехватка квоты способна остановить продвижение всей группы, хотя на хосте есть свободные ядра. <code>cpuset</code> ограничивает допустимые CPU — это другой механизм. В контейнере PID и путь к cgroup также зависят от пространства имён; их читают в контексте самого приложения.</p>
+      <p>Процесс даёт более сильную границу отказа и ресурсов, но требует запуска, IPC, контроля выхода и отдельной эксплуатации. Потоки проще делят данные, зато нуждаются в согласовании и не изолируют фатальный отказ JVM. Виртуальные потоки уменьшают цену множества ожидающих Java-задач, но не ускоряют вычисления и не увеличивают пропускную способность банка. Модель памяти — в <a href="os-memory.html">Virtual Memory</a>, дескрипторы и способы ожидания I/O — в <a href="os-io.html">I/O Models</a>, рабочие команды диагностики — в <a href="linux.html">Linux Basics</a>.</p>
+    </section>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="process-versus-thread" data-freq="2">
+      <h3>Чем процесс отличается от потока и что копирует fork?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Процесс задаёт адресное пространство и ресурсы программы. Поток выполняет код внутри него: свой стек, регистры и следующая инструкция, но общая память с соседними потоками. fork создаёт процесс с отдельной копией исходной памяти; запись ребёнка не меняет переменную родителя. Дескрипторы копируются как ссылки на объекты ядра, поэтому позиция одного открытого до fork файла остаётся общей. exec затем может заменить программу ребёнка с сохранением его PID.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Copy-on-write уменьшает немедленное копирование физических страниц, но не делает fork бесплатным: нужны структуры ядра и управление отображениями памяти.</li>
+          <li>В ребёнке многопоточного процесса остаётся один поток, а состояния чужих замков уже скопированы. До exec нужны async-signal-safe операции.</li>
+          <li>Изоляция памяти не изолирует внешний мир: процессы могут писать в тот же файл и проводить операции с той же базой. Эта граница требует протокола и согласования.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="context-switching" data-freq="2">
+      <h3>Что происходит при переключении контекста и почему больше потоков не всегда быстрее?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ядро сохраняет состояние уходящего потока и восстанавливает выбранный поток: регистры, стек, место продолжения. Для другого процесса меняется адресное пространство. Если готовых задач больше, чем доступных CPU, они делят время и ждут очереди. Если задача ждёт I/O, ядро отдаёт CPU другой; это помогает перекрывать ожидания. Но для вычислений дополнительные потоки не добавляют CPU и увеличивают издержки.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Системный вызов может выполнить всю работу в контексте того же потока. Число syscall не равно числу переключений.</li>
+          <li>Миграция на другой CPU влияет на локальность данных. Цена переключения зависит от рабочей нагрузки и памяти; одна универсальная цифра в микросекундах мало помогает.</li>
+          <li>Доля CPU зависит от весов и ограничений cgroup. Свободные ядра хоста не доказывают, что контейнеру разрешено ими пользоваться.</li>
+          <li>Java RUNNABLE объединяет несколько ситуаций ОС. Для диагноза сопоставляю стек Java, состояние потока в ОС и профиль ресурса, на котором он задержался.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="ipc-process-builder" data-freq="2">
+      <h3>Почему программа, запущенная через ProcessBuilder, не завершается?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Проверяю протокол всех трёх каналов. Ребёнок может ждать вход или EOF на stdin, а может стоять на записи в заполненный stdout или stderr. waitFor не читает эти каналы. Я забираю вывод и ошибки одновременно либо направляю их в файл, закрываю законченный ввод и задаю общий срок. Когда процесс вышел, проверяю его код и результат. Для pipe EOF наступает после закрытия всех концов записи, включая копии у родителя.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>У pipe и TCP есть поток байтов: одно write не равно одному read. Протокол задаёт длину, разделитель или иной способ выделить сообщение.</li>
+          <li>Чтение в память без ограничения меняет зависание на риск исчерпания памяти. Большой вывод направляю в ограниченное хранилище или разбираю по мере поступления.</li>
+          <li>Потомок ребёнка тоже может удерживать канал. Завершение прямого ребёнка и завершение всего дерева работы — разные события.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью">
+        <summary>Почему квитанция иногда создаётся, но запрос навсегда остаётся в ожидании?</summary>
+        <pre><code class="language-java">Process child = new ProcessBuilder(command).start();
+child.waitFor();                                  // Вывод пока никто не забирает.
+String errors = new String(child.getErrorStream().readAllBytes());
+String receipt = new String(child.getInputStream().readAllBytes());</code></pre>
+        <p>Ребёнок может заполнить любой из двух выходных каналов и блокироваться до чтения. Родитель ждёт его выхода перед первым чтением. Нужно читать оба потока с начала работы или перенаправить их; перестановка двух последних строк после waitFor причину не устраняет. Если ещё и вход останется открытым, ребёнок может ждать EOF от родителя.</p>
+      </details></div>
+    </article>
+
+    <article class="q" id="process-termination" data-freq="2">
+      <h3>Чем SIGTERM отличается от SIGKILL и зачем ждать уже завершившегося ребёнка?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>SIGTERM даёт программе обработать запрос остановки; SIGKILL прекращает её без обработчика и shutdown hooks. Для платежей сначала прекращают приём и дают текущей работе ограниченный срок, потом применяют принудительную остановку. Родитель через wait получает статус ребёнка и освобождает запись о завершении. Без этого может остаться zombie: CPU он не тратит, но запись в системе занимает. Запрос остановки и подтверждённый выход я считаю разными шагами.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Убийство процесса не отменяет уже сохранённую транзакцию и не возвращает автоматически списание банка. После перезапуска нужна сверка состояния.</li>
+          <li>Остановка родителя не обязана остановить всех его детей. Для фоновой работы важно определить владельца и порядок завершения всей группы процессов.</li>
+          <li>Даже SIGKILL не даёт обещания немедленно убрать задачу из настоящего непрерываемого ожидания в ядре. Исчезновение процесса подтверждают отдельно.</li>
+          <li>Стандартные сигналы не являются надёжной очередью бизнес-сообщений: одинаковые ожидающие сигналы могут объединяться.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">Arpaci-Dusseau: Operating Systems — Three Easy Pieces</a>, главы 4–7 и 26–27 — процессы, API, механизмы исполнения, планирование и потоки; основа урока.</li>
+    <li><a href="https://man7.org/linux/man-pages/man2/fork.2.html">Linux man-pages: fork(2)</a> и <a href="https://man7.org/linux/man-pages/man2/waitpid.2.html">waitpid(2)</a> — наследование ресурсов, fork многопоточного процесса и получение статуса.</li>
+    <li><a href="https://man7.org/linux/man-pages/man7/signal.7.html">Linux man-pages: signal(7)</a> — доставка, маски и объединение стандартных сигналов.</li>
+    <li><a href="https://docs.kernel.org/scheduler/sched-eevdf.html">Linux Kernel: EEVDF Scheduler</a> и <a href="https://docs.kernel.org/admin-guide/cgroup-v2.html">Control Group v2</a> — выбор задач и ограничения CPU.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Process.html">JDK 21: Process</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ProcessBuilder.html">ProcessBuilder</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/ProcessHandle.html">ProcessHandle</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Runtime.html">Runtime</a> — каналы, ожидание, запросы остановки и shutdown hooks.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

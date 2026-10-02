@@ -91,7 +91,7 @@ window.KB_TREE = [
     source: 'roadmap.sh/computer-science, OSTEP, Computer Networking: A Top-Down Approach (Kurose, Ross), High Performance Browser Networking (Grigorik)',
     items: [
       { id: 'os', title: 'Operating Systems', source: 'Operating Systems: Three Easy Pieces — Virtualization, Concurrency, Persistence', items: [
-        { id: 'processes', freq: 2, status: 'empty', title: 'Processes & Threads',
+        { id: 'processes', freq: 2, status: 'draft', title: 'Processes & Threads',
           scope: 'процесс и поток, переключение контекста, планировщик, IPC, сигналы, fork' },
         { id: 'os-memory', freq: 1, status: 'empty', title: 'Virtual Memory',
           scope: 'виртуальная память, страницы, page fault, swap, кеши CPU, OOM killer' },
