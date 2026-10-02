@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Serialization Formats · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="serialization">
+<main class="page">
+  <header class="topic-head"><h1>Serialization Formats</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёж существует в памяти одного процесса, а другому приходят только байты. Чтобы восстановить смысл, получатель должен знать, где заканчивается сообщение, как найти поля и что означают их значения. Формат решает часть этой задачи; остальное задаёт контракт. При обновлении сервисов одновременно живут несколько контрактов, поэтому правильный вопрос — какие старые данные прочитает новый код и какие новые данные переживёт старый.</p>
+    </div>
+
+    <section class="step" id="contract">
+      <h2>Между сервисами передаются байты и договорённости</h2>
+      <p>Сервис платежей записал событие об оплате на 150 центов. Сервис отчётов обновили: теперь его разработчик считает, что поле <code>amount</code> хранит доллары. JSON разбирается, число положительное, валидация проходит. Выручка выросла в сто раз. Ошибка лежит в значении поля, хотя на графике ошибок десериализации всё спокойно.</p>
+      <p><b>Сериализация</b> переводит данные в последовательность байтов, <b>десериализация</b> восстанавливает представление у получателя. Ссылка на Java-объект, его методы и identity через сеть сами не переезжают. Обычно мы передаём DTO с выбранными полями: идентификатором платежа, суммой, валютой и временем события. Ссылки между сущностями заменяем явными идентификаторами, иначе случайный граф ORM-объектов становится сетевым контрактом.</p>
+      <p>У контракта несколько слоёв. Транспорт отделяет одно сообщение от другого и сообщает формат. Кодировка превращает текст в байты. Грамматика формата распознаёт структуру. Схема связывает поля с типами и обязательностью. Семантика объясняет единицы измерения, допустимые состояния и смысл отсутствия. Успешный нижний слой ничего не доказывает о следующем: корректный UTF-8 ещё не JSON, а корректный JSON ещё не платёж.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 244" role="img" aria-label="Процесс отправителя кодирует DTO в тело сообщения. Тело лежит внутри транспортного конверта; получатель декодирует его с помощью своего контракта. Контракты отдельно задают смысл суммы.">
+            <defs><marker id="ct-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="18" y="40" width="160" height="84" rx="8" class="dg-box"/>
+            <rect x="238" y="26" width="244" height="150" rx="8" class="dg-sep" fill="none"/>
+            <rect x="254" y="68" width="212" height="80" rx="6" class="dg-cell"/>
+            <rect x="542" y="40" width="160" height="84" rx="8" class="dg-box"/>
+            <path d="M178 91 L250 91" class="dg-line" marker-end="url(#ct-a)"/>
+            <path d="M466 91 L538 91" class="dg-line" marker-end="url(#ct-a)"/>
+            <path d="M98 190 L98 128" class="dg-line" marker-end="url(#ct-a)"/>
+            <path d="M622 190 L622 128" class="dg-line" marker-end="url(#ct-a)"/>
+            <text x="32" y="64" class="dg-t">Payment DTO</text>
+            <text x="32" y="87" class="dg-in">amount = 150</text>
+            <text x="32" y="110" class="dg-s">Java, версия 1</text>
+            <text x="252" y="49" class="dg-t">Конверт сообщения</text>
+            <text x="268" y="91" class="dg-in">{"amount":150}</text>
+            <text x="268" y="118" class="dg-s">тело в UTF-8</text>
+            <text x="252" y="165" class="dg-n">длина + тип содержимого</text>
+            <text x="556" y="64" class="dg-t">Report DTO</text>
+            <text x="556" y="87" class="dg-in">amount = 150</text>
+            <text x="556" y="110" class="dg-s">Java, версия 2</text>
+            <text x="182" y="76" class="dg-n">запись</text>
+            <text x="485" y="76" class="dg-n">чтение</text>
+            <text x="18" y="213" class="dg-ok">контракт: центы</text>
+            <text x="506" y="213" class="dg-bad">контракт: доллары</text>
+            <text x="198" y="237" class="dg-s">Одинаковое число ≠ одинаковая сумма</text>
+          </svg>
+        </div>
+        <figcaption>Байты не испорчены и оба парсера правы. Нужна миграция смысла поля, а не другой сериализатор.</figcaption>
+      </figure>
+      <p>Для сквозного примера договоримся: <code>amountMinor = 150</code>, <code>currency = "USD"</code>, <code>feeMinor = 7</code>. Сумма и комиссия выражены в минимальных единицах указанной валюты; правила округления задаёт домен. Название поля помогает, но не заменяет описание: у валют бывают разные масштабы, а платёж, возврат и бухгалтерская корректировка имеют разные ограничения на знак.</p>
+      <p>JSON, XML, Protobuf и Avro — разные способы передать этот контракт. Первые два несут текстовые имена, Protobuf — номера полей, бинарный Avro опирается на порядок полей в схеме записи. От выбора зависит, что получатель сможет пропустить без знания поля и какие метаданные придётся сохранить вместе с данными.</p>
+      <div class="note exp"><p>Событие живёт дольше релиза: оно остаётся в журнале, DLQ, архиве или резервной копии. Даже когда все процессы обновились, старый writer никуда не исчез — его роль играют сохранённые байты. Срок поддержки схемы определяй по сроку возможного replay, а не по времени завершения деплоя.</p></div>
+    </section>
+
+    <section class="step" id="text-formats">
+      <h2>Читаемый текст не отменяет схему и точность типов</h2>
+      <p>JSON удобен на границе с браузером и внешним API: объект содержит пары имя–значение, массив сохраняет порядок элементов, примитивы читаются без специального инструмента. По RFC 8259 JSON знает строку, число, boolean, null, объект и массив. Отдельных типов для даты, UUID, decimal и Java long у него нет. Их смысл и представление приходится согласовать: например, момент в UTC строкой ISO 8601, идентификатор строкой, сумму целым числом минимальных единиц.</p>
+      <pre><code class="language-json">{
+  "paymentId": "p-42",
+  "amountMinor": 150,
+  "currency": "USD",
+  "feeMinor": 7
+}</code></pre>
+      <p>Число в JSON — последовательность символов с допустимой грамматикой. Конкретный парсер и целевой тип решают, станет оно <code>BigDecimal</code>, <code>long</code> или <code>double</code>. Java long может точно хранить целое, которое JavaScript Number уже округлит. Поэтому произвольный 64-битный ID безопаснее передавать строкой, если среди клиентов есть такие ограничения. Перевод в строку должен быть частью схемы: внезапная смена JSON number на string тоже ломает строгого потребителя.</p>
+      <p>Это фрагмент <a href="../examples/cs/SerializationDemo.java">SerializationDemo.java</a>, Jackson 2.17.2, JDK 21. Оба чтения используют один текст; различается только заказанный Java-тип. Зависимости и команда запуска приведены в конце урока.</p>
+      <pre><code class="language-java">var mapper = new ObjectMapper();
+String token = "9007199254740993";
+System.out.println("JSON as decimal = "
+        + mapper.readValue(token, BigDecimal.class).toPlainString());
+// Потеря появляется при выборе Double, а не при записи текста JSON.
+System.out.println("JSON via double = "
+        + BigDecimal.valueOf(mapper.readValue(token, Double.class)).toPlainString());</code></pre>
+      <pre class="out">JSON as decimal = 9007199254740993
+JSON via double = 9007199254740992</pre>
+      <p><code>BigDecimal</code>, созданный после округления, уже не вернёт потерянную единицу. Для денег точность нужна на всём пути: отправитель, JSON-парсер, DTO, преобразования и хранилище. Основа двоичной точности разобрана в <a href="data-repr.html">Numbers &amp; Text</a>; здесь важно, что корректный документ не гарантирует точного round trip.</p>
+      <h3>Отсутствие поля, null и ноль — разные команды</h3>
+      <p>В частичном обновлении платежа отсутствие <code>feeMinor</code> может означать «оставь как было», явный <code>null</code> — «сбрось», а <code>0</code> — «комиссия рассчитана и равна нулю». Если все три случая сразу связать с примитивным Java long, часть состояний исчезнет. Даже nullable-поле различает лишь null и значение: для PATCH нужна отдельная информация о присутствии, дерево JSON или специальная модель поля обновления.</p>
+      <p>Неизвестное поле тоже проверяет контракт потребителя. Один mapper отвергнет <code>feeMinor</code>, другой проигнорирует, третий сохранит в дополнительной map. Это политика библиотеки и настройки, а не обещание JSON. Дублирующиеся имена лучше отклонять на входе: RFC рекомендует уникальность имён, а разные реализации могут выбрать последнее значение, сохранить все или выдать ошибку. Подписывать один разбор, а исполнять другой — опасная неоднозначность.</p>
+      <h3>XML описывает документ и имена с пространствами</h3>
+      <p>XML полезен, когда партнёрский контракт уже строится на XSD, пространствах имён и документной структуре. У него есть элементы, атрибуты, упорядоченное содержимое и смешанный текст. XSD может задать тип decimal, допустимое число элементов и структуру, однако сам вызов XML-парсера ещё не означает проверку по XSD. Хорошо сформированный документ и валидный по схеме документ — разные уровни.</p>
+      <p>В namespace-aware разборе имя элемента — пара <code>{namespace URI, local name}</code>. Префикс служит локальным сокращением URI. Поэтому эти документы называют один и тот же элемент, хотя строковые имена узлов различаются:</p>
+      <pre><code class="language-xml">&lt;p:payment xmlns:p="urn:pay:v1" amountMinor="150"/&gt;
+&lt;x:payment xmlns:x="urn:pay:v1" amountMinor="150"/&gt;</code></pre>
+      <p>JAXP-пример использует DOM для двух крошечных документов. Для большого потока записей разумнее SAX или StAX: DOM строит дерево целиком, поэтому размер heap зависит от всего документа, а не только от текущей записи. Обработчик должен сравнивать namespace URI и local name, иначе смена префикса у партнёра станет ложным изменением контракта.</p>
+      <pre><code class="language-java">var factory = DocumentBuilderFactory.newInstance();
+factory.setNamespaceAware(true);
+factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+// Для этого контракта DTD не нужны: отклоняем сам DOCTYPE.
+factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+var builder = factory.newDocumentBuilder();
+String a = "&lt;p:payment xmlns:p='urn:pay:v1' amountMinor='150'/&gt;";
+String b = "&lt;x:payment xmlns:x='urn:pay:v1' amountMinor='150'/&gt;";
+var left = builder.parse(new InputSource(new StringReader(a))).getDocumentElement();
+var right = builder.parse(new InputSource(new StringReader(b))).getDocumentElement();
+boolean sameName = left.getNamespaceURI().equals(right.getNamespaceURI())
+        &amp;&amp; left.getLocalName().equals(right.getLocalName());
+System.out.println("XML expanded names equal = " + sameName);
+String withDtd = "&lt;!DOCTYPE payment [&lt;!ENTITY amount '150'&gt;]&gt;&lt;payment&gt;&amp;amount;&lt;/payment&gt;";
+try {
+    builder.parse(new InputSource(new StringReader(withDtd)));
+    throw new AssertionError("DOCTYPE was accepted");
+} catch (SAXParseException expected) {
+    System.out.println("XML DOCTYPE = rejected");
+}</code></pre>
+      <pre class="out">XML expanded names equal = true
+XML DOCTYPE = rejected</pre>
+      <p>В полном файле обработчик ошибок убирает стандартную печать диагностики парсера и пробрасывает исключение. Эти настройки проверены на встроенном JAXP-провайдере JDK 21; неподдерживаемую настройку нельзя молча проглотить. Запрет внешних DTD закрывает загрузку внешних сущностей, запрет DOCTYPE дополнительно отсекает и внутренние объявления. Для XSD-валидации и XSLT отдельно настраивают используемые <code>SchemaFactory</code> и <code>TransformerFactory</code>: настройка DOM-фабрики не распространяется на все XML API процесса.</p>
+      <div class="trap"><p class="myth">JSON или XML самодокументируемы, поэтому отдельная схема не нужна.</p><p class="fact">Имена позволяют увидеть структуру, но не сообщают, что 150 — центы, timestamp — миллисекунды, а null запрещён. OpenAPI/JSON Schema и XSD делают часть ограничений проверяемой; доменная семантика всё равно требует документации и тестов совместимости.</p></div>
+    </section>
+
+    <section class="step" id="protobuf-tags">
+      <h2>Protobuf узнаёт поле по номеру, а длину — по wire type</h2>
+      <p>В бинарном Protobuf строка <code>amount_minor</code> не повторяется в каждом сообщении. Схема назначает полю постоянный номер, а generated-код или descriptor связывает номер с именем и типом. Для нашего платежа схема proto3 выглядит так; в первой версии поля 3 ещё нет:</p>
+      <pre><code class="language-text">syntax = "proto3";
+message Payment {
+  int64 amount_minor = 1;
+  string currency = 2;
+  int64 fee_minor = 3;  // добавлено в v2, новый номер
+}</code></pre>
+      <p>Тег вычисляется как <code>(fieldNumber &lt;&lt; 3) | wireType</code> и тоже кодируется varint. В младших трёх битах лежит способ прочитать или пропустить значение: varint, фиксированные 32/64 бита, length-delimited и исторические groups. Wire type — не полноценный тип поля: одинаковый length-delimited подходит строке, bytes, вложенному сообщению и packed-числам. Знать границы ещё не значит знать смысл.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 264" role="img" aria-label="Старый Protobuf reader проходит 10 байтов слева направо. Читает tag 08 и сумму 150, затем tag 12 и строку USD длиной 3, затем пропускает неизвестное поле 3 по varint wire type. После прохода известны сумма и валюта, неизвестное поле сохранено отдельно.">
+            <defs><marker id="pb-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="44" width="66" height="40" class="dg-cell"/>
+            <rect x="86" y="44" width="132" height="40" class="dg-cell"/>
+            <rect x="218" y="44" width="66" height="40" class="dg-cell"/>
+            <rect x="284" y="44" width="66" height="40" class="dg-cell"/>
+            <rect x="350" y="44" width="198" height="40" class="dg-cell"/>
+            <rect x="548" y="44" width="66" height="40" class="dg-cell"/>
+            <rect x="614" y="44" width="66" height="40" class="dg-cell"/>
+            <rect x="20" y="145" width="290" height="88" rx="8" class="dg-box"/>
+            <rect x="420" y="145" width="260" height="88" rx="8" class="dg-box"/>
+            <g data-s="2"><rect x="20" y="44" width="198" height="40" class="dg-cell hit"/><path d="M119 86 L119 141" class="dg-line" marker-end="url(#pb-a)"/></g>
+            <g data-s="3"><rect x="218" y="44" width="330" height="40" class="dg-cell hit"/><path d="M383 86 L383 123 L285 123 L285 141" class="dg-line" marker-end="url(#pb-a)"/></g>
+            <g data-s="4"><rect x="548" y="44" width="132" height="40" class="dg-cell hit"/><path d="M614 86 L614 141" class="dg-line" marker-end="url(#pb-a)"/></g>
+            <text x="20" y="25" class="dg-cap">ТЕЛО СООБЩЕНИЯ: 10 БАЙТ</text>
+            <g class="dg-in" text-anchor="middle">
+              <text x="53" y="69">08</text><text x="152" y="69">96 01</text>
+              <text x="251" y="69">12</text><text x="317" y="69">03</text>
+              <text x="449" y="69">55 53 44</text><text x="581" y="69">18</text><text x="647" y="69">07</text>
+            </g>
+            <text x="20" y="105" class="dg-n">tag 1</text><text x="141" y="105" class="dg-n">150</text>
+            <text x="218" y="105" class="dg-n">tag 2</text><text x="291" y="105" class="dg-n">len=3</text>
+            <text x="441" y="105" class="dg-n">USD</text><text x="548" y="105" class="dg-n">tag 3</text><text x="640" y="105" class="dg-n">7</text>
+            <text x="34" y="169" class="dg-t">Поля старого reader</text>
+            <text x="434" y="169" class="dg-t">UnknownFieldSet</text>
+            <text data-s="2-4" x="34" y="192" class="dg-in">amount_minor = 150</text>
+            <text data-s="3-4" x="34" y="214" class="dg-in">currency = USD</text>
+            <text data-s="4" x="434" y="201" class="dg-in">field 3: varint 7</text>
+            <text data-s="1" x="20" y="254" class="dg-s">offset 0: ещё ничего не прочитано</text>
+            <text data-s="2" x="20" y="254" class="dg-s">offset 3: сумма восстановлена</text>
+            <text data-s="3" x="20" y="254" class="dg-s">offset 8: валюта восстановлена</text>
+            <text data-s="4" x="20" y="254" class="dg-s">offset 10: граница тела достигнута</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Reader знает поля 1 и 2. Границу тела ему дал транспорт; само сообщение Protobuf не содержит универсального разделителя следующего сообщения.</li>
+          <li><code>08</code> даёт номер 1 и wire type 0. У <code>96</code> старший бит равен 1, поэтому varint продолжается; полезные части <code>0x16 + (0x01 &lt;&lt; 7)</code> дают 150.</li>
+          <li><code>12</code> даёт номер 2 и wire type 2. Следующий varint задаёт длину 3, после него лежат UTF-8 байты USD. Следующий тег начинается на offset 8.</li>
+          <li><code>18</code> даёт неизвестный номер 3, но wire type 0 понятен. Java Protobuf сохраняет varint 7 среди неизвестных полей и способен вернуть его в бинарный поток.</li>
+        </ol>
+      </figure>
+      <p>Отсюда появляется удобная эволюция: старый reader способен пройти незнакомое поле, не зная его бизнес-смысла. Порядок разных полей в сообщении не обязан совпадать с порядком объявления. Но номер — постоянная identity поля: после удаления его резервируют, чтобы будущие байты не были прочитаны старым кодом под прежним именем. Практика — резервировать и номер, и имя: имя важно для текстовых представлений и инструментов.</p>
+      <h3>Одинаковый wire type может тихо поменять значение</h3>
+      <p><code>int64</code> и <code>sint64</code> используют varint, но второй сначала применяет ZigZag: отрицательные и положительные числа превращаются в небольшие неотрицательные коды. Поэтому значение 150 типа int64 записывается как varint 150, а тот же varint reader типа sint64 интерпретирует как 75. Теги и длины правильные; исключения не будет.</p>
+      <p>В демо <code>protoSchema</code> строит настоящий descriptor: поле 1 получает переданный тип, поле 2 — string, поле 3 — int64, если включён параметр <code>fee</code>. Все поля singular, syntax — proto3. <code>DynamicMessage</code> позволяет выполнить опыт без protoc и сгенерированных Java-файлов.</p>
+      <pre><code class="language-java">var v2 = protoSchema(true, FieldDescriptorProto.Type.TYPE_INT64);
+var v1 = protoSchema(false, FieldDescriptorProto.Type.TYPE_INT64);
+var changed = protoSchema(false, FieldDescriptorProto.Type.TYPE_SINT64);
+byte[] bytes = DynamicMessage.newBuilder(v2)
+        .setField(v2.findFieldByNumber(1), 150L)
+        .setField(v2.findFieldByNumber(2), "USD")
+        .setField(v2.findFieldByNumber(3), 7L).build().toByteArray();
+var old = DynamicMessage.parseFrom(v1, bytes);
+System.out.println("protobuf bytes = " + HexFormat.ofDelimiter(" ").formatHex(bytes));
+System.out.println("protobuf int64 amount = " + old.getField(v1.findFieldByNumber(1)));
+// Тот же номер и wire type, но другая интерпретация полезной нагрузки.
+System.out.println("protobuf sint64 amount = " + DynamicMessage.parseFrom(changed, bytes)
+        .getField(changed.findFieldByNumber(1)));
+var throughOld = DynamicMessage.parseFrom(v2, old.toByteArray());
+System.out.println("protobuf fee after binary relay = " + throughOld.getField(v2.findFieldByNumber(3)));
+// Копируем только известные поля: как при переходе через старый DTO.
+var rebuilt = DynamicMessage.newBuilder(v1);
+old.getAllFields().forEach(rebuilt::setField);
+var throughDto = DynamicMessage.parseFrom(v2, rebuilt.build().toByteArray());
+System.out.println("protobuf fee after known-field copy = " + throughDto.getField(v2.findFieldByNumber(3)));</code></pre>
+      <pre class="out">protobuf bytes = 08 96 01 12 03 55 53 44 18 07
+protobuf int64 amount = 150
+protobuf sint64 amount = 75
+protobuf fee after binary relay = 7
+protobuf fee after known-field copy = 0</pre>
+      <p>Последний ноль — не переданная комиссия, а значение по умолчанию отсутствующего scalar-поля с implicit presence. Старый binary relay сохранил новое поле, а пересборка только известных полей его уничтожила. Поэтому проверять совместимость нужно через весь маршрут: Protobuf → DTO → JSON → Protobuf уже не тот же канал, что бинарная пересылка сообщения.</p>
+      <details class="deep">
+        <summary>Presence, отрицательные числа и почему сериализация не каноническая</summary>
+        <p>Для обычного scalar-поля proto3 без <code>optional</code> getter возвращает default, а состояние «не было» неотличимо от «явно прислали 0». <code>optional int64 fee_minor = 3</code> добавляет явное присутствие; generated Java API даёт <code>hasFeeMinor()</code>. Это полезно для частичных обновлений. Nullable-значение при этом не возникает автоматически: присутствующий long всё равно число. У message-полей присутствие есть; для нескольких взаимоисключающих вариантов служит oneof.</p>
+        <p>У отрицательного <code>int64</code> обычный varint занимает 10 байт. ZigZag у <code>sint64</code> делает малые отрицательные значения компактными, но сменить int64 на sint64 на прежнем номере нельзя. Для миграции вводят новое поле, договариваются о приоритете и некоторое время поддерживают обе формы.</p>
+        <p>Одни логические данные могут иметь разный порядок полей и разные допустимые бинарные представления. Даже deterministic serialization конкретной библиотеки не обещает вечный канонический формат для всех языков и версий. Хеш сырых байтов годится для идентичности именно этих байтов; для бизнес-дедупликации нужен устойчивый event ID, а для подписи — заранее определённое представление.</p>
+      </details>
+    </section>
+
+    <section class="step" id="avro-resolution">
+      <h2>Avro сначала читает по схеме записи, затем сопоставляет со схемой чтения</h2>
+      <p>Бинарный Avro идёт дальше в экономии метаданных: у record в теле нет ни имён, ни номеров полей. Значения следуют в порядке <b>writer schema</b> — схемы, по которой их записали. Для платежа с двумя long сначала записана сумма 150, затем комиссия 7. Чтобы найти второе поле, reader должен знать, как прочитать первое. Угадать структуру по одним байтам нельзя.</p>
+      <p><b>Reader schema</b> описывает результат, который хочет получить приложение. Библиотека читает байты по writer schema и выполняет schema resolution: сопоставляет поля record по именам, пропускает ненужные и подставляет default для полей reader, отсутствовавших у writer. Поэтому перестановка полей в reader разрешима, хотя физический порядок в данных не меняется. Подставить новую схему вместо старой writer schema — совершенно другая операция.</p>
+      <p>В следующем опыте amount и fee имеют один тип long. Если ошибочно объявить новый порядок порядком записи, декодер честно прочитает первое число как комиссию. Типовая проверка не поймает подмену: оба значения корректны для long. С двумя схемами Avro восстановит исходные имена, переставит поля в результат и добавит валюту.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 278" role="img" aria-label="Три байта Avro ac 02 0e декодируются по writer schema как amountMinor 150 и feeMinor 7. По именам сумма переходит во вторую строку reader, комиссия в первую, а currency USD берётся из default reader, не из байтов.">
+            <defs><marker id="av-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="18" y="57" width="130" height="56" rx="6" class="dg-cell"/>
+            <rect x="18" y="143" width="130" height="56" rx="6" class="dg-cell"/>
+            <rect x="212" y="57" width="228" height="56" rx="6" class="dg-box"/>
+            <rect x="212" y="143" width="228" height="56" rx="6" class="dg-box"/>
+            <rect x="516" y="57" width="186" height="56" rx="6" class="dg-cell hit"/>
+            <rect x="516" y="143" width="186" height="56" rx="6" class="dg-cell hit"/>
+            <rect x="516" y="224" width="186" height="38" rx="6" class="dg-cell hit"/>
+            <path d="M148 85 L208 85" class="dg-line" marker-end="url(#av-a)"/>
+            <path d="M148 171 L208 171" class="dg-line" marker-end="url(#av-a)"/>
+            <path d="M440 77 C484 77, 470 165, 512 165" class="dg-line" marker-end="url(#av-a)"/>
+            <path d="M440 185 C486 185, 470 97, 512 97" class="dg-line" marker-end="url(#av-a)"/>
+            <path d="M440 243 L512 243" class="dg-line" marker-end="url(#av-a)"/>
+            <text x="18" y="27" class="dg-cap">БАЙТЫ</text>
+            <text x="212" y="27" class="dg-cap">WRITER SCHEMA</text>
+            <text x="516" y="27" class="dg-cap">READER SCHEMA</text>
+            <text x="47" y="91" class="dg-in">ac 02</text><text x="61" y="177" class="dg-in">0e</text>
+            <text x="224" y="81" class="dg-in">amountMinor: long</text><text x="224" y="101" class="dg-s">150</text>
+            <text x="224" y="167" class="dg-in">feeMinor: long</text><text x="224" y="187" class="dg-s">7</text>
+            <text x="529" y="90" class="dg-in">feeMinor = 7</text><text x="529" y="176" class="dg-in">amountMinor = 150</text>
+            <text x="529" y="248" class="dg-in">currency = USD</text>
+            <text x="240" y="247" class="dg-s">default reader: USD</text>
+            <text x="18" y="236" class="dg-n">по порядку writer</text>
+            <text x="212" y="128" class="dg-n">между схемами — по имени</text>
+          </svg>
+        </div>
+        <figcaption>Перекрёстные стрелки показывают перестановку результата. Последнее поле не занимает места в старых данных: его значение взято из новой схемы чтения.</figcaption>
+      </figure>
+      <p>Схемы опыта ниже имеют одинаковое имя record <code>Payment</code>. В реальном контракте также контролируй namespace и правила именованных типов. <code>writer</code> — настоящая схема записи; <code>reordered</code> нужна, чтобы воспроизвести ошибку; <code>reader</code> задаёт желаемую проекцию.</p>
+      <pre><code class="language-java">var writer = new Schema.Parser().parse("""
+    {"type":"record","name":"Payment","fields":[
+      {"name":"amountMinor","type":"long"},
+      {"name":"feeMinor","type":"long"}]}
+    """);
+var reordered = new Schema.Parser().parse("""
+    {"type":"record","name":"Payment","fields":[
+      {"name":"feeMinor","type":"long"},
+      {"name":"amountMinor","type":"long"}]}
+    """);
+var reader = new Schema.Parser().parse("""
+    {"type":"record","name":"Payment","fields":[
+      {"name":"feeMinor","type":"long"},
+      {"name":"amountMinor","type":"long"},
+      {"name":"currency","type":"string","default":"USD"}]}
+    """);
+var payment = new GenericData.Record(writer);
+payment.put("amountMinor", 150L); payment.put("feeMinor", 7L);
+var out = new ByteArrayOutputStream();
+var encoder = EncoderFactory.get().binaryEncoder(out, null);
+new GenericDatumWriter&lt;GenericRecord&gt;(writer).write(payment, encoder);
+encoder.flush();
+byte[] bytes = out.toByteArray();
+// Ошибка: выдаём reader-порядок за тот, которым пользовался writer.
+var wrong = new GenericDatumReader&lt;GenericRecord&gt;(reordered).read(null,
+        DecoderFactory.get().binaryDecoder(bytes, null));
+// Правильно: сообщаем библиотеке обе схемы с разными ролями.
+var resolved = new GenericDatumReader&lt;GenericRecord&gt;(writer, reader).read(null,
+        DecoderFactory.get().binaryDecoder(bytes, null));
+System.out.println("avro bytes = " + HexFormat.ofDelimiter(" ").formatHex(bytes));
+System.out.println("avro wrong writer schema = " + wrong);
+System.out.println("avro writer + reader = " + resolved);</code></pre>
+      <pre class="out">avro bytes = ac 02 0e
+avro wrong writer schema = {"feeMinor": 150, "amountMinor": 7}
+avro writer + reader = {"feeMinor": 7, "amountMinor": 150, "currency": "USD"}</pre>
+      <p>Avro long применяет ZigZag и varint: 150 превращается в 300, записанное <code>ac 02</code>; 7 превращается в 14, записанное <code>0e</code>. Три байта — только тело record с двумя числами. Сравнивать их с десятью байтами Protobuf из предыдущего шага как «выигрыш формата» нельзя: там присутствует ещё и валюта. В честном сравнении одинаковы данные, требования к присутствию, конверт и метаданные схемы.</p>
+      <h3>Как получатель найдёт writer schema</h3>
+      <p>В Avro Object Container File схема лежит в метаданных заголовка, а блоки содержат данные. У raw datum из демо заголовка нет: схему нужно передать отдельно. В сообщениях часто хранят ID схемы в конверте и получают её из registry с локальным кешем. Конкретная раскладка такого конверта принадлежит выбранному serializer, она не является универсальным свойством любого Avro. В спецификации также есть single-object encoding с fingerprint схемы; fingerprint помогает найти схему, но не содержит её полного описания.</p>
+      <p>Связка «байты + идентификатор writer schema + доступная неизменная схема» должна переживать архивирование и восстановление. Если registry удалён или ID переиспользован в другом окружении, синтаксически целые данные могут оказаться нечитаемыми или получить неверный смысл. Backup только Kafka-топика без его схем — неполный план восстановления.</p>
+      <details class="deep">
+        <summary>Default, union и logical type не одно и то же</summary>
+        <p>Default у поля Avro применяется при чтении, когда этого поля не было в writer schema. Он не разрешает writer пропускать поле в бинарной записи. Если writer schema содержит currency, writer должен закодировать её значение по этой схеме. Поэтому «добавим default, и размер сообщений не изменится» — неверная модель.</p>
+        <p>Для nullable-поля используют union, например <code>["null", "string"]</code>, и default null. В байтах есть индекс выбранной ветки union, затем её значение. Null в этом случае — настоящий вариант данных, а не отсутствие записи поля. Указанный порядок совместим со старыми версиями инструментов; при изменениях union проверяй сочетания reader/writer, а не только успешный парсинг схемы.</p>
+        <p>Logical type добавляет значение поверх физического типа: например, decimal поверх bytes/fixed, timestamp-millis поверх long. Нельзя считать смену единицы времени безопасной только потому, что физический long не изменился. Для decimal важны precision и scale; настройки и поддержка преобразования в Java-тип должны совпадать у участников.</p>
+      </details>
+    </section>
+
+    <section class="step" id="evolution">
+      <h2>Совместимость проверяют в обе стороны и через посредников</h2>
+      <p>Назови <code>W1</code> старого writer, <code>R1</code> старого reader, а <code>W2</code> и <code>R2</code> — новые версии. <b>Backward compatibility</b> означает, что новый reader читает старые данные: W1 → R2. <b>Forward compatibility</b> — старый reader читает новые: W2 → R1. <b>Full compatibility</b> объединяет оба направления. Это отношения между версиями, а не свойство слова «Avro» или «JSON».</p>
+      <p>Представь, что в событие добавляют <code>currency</code>. Для Avro новый reader с default USD прочитает старый record без валюты; старый reader пропустит новое поле writer. Формальная совместимость есть. Но default USD допустим лишь если исторически все такие платежи действительно были долларовыми. Если в архиве были EUR, автоматическая подстановка превратит совместимую схему в финансовую ошибку. Default — бизнес-решение о старых данных.</p>
+      <table class="mx">
+        <thead><tr><th>Изменение</th><th>W1 → R2</th><th>W2 → R1</th><th>Что проверить сверх парсинга</th></tr></thead>
+        <tbody>
+          <tr><td>Новое JSON-поле</td><td>R2 должен принять его отсутствие</td><td>R1 должен разрешить неизвестное имя</td><td>Настройки mapper, обязательность, null</td></tr>
+          <tr><td>Новое optional-поле Protobuf с новым номером</td><td>R2 видит отсутствие</td><td>R1 читает unknown field</td><td>Поле переживает посредников; отсутствие имеет допустимый смысл</td></tr>
+          <tr><td>Новое Avro-поле с default в R2</td><td>Default заполняет отсутствующее поле</td><td>R1 пропускает лишнее поле W2</td><td>Default честно описывает историю; writer schema сохранена</td></tr>
+          <tr><td>Avro int → long</td><td>Разрешено расширение int в long</td><td>Обратного автоматического сужения нет</td><td>Нельзя считать миграцию full только из-за старых маленьких значений</td></tr>
+          <tr><td>Protobuf int64 → sint64 на прежнем номере</td><td>Байты разбираются с другим смыслом</td><td>Байты разбираются с другим смыслом</td><td>Новый номер и явная миграция</td></tr>
+          <tr><td>Сумма в центах → сумма в долларах</td><td>Тип может остаться прежним</td><td>Тип может остаться прежним</td><td>Новое поле или версия события, преобразование единиц</td></tr>
+        </tbody>
+      </table>
+      <p>Таблица предполагает, что остальные части схемы не меняются. Для XML нет универсального «добавление элемента безопасно»: строгая XSD старого читателя может запретить новый элемент, а контракт с extension point — разрешить. Переименование JSON/XML-поля тоже часто означает удаление старого и добавление нового; без периода двойного чтения старое имя потеряется. В Protobuf binary имя можно поменять, сохранив номер, но ProtoJSON и исходный API при этом требуют отдельной проверки.</p>
+      <h3>Порядок релизов следует из направления совместимости</h3>
+      <p>Если гарантировано только W1 → R2, сначала обнови всех readers, затем включай новый writer. Иначе во время rolling update старый reader получит неподдерживаемый payload. Если гарантировано только W2 → R1, новые writers могут появляться первыми, но новый reader ещё не способен безопасно перечитать историю. Для независимых деплоев и replay обычно требуется поддержать оба случая или организовать явный переходный протокол.</p>
+      <p>Типичная безопасная миграция единиц выглядит так: добавляем <code>amountMinorV2</code> на новом имени/номере, учим readers читать новое поле с согласованным fallback на старое, затем включаем двойную запись. Сравниваем значения и бизнес-метрики, переключаем чтение, а удаление старой формы откладываем до завершения окна rollback и поддержки истории. Если обе формы присутствуют и противоречат друг другу, правило приоритета или отказа должно быть частью контракта, иначе два consumer посчитают разную сумму.</p>
+      <p>Проверка только последней пары схем недостаточна, когда consumer может читать данные трёхлетней давности. Транзитивная политика проверяет новую схему против всей заданной истории версий, а не только соседней. Что именно registry называет BACKWARD, FULL и их TRANSITIVE-вариантами, проверяй в документации выбранного продукта; библиотека сериализации сама не управляет релизами и retention.</p>
+      <h3>Совместимость — это набор исполняемых сценариев</h3>
+      <p>Храни небольшие старые payload-fixtures рядом с контрактом и проверяй чтение новым кодом. Для обратного направления запускай старого reader на новых данных. Добавляй случаи отсутствия, null, нуля, нового enum, неизвестного поля, максимального числа и противоречащих полей переходного периода. Утверждай не только «не упало», но и полученную сумму, валюту, присутствие и сохранение неизвестных данных после промежуточного сервиса.</p>
+      <div class="note warn"><p>Простой round trip новым writer и новым reader скрывает ошибки миграции: обе стороны одинаково понимают новую ошибочную схему. Нужна перекрёстная матрица версий. Демо Avro показывает почему: неправильная схема даёт правдоподобный объект без исключения, а проверка значений выявляет перестановку.</p></div>
+    </section>
+
+    <section class="step" id="production-limits">
+      <h2>Выбор формата зависит от границы системы и срока жизни данных</h2>
+      <p>Для внешнего API важны удобство клиентов, наблюдаемость и договорённости об ошибках; для внутренних RPC — компактность и удобный типизированный контракт; для архива — возможность прочитать данные без запуска прежнего приложения. Это разные ограничения. JSON часто удобен для публичного API, Protobuf — для типизированного межсервисного обмена, Avro — для потоков и хранения со схемами, XML — для существующих документных контрактов. Это отправные точки, а не запрет использовать формат в другой роли.</p>
+      <table class="mx">
+        <thead><tr><th>Формат</th><th>Что нужно для чтения</th><th>За что платим</th><th>Что нельзя предполагать</th></tr></thead>
+        <tbody>
+          <tr><td>JSON</td><td>Парсер + соглашение о DTO/схеме</td><td>Имена в каждом объекте, числовой mapping, валидация</td><td>Любой клиент точно прочитает long и проигнорирует новое поле</td></tr>
+          <tr><td>XML</td><td>Парсер, namespaces, при необходимости XSD</td><td>Более сложная модель и настройка обработки документа</td><td>Любой новый элемент допустим старой XSD</td></tr>
+          <tr><td>Protobuf binary</td><td>Граница сообщения + известный тип/descriptor</td><td>Жизненный цикл номеров и generated/runtime API</td><td>Одинаковый wire type означает одинаковый смысл</td></tr>
+          <tr><td>Avro binary</td><td>Точная writer schema; reader schema для проекции</td><td>Доступность схем и schema resolution</td><td>Достаточно самой новой схемы или одних байтов</td></tr>
+        </tbody>
+      </table>
+      <p>Измеряй полный путь: размер после сжатия, затраты CPU на encode/decode, аллокации, p95/p99 и нагрузку на GC. Повторяющиеся имена JSON хорошо сжимаются, маленькие события могут больше зависеть от конверта и сетевых заголовков. Бинарный формат не гарантирует победу в конкретном сервисе: часто основная стоимость — преобразования DTO, копирование буферов и бизнес-обработка. Сравнение по одному демонстрационному сообщению не заменяет измерения на распределении реальных данных.</p>
+      <p>При инциденте сначала выясни формат и schema ID из конверта, версии producer/consumer и стадию отказа: framing, синтаксис, schema resolution, mapping или доменная валидация. Сохраняй безопасный образец payload или его диагностическое представление вместе с версией схемы. Сумма без валюты, «schema not found» и «unknown field» — разные причины, поэтому их не стоит сводить в одну метрику decode error. Полные платёжные данные в лог ради удобства отладки не нужны.</p>
+      <p>Ограничивай размер сообщения, вложенность, длины строк/массивов и время обработки до дорогих аллокаций. После распаковки данных лимит проверяется заново: маленький сжатый вход может развернуться в огромный документ. Не разрешай входному полю выбирать произвольный Java-класс для полиморфной десериализации; набор допустимых вариантов принадлежит контракту. XML требует отдельного контроля внешних ресурсов и сущностей, как в примере выше.</p>
+      <p>Ни один из четырёх форматов не обеспечивает доставку ровно один раз, порядок событий, транзакцию с базой или бизнес-идемпотентность. Это задачи протокола и обработки сообщений. Native Java serialization через <code>ObjectInputStream</code> — другой механизм с привязкой к Java-классам и своими рисками; он не заменяет межъязыковой контракт. Здесь мы рассматриваем форматы данных, а не перенос внутреннего графа Java-объектов.</p>
+      <details class="deep">
+        <summary>Запустить все опыты без Maven и генерации кода</summary>
+        <p>Полный файл: <a href="../examples/cs/SerializationDemo.java">examples/cs/SerializationDemo.java</a>. Проверено на JDK 21.0.11 JBR, protobuf-java 4.28.3, Avro 1.12.0, Jackson 2.17.2, SLF4J 2.0.13. Зависимости нужны только этому запуску. SLF4J nop убирает диагностическое сообщение о ненайденном logging provider; сеть при выполнении опытов не используется.</p>
+        <pre><code class="language-bash"># Из корня репозитория; для скачивания нужен curl и доступ к Maven Central.
+SERIALIZATION_LIBS=$(mktemp -d /tmp/java-kb-serialization-libs.XXXXXX)
+SERIALIZATION_MAVEN=https://repo.maven.apache.org/maven2
+for artifact in \
+  com/google/protobuf/protobuf-java/4.28.3/protobuf-java-4.28.3.jar \
+  org/apache/avro/avro/1.12.0/avro-1.12.0.jar \
+  com/fasterxml/jackson/core/jackson-core/2.17.2/jackson-core-2.17.2.jar \
+  com/fasterxml/jackson/core/jackson-databind/2.17.2/jackson-databind-2.17.2.jar \
+  com/fasterxml/jackson/core/jackson-annotations/2.17.2/jackson-annotations-2.17.2.jar \
+  org/slf4j/slf4j-api/2.0.13/slf4j-api-2.0.13.jar \
+  org/slf4j/slf4j-nop/2.0.13/slf4j-nop-2.0.13.jar
+do
+  curl --fail --location --silent --show-error \
+    "$SERIALIZATION_MAVEN/$artifact" -o "$SERIALIZATION_LIBS/${artifact##*/}"
+done
+java -version  # нужен JDK 21
+java --class-path "$SERIALIZATION_LIBS/*" examples/cs/SerializationDemo.java</code></pre>
+        <p>Фрагменты вывода выше — части одного реального запуска, без замены чисел. Демо использует библиотеки форматов: Protobuf работает через DynamicMessage и descriptors, Avro — через GenericDatumWriter/Reader. Самодельного кодека, который лишь повторяет объяснение, здесь нет.</p>
+      </details>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Формат восстанавливает структуру; единицы измерения, обязательность и смысл отсутствия задаёт контракт.</li>
+        <li>JSON-number не обязан быть double. Потеря точности может появиться при выборе Java-типа и пережить все дальнейшие преобразования.</li>
+        <li>Protobuf узнаёт поле по номеру и пропускает его по wire type. Номер нельзя переиспользовать; одинаковый wire type не гарантирует одинакового значения.</li>
+        <li>Avro читает порядок байтов по writer schema и сопоставляет поля с reader schema по именам. Подмена writer schema способна тихо поменять сумму и комиссию местами.</li>
+        <li>Совместимость проверяют W1 → R2 и W2 → R1, с историческими payload и всеми посредниками. Успешный парсинг — лишь начало проверки.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="format-choice" data-freq="2">
+      <h3>Чем JSON, XML, Protobuf и Avro отличаются и как выбрать формат?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я начинаю с участников и срока жизни данных. JSON и XML несут текстовые имена, их удобно исследовать обычными инструментами. У XML богаче документная модель, namespaces и XSD; это важно в готовых партнёрских контрактах. Protobuf передаёт номера полей и wire types, а полный тип знает из схемы. Avro binary убирает даже номера: для чтения нужна схема, по которой записали данные.</p>
+          <p>Для внешнего API я часто рассматриваю JSON, для типизированных RPC — Protobuf, для событий и архивов со схемами — Avro. Но решение принимаю по совместимости, инструментам клиентов и измерениям полного пути. Формат не определяет ни единицы денег, ни идемпотентность платежа.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Размер нужно сравнивать на одинаковом наборе данных, с одинаковыми требованиями к presence и с учётом сжатия и метаданных. Три байта Avro record без валюты нельзя сравнивать с полным Protobuf payment.</li>
+            <li>Цена схемы у Avro вынесена в контейнер или инфраструктуру её доставки. В план disaster recovery входят и payload, и неизменные writer schemas.</li>
+            <li>Граница ProtoJSON отличается от Protobuf binary: текстовые имена и неизвестные поля дают другой набор рисков совместимости. Транскодирующий gateway входит в проверяемый маршрут.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="compatibility-directions" data-freq="2">
+      <h3>Что такое backward и forward compatibility? Как обновить событие без остановки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Backward означает, что новый reader умеет читать старые данные, forward — старый reader умеет читать новые. Я явно рисую направления writer → reader, чтобы не перепутать. Для нового поля проверяю обе стороны: как новый код обрабатывает отсутствие и как старый — незнакомое поле. Затем выбираю порядок релизов, совместимый с этими гарантиями.</p>
+          <p>Если меняется смысл суммы, не переиспользую прежнее поле. Ввожу новое, сначала выкатываю читающий обе формы код, потом writer, проверяю согласованность и только после окна rollback убираю старый путь. Исторические сообщения остаются частью контракта дольше деплоя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Совместимость с предыдущей схемой не равна совместимости со всем архивом. Для replay нужна проверка исторических версий, часто транзитивная политика registry.</li>
+            <li>Default у нового Avro-поля может сделать чтение технически успешным и одновременно испортить смысл: USD допустим только для действительно долларовой истории.</li>
+            <li>Матрица тестов утверждает значения и presence, а не только отсутствие исключения. Нужно включить старые DTO-посредники, потерю unknown fields и конфликт двух форм миграции.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Сначала обновили writer, затем readers. Registry пропустил BACKWARD-проверку. Почему старый consumer упал?</summary>
+          <p>BACKWARD проверяет чтение старых данных новым reader, а во время такого деплоя возникло обратное направление: новые данные пришли старому reader. Например, Avro int заменили на long: новый reader расширит исторический int, но старый reader не обязан сужать long. Нужно либо сначала обновить всех readers, либо подготовить схему, совместимую в обе стороны. Отдельно проверь возможность отката readers после включения нового writer.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="protobuf-evolution" data-freq="2">
+      <h3>Почему Protobuf переживает новые поля, но запрещает переиспользовать номера?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В каждом поле передаётся тег: номер и wire type. По номеру reader находит поле своей схемы, а по wire type понимает границу значения, даже если номер неизвестен. Поэтому новое поле можно прочитать как unknown и продолжить разбор. Если отдать старый номер другому полю, старый reader будет интерпретировать новые данные как прежнее значение. Удалённые номера я резервирую.</p>
+          <p>Проверяю и изменение типов. Например, int64 и sint64 используют один wire type, но ZigZag меняет смысл числа: varint 150 становится 75 у sint64. Отсутствие ошибки парсинга ещё не означает совместимость.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Proto3 Java сохраняет unknown fields при бинарном parse/serialize, но копирование только известных полей или переход через JSON может их потерять. Посредник способен нарушить совместимость без изменения своей схемы.</li>
+            <li>Для partial update важна presence: implicit scalar не отличает отсутствующее поле от default. Explicit optional позволяет отдельно проверить присутствие нулевой комиссии.</li>
+            <li>Стабильность номеров не означает каноничность байтов. Для бизнес-дедупликации нужен идентификатор события, а не произвольный hash сериализованного message.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>В v2 появилась комиссия. Старый сервис прочитал платёж и отправил его дальше. Сохранится комиссия?</summary>
+          <p>При бинарной пересериализации исходного message в нашем опыте сохраняется 7: поле осталось в UnknownFieldSet. Если сервис создал новый message по <code>getAllFields()</code>, там только известные поля; новая комиссия исчезает, а getter v2 возвращает 0 для implicit scalar. Поэтому ответ зависит от операции посредника. Сохранение unknown проверяй на реальном коде пересылки, а не только на схемах endpoints.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="avro-writer-reader" data-freq="2">
+      <h3>Зачем Avro две схемы? Что произойдёт при перестановке и добавлении полей?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Writer schema описывает физический порядок значений в старых байтах, reader schema — объект, который нужен моему приложению. Avro сначала использует правильную writer schema, затем сопоставляет поля record по именам. Поэтому reader может переставить поля, убрать ненужные и добавить поле с default. Без default новое поле, которого у writer не было, даст ошибку resolution.</p>
+          <p>Самую новую схему нельзя просто объявить схемой записи старого сообщения. В демо это молча меняет сумму и комиссию местами, потому что оба поля long. Я сохраняю writer schema или устойчивую ссылку на неё вместе с данными и отдельно задаю схему чтения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Default нужен для отсутствия поля у writer, а не для пропуска поля текущим writer. Nullable union — отдельная конструкция с индексом ветки в байтах.</li>
+            <li>Проекция reader не сохраняет автоматически все отброшенные поля для будущей пересылки. Если промежуточный сервис читает старую проекцию и пишет новый record из неё, нужна отдельная стратегия сохранения данных.</li>
+            <li>Logical type добавляет семантику поверх физического типа. Long с миллисекундами нельзя без миграции читать как микросекунды, даже если базовый binary decoder успешно вернул число.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Martin Kleppmann, Designing Data-Intensive Applications, 1-е изд., глава 4 «Encoding and Evolution» — основа урока: направления совместимости, схемы writer/reader и данные, переживающие релиз.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc8259">RFC 8259, JSON</a>, §§4, 6, 8 — уникальность имён, числа, Unicode; <a href="https://docs.oracle.com/en/java/javase/21/security/java-api-xml-processing-jaxp-security-guide.html">JDK 21 JAXP Security Guide</a> — внешние ресурсы, secure processing и конфигурация XML API.</li>
+      <li><a href="https://protobuf.dev/programming-guides/encoding/">Protobuf Encoding</a> — теги, varint и ZigZag; <a href="https://protobuf.dev/programming-guides/proto3/">proto3 Language Guide</a>, Updating a Message Type и Unknown Fields — эволюция и сохранение неизвестных полей.</li>
+      <li><a href="https://avro.apache.org/docs/1.12.0/specification/">Avro 1.12.0 Specification</a>, Binary Encoding, Object Container Files, Schema Resolution и Logical Types — порядок байтов, две схемы, defaults и преобразования типов.</li>
+      <li><a href="https://www.w3.org/TR/xml-names/">Namespaces in XML 1.0</a>, §2 — expanded names; <a href="https://protobuf.dev/programming-guides/serialization-not-canonical/">Protobuf Serialization Is Not Canonical</a> — границы детерминированности бинарного представления.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
