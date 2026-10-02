@@ -176,7 +176,7 @@ window.KB_TREE = [
             scope: 'временные и постоянные ошибки, ядовитое сообщение, блокирующие повторы, DLT, retry-топики, разбор DLQ' },
           { id: 'kafka-replication', freq: 2, status: 'draft', title: 'Replication',
             scope: 'лидер и реплики, ISR, min.insync.replicas, unclean leader election, KRaft' },
-          { id: 'kafka-ops', freq: 1, status: 'empty', title: 'Operations',
+          { id: 'kafka-ops', freq: 1, status: 'draft', title: 'Operations',
             scope: 'lag, мониторинг, retention и compaction, сколько делать партиций' },
         ] },
         { id: 'outbox', freq: 3, status: 'draft', title: 'Transactional Outbox',

@@ -11,6 +11,7 @@ java -cp "$(cat target/classpath.txt)" ConsumerDemo.java
 java -cp "$(cat target/classpath.txt)" DeliveryDemo.java
 java -cp "$(cat target/classpath.txt)" ReplicationDemo.java   # останавливает и запускает брокеры, ~2 мин
 java -cp "$(cat target/classpath.txt)" UncleanDemo.java       # теряет подтверждённые записи, ~1,5 мин
+java -cp "$(cat target/classpath.txt)" OpsDemo.java           # compaction, retention, партиции, ~2 мин
 ```
 
 Номера партиций для записей без ключа и смещения меняются от запуска к запуску.

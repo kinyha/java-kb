@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kafka: Operations · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kafka-ops">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Kafka: Operations</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Эксплуатация Kafka держится на трёх вещах. Lag показывает, успевают ли группы консьюмеров, и смотреть его нужно по партициям и во времени, а не одной суммой. Retention удаляет данные по сроку или размеру независимо от того, прочитали их или нет: отставшая группа молча перепрыгивает через удалённое. Compaction хранит последнее значение каждого ключа и удаляет ключ по tombstone — так Kafka работает как таблица текущего состояния. Число партиций можно только увеличить, и это меняет партицию для ключей, поэтому его выбирают заранее с запасом.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Группа аудита после двухдневного простоя продолжила работу и молча пропустила события</h2>
+      <p>Сервис аудита читал топик <code>audit</code> со сроком хранения в сутки. Его остановили на выходные из-за миграции базы, а в понедельник запустили. Ни одной ошибки, lag нулевой — и двое суток событий в аудите нет. В тот же месяц другой команде понадобилось больше параллелизма, и она увеличила число партиций топика платежей с 6 до 12; после этого сверка нашла события одних и тех же платежей в разном порядке.</p>
+      <p>Это вопросы эксплуатации, а не кода: как следить за отставанием, как долго Kafka хранит данные, как устроены compacted-топики и сколько делать партиций. Устройство групп — в <a href="kafka-consumer.html">Consumer Groups</a>, реплики и отказоустойчивость — в <a href="kafka-replication.html">Replication</a>. Демо <a href="../examples/kafka-cluster/OpsDemo.java">OpsDemo.java</a> работает с Kafka 4.3 в Docker: три контроллера и три брокера, проверка retention для демо ускорена до 5 секунд.</p>
+    </section>
+
+    <section class="step" id="lag">
+      <h2>Lag смотрят по партициям: сумма прячет застрявшую</h2>
+      <p>Lag группы — насколько её закоммиченное смещение отстаёт от конца партиции. Стандартный инструмент — <code>kafka-consumer-groups.sh</code>. Группа <code>billing</code> из темы о консьюмерах обработала 30 записей из 60 и закоммитила 20:</p>
+      <pre><code class="language-bash">kafka-consumer-groups.sh --bootstrap-server kafka-1:9092 --describe --group billing</code></pre>
+      <pre class="out">Consumer group 'billing' has no active members.
+GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID     HOST            CLIENT-ID
+billing         orders          0          0               9               9               -               -               -
+billing         orders          1          12              12              0               -               -               -
+billing         orders          2          0               8               8               -               -               -
+billing         orders          3          8               10              2               -               -               -
+billing         orders          4          0               11              11              -               -               -
+billing         orders          5          0               10              10              -               -               -</pre>
+      <p>Сумма — 40, но картина неравномерная: партиция 1 прочитана целиком, а 0, 2, 4 и 5 не начаты. В живой группе такое распределение означает, что консьюмер этих партиций застрял — например, на ядовитом сообщении — или их обладатель медленнее остальных. Поэтому алерты строят по каждой партиции, а не по сумме. И не только в записях: 10 000 записей отставания — это секунда для топика кликов и сутки для топика сверок. Полезнее lag во времени — насколько старое сообщение сейчас обрабатывается; его считают экспортёры вроде kafka-lag-exporter или Burrow, сопоставляя смещения с временными метками записей.</p>
+      <p>Строка «has no active members» тоже сигнал: группа с lag и без членов — остановленный сервис, а её смещения начинают стареть относительно retention.</p>
+    </section>
+
+    <section class="step" id="retention">
+      <h2>Retention удаляет данные по сроку, не спрашивая консьюмеров</h2>
+      <p>Kafka хранит лог сегментами — файлами по <code>segment.bytes</code> (1 ГБ) или <code>segment.ms</code> (7 дней). При <code>cleanup.policy=delete</code> брокер удаляет закрытые сегменты целиком, когда самая новая запись в них старше <code>retention.ms</code> (по умолчанию 7 дней) или когда партиция превысила <code>retention.bytes</code>. Прочитали ли их консьюмеры, значения не имеет. Демо создаёт топик с хранением 5 секунд; группа читает 3 события из 10 и коммитит смещение 3, а потом «простаивает»:</p>
+      <pre class="out">== retention: group committed offset 3 of 10 read
+   log start offset now 12
+   group resumes and reads: []</pre>
+      <p>Начало лога сдвинулось на 12: все записи до него удалены. Закоммиченное смещение 3 указывает в пустоту, и консьюмер получает ситуацию «смещение вне диапазона». Её решает <code>auto.offset.reset</code>: с <code>earliest</code> группа прыгает на начало лога, с <code>latest</code> — на конец, с <code>none</code> — бросает исключение. В обоих первых случаях девять событий пропущены без единой ошибки — это и случилось с аудитом. Для критичных групп ставят <code>auto.offset.reset=none</code>, чтобы такая ситуация остановила консьюмера и подняла алерт, а retention выбирают больше максимального простоя, который может случиться, с запасом на выходные.</p>
+      <p>Retention — ещё и планирование диска: поток 10 МБ/с с хранением 7 дней и фактором репликации 3 — около 18 ТБ на кластер. Удаление идёт сегментами, поэтому фактический срок хранения может превышать <code>retention.ms</code> на размер незакрытого сегмента.</p>
+    </section>
+
+    <section class="step" id="compaction">
+      <h2>Compaction хранит последнее значение ключа, и топик становится таблицей</h2>
+      <p>С <code>cleanup.policy=compact</code> брокер удаляет не старые записи, а устаревшие: для каждого ключа остаётся последняя. Запись с пустым значением — tombstone — означает удаление ключа и сама исчезает через <code>delete.retention.ms</code>. Демо пишет балансы счетов:</p>
+      <pre class="out">== compaction, before: [0:acc-1=100, 1:acc-2=50, 2:acc-1=80, 3:acc-3=10, 4:acc-1=130, 5:acc-2=null, 6:acc-3=15]
+== compaction, after:  [4:acc-1=130, 6:acc-3=15, 7:acc-9=0, 8:acc-9=1]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 190" role="img" aria-label="До очистки семь записей: три значения acc-1, значение и tombstone acc-2, два значения acc-3. После очистки остались acc-1=130 со смещением 4 и acc-3=15 со смещением 6; acc-2 удалён вместе с tombstone. Смещения сохранились, в нумерации появились пропуски.">
+            <text x="20" y="22" class="dg-cap">ДО ОЧИСТКИ</text>
+            <rect x="20" y="32" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="55" y="50" class="dg-n" text-anchor="middle">0: acc-1</text>
+            <text x="55" y="68" class="dg-in" text-anchor="middle">100</text>
+            <rect x="96" y="32" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="131" y="50" class="dg-n" text-anchor="middle">1: acc-2</text>
+            <text x="131" y="68" class="dg-in" text-anchor="middle">50</text>
+            <rect x="172" y="32" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="207" y="50" class="dg-n" text-anchor="middle">2: acc-1</text>
+            <text x="207" y="68" class="dg-in" text-anchor="middle">80</text>
+            <rect x="248" y="32" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="283" y="50" class="dg-n" text-anchor="middle">3: acc-3</text>
+            <text x="283" y="68" class="dg-in" text-anchor="middle">10</text>
+            <rect x="324" y="32" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="359" y="50" class="dg-n" text-anchor="middle">4: acc-1</text>
+            <text x="359" y="68" class="dg-in" text-anchor="middle">130</text>
+            <rect x="400" y="32" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="435" y="50" class="dg-n" text-anchor="middle">5: acc-2</text>
+            <text x="435" y="68" class="dg-in" text-anchor="middle">∅</text>
+            <rect x="476" y="32" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="511" y="50" class="dg-n" text-anchor="middle">6: acc-3</text>
+            <text x="511" y="68" class="dg-in" text-anchor="middle">15</text>
+            <text x="20" y="100" class="dg-cap">ПОСЛЕ</text>
+            <rect x="324" y="110" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="359" y="128" class="dg-n" text-anchor="middle">4: acc-1</text>
+            <text x="359" y="146" class="dg-in" text-anchor="middle">130</text>
+            <rect x="476" y="110" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="511" y="128" class="dg-n" text-anchor="middle">6: acc-3</text>
+            <text x="511" y="146" class="dg-in" text-anchor="middle">15</text>
+            <rect x="552" y="110" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="587" y="128" class="dg-n" text-anchor="middle">7: acc-9</text>
+            <text x="587" y="146" class="dg-in" text-anchor="middle">0</text>
+            <rect x="628" y="110" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="663" y="128" class="dg-n" text-anchor="middle">8: acc-9</text>
+            <text x="663" y="146" class="dg-in" text-anchor="middle">1</text>
+            <text x="20" y="182" class="dg-s">Смещения не перенумеровываются: после очистки в логе остаются пропуски.</text>
+          </svg>
+        </div>
+        <figcaption>Новый консьюмер, прочитав compacted-топик с начала, получает текущее состояние всех ключей, а не историю изменений.</figcaption>
+      </figure>
+      <p>От acc-1 осталось последнее значение 130, acc-2 удалён вместе с tombstone, у acc-3 — 15. Смещения сохранились: 4 и 6, с пропусками. Записи acc-9 добавлены в конце, чтобы закрыть сегмент: чистится только закрытая часть лога, и последняя запись acc-9 ещё не сжата. Чистильщик работает в фоне и запускается, когда доля «грязных» записей превысила <code>min.cleanable.dirty.ratio</code> (по умолчанию половина), поэтому в обычном топике дубли ключей видны долго, и консьюмер обязан их переживать.</p>
+      <p>Compacted-топик — это журнал изменений таблицы: <code>__consumer_offsets</code> хранит так последние смещения групп, Kafka Streams — состояние, а сервисы — справочники вроде настроек магазинов, которые новый экземпляр загружает целиком при старте. Для событий — платёж создан, списан, возвращён — compaction не подходит: история и есть ценность.</p>
+    </section>
+
+    <section class="step" id="partitions">
+      <h2>Партиций можно только добавить, и ключи при этом переезжают</h2>
+      <pre class="out">== key partition with 6:  p-1=4 p-2=4 p-3=1 p-4=1
+== key partition with 12: p-1=4 p-2=4 p-3=7 p-4=7
+== decrease to 6 -&gt; InvalidPartitionsException</pre>
+      <p>Партиция ключа — <code>murmur2(key) mod N</code>. После увеличения с 6 до 12 p-1 и p-2 остались в партиции 4, а p-3 и p-4 переехали из 1 в 7. Старые события p-3 лежат в партиции 1, новые — в 7, и консьюмеры двух партиций обрабатывают их независимо: порядок для ключа нарушен, как у сверки в начале темы. Уменьшить число партиций нельзя вовсе — данные пришлось бы переносить между логами. Если менять число партиций неизбежно, создают новый топик и переводят на него продюсеров и консьюмеров.</p>
+      <p>Поэтому число партиций выбирают при создании, исходя из трёх чисел: целевая пропускная способность, делённая на пропускную способность одной партиции у продюсера и у консьюмера; максимальное число экземпляров консьюмера, которое понадобится; и запас на рост на годы вперёд. Слишком много партиций тоже вредно: больше файлов и памяти у брокеров, больше батчей у продюсера, дольше восстановление после сбоя брокера. Типичные значения — от 6 до нескольких десятков на топик; сотни — для топиков с очень высокой нагрузкой.</p>
+      <div class="trap">
+        <p class="myth">Kafka хранит сообщения, пока их не прочитают все группы.</p>
+        <p class="fact">Kafka удаляет данные по retention, не глядя на смещения групп. Группа, которая простояла дольше срока хранения, при возобновлении перепрыгнет через удалённое по auto.offset.reset без ошибки: в демо девять событий пропали молча. Критичным группам ставят auto.offset.reset=none и алерт на lag во времени.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Lag смотрят по партициям и во времени: сумма 40 прятала четыре непрочитанные партиции.</li>
+        <li>Retention удаляет сегменты по сроку и размеру; отставшая группа перепрыгивает через удалённое по auto.offset.reset.</li>
+        <li>Compaction оставляет последнее значение ключа, tombstone удаляет ключ; смещения сохраняются с пропусками.</li>
+        <li>Число партиций нельзя уменьшить, а увеличение переносит ключи в другие партиции и ломает порядок.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ops-retention-compaction" data-freq="3">
+      <h3>Чем retention отличается от compaction?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Retention (cleanup.policy=delete) удаляет старые сегменты по сроку retention.ms или размеру retention.bytes — все записи подряд, независимо от ключей и от того, прочитаны ли они. Compaction (cleanup.policy=compact) удаляет устаревшие записи: для каждого ключа остаётся последнее значение, а tombstone удаляет ключ. Retention — для потока событий, compaction — для текущего состояния по ключу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Compaction сохраняет смещения с пропусками и чистит только закрытые сегменты; дубли ключей в активной части видны.</li>
+            <li>Tombstone живёт delete.retention.ms, чтобы консьюмеры успели увидеть удаление.</li>
+            <li>Политики можно совместить: compact,delete.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ops-lag" data-freq="2">
+      <h3>Как мониторить консьюмеров Kafka?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Главная метрика — lag: разница между концом партиции и закоммиченным смещением группы. Смотрят её по каждой партиции, чтобы увидеть застрявшую, и во времени — насколько старое сообщение сейчас обрабатывается. Источники — kafka-consumer-groups.sh, метрики клиента records-lag-max, экспортёры вроде kafka-lag-exporter или Burrow.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Алерт на lag во времени сравнивают с retention: группа не должна отстать дольше срока хранения.</li>
+            <li>Группа с lag и без активных членов — остановленный сервис.</li>
+            <li>Растущий lag на одной партиции — ядовитое сообщение или горячий ключ.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Чем опасна эта конфигурация группы аудита?</summary>
+          <pre><code class="language-text"># топик audit: retention.ms=86400000 (сутки)
+# консьюмер audit-service:
+auto.offset.reset=latest
+# алерт: sum(lag) &gt; 1000000</code></pre>
+          <p>Если сервис простоит дольше суток, его смещения окажутся до начала лога, и latest перепрыгнет на конец: все события за простой будут пропущены без ошибки. Алерт по сумме lag в записях не заметит ни застрявшую партицию, ни медленный поток. Нужны auto.offset.reset=none для аудита, retention с запасом на выходные и алерт на lag во времени по партициям.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ops-partitions" data-freq="2">
+      <h3>Сколько делать партиций и можно ли их потом изменить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Число партиций определяет предел параллелизма консьюмеров и пропускную способность топика. Его считают от целевой нагрузки, делённой на пропускную способность одной партиции, и от максимального числа экземпляров консьюмера, с запасом на рост. Увеличить можно, уменьшить нельзя; увеличение меняет murmur2(key) mod N, и ключи переезжают в другие партиции, ломая порядок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Слишком много партиций — больше файлов, памяти и дольше восстановление после сбоя брокера.</li>
+            <li>Если нужен другой размер, создают новый топик и переводят на него клиентов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://kafka.apache.org/documentation/#compaction">Apache Kafka: Log Compaction</a> — основа урока о compaction: tombstone, dirty ratio, гарантии.</li>
+      <li><a href="https://kafka.apache.org/documentation/#topicconfigs">Apache Kafka: Topic Configs</a> — retention.ms, retention.bytes, segment.ms, cleanup.policy.</li>
+      <li><a href="https://kafka.apache.org/documentation/#basic_ops_consumer_lag">Apache Kafka: Checking consumer position</a> — kafka-consumer-groups.sh и lag.</li>
+      <li><a href="https://www.confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster/">Confluent: How to choose the number of topics/partitions</a> — расчёт числа партиций.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
