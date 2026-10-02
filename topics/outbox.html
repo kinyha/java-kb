@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Transactional Outbox · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="outbox">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Transactional Outbox</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сервис должен и сохранить платёж в базе, и опубликовать событие в брокер, но общей транзакции у базы и брокера нет. Сначала база, потом брокер — событие теряется при падении между ними; сначала брокер — событие уходит о том, чего в базе нет. Outbox решает это одной локальной транзакцией: событие записывается в таблицу outbox вместе с данными, а отдельный ретранслятор переносит его в брокер — поллингом с <code>FOR UPDATE SKIP LOCKED</code> или чтением журнала базы через CDC, как Debezium. Доставка становится at-least-once, поэтому консьюмер обязан отбрасывать дубли.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Платёж есть в базе, а сервис уведомлений о нём не узнал</h2>
+      <p>Сервис платежей сохраняет платёж и публикует <code>PaymentCreated</code>, на которое подписаны чеки, антифрод и аналитика. Обычно всё работает. Но раз в несколько дней сверка находит платежи без чеков: брокер был недоступен несколько секунд, или под перезапустился ровно между коммитом и отправкой. Реже бывает обратное: чек отправлен клиенту за платёж, которого в базе нет, потому что транзакция откатилась уже после публикации.</p>
+      <p>Это проблема двойной записи: два хранилища, и нет способа изменить оба атомарно. Распределённые транзакции XA между базой и брокером почти никто не использует — они медленные, сложные и поддерживаются не всеми брокерами. Тема разбирает, как outbox превращает две записи в одну, как работает ретранслятор, откуда берутся дубли и что даёт CDC. Гарантии доставки в целом — в <a href="messaging.html">Brokers &amp; Guarantees</a>, транзакции Spring — в <a href="spring-tx.html">Transactions</a>. Демо <a href="../examples/outbox/OutboxDemo.java">OutboxDemo.java</a> работает с настоящим PostgreSQL 17.11 в Docker; брокер заменён журналом в памяти с рубильником «недоступен», потому что вся суть — в транзакциях базы.</p>
+    </section>
+
+    <section class="step" id="dual-write">
+      <h2>При двойной записи любой порядок теряет согласованность</h2>
+      <pre><code class="language-java">// Вариант 1: сначала коммит, потом публикация.
+insertPayment(db, "p-1", 500);
+db.commit();
+publish("PaymentCreated p-1");        // Брокер недоступен или процесс упал.
+
+// Вариант 2: публикация до коммита.
+insertPayment(db, "p-2", 700);
+publish("PaymentCreated p-2");        // Уже ушло.
+insertPayment(db, "p-2b", -5);        // Следующий шаг нарушает check, транзакция откатывается.</code></pre>
+      <pre class="out">== commit, then publish: broker unavailable
+payment p-1 in db: 1, PaymentCreated p-1 in broker: false
+== publish, then commit: 23514 rollback
+payment p-2 in db: 0, PaymentCreated p-2 in broker: true</pre>
+      <p>В первом варианте платёж p-1 есть, а события нет, и подписчики никогда о нём не узнают. Во втором событие о p-2 ушло, а платежа нет: код 23514 — нарушение check constraint, транзакция откатилась. Повтор публикации в первом варианте не спасает: процесс может упасть, а не получить исключение. Публикация внутри <code>@Transactional</code> метода — это второй вариант, только менее заметный: Spring закоммитит транзакцию после выхода из метода, когда событие уже отправлено.</p>
+    </section>
+
+    <section class="step" id="outbox">
+      <h2>Событие пишется в таблицу outbox в той же транзакции, что и данные</h2>
+      <p>Outbox заменяет запись в брокер записью в базу. Таблица <code>outbox</code> хранит события: id, ключ агрегата, тип, payload. Сервис вставляет платёж и событие одной локальной транзакцией — либо сохранится и то, и другое, либо ничего. Отдельный процесс-ретранслятор читает outbox и публикует события в брокер:</p>
+      <pre><code class="language-java">insertPayment(db, "p-3", 900);
+insertOutbox(db, "p-3", "PaymentCreated");     // Та же транзакция.
+db.commit();
+
+// Ретранслятор: пачка строк, публикация, удаление — в одной транзакции базы.
+select id, type, aggregate_id from outbox order by id limit ? for update skip locked
+publish(...);
+delete from outbox where id = any(?)</code></pre>
+      <pre class="out">== outbox, broker down: relay sent 0, pending 1
+== outbox, broker up:   relay sent 1, pending 0, broker has [PaymentCreated p-3 #1]</pre>
+      <p>Пока брокер недоступен, событие спокойно лежит в outbox: ретранслятор откатил свою транзакцию, строка осталась. Как только брокер поднялся, следующий проход отправил событие и удалил строку. Платёж и событие больше не могут разойтись: событие существует ровно тогда, когда закоммичен платёж. Цена — задержка доставки на интервал опроса и нагрузка на базу.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Сервис одной транзакцией пишет платёж и строку outbox. Ретранслятор забирает строку и публикует событие в брокер. Он падает до удаления строки. Следующий проход публикует событие снова. Консьюмер записывает id события в таблицу обработанных и второй раз его пропускает.">
+            <defs>
+              <marker id="ob-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ob-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="30" width="200" height="150" rx="9" class="dg-box"/>
+            <text x="120" y="52" class="dg-in" text-anchor="middle">PostgreSQL</text>
+            <rect x="34" y="66" width="172" height="30" rx="5" class="dg-cell"/>
+            <text x="44" y="86" class="dg-n">payment p-4</text>
+            <rect data-s="1-4" x="34" y="106" width="172" height="30" rx="5" class="dg-cell hit"/>
+            <text data-s="1-4" x="44" y="126" class="dg-n">outbox #8 p-4</text>
+            <rect x="290" y="70" width="140" height="60" rx="9" class="dg-box"/>
+            <text x="360" y="96" class="dg-in" text-anchor="middle">ретранслятор</text>
+            <text data-s="3" x="360" y="116" class="dg-bad" text-anchor="middle">упал</text>
+            <rect x="500" y="30" width="200" height="70" rx="9" class="dg-box"/>
+            <text x="600" y="52" class="dg-in" text-anchor="middle">брокер</text>
+            <text data-s="2-3" x="512" y="80" class="dg-n">#8</text>
+            <text data-s="4-" x="512" y="80" class="dg-n">#8  #8</text>
+            <rect x="500" y="130" width="200" height="70" rx="9" class="dg-box"/>
+            <text x="600" y="152" class="dg-in" text-anchor="middle">консьюмер</text>
+            <text data-s="5" x="512" y="178" class="dg-ok">#8 принят, повтор пропущен</text>
+            <path data-s="2" d="M206 121 C 250 121, 250 100, 286 100" class="dg-line" marker-end="url(#ob-n)"/>
+            <path data-s="2" d="M430 92 L 496 70" class="dg-line" marker-end="url(#ob-n)"/>
+            <path data-s="4" d="M206 121 C 250 121, 250 100, 286 100" class="dg-line bad" marker-end="url(#ob-bad)"/>
+            <path data-s="4" d="M430 92 L 496 70" class="dg-line bad" marker-end="url(#ob-bad)"/>
+            <path data-s="5" d="M600 100 L 600 126" class="dg-line" marker-end="url(#ob-n)"/>
+            <text data-s="1" x="20" y="222" class="dg-t">Платёж и событие сохранены одной транзакцией.</text>
+            <text data-s="2" x="20" y="222" class="dg-t">Ретранслятор забрал строку и опубликовал событие.</text>
+            <text data-s="3" x="20" y="222" class="dg-bad">Упал до удаления: транзакция откатилась, строка осталась.</text>
+            <text data-s="4" x="20" y="222" class="dg-bad">Следующий проход публикует #8 ещё раз.</text>
+            <text data-s="5" x="20" y="222" class="dg-ok">Консьюмер отбрасывает дубль по id события.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Сервис вставляет платёж и строку outbox в одной транзакции и коммитит.</li>
+          <li>Ретранслятор блокирует строку, публикует событие #8 и готовится удалить строку.</li>
+          <li>Процесс падает до коммита удаления. Транзакция ретранслятора откатывается, строка #8 остаётся в outbox.</li>
+          <li>Следующий проход находит ту же строку и публикует #8 снова. В брокере два одинаковых события.</li>
+          <li>Консьюмер записывает id события в таблицу обработанных в той же транзакции, что и свою работу, и второй экземпляр пропускает.</li>
+        </ol>
+      </figure>
+    </section>
+
+    <section class="step" id="duplicates">
+      <h2>Outbox гарантирует at-least-once, поэтому консьюмер отбрасывает дубли</h2>
+      <p>Публикация в брокер и удаление строки из outbox — снова две записи в разные системы. Ретранслятор может упасть между ними, и тогда событие уйдёт повторно. Демо воспроизводит это: событие опубликовано, транзакция удаления откатилась, следующий проход публикует его снова:</p>
+      <pre class="out">== crash before delete: broker has [PaymentCreated p-4 #8, PaymentCreated p-4 #8]
+consumer PaymentCreated p-4 #8 -&gt; processed
+consumer PaymentCreated p-4 #8 -&gt; duplicate, skipped</pre>
+      <p>Убрать дубли на стороне отправителя нельзя, поэтому их отбрасывает получатель. Каждое событие несёт уникальный id — здесь id строки outbox, — и консьюмер вставляет его в таблицу обработанных <code>insert ... on conflict do nothing</code> в той же транзакции, что и свою работу. Если вставка ничего не вставила, событие уже обработано. Это inbox или идемпотентный консьюмер; вместе outbox и inbox дают эффективно однократную обработку поверх at-least-once доставки. Таблицу обработанных чистят по сроку, который заведомо больше окна повторов.</p>
+    </section>
+
+    <section class="step" id="relay">
+      <h2>Несколько ретрансляторов делят строки через SKIP LOCKED, но порядок держит ключ</h2>
+      <p>Сервис работает в нескольких экземплярах, и в каждом может крутиться ретранслятор. Чтобы они не публиковали одни и те же строки, выборка блокирует строки <code>FOR UPDATE</code>, а <code>SKIP LOCKED</code> заставляет другие транзакции пропускать заблокированные строки, а не ждать их:</p>
+      <pre class="out">== two relays, skip locked: A took [2, 3, 4], B took [5, 6, 7]</pre>
+      <p>Ретранслятор A держит блокировку на строках 2–4, пока публикует, а B, начав позже, сразу берёт 5–7. Пропускная способность растёт, но порядок публикации между пачками теряется: B может отправить событие 5 раньше, чем A отправит 4. Если 4 и 5 — события одного платежа, подписчик увидит их в обратном порядке. Поэтому порядок обеспечивают по ключу агрегата: один ретранслятор, или распределение агрегатов между ретрансляторами по хешу, и публикация в Kafka с ключом <code>aggregate_id</code>, чтобы события одного платежа попали в одну партицию.</p>
+      <p>Ещё одна ловушка — курсор по id вместо удаления. Ретранслятор, который запоминает «последний отправленный id» и читает <code>where id &gt; :last</code>, пропустит события: id из последовательности выдаётся при вставке, а не при коммите. Транзакция с id 10 может закоммититься раньше транзакции с id 9, и курсор уже уйдёт дальше. Удаление или флаг «отправлено» с выборкой неотправленных этой проблемы не имеют. Таблицу outbox держат маленькой: отправленное удаляют сразу или партиционируют по времени и удаляют партиции целиком.</p>
+    </section>
+
+    <section class="step" id="cdc">
+      <h2>CDC читает outbox из журнала базы, без опроса таблицы</h2>
+      <p>Вместо опроса можно читать журнал предзаписи базы (WAL), куда PostgreSQL записывает каждое изменение. Логическое декодирование превращает WAL в поток изменений строк, и в нём видны только закоммиченные транзакции в порядке коммита. Демо создаёт слот логической репликации со встроенным плагином <code>test_decoding</code> и читает, что попало в журнал после транзакции с платежом:</p>
+      <pre><code class="language-sql">select pg_create_logical_replication_slot('outbox_slot', 'test_decoding');
+-- транзакция: insert payment p-5, insert outbox p-5, commit
+select data from pg_logical_slot_get_changes('outbox_slot', null, null);</code></pre>
+      <pre class="out">== CDC: logical decoding of WAL
+BEGIN 796
+table public.payment: INSERT: id[text]:'p-5' amount[bigint]:1200
+table public.outbox: INSERT: id[bigint]:9 aggregate_id[text]:'p-5' type[text]:'PaymentCreated' payload[text]:'{"paymentId":"p-5"}' created_at[timestamp with time zone]:'2026-10-02 19:01:57.661974+03'
+COMMIT 796</pre>
+      <p>Это то, что читает Debezium: он подключается к слоту с плагином <code>pgoutput</code>, превращает вставки в outbox в сообщения Kafka, а его Outbox Event Router берёт ключ и тип из колонок. Задержка — миллисекунды, нагрузки опросом нет, порядок — порядок коммитов. Строки outbox можно удалять сразу после вставки в той же транзакции: в WAL событие уже записано.</p>
+      <p>Цена — инфраструктура. Kafka Connect и Debezium нужно разворачивать и мониторить. Слот репликации держит WAL, пока потребитель его не прочитал: остановившийся Debezium заставляет базу копить журнал, и диск заканчивается. В PostgreSQL 13+ это ограничивает <code>max_slot_wal_keep_size</code>, а отставание слота мониторят. При переключении на реплику слоты исторически терялись; в PostgreSQL 17 появилась синхронизация слотов на standby.</p>
+      <div class="trap">
+        <p class="myth">Если отправить событие после коммита в TransactionSynchronization.afterCommit, двойная запись решена.</p>
+        <p class="fact">Это вариант «сначала база, потом брокер»: процесс может упасть или брокер оказаться недоступен сразу после коммита, и событие потеряется без следа. В демо платёж p-1 сохранён, а события нет. Надёжно только сохранить событие в той же транзакции, что и данные.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Двойная запись в базу и брокер теряет события или публикует фантомы; в демо оба исхода воспроизведены.</li>
+        <li>Outbox: событие в таблице в той же транзакции; ретранслятор публикует и удаляет, пока брокер лежит — ждёт.</li>
+        <li>Падение ретранслятора между публикацией и удалением даёт дубль: доставка at-least-once, консьюмер отбрасывает по id события.</li>
+        <li>SKIP LOCKED делит строки между ретрансляторами, но порядок держат по ключу агрегата; курсор по id теряет события.</li>
+        <li>CDC читает outbox из WAL в порядке коммитов; цена — Debezium, слоты и рост WAL при остановке.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="outbox-what" data-freq="3">
+      <h3>Что такое transactional outbox и какую проблему он решает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Проблему двойной записи: сервису нужно изменить базу и отправить событие в брокер, а общей транзакции нет. Если сначала коммит, событие теряется при падении; если сначала публикация, событие уходит о данных, которые потом откатились. Outbox записывает событие в таблицу той же базы в той же транзакции, что и данные, а отдельный ретранслятор публикует события из таблицы в брокер.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Доставка at-least-once: ретранслятор может упасть между публикацией и отметкой, поэтому нужен идемпотентный консьюмер.</li>
+            <li>Ретранслятор — поллинг с FOR UPDATE SKIP LOCKED или CDC из WAL через Debezium.</li>
+            <li>Порядок событий одного агрегата держат ключом партиции и одним ретранслятором на ключ.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим методом?</summary>
+          <pre><code class="language-java">@Transactional
+public Payment create(CreatePayment cmd) {
+    Payment p = repository.save(Payment.from(cmd));
+    kafkaTemplate.send("payments", p.getId(), new PaymentCreated(p.getId(), p.getAmount()));
+    ledger.reserve(p);              // может бросить исключение
+    return p;
+}</code></pre>
+          <p>Событие уходит в Kafka до коммита: если ledger.reserve бросит исключение или коммит не пройдёт, транзакция откатится, а PaymentCreated уже опубликован. Перенос send после коммита даёт обратную проблему — потерю при падении. Нужно сохранить событие в таблицу outbox в этой же транзакции и публиковать его ретранслятором или через CDC.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="outbox-polling-cdc" data-freq="2">
+      <h3>Поллинг или CDC: как переносить события из outbox?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Поллинг: ретранслятор периодически выбирает неотправленные строки с FOR UPDATE SKIP LOCKED, публикует и удаляет или помечает их. Просто, без новой инфраструктуры, но с задержкой на интервал опроса и нагрузкой на базу. CDC: Debezium читает WAL через слот логической репликации и публикует вставки в outbox. Задержка минимальна, порядок — порядок коммитов, но нужны Kafka Connect, мониторинг слотов и отставания.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Курсор «id больше последнего» теряет события: id выдаётся при вставке, а коммиты идут в другом порядке.</li>
+            <li>Неактивный слот держит WAL и заполняет диск; max_slot_wal_keep_size ограничивает рост.</li>
+            <li>Таблицу outbox держат маленькой: удаление сразу или партиции по времени.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="outbox-dupes" data-freq="2">
+      <h3>Откуда в outbox берутся дубли и как с ними работать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Публикация в брокер и отметка строки как отправленной — две разные системы. Если ретранслятор упал после публикации, но до коммита отметки, следующий проход опубликует событие снова. Устранить это на отправителе нельзя, поэтому каждое событие несёт уникальный id, а консьюмер в той же транзакции, что и свою работу, вставляет id в таблицу обработанных и пропускает повторы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Outbox плюс inbox дают эффективно однократную обработку поверх at-least-once.</li>
+            <li>Таблицу обработанных чистят по сроку больше окна возможных повторов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://microservices.io/patterns/data/transactional-outbox.html">Chris Richardson: Transactional Outbox</a> — основа урока: двойная запись, outbox, ретранслятор.</li>
+      <li><a href="https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html">Debezium: Outbox Event Router</a> — CDC для outbox.</li>
+      <li><a href="https://www.postgresql.org/docs/17/logicaldecoding.html">PostgreSQL 17: Logical Decoding</a> и <a href="https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE">SELECT … FOR UPDATE SKIP LOCKED</a>.</li>
+      <li><a href="https://microservices.io/patterns/communication-style/idempotent-consumer.html">Idempotent Consumer</a> — отбрасывание дублей на стороне получателя.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

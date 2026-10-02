@@ -179,7 +179,7 @@ window.KB_TREE = [
           { id: 'kafka-ops', freq: 1, status: 'empty', title: 'Operations',
             scope: 'lag, мониторинг, retention и compaction, сколько делать партиций' },
         ] },
-        { id: 'outbox', freq: 3, status: 'empty', title: 'Transactional Outbox',
+        { id: 'outbox', freq: 3, status: 'draft', title: 'Transactional Outbox',
           scope: 'двойная запись, таблица outbox, поллинг и CDC, Debezium, дубли и порядок' },
         { id: 'rabbitmq', freq: 2, status: 'draft', title: 'RabbitMQ',
           scope: 'exchange и очереди, routing key, ack, prefetch, DLX, отличия от Kafka' },
