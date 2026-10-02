@@ -253,7 +253,7 @@ window.KB_TREE = [
       { id: 'postgres', title: 'PostgreSQL Internals', source: 'PostgreSQL изнутри (Рогов), ч. I–II', items: [
         { id: 'postgres', freq: 2, status: 'empty', title: 'Architecture & WAL',
           scope: 'процессы, shared buffers, WAL, checkpoint, TOAST' },
-        { id: 'vacuum', freq: 2, status: 'empty', title: 'VACUUM',
+        { id: 'vacuum', freq: 2, status: 'draft', title: 'VACUUM',
           scope: 'autovacuum, bloat, HOT-обновления, wraparound' },
       ] },
       { id: 'scale', title: 'Scaling', source: 'DDIA, гл. Replication и Partitioning', items: [

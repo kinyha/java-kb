@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VACUUM · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="vacuum">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>VACUUM</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Каждый UPDATE и DELETE в PostgreSQL оставляет мёртвую версию строки, и убирает её VACUUM. Обычный VACUUM не уменьшает файл таблицы, а отмечает место свободным для новых версий; вернуть место ОС может только VACUUM FULL, который переписывает таблицу под эксклюзивной блокировкой. HOT-обновление кладёт новую версию на ту же страницу без записи в индексы, если индексированные колонки не менялись и на странице есть место — его оставляет <code>fillfactor</code>. Autovacuum приходит, когда мёртвых строк набралось 20 % таблицы, и на больших таблицах это слишком поздно. Ещё одна его задача — заморозка: 32-битные номера транзакций исчерпываются, и без неё база остановится.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Таблица балансов выросла вчетверо, а после VACUUM диск не освободился</h2>
+      <p>Таблица балансов на сто тысяч счетов занимала 14 МБ. Ночной пересчёт обновляет каждый баланс несколько раз, и утром таблица весит 57 МБ, а запросы, читающие её целиком, стали в четыре раза медленнее. Администратор запустил VACUUM — размер не изменился. Ещё через полгода в логе базы появилось предупреждение о скором исчерпании номеров транзакций.</p>
+      <p>Тема объясняет, откуда берётся раздувание, что именно делает VACUUM, как HOT-обновления его уменьшают, когда приходит autovacuum и зачем нужна заморозка. Почему версии вообще остаются — в <a href="mvcc.html">MVCC</a>, устройство страниц и WAL — в <a href="postgres.html">Architecture &amp; WAL</a>. Демо <a href="../examples/db-tx/VacuumDemo.java">VacuumDemo.java</a> работает с PostgreSQL 17 в Docker и считает версии точно через расширение <code>pgstattuple</code>; autovacuum для демо-таблиц выключен, чтобы он не вмешивался.</p>
+    </section>
+
+    <section class="step" id="bloat">
+      <h2>VACUUM освобождает место внутри файла, но не возвращает его ОС</h2>
+      <pre class="out">== after insert of 100k rows          size 14 MB   live 100000  dead 0       free 0%
+== after 3 full-table UPDATEs         size 57 MB   live 100000  dead 100000  free 49%
+== after VACUUM                       size 57 MB   live 100000  dead 0       free 75%
+== after 2 more UPDATE+VACUUM rounds  size 57 MB   live 100000  dead 0       free 75%
+== after VACUUM FULL                  size 14 MB   live 100000  dead 0       free 0%</pre>
+      <p>Три обновления всех строк создали триста тысяч новых версий, и таблица выросла с 14 до 57 МБ. Часть мёртвых версий уже убрала внутристраничная очистка (pruning), которую PostgreSQL делает попутно при чтении страницы, — поэтому мёртвых 100 тысяч, а не 300. VACUUM удалил остальные: мёртвых 0, свободно 75 % — но размер файла тот же. Место отмечено в карте свободного пространства, и новые версии будут занимать его: ещё два раунда обновлений с VACUUM между ними не увеличили таблицу. Так выглядит здоровое состояние нагруженной таблицы: она немного больше минимального размера и стабильна.</p>
+      <p>VACUUM FULL переписал таблицу в новый файл и вернул 14 МБ, но для этого он держит <code>ACCESS EXCLUSIVE</code>: таблица недоступна даже на чтение всё время перезаписи, а на диске нужно место под копию. На проде вместо него используют <code>pg_repack</code>, который перестраивает таблицу в фоне и берёт эксклюзивную блокировку лишь на короткое переключение. Обычно же лечат причину: частый autovacuum и отсутствие долгих транзакций, которые держат горизонт очистки, как показано в <a href="mvcc.html">MVCC</a>.</p>
+    </section>
+
+    <section class="step" id="hot">
+      <h2>HOT-обновление не трогает индексы, если на странице есть место</h2>
+      <p>Обычный UPDATE создаёт новую версию где-нибудь в таблице и добавляет запись о ней в каждый индекс таблицы. HOT (heap-only tuple) — оптимизация: если ни одна индексированная колонка не изменилась и новая версия помещается на ту же страницу, индексы не трогаются, а старая версия ссылается на новую внутри страницы. Демо обновляет каждую десятую строку таблицы с индексом по <code>status</code>:</p>
+      <pre class="out">== HOT, fillfactor 100, update non-indexed (balance):     updated 2000, HOT 0
+== HOT, fillfactor 100, update indexed column (status):   updated 2000, HOT 0
+== HOT, fillfactor 90, update non-indexed (balance):     updated 2000, HOT 2000
+== HOT, fillfactor 90, update indexed column (status):   updated 2000, HOT 0</pre>
+      <p>С <code>fillfactor = 100</code> страницы заполнены целиком, новой версии некуда лечь, и HOT не случился ни разу. С <code>fillfactor = 90</code> каждая страница оставляет 10 % под обновления, и все две тысячи изменений баланса прошли как HOT. Изменение индексированного <code>status</code> не может быть HOT при любом fillfactor: индекс должен узнать новое значение. Отсюда два практических правила: не индексировать часто меняющиеся колонки без нужды и снижать fillfactor у таблиц с частыми обновлениями. Долю HOT показывают <code>n_tup_hot_upd</code> и <code>n_tup_upd</code> в <code>pg_stat_user_tables</code>.</p>
+    </section>
+
+    <section class="step" id="autovacuum">
+      <h2>Autovacuum приходит по доле мёртвых строк, и на больших таблицах это поздно</h2>
+      <pre class="out">== autovacuum_vacuum_threshold=50, scale_factor=0.2
+   table of 10,000 rows: vacuum after ~2,050 dead rows
+   table of 1,000,000 rows: vacuum after ~200,050 dead rows
+   table of 100,000,000 rows: vacuum after ~20,000,050 dead rows</pre>
+      <p>Autovacuum запускает очистку таблицы, когда мёртвых строк больше <code>threshold + scale_factor × число строк</code>. Для маленьких таблиц это часто, для таблицы платежей на сто миллионов строк — двадцать миллионов мёртвых версий, и проход по такой таблице займёт часы. Поэтому большим таблицам задают собственные параметры: <code>alter table payment set (autovacuum_vacuum_scale_factor = 0.01)</code> или фиксированный порог. Для таблиц, куда только вставляют, есть отдельный порог по вставкам — VACUUM нужен им для карты видимости и заморозки.</p>
+      <p>Autovacuum намеренно медленный: <code>autovacuum_vacuum_cost_limit</code> ограничивает, сколько работы он делает перед паузой, чтобы не мешать запросам. На нагруженной базе этот лимит поднимают, иначе очистка не успевает за потоком изменений. Мониторят <code>n_dead_tup</code>, <code>last_autovacuum</code> и длительность проходов в логах (<code>log_autovacuum_min_duration</code>).</p>
+    </section>
+
+    <section class="step" id="freeze">
+      <h2>Номера транзакций 32-битные, и без заморозки база остановится</h2>
+      <p>Номер транзакции — 32-битное число, и PostgreSQL сравнивает их по кругу: из любой точки два миллиарда номеров считаются прошлым, а два миллиарда — будущим. Если строка, созданная транзакцией 100, доживёт до момента, когда счётчик ушёл на два миллиарда вперёд, её <code>xmin</code> внезапно окажется «в будущем», и строка исчезнет. Чтобы этого не случилось, VACUUM замораживает старые версии: помечает, что они видны всем, независимо от номера.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Круг номеров транзакций. От текущей транзакции половина круга назад — прошлое, половина вперёд — будущее. Старая незамороженная строка приближается к границе. Autovacuum замораживает таблицы, когда возраст relfrozenxid достигает 200 миллионов, задолго до границы в 2 миллиарда.">
+            <circle cx="160" cy="115" r="90" class="dg-sep" fill="none"/>
+            <path d="M160 25 A 90 90 0 0 1 160 205" class="dg-line bad" fill="none"/>
+            <path d="M160 205 A 90 90 0 0 1 160 25" class="dg-line ok" fill="none"/>
+            <circle cx="160" cy="25" r="6" class="dg-cell hit"/>
+            <text x="172" y="20" class="dg-n">текущая транзакция</text>
+            <text x="262" y="120" class="dg-bad">будущее: 2^31</text>
+            <text x="12" y="120" class="dg-ok">прошлое: 2^31</text>
+            <circle cx="88" cy="168" r="6" class="dg-cell miss"/>
+            <text x="24" y="196" class="dg-n">старая строка</text>
+            <text x="380" y="50" class="dg-in">возраст relfrozenxid</text>
+            <rect x="380" y="64" width="320" height="22" rx="4" class="dg-cell"/>
+            <rect x="380" y="64" width="32" height="22" rx="4" class="dg-cell hit"/>
+            <text x="380" y="104" class="dg-n">200 млн: anti-wraparound autovacuum</text>
+            <text x="380" y="124" class="dg-n">~2 млрд: база перестаёт выдавать</text>
+            <text x="380" y="142" class="dg-n">номера транзакций, только чтение</text>
+            <text x="380" y="180" class="dg-ok">заморозка: версия видна всем,</text>
+            <text x="380" y="198" class="dg-ok">номер больше не сравнивается</text>
+          </svg>
+        </div>
+        <figcaption>Заморозка снимает с версии зависимость от счётчика транзакций. Возраст считают от relfrozenxid — самой старой незамороженной транзакции таблицы.</figcaption>
+      </figure>
+      <pre class="out">== ledger relfrozenxid age 9 of autovacuum_freeze_max_age 200000000</pre>
+      <p>Когда возраст <code>relfrozenxid</code> таблицы превышает <code>autovacuum_freeze_max_age</code> — 200 миллионов, — autovacuum запускает агрессивную очистку для защиты от переполнения, даже если autovacuum для таблицы выключен, и такая очистка не уступает конфликтующим блокировкам, как обычный autovacuum. Если и это не успевает — например, долгая транзакция держит горизонт или очистка не справляется, — база ближе к границе перестаёт выдавать новые номера и работает только на чтение, пока не пройдёт VACUUM. Возраст отслеживают по <code>age(datfrozenxid)</code> в <code>pg_database</code> и алертят задолго до порога. Проходы заморозки по большим таблицам ускоряет карта видимости: страницы, где все версии уже заморожены, VACUUM пропускает.</p>
+      <div class="trap">
+        <p class="myth">После массового UPDATE нужно запустить VACUUM, чтобы таблица уменьшилась.</p>
+        <p class="fact">VACUUM не уменьшает файл: в демо таблица осталась 57 МБ, но 75 % внутри стали свободными для новых версий. Уменьшает только VACUUM FULL с полной блокировкой таблицы или pg_repack. Обычно правильная цель — стабильный размер при частом autovacuum, а не минимальный.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>UPDATE оставляет мёртвые версии: 14 МБ → 57 МБ после трёх обновлений всех строк.</li>
+        <li>VACUUM делает место переиспользуемым (75 % свободно), но размер не меняет; VACUUM FULL сжимает под ACCESS EXCLUSIVE, pg_repack — в фоне.</li>
+        <li>HOT не пишет в индексы: с fillfactor 90 все 2000 обновлений баланса — HOT, с 100 и для индексированной колонки — ни одного.</li>
+        <li>Autovacuum по умолчанию ждёт 20 % мёртвых строк — для больших таблиц задают свой scale_factor и поднимают cost_limit.</li>
+        <li>Заморозка защищает от переполнения 32-битных номеров транзакций; возраст свыше 200 млн запускает агрессивную очистку.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="vacuum-what" data-freq="3">
+      <h3>Зачем в PostgreSQL нужен VACUUM?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>MVCC оставляет мёртвые версии строк после UPDATE и DELETE. VACUUM удаляет те, которые уже не видит ни один снимок, и отмечает место свободным для новых версий; обновляет карту видимости для index-only scan и статистику; замораживает старые версии, защищая от переполнения номеров транзакций. Autovacuum делает это автоматически по порогам.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Обычный VACUUM не уменьшает файл; VACUUM FULL переписывает таблицу под ACCESS EXCLUSIVE.</li>
+            <li>Долгие транзакции и idle in transaction держат горизонт, и VACUUM не может убрать версии.</li>
+            <li>Для больших таблиц задают свой autovacuum_vacuum_scale_factor.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="vacuum-hot" data-freq="2">
+      <h3>Что такое HOT-обновление и как его получить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Heap-only tuple: новая версия строки ложится на ту же страницу, а индексы не обновляются, потому что ни одна индексированная колонка не менялась. Это экономит запись в индексы и их раздувание. Нужны два условия: изменение только неиндексированных колонок и свободное место на странице, которое оставляет fillfactor меньше 100.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Долю HOT видно в n_tup_hot_upd в pg_stat_user_tables.</li>
+            <li>Лишний индекс на часто меняющейся колонке отключает HOT для всех её обновлений.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему таблица сессий раздувается, хотя autovacuum включён?</summary>
+          <pre><code class="language-sql">create table session(id uuid primary key, user_id bigint, last_seen timestamptz, data jsonb);
+create index on session(last_seen);
+-- каждый запрос пользователя: update session set last_seen = now() where id = :id</code></pre>
+          <p>last_seen меняется на каждом запросе и проиндексирована, поэтому ни одно обновление не может быть HOT: каждое создаёт новую версию и записи во всех индексах, включая первичный. При fillfactor 100 новым версиям и так нет места на странице. Если индекс по last_seen нужен только для чистки старых сессий, можно обновлять last_seen реже, хранить его отдельно или заменить индекс; таблице стоит снизить fillfactor и поставить агрессивный autovacuum.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="vacuum-wraparound" data-freq="2">
+      <h3>Что такое transaction ID wraparound?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Номера транзакций 32-битные и сравниваются по кругу: половина считается прошлым, половина будущим. Незамороженная старая версия со временем оказалась бы «в будущем» и исчезла. VACUUM замораживает старые версии, делая их видимыми всем. Когда возраст relfrozenxid превышает autovacuum_freeze_max_age (200 млн), запускается принудительная очистка, а у границы база перестаёт выдавать номера транзакций.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Мониторят age(datfrozenxid) по базам и age(relfrozenxid) по большим таблицам.</li>
+            <li>Причины опасной ситуации — долгие транзакции, заброшенные слоты репликации, отстающий autovacuum.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/routine-vacuuming.html">PostgreSQL 17: Routine Vacuuming</a> — основа урока: очистка, autovacuum, заморозка и wraparound.</li>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть I — внутристраничная очистка, HOT, VACUUM, заморозка.</li>
+      <li><a href="https://www.postgresql.org/docs/17/pgstattuple.html">pgstattuple</a> — точная статистика версий из демо.</li>
+      <li><a href="https://reorg.github.io/pg_repack/">pg_repack</a> — перестройка таблиц без долгой блокировки.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
