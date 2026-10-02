@@ -139,7 +139,7 @@ window.KB_TREE = [
           scope: 'short и long polling, SSE, WebSocket' },
       ] },
       { id: 'security', title: 'Security', source: 'roadmap.sh/backend: Authentication, Web Security; OWASP Top 10', items: [
-        { id: 'auth', freq: 2, status: 'empty', title: 'Authentication Basics',
+        { id: 'auth', freq: 2, status: 'draft', title: 'Authentication Basics',
           scope: 'сессии и cookie, Basic, API-ключи, stateful и stateless аутентификация' },
         { id: 'jwt', freq: 3, status: 'empty', title: 'JWT',
           scope: 'структура токена, подпись HS256 и RS256, access и refresh token, отзыв токена, где хранить на клиенте' },
