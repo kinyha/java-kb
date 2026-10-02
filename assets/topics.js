@@ -105,7 +105,7 @@ window.KB_TREE = [
           scope: 'модели OSI и TCP/IP, путь запроса от браузера до сервера, IP и маршрутизация, NAT, прокси' },
         { id: 'tcp-udp', freq: 2, status: 'draft', title: 'TCP & UDP',
           scope: 'рукопожатие, управление потоком и перегрузкой, keep-alive, TIME_WAIT, когда нужен UDP' },
-        { id: 'http', freq: 3, status: 'empty', title: 'HTTP',
+        { id: 'http', freq: 3, status: 'draft', title: 'HTTP',
           scope: 'методы, коды ответов, заголовки, cookies, идемпотентность и безопасность методов' },
         { id: 'http-versions', freq: 2, status: 'empty', title: 'HTTP/2 & HTTP/3',
           scope: 'keep-alive и head-of-line blocking в HTTP/1.1, мультиплексирование в HTTP/2, QUIC в HTTP/3' },

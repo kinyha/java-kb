@@ -6,4 +6,5 @@
 cd examples/net
 java RequestPathDemo.java
 java TcpDemo.java
+java HttpDemo.java
 ```

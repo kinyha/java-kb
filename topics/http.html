@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Networking: HTTP · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="http">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Networking: HTTP</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>HTTP — договор не только между клиентом и сервером, но и со всеми, кто стоит между ними: прокси, CDN, балансировщиками, библиотеками клиентов. Метод говорит им, можно ли запрос повторить и закешировать. Код ответа — кто виноват и стоит ли пробовать снова. Заголовки управляют кешем, условными запросами и cookies. Если API нарушает этот договор — меняет данные в GET или отвечает 200 на ошибку, — посредники делают правильные по стандарту, но разрушительные вещи: повторяют платёж, кешируют ошибку, теряют тело запроса на редиректе.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Между клиентом и API стоят посредники, и они читают метод и коды</h2>
+      <p>Запрос мобильного приложения к платёжному API проходит через HTTP-клиент с повторами, CDN, балансировщик и ingress. Каждый из них принимает решения по правилам HTTP: можно ли повторить запрос при обрыве, можно ли отдать ответ из кеша, куда пойти по редиректу. Платёжный API, который не следует этим правилам, получает дубли платежей и устаревшие данные, хотя сам код сервера верный.</p>
+      <p>Демо <a href="../examples/net/HttpDemo.java">HttpDemo.java</a> поднимает на loopback встроенный в JDK <code>HttpServer</code> и вызывает его стандартным <code>java.net.http.HttpClient</code>: <code>java HttpDemo.java</code> на JDK 21. Каждый опыт показывает правило, которое клиент или посредник выполняет без участия твоего кода. Семантика HTTP описана в RFC 9110; формат сообщения HTTP/1.1 — в RFC 9112.</p>
+    </section>
+
+    <section class="step" id="methods">
+      <h2>Метод обещает посредникам, безопасен ли запрос и можно ли его повторить</h2>
+      <p>HTTP/1.1-сообщение — текст: стартовая строка, заголовки, пустая строка и тело. Как это выглядит в байтах, показано в <a href="network.html">How a Request Travels</a>. Тело отделяется по <code>Content-Length</code> или кусками <code>Transfer-Encoding: chunked</code>, когда размер заранее неизвестен.</p>
+      <p>Главная часть стартовой строки — метод. Стандарт приписывает методам три свойства. <b>Безопасный</b> — клиент не просит ничего менять: такой запрос можно сделать заранее, например, при предзагрузке. <b>Идемпотентный</b> — повтор того же запроса даёт тот же эффект на сервере, что и один. <b>Кешируемый</b> — ответ можно сохранить и отдать повторно.</p>
+      <table class="mx">
+        <thead><tr><th>Метод</th><th>Безопасный</th><th>Идемпотентный</th><th>Платёжный API</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET</code>, <code>HEAD</code></td><td>да</td><td>да</td><td>Получить платёж, проверить существование</td></tr>
+          <tr><td><code>OPTIONS</code></td><td>да</td><td>да</td><td>Preflight CORS, разрешённые методы</td></tr>
+          <tr><td><code>PUT</code></td><td>нет</td><td>да</td><td>Заменить ресурс целиком по известному адресу</td></tr>
+          <tr><td><code>DELETE</code></td><td>нет</td><td>да</td><td>Отменить черновик платежа</td></tr>
+          <tr><td><code>POST</code></td><td>нет</td><td>нет</td><td>Создать платёж, выполнить операцию</td></tr>
+          <tr><td><code>PATCH</code></td><td>нет</td><td>не обязан</td><td>Частично изменить ресурс</td></tr>
+        </tbody>
+      </table>
+      <p>Идемпотентность говорит об эффекте, а не об ответе. Первый <code>DELETE /drafts/17</code> вернёт 204, второй — 404, но состояние сервера после обоих одинаковое: черновика нет. PATCH не идемпотентен в общем случае: «увеличить лимит на 1000» дважды даёт другой результат, а «установить лимит 5000» — тот же.</p>
+      <p>Эти свойства — обещание посредникам, а не проверка. Если GET меняет данные (<code>GET /payments/17/confirm</code>), браузер может выполнить его при предзагрузке ссылки, краулер — при обходе сайта, прокси — повторить при обрыве. Всё по правилам, и каждый раз подтверждая платёж.</p>
+    </section>
+
+    <section class="step" id="idempotency">
+      <h2>POST не идемпотентен, и повтор после таймаута создаёт второй платёж</h2>
+      <p>Клиент отправил POST создания платежа, сервер его провёл, а ответ потерялся: таймаут, обрыв соединения. Клиент не знает, прошёл ли платёж, и повторяет. Для POST сервер не может отличить повтор от нового платежа на ту же сумму:</p>
+      <pre><code class="language-java">for (int attempt = 1; attempt &lt;= 2; attempt++) {      // Второй раз — «повтор после таймаута».
+    var b = HttpRequest.newBuilder(URI.create(base + "/payments"))
+            .POST(HttpRequest.BodyPublishers.ofString("{\"cents\":500}"));
+    if (key != null) b.header("Idempotency-Key", key); // Один ключ на одну операцию.
+    client.send(b.build(), ofString());
+}</code></pre>
+      <pre class="out">no key, attempt 1 -&gt; 201 p-101
+no key, attempt 2 -&gt; 201 p-102
+payments created: 2
+key 7f3c-01, attempt 1 -&gt; 201 p-101
+key 7f3c-01, attempt 2 -&gt; 200 p-101 (replayed)
+payments created: 1</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Клиент отправляет POST с ключом 7f3c-01. Сервер не находит ключ, создаёт платёж p-101 и запоминает ключ. Ответ теряется. Клиент повторяет тот же POST с тем же ключом. Сервер находит ключ и возвращает сохранённый результат p-101, не создавая второй платёж.">
+            <defs>
+              <marker id="ik-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ik-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="ik-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="40" width="150" height="56" rx="9" class="dg-box"/>
+            <rect x="290" y="40" width="170" height="56" rx="9" class="dg-box"/>
+            <rect x="540" y="30" width="160" height="76" rx="9" class="dg-box"/>
+            <rect data-s="2-" x="552" y="62" width="136" height="32" rx="6" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="95" y="64" class="dg-in">клиент</text>
+              <text x="95" y="82" class="dg-n">мобильное приложение</text>
+              <text x="375" y="64" class="dg-in">payments API</text>
+              <text x="375" y="82" class="dg-n">POST /payments</text>
+              <text x="620" y="50" class="dg-in">ключи</text>
+            </g>
+            <text data-s="2-" x="562" y="83" class="dg-in">7f3c-01 → p-101</text>
+            <path data-s="1" d="M170 60 L 286 60" class="dg-line" marker-end="url(#ik-n)"/>
+            <text data-s="1" x="180" y="52" class="dg-n">POST, key 7f3c-01</text>
+            <path data-s="2" d="M460 68 L 536 68" class="dg-line ok" marker-end="url(#ik-ok)"/>
+            <text data-s="2" x="290" y="124" class="dg-ok">ключа нет: создан p-101</text>
+            <path data-s="3" d="M286 80 L 200 80" class="dg-line bad" marker-end="url(#ik-bad)"/>
+            <text data-s="3" x="180" y="124" class="dg-bad">201 p-101 потерян: таймаут</text>
+            <path data-s="4" d="M170 60 L 286 60" class="dg-line" marker-end="url(#ik-n)"/>
+            <text data-s="4" x="180" y="52" class="dg-n">тот же POST, тот же key</text>
+            <path data-s="4" d="M460 68 L 536 68" class="dg-line" marker-end="url(#ik-n)"/>
+            <path data-s="5" d="M286 80 L 174 80" class="dg-line ok" marker-end="url(#ik-ok)"/>
+            <text data-s="5" x="180" y="124" class="dg-ok">200 p-101 (replayed)</text>
+            <text data-s="1" x="20" y="200" class="dg-t">Ключ генерирует клиент один раз на операцию.</text>
+            <text data-s="2" x="20" y="200" class="dg-ok">Сервер создал платёж и запомнил ключ.</text>
+            <text data-s="3" x="20" y="200" class="dg-bad">Клиент не знает, прошла ли оплата.</text>
+            <text data-s="4" x="20" y="200" class="dg-t">Повтор несёт тот же ключ.</text>
+            <text data-s="5" x="20" y="200" class="dg-ok">Второго платежа нет: тот же результат.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент создаёт ключ идемпотентности один раз для операции «оплатить заказ» и отправляет POST с заголовком Idempotency-Key.</li>
+          <li>Сервер не находит ключ, создаёт платёж p-101 и сохраняет пару «ключ — результат».</li>
+          <li>Ответ теряется по дороге. Для клиента это таймаут: платёж мог пройти, а мог и нет.</li>
+          <li>Клиент повторяет тот же запрос с тем же ключом.</li>
+          <li>Сервер находит ключ и возвращает сохранённый результат. Второй платёж не создаётся.</li>
+        </ol>
+      </figure>
+      <p>Ключ создаёт клиент — на операцию, а не на попытку. Сервер хранит ключ вместе с результатом и проверяет, что повтор пришёл с тем же телом, иначе это ошибка клиента. Ключ и сам платёж пишутся в одной транзакции, а два одновременных запроса с одним ключом не должны оба пройти проверку «ключа ещё нет» — нужен уникальный индекс. Заголовок <code>Idempotency-Key</code> описан в черновике стандарта IETF и используется Stripe, Adyen и многими банковскими API. Подробно схема разобрана в <a href="idempotency.html">Idempotency</a>.</p>
+    </section>
+
+    <section class="step" id="status">
+      <h2>Код ответа говорит, кто виноват и стоит ли пробовать снова</h2>
+      <p>Клиенты, балансировщики и мониторинг принимают решения по классу кода. 2xx — успех, 3xx — иди в другое место, 4xx — ошибка клиента, повтор того же запроса не поможет, 5xx — ошибка на стороне сервера, повтор может помочь. API, который возвращает <code>200 {"error": "insufficient funds"}</code>, ломает всё сразу: кеш сохраняет ошибку, метрики не видят отказов, клиентская библиотека не бросает исключение.</p>
+      <table class="mx">
+        <thead><tr><th>Пара</th><th>Различие</th></tr></thead>
+        <tbody>
+          <tr><td>400 и 422</td><td>400 — запрос не разобран: битый JSON, неверный тип. 422 — разобран, но нарушает правила: сумма отрицательная</td></tr>
+          <tr><td>401 и 403</td><td>401 — неизвестно, кто ты: нет или неверный токен. 403 — известно, но нельзя</td></tr>
+          <tr><td>404 и 410</td><td>404 — нет такого ресурса. 410 — был и удалён навсегда</td></tr>
+          <tr><td>409 и 412</td><td>409 — конфликт с текущим состоянием: платёж уже отменён. 412 — не выполнилось условие If-Match</td></tr>
+          <tr><td>429</td><td>Слишком много запросов; Retry-After говорит, когда пробовать снова</td></tr>
+          <tr><td>500, 502, 503, 504</td><td>500 — упал сам сервер. 502 — прокси получил плохой ответ от backend. 503 — сервис временно не принимает. 504 — прокси не дождался backend</td></tr>
+        </tbody>
+      </table>
+      <p>Для повторов главное различие — выполнилась ли операция. 503 с <code>Retry-After</code> и 429 означают «запрос не обработан, приходи позже». 504 опаснее: прокси не дождался backend, но backend мог успеть провести платёж. Повторять POST после 504 можно только с ключом идемпотентности. 502 и 504 говорят, что ответил прокси, а не приложение: искать причину надо в связи прокси с backend. Формат тела ошибок для API стандартизирован в RFC 9457 (Problem Details), который Spring поддерживает через <code>ProblemDetail</code> — разобрано в <a href="spring-validation.html">Validation &amp; Errors</a>.</p>
+    </section>
+
+    <section class="step" id="redirects">
+      <h2>Редирект 302 превращает POST в GET и теряет тело</h2>
+      <p>Адрес платёжного API переехал, и старый путь отвечает редиректом. Клиент следует за ним автоматически. Что он отправит по новому адресу, зависит от кода:</p>
+      <pre><code class="language-java">var client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NORMAL).build();
+// /old-pay-302 и /old-pay-307 отвечают редиректом на /pay.
+client.send(HttpRequest.newBuilder(URI.create(base + path))
+        .POST(HttpRequest.BodyPublishers.ofString("{\"cents\":500}")).build(), ofString());</code></pre>
+      <pre class="out">POST /old-pay-302 -&gt; 200 pay got GET body=
+POST /old-pay-307 -&gt; 200 pay got POST body={"cents":500}</pre>
+      <p>После 302 клиент пошёл на новый адрес методом GET и без тела, а ответ всё равно 200: сервер просто показал «что-то» по GET. Так исторически делали браузеры, и стандарт разрешил это поведение для 301 и 302. Коды 307 и 308 появились, чтобы сказать явно: повтори тот же метод с тем же телом. 303 — наоборот, явное «теперь сделай GET», его используют после POST формы.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Временный</th><th>Постоянный</th></tr></thead>
+        <tbody>
+          <tr><td>Метод может смениться на GET</td><td>302</td><td>301</td></tr>
+          <tr><td>Метод и тело сохраняются</td><td>307</td><td>308</td></tr>
+        </tbody>
+      </table>
+      <p>Для API это значит: переносить эндпоинты, принимающие POST, только через 307 или 308, а лучше не полагаться на редиректы в API вовсе. Типичная ловушка — редирект с http на https на балансировщике кодом 301: браузер его переживёт, а платёжный POST клиента, по ошибке настроенного на http, молча превратится в GET.</p>
+    </section>
+
+    <section class="step" id="caching">
+      <h2>ETag позволяет не пересылать неизменившийся ответ и не перезаписать чужое изменение</h2>
+      <p>Тариф банка меняется раз в день, а запрашивают его тысячи раз. <code>Cache-Control: max-age=60</code> разрешает клиенту и CDN минуту отдавать сохранённый ответ без запроса. После этого клиент может спросить, изменился ли ресурс, передав его версию — ETag — в условном запросе:</p>
+      <pre><code class="language-java">var first = client.send(get("/tariff"), ofString());
+String etag = first.headers().firstValue("ETag").orElseThrow();
+var again = client.send(get("/tariff").header("If-None-Match", etag).build(), ofString()); // «Если не изменился».</code></pre>
+      <pre class="out">GET /tariff -&gt; 200, ETag "tariff-v42", body 57 bytes
+GET /tariff If-None-Match -&gt; 304, body 0 bytes</pre>
+      <p>Ответ 304 Not Modified идёт без тела: клиент берёт сохранённую копию. Экономия — трафик и время сервера на сборку ответа, но не круг до сервера. Для ответов с персональными данными ставят <code>Cache-Control: private</code> или <code>no-store</code>, иначе общий кеш CDN отдаст счёт одного клиента другому. <code>no-cache</code> не запрещает кеширование, а требует проверять копию у сервера перед каждым использованием.</p>
+      <p>Тот же ETag защищает от потерянных обновлений. Клиент прочитал настройки магазина с ETag <code>"v7"</code>, изменил и отправил <code>PUT</code> с <code>If-Match: "v7"</code>. Если за это время настройки поменял кто-то другой, сервер ответит 412 Precondition Failed вместо того, чтобы молча перезаписать чужое изменение. Это оптимистичная блокировка на уровне HTTP, та же идея, что <code>@Version</code> в <a href="jpa-locking.html">Locking &amp; Caching</a>.</p>
+    </section>
+
+    <section class="step" id="cookies">
+      <h2>Атрибуты cookie решают, куда браузер её отправит</h2>
+      <p>HTTP не хранит состояние между запросами. Сессию держат cookies: сервер отдаёт <code>Set-Cookie</code>, клиент возвращает значение в заголовке <code>Cookie</code> следующих запросов. Куда именно клиент её вернёт, определяют атрибуты:</p>
+      <pre><code class="language-java">ex.getResponseHeaders().add("Set-Cookie", "SESSION=abc; Path=/; HttpOnly; SameSite=Lax");
+ex.getResponseHeaders().add("Set-Cookie", "TRACK=xyz; Path=/; Secure");
+// Следующий запрос по http:// к тому же серверу.</code></pre>
+      <pre class="out">cookies sent: [SESSION=abc]</pre>
+      <p>Клиент сохранил обе cookies, но по обычному HTTP отправил только одну: <code>Secure</code> разрешает передавать cookie только по HTTPS. <code>HttpOnly</code> закрывает её от JavaScript страницы, и XSS не сможет её украсть. <code>SameSite</code> решает, отправлять ли cookie в запросах, начатых с чужого сайта: <code>Strict</code> — никогда, <code>Lax</code> — только при переходе по ссылке методом GET, <code>None</code> — всегда, но только вместе с <code>Secure</code>. <code>Domain</code> и <code>Path</code> ограничивают, к каким адресам она уйдёт.</p>
+      <p>Cookie браузер прикладывает сам, и именно поэтому существует CSRF: чужая страница может отправить запрос, и cookie сессии уйдёт с ним. Токен в заголовке Authorization браузер сам не подставляет. Об этом выборе — в <a href="spring-security.html">Architecture</a> и <a href="spring-oauth2.html">OAuth2 &amp; JWT</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Метод — обещание посредникам: GET безопасен и может быть повторён и закеширован, POST — нет.</li>
+        <li>Идемпотентность — об эффекте, а не ответе; POST делают повторяемым ключом идемпотентности на операцию.</li>
+        <li>Код ответа говорит, кто виноват и поможет ли повтор; 504 не значит, что операция не выполнилась.</li>
+        <li>301 и 302 разрешают сменить POST на GET; для API — 307 и 308.</li>
+        <li>ETag даёт 304 без тела и защищает PUT через If-Match; атрибуты Secure, HttpOnly, SameSite решают судьбу cookie.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="http-idempotent" data-freq="3">
+      <h3>Какие HTTP-методы идемпотентны и как сделать идемпотентным создание платежа?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Идемпотентны GET, HEAD, OPTIONS, PUT и DELETE: повтор даёт тот же эффект на сервере, хотя ответ может отличаться — второй DELETE вернёт 404. POST не идемпотентен, PATCH — в общем случае тоже. Безопасные методы — GET, HEAD, OPTIONS — вообще не меняют состояние.</p>
+          <p>Создание платежа делаю идемпотентным ключом: клиент генерирует Idempotency-Key на операцию, сервер сохраняет ключ с результатом в той же транзакции и при повторе возвращает сохранённый ответ. В демо без ключа повтор создал два платежа, с ключом — один.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ключ проверяется уникальным индексом: два одновременных запроса не должны оба пройти проверку «ключа нет».</li>
+            <li>Повтор с тем же ключом, но другим телом — ошибка клиента, а не новая операция.</li>
+            <li>Прокси и клиенты могут автоматически повторять идемпотентные запросы при обрыве, поэтому GET с побочным эффектом опасен.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="http-status-codes" data-freq="3">
+      <h3>Чем отличаются 401 и 403, 400 и 422, 502, 503 и 504?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>401 — сервер не знает, кто ты: токена нет или он неверный. 403 — знает, но прав не хватает. 400 — запрос не удалось разобрать, 422 — разобран, но нарушает бизнес-правила. 502 — прокси получил неверный ответ от backend, 503 — сервис временно недоступен, 504 — прокси не дождался ответа backend.</p>
+          <p>Класс кода определяет поведение клиентов и мониторинга: 4xx повторять бессмысленно, 5xx иногда можно. Ответ 200 с ошибкой в теле ломает кеши, метрики и клиентские библиотеки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>504 не значит, что операция не выполнилась: backend мог успеть; POST повторяют только с ключом идемпотентности.</li>
+            <li>429 и 503 с Retry-After — явное «не обработано, приходи позже».</li>
+            <li>Тело ошибок API стандартизирует RFC 9457 Problem Details.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="http-put-patch-post" data-freq="2">
+      <h3>Чем отличаются POST, PUT и PATCH?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>POST — создать ресурс, адрес которого выберет сервер, или выполнить операцию; повтор создаёт новый ресурс. PUT — положить ресурс целиком по известному адресу: повтор даёт то же состояние, поэтому он идемпотентен. PATCH — частично изменить ресурс; идемпотентен только если описывает установку значений, а не приращение.</p>
+          <p>PUT с неполным телом по смыслу стирает отсутствующие поля, поэтому для частичных изменений нужен PATCH.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Форматы PATCH: JSON Merge Patch (RFC 7396) и JSON Patch (RFC 6902) со списком операций.</li>
+            <li>PUT и PATCH защищают от потерянных обновлений через If-Match с ETag и ответ 412.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="http-caching" data-freq="2">
+      <h3>Как работает кеширование в HTTP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сервер управляет кешем заголовком Cache-Control: max-age — сколько секунд копия свежая, private — только кеш клиента, no-store — не сохранять вовсе, no-cache — сохранять, но проверять у сервера перед использованием. Для проверки сервер отдаёт ETag или Last-Modified, а клиент присылает If-None-Match или If-Modified-Since; если ресурс не изменился, ответ 304 без тела.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ответы с персональными данными без private попадают в общий кеш CDN и уходят другим пользователям.</li>
+            <li>Заголовок Vary говорит кешу, от каких заголовков запроса зависит ответ: Accept-Encoding, Authorization.</li>
+            <li>304 экономит трафик и сборку ответа, но не круг до сервера.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему клиенты жалуются, что видят чужие счета?</summary>
+          <pre><code class="language-java">@GetMapping("/me/invoices")
+ResponseEntity&lt;List&lt;Invoice&gt;&gt; invoices(Authentication user) {
+    return ResponseEntity.ok()
+            .cacheControl(CacheControl.maxAge(Duration.ofMinutes(5))) // Разгрузить сервер.
+            .body(service.invoicesOf(user.getName()));
+}</code></pre>
+          <p>max-age без private разрешает общим кешам — CDN и прокси — сохранить ответ. Адрес /me/invoices одинаковый для всех, поэтому кеш отдаст счета первого пользователя следующим. Нужен CacheControl.maxAge(...).cachePrivate() или no-store для персональных данных, а если ответ зависит от заголовка авторизации — ещё и Vary.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="http-cookies" data-freq="2">
+      <h3>Какие атрибуты cookie важны для безопасности?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Secure — отправлять только по HTTPS; в демо такая cookie не ушла по обычному HTTP. HttpOnly — недоступна JavaScript, поэтому XSS не украдёт сессию. SameSite — отправлять ли cookie в запросах с чужих сайтов: Strict — никогда, Lax — только при переходе по ссылке GET-запросом, None — всегда и только с Secure.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>SameSite=Lax по умолчанию в браузерах сильно снижает риск CSRF, но не заменяет токен.</li>
+            <li>Domain с точкой открывает cookie всем поддоменам; без нужды его не задают.</li>
+            <li>Префиксы __Host- и __Secure- заставляют браузер проверить Secure, Path и отсутствие Domain.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9110">RFC 9110: HTTP Semantics</a> — основа урока: методы, их свойства, коды ответов, условные запросы, редиректы.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9111">RFC 9111: HTTP Caching</a> — Cache-Control, проверка свежести, 304.</li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/">IETF draft: The Idempotency-Key HTTP Header Field</a> — ключ идемпотентности для POST и PATCH.</li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Cookies">MDN: Using HTTP cookies</a> — атрибуты Secure, HttpOnly, SameSite и префиксы.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
