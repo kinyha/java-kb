@@ -561,7 +561,7 @@ window.KB_TREE = [
           scope: 'AuthenticationManager, UserDetailsService, PasswordEncoder, сессии и stateless' },
         { id: 'spring-authz', freq: 2, status: 'draft', title: 'Authorization',
           scope: 'правила по URL, @PreAuthorize и method security, роли и authorities' },
-        { id: 'spring-oauth2', freq: 3, status: 'empty', title: 'OAuth2 & JWT',
+        { id: 'spring-oauth2', freq: 3, status: 'draft', title: 'OAuth2 & JWT',
           scope: 'Resource Server, проверка JWT, OAuth2 Client и Login, Keycloak' },
       ] },
       { id: 'integration', title: 'Integration', source: 'Spring Framework Reference: Integration; Spring Boot Reference: Messaging, IO', items: [

@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Security: OAuth2 &amp; JWT · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-oauth2">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Security: OAuth2 &amp; JWT</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>В OAuth2 пароль видит только сервер авторизации, например Keycloak. Он выдаёт клиенту access token, а платёжный API принимает этот токен вместо пароля. Если токен — JWT, API проверяет его сам, без сетевого вызова: подпись публичным ключом издателя, срок жизни, издателя. Из claim-ов токена получаются права пользователя. Всё, что не проверено явно, API принимает на веру, и самое частое такое место — аудитория токена.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Платёжный API принимает токены от Keycloak, а паролей не видит</h2>
+      <p>У компании десяток сервисов: платежи, возвраты, отчёты, личный кабинет. Если каждый проверяет пароль сам, пароль хранится в десяти местах, а смена политики паролей — десять релизов. Вход через Google или корпоративный SSO придётся встраивать в каждый сервис отдельно.</p>
+      <p>OAuth2 выносит вход в отдельный <b>сервер авторизации</b>: Keycloak, Okta, Auth0 или Spring Authorization Server. Пользователь вводит пароль только там. <b>Клиент</b> — веб-приложение или мобильное — получает от сервера авторизации access token. <b>Resource server</b> — наш платёжный API — принимает запросы с этим токеном в заголовке <code>Authorization: Bearer</code> и решает, пускать ли.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 258" role="img" aria-label="Браузер входит через Keycloak и получает access token. С токеном в заголовке Bearer он вызывает платёжный API. API заранее скачал публичные ключи Keycloak из JWKS и проверяет подпись токена локально, без запроса к Keycloak на каждый вызов.">
+            <defs>
+              <marker id="oa-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="oa-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="52" width="170" height="64" rx="9" class="dg-box"/>
+            <rect x="290" y="30" width="190" height="96" rx="9" class="dg-box"/>
+            <rect x="302" y="82" width="166" height="32" rx="6" class="dg-cell"/>
+            <rect x="520" y="160" width="180" height="70" rx="9" class="dg-box"/>
+            <path d="M190 70 L 286 70" class="dg-line" marker-end="url(#oa-n)"/>
+            <path d="M286 100 L 194 100" class="dg-line" marker-end="url(#oa-n)"/>
+            <path d="M105 116 C 105 196, 380 196, 516 196" class="dg-line ok" marker-end="url(#oa-ok)"/>
+            <path d="M610 160 C 610 110, 540 98, 472 98" class="dg-line" marker-end="url(#oa-n)"/>
+            <g text-anchor="middle">
+              <text x="105" y="80" class="dg-in">браузер</text>
+              <text x="105" y="98" class="dg-n">клиент OAuth2</text>
+              <text x="385" y="52" class="dg-in">Keycloak</text>
+              <text x="385" y="68" class="dg-n">сервер авторизации</text>
+              <text x="385" y="103" class="dg-in">JWKS: ключи</text>
+              <text x="610" y="190" class="dg-in">payments API</text>
+              <text x="610" y="208" class="dg-n">resource server</text>
+            </g>
+            <text x="200" y="62" class="dg-n">1 вход</text>
+            <text x="200" y="116" class="dg-n">2 access token</text>
+            <text x="200" y="218" class="dg-n">3 Authorization: Bearer eyJ…</text>
+            <text x="618" y="146" class="dg-n">4 ключи, редко</text>
+            <text x="20" y="250" class="dg-s">Шаг 3 не ходит в Keycloak: подпись проверяется у себя, ключом из кеша.</text>
+          </svg>
+        </div>
+        <figcaption>Платёжный API зависит от Keycloak только через публичные ключи. Пока ключи в кеше, падение Keycloak не мешает проверять уже выданные токены.</figcaption>
+      </figure>
+      <p>Эта тема про две стороны Spring Security. Большая часть — resource server: как платёжный API проверяет JWT и превращает его в права. В конце — клиентская сторона: вход через внешнего провайдера и получение токена для вызова другого сервиса.</p>
+      <p>Демо <a href="../examples/security/JwtDemo.java">JwtDemo.java</a> само играет роль сервера авторизации: создаёт RSA-ключ и подписывает им токены с нужными claim-ами. Платёжный API в том же процессе проверяет их публичным ключом. Keycloak для запуска не нужен.</p>
+      <pre><code class="language-bash">cd examples/security
+./run.sh JwtDemo # Boot 4.1.1, Spring Security 7.1, nimbus-jose-jwt 10.9.</code></pre>
+    </section>
+
+    <section class="step" id="jwt">
+      <h2>JWT несёт утверждения открытым текстом, а подпись доказывает, кто их выдал</h2>
+      <p>JWT — три части через точку: header, payload и подпись, каждая в Base64URL. Header говорит, каким алгоритмом и каким ключом подписано: <code>{"kid":"k1","alg":"RS256"}</code>. Payload — набор claim-ов, утверждений о пользователе и самом токене:</p>
+      <pre><code class="language-json">{
+  "iss": "https://auth.payments.example", // кто выдал
+  "sub": "alice",                         // о ком
+  "aud": "payments-api",                  // для какого сервиса
+  "exp": 1790933100,                      // до какого момента действует, секунды
+  "scope": "payments.read",               // что разрешил пользователь
+  "roles": ["USER"]                       // свой claim сервера авторизации
+}</code></pre>
+      <p>Base64 — не шифрование. Любой, у кого есть токен, прочитает payload, поэтому в токен не кладут номера карт и персональные данные. Защищает подпись: сервер авторизации подписывает header и payload своим приватным ключом, а API проверяет публичным. Изменить хоть один символ payload без приватного ключа нельзя.</p>
+      <p>Демо берёт настоящий токен, меняет в payload <code>payments.read</code> на <code>payments.admin</code> и собирает его обратно со старой подписью:</p>
+      <pre><code class="language-java">String[] p = jwt.split("\\.");
+String payload = new String(Base64.getUrlDecoder().decode(p[1]))
+        .replace("payments.read", "payments.admin"); // Повышаем себе права.
+return p[0] + "." + Base64.getUrlEncoder().withoutPadding()
+        .encodeToString(payload.getBytes()) + "." + p[2]; // Подпись прежняя.</code></pre>
+      <pre class="out">tampered payload  -> 401 Bearer error="invalid_token", error_description="An error occurred while attempting to decode the Jwt: Signed JWT rejected: Invalid signature"</pre>
+      <p>В выводах этой темы из заголовка <code>WWW-Authenticate</code> убраны поля <code>error_uri</code> и <code>resource_metadata</code>, чтобы строки помещались. Второе поле — новинка Spring Security 7: ссылка на метаданные защищённого ресурса по RFC 9728, по которой клиент узнаёт, где брать токен.</p>
+      <p>В Boot resource server включается стартером и одной настройкой. В Boot 4 стартер переименован: <code>spring-boot-starter-security-oauth2-resource-server</code> вместо прежнего <code>spring-boot-starter-oauth2-resource-server</code>.</p>
+      <pre><code class="language-yaml">spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: https://auth.payments.example/realms/payments # iss и адрес JWKS
+          audiences: payments-api # Без этой строки aud не проверяется.</code></pre>
+    </section>
+
+    <section class="step" id="validation">
+      <h2>Resource server проверяет подпись, срок и издателя, но не аудиторию</h2>
+      <p>Запрос с заголовком <code>Authorization: Bearer</code> перехватывает <code>BearerTokenAuthenticationFilter</code>. Он создаёт неаутентифицированный токен и отдаёт его в AuthenticationManager, а там <code>JwtAuthenticationProvider</code> вызывает <code>JwtDecoder</code>. Декодер выполняет проверки по порядку, и любая неудача даёт 401 с <code>error="invalid_token"</code>.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Шесть этапов проверки JWT: разбор, поиск ключа по kid, проверка подписи, проверка срока с допуском 60 секунд, проверка iss и aud, превращение claim-ов в authorities. Подменённый токен падает на подписи, токен с истёкшим на две минуты сроком — на сроке. Токен, истёкший 30 секунд назад, и токен с чужой аудиторией по умолчанию проходят.">
+            <text x="20" y="22" class="dg-cap">JWTDECODER И КОНВЕРТЕР</text>
+            <rect x="20" y="36" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="136" y="36" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="252" y="36" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="368" y="36" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="484" y="36" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="600" y="36" width="100" height="50" rx="7" class="dg-cell"/>
+            <!-- пройденные этапы -->
+            <rect data-s="1-" x="20" y="36" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="2-" x="136" y="36" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="3-" x="252" y="36" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="4-" x="368" y="36" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="5-" x="484" y="36" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="6" x="600" y="36" width="100" height="50" rx="7" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="72" y="58" class="dg-n">разобрать</text>
+              <text x="72" y="73" class="dg-n">header, payload</text>
+              <text x="188" y="58" class="dg-n">ключ по kid</text>
+              <text x="188" y="73" class="dg-n">из кеша JWKS</text>
+              <text x="304" y="58" class="dg-n">подпись</text>
+              <text x="304" y="73" class="dg-n">RS256</text>
+              <text x="420" y="58" class="dg-n">exp, nbf</text>
+              <text x="420" y="73" class="dg-n">допуск 60 с</text>
+              <text x="536" y="58" class="dg-n">iss</text>
+              <text x="536" y="73" class="dg-n">aud — если задан</text>
+              <text x="650" y="58" class="dg-n">claim-ы в</text>
+              <text x="650" y="73" class="dg-n">authorities</text>
+            </g>
+            <!-- что происходит с токенами демо на этом этапе -->
+            <g data-s="1"><text x="20" y="122" class="dg-t">Токен разбит на части, алгоритм из header.</text><text x="20" y="144" class="dg-s">alg=none и битый Base64 отклоняются здесь же.</text></g>
+            <g data-s="2"><text x="20" y="122" class="dg-t">kid=k1 найден среди ключей издателя.</text><text x="20" y="144" class="dg-s">Неизвестный kid вызывает повторную загрузку JWKS.</text></g>
+            <g data-s="3"><text x="20" y="122" class="dg-bad">tampered payload: 401, Invalid signature</text><text x="20" y="144" class="dg-s">Подпись не совпала с изменённым payload.</text></g>
+            <g data-s="4"><text x="20" y="122" class="dg-bad">expired 120s ago: 401, Jwt expired</text><text x="20" y="144" class="dg-ok">expired 30s ago: проходит, допуск 60 секунд</text></g>
+            <g data-s="5"><text x="20" y="122" class="dg-bad">aud=ledger-api: проходит, aud не задан</text><text x="20" y="144" class="dg-s">С audiences в настройках — 401, The aud claim is not valid.</text></g>
+            <g data-s="6"><text x="20" y="122" class="dg-ok">alice: SCOPE_payments.read, ROLE_USER</text><text x="20" y="144" class="dg-s">Дальше обычная авторизация по этим правам.</text></g>
+            <text x="20" y="196" class="dg-s">Каждый этап — локальная проверка; сеть нужна только для загрузки ключей.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Декодер разбирает токен на части. Header говорит, каким алгоритмом подписан токен и каким ключом. Токен без подписи с alg=none Spring не принимает.</li>
+          <li>По kid из header декодер находит публичный ключ. Ключи скачаны из JWKS сервера авторизации и лежат в кеше. Если kid незнаком, например после ротации ключей, декодер скачивает JWKS заново.</li>
+          <li>Проверка подписи. Подменённый payload из демо отклонён здесь: подпись считалась для других байтов.</li>
+          <li>Проверка срока. JwtTimestampValidator допускает расхождение часов на 60 секунд, поэтому токен, истёкший 30 секунд назад, ещё работает, а истёкший две минуты назад — нет.</li>
+          <li>Проверка iss включается вместе с issuer-uri. Проверка aud — только если она задана явно. Без неё токен, выданный для другого сервиса, принимается.</li>
+          <li>Конвертер превращает claim-ы в права: scope становится SCOPE_*, свой claim roles — ROLE_*. Дальше работают обычные правила авторизации.</li>
+        </ol>
+      </figure>
+      <p>Два вывода из демо заслуживают внимания. Первый — допуск по времени:</p>
+      <pre class="out">expired 30s ago   -> 200 payments
+expired 120s ago  -> 401 Bearer error="invalid_token", error_description="An error occurred while attempting to decode the Jwt: Jwt expired at 2026-10-02T09:37:35Z"</pre>
+      <p>Допуск нужен, потому что часы сервера авторизации и сервиса расходятся на секунды. Но он означает, что «токен живёт 5 минут» на деле — 6. Для коротких токенов это заметная прибавка.</p>
+      <p>Второй — аудитория. Компания выпускает токены для нескольких сервисов одним Keycloak. Токен с <code>aud=ledger-api</code> предназначен бухгалтерии, но платёжный API его принимает:</p>
+      <pre class="out">aud=ledger-api    -> 200 payments</pre>
+      <p>Подпись верна, издатель свой, срок не истёк — а проверки аудитории нет. Любой сервис, получивший токен пользователя для своих нужд, может пойти с ним в платежи. Во втором запуске демо декодер настроен с проверками издателя и аудитории:</p>
+      <pre><code class="language-java">OAuth2TokenValidator&lt;Jwt&gt; aud = new JwtClaimValidator&lt;List&lt;String&gt;&gt;("aud",
+        a -&gt; a != null &amp;&amp; a.contains("payments-api")); // Токен должен быть выдан нам.
+decoder.setJwtValidator(new DelegatingOAuth2TokenValidator&lt;&gt;(
+        JwtValidators.createDefaultWithIssuer(ISSUER), aud)); // exp/nbf + iss + aud.</code></pre>
+      <pre class="out">strict aud=ledger -> 401 Bearer error="invalid_token", error_description="An error occurred while attempting to decode the Jwt: The aud claim is not valid"
+strict aud=pay    -> 200 payments</pre>
+      <p>В Boot то же самое делает одна настройка <code>spring.security.oauth2.resourceserver.jwt.audiences</code>. Если ты задаёшь свой бин JwtDecoder, настройки Boot к нему не применяются, и валидаторы приходится собирать самому, как в демо. Вызов <code>setJwtValidator</code> заменяет валидаторы целиком: без <code>createDefault…</code> пропадёт и проверка срока.</p>
+      <div class="trap">
+        <p class="myth">Если подпись JWT верна, токен можно принимать.</p>
+        <p class="fact">Подпись доказывает только, кто выдал токен. Для кого он выдан, говорит aud, и по умолчанию Spring её не проверяет. Без проверки аудитории токен любого сервиса компании открывает твой API.</p>
+      </div>
+    </section>
+
+    <section class="step" id="authorities">
+      <h2>Права из токена получаются конвертером, и для Keycloak его пишут сами</h2>
+      <p>После проверки <code>JwtAuthenticationConverter</code> превращает Jwt в <code>JwtAuthenticationToken</code>. По умолчанию он читает claim <code>scope</code> или <code>scp</code> и делает из каждого значения authority с префиксом <code>SCOPE_</code>. Другие claim-ы, в том числе роли, он не трогает. Имя пользователя по умолчанию берётся из <code>sub</code>.</p>
+      <p>Демо добавляет к scope роли из своего claim <code>roles</code>:</p>
+      <pre><code class="language-java">var scopes = new JwtGrantedAuthoritiesConverter(); // scope -&gt; SCOPE_*
+var roles = new JwtGrantedAuthoritiesConverter();
+roles.setAuthoritiesClaimName("roles"); // Читать из claim roles
+roles.setAuthorityPrefix("ROLE_");      // и добавить префикс роли.
+var converter = new JwtAuthenticationConverter();
+converter.setJwtGrantedAuthoritiesConverter(jwt -&gt; {
+    var all = new ArrayList&lt;&gt;(scopes.convert(jwt));
+    all.addAll(roles.convert(jwt));
+    return all;
+});
+http.oauth2ResourceServer(o -&gt; o.jwt(j -&gt; j.jwtAuthenticationConverter(converter)));</code></pre>
+      <pre class="out">me                -> 200 alice [SCOPE_payments.read, ROLE_USER, FactorGrantedAuthority [authority=FACTOR_BEARER, issuedAt=2026-10-02T09:39:35.616374Z]]
+scope write only  -> 403 Bearer error="insufficient_scope", error_description="The request requires higher privileges than provided by the access token."
+refunds as USER   -> 403 Bearer error="insufficient_scope", error_description="The request requires higher privileges than provided by the access token."
+refunds SUPPORT   -> 200 refunds</pre>
+      <p>Право <code>FACTOR_BEARER</code> — фактор аутентификации из Spring Security 7, как <code>FACTOR_PASSWORD</code> в <a href="spring-authn.html">Authentication</a>. Ответ 403 в resource server всегда говорит <code>insufficient_scope</code>, даже если не хватило роли, а не scope: так устроен <code>BearerTokenAccessDeniedHandler</code>. По этому тексту причину отказа не определить.</p>
+      <p>Keycloak кладёт роли realm не в плоский список, а во вложенный объект: <code>"realm_access": {"roles": ["SUPPORT"]}</code>, а роли клиента — в <code>resource_access.&lt;client&gt;.roles</code>. Стандартный конвертер вложенность не понимает, и интеграция с Keycloak почти всегда начинается со своего конвертера, который достаёт <code>jwt.getClaimAsMap("realm_access")</code> и превращает список в <code>ROLE_*</code>. Без него <code>hasRole("SUPPORT")</code> отвечает 403 пользователю, у которого роль в Keycloak есть.</p>
+      <p>Scope и роль отвечают на разные вопросы. Scope — что пользователь разрешил клиенту делать от своего имени: мобильному приложению только чтение платежей. Роль — что пользователю можно вообще. Сильная проверка учитывает оба: <code>hasAuthority('SCOPE_payments.refund') and hasRole('SUPPORT')</code>.</p>
+    </section>
+
+    <section class="step" id="keys-revocation">
+      <h2>JWT нельзя отозвать, поэтому его делают короткоживущим</h2>
+      <p>С настройкой <code>issuer-uri</code> Boot находит адрес JWKS через документ <code>/.well-known/openid-configuration</code> издателя. Декодер создаётся лениво: Keycloak нужен при первом запросе с токеном, а не при старте сервиса. Скачанные ключи кешируются. Сервер авторизации меняет ключи плавно: сначала публикует новый ключ рядом со старым, потом начинает подписывать им. Незнакомый <code>kid</code> заставляет декодер перечитать JWKS, поэтому ротация проходит без перезапуска сервисов.</p>
+      <p>Обратная сторона локальной проверки — токен нельзя отозвать. Пользователя уволили, пароль сменили, а выданный JWT продолжает работать до <code>exp</code>: ни один сервис не спрашивает Keycloak, жив ли токен. Поэтому access token делают коротким, на 5–15 минут, а для продления выдают refresh token, который проверяет сам сервер авторизации и может отказать.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>JWT</th><th>Opaque token и introspection</th></tr></thead>
+        <tbody>
+          <tr><td>Как проверяется</td><td>Локально: подпись и claim-ы</td><td>Запросом к серверу авторизации на каждый вызов или с кешем</td></tr>
+          <tr><td>Отзыв</td><td>Только истечением срока</td><td>Сразу: сервер ответит active=false</td></tr>
+          <tr><td>Зависимость от сервера авторизации</td><td>Только за ключами</td><td>На каждый запрос</td></tr>
+          <tr><td>Что видно клиенту</td><td>Все claim-ы, если раскодировать</td><td>Случайная строка без смысла</td></tr>
+          <tr><td>В Spring</td><td><code>.jwt()</code></td><td><code>.opaqueToken()</code>, <code>introspection-uri</code></td></tr>
+        </tbody>
+      </table>
+      <p>Для платёжного сервиса типичный компромисс: короткие JWT для обычных запросов и дополнительная проверка для опасных действий. Возврат крупной суммы может требовать свежего входа: claim <code>auth_time</code> не старше нескольких минут или второй фактор.</p>
+    </section>
+
+    <section class="step" id="client">
+      <h2>OAuth2 Client получает токены, когда сервис сам ходит к другим</h2>
+      <p>До сих пор платёжный API только принимал токены. Иногда сервис должен их получать. Spring Security даёт для этого клиентскую часть, стартер <code>spring-boot-starter-security-oauth2-client</code>. Эту часть мы не запускали: ей нужен настоящий сервер авторизации и браузер. Поведение описано по документации Spring Security.</p>
+      <p><b>Вход через внешнего провайдера</b>, <code>oauth2Login()</code>. Админка платёжного сервиса пускает сотрудников через корпоративный Keycloak. Браузер уходит на страницу входа Keycloak, возвращается с одноразовым <code>code</code>, и сервер админки сам меняет code на токены прямым запросом к Keycloak. Это authorization code flow. В Spring Security 7 к нему по умолчанию добавляется PKCE (<code>ClientSettings.requireProofKey</code> равен true для всех клиентов): случайный секрет, хеш которого уходит в первом запросе, а сам секрет — при обмене code. Перехваченный code без секрета бесполезен. Токены остаются на сервере в сессии, браузер получает только cookie. С OpenID Connect Keycloak дополнительно выдаёт id token — сведения о том, кто вошёл.</p>
+      <p><b>Вызов другого сервиса от своего имени</b>, client credentials. Ночная сверка платёжного сервиса вызывает API бухгалтерии. Пользователя нет, сервис сам получает токен у Keycloak по client_id и секрету. В Spring это регистрация клиента в настройках и <code>OAuth2ClientHttpRequestInterceptor</code> на RestClient. Он получает токен, кеширует до истечения и подставляет в заголовок Bearer.</p>
+      <pre><code class="language-yaml">spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          ledger:                           # Имя регистрации в коде.
+            provider: keycloak
+            client-id: payments-service
+            client-secret: ${LEDGER_CLIENT_SECRET} # Из окружения, не из git.
+            authorization-grant-type: client_credentials
+            scope: ledger.read
+        provider:
+          keycloak:
+            issuer-uri: https://auth.payments.example/realms/payments</code></pre>
+      <p>Для SPA сейчас рекомендуют схему BFF, backend for frontend: токены держит сервер с <code>oauth2Login()</code>, а браузер общается с ним по cookie-сессии. Токены в localStorage браузера читает любой внедрённый скрипт, поэтому XSS превращается в кражу токена. С BFF возвращается CSRF-защита из <a href="spring-security.html">Architecture</a>: снова есть cookie, которую браузер шлёт сам.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Сервер авторизации выдаёт токен, resource server проверяет его локально публичным ключом из JWKS.</li>
+        <li>Payload JWT читает любой; подпись доказывает издателя, aud — для кого токен. По умолчанию Spring проверяет срок и издателя, но не aud.</li>
+        <li>Допуск по времени — 60 секунд. Свой JwtDecoder без createDefault… теряет проверку срока.</li>
+        <li>scope становится SCOPE_*, роли Keycloak из realm_access нужно доставать своим конвертером.</li>
+        <li>JWT не отзывается: короткий access token, refresh token, introspection для случаев, где отзыв обязателен.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="oauth2-resource-server" data-freq="3">
+      <h3>Как Spring Resource Server проверяет JWT?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>BearerTokenAuthenticationFilter достаёт токен из заголовка Authorization и передаёт в AuthenticationManager. JwtAuthenticationProvider вызывает JwtDecoder: тот находит публичный ключ по kid из JWKS сервера авторизации, проверяет подпись, затем валидаторы — срок с допуском 60 секунд и издателя, если задан issuer-uri. Потом конвертер превращает scope в authorities SCOPE_*.</p>
+          <p>Проверка локальная: на каждый запрос Keycloak не нужен, только ключи, которые кешируются и перечитываются при незнакомом kid.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Аудитория по умолчанию не проверяется; нужна настройка audiences или свой JwtClaimValidator, иначе принимаются токены других сервисов.</li>
+            <li>setJwtValidator заменяет валидаторы целиком; без JwtValidators.createDefault… пропадает проверка exp.</li>
+            <li>Свой бин JwtDecoder отключает настройки Boot для декодера.</li>
+            <li>Ответ 403 всегда содержит insufficient_scope, даже если не хватило роли.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим декодером?</summary>
+          <pre><code class="language-java">@Bean
+JwtDecoder jwtDecoder() {
+    var decoder = NimbusJwtDecoder.withIssuerLocation(ISSUER).build();
+    decoder.setJwtValidator(new JwtClaimValidator&lt;List&lt;String&gt;&gt;("aud",
+            aud -&gt; aud.contains("payments-api")));
+    return decoder;
+}</code></pre>
+          <p>setJwtValidator заменил стандартные валидаторы, и остался только aud. Срок и издатель больше не проверяются: токен, истёкший месяц назад, принимается. Ещё aud может отсутствовать, и тогда лямбда упадёт с NullPointerException. Правильно: DelegatingOAuth2TokenValidator из JwtValidators.createDefaultWithIssuer(ISSUER) и проверки aud с учётом null.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="oauth2-roles-flow" data-freq="3">
+      <h3>Какие роли есть в OAuth2 и как работает authorization code flow?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Владелец ресурса — пользователь. Клиент — приложение, которое действует от его имени. Сервер авторизации, например Keycloak, проверяет пользователя и выдаёт токены. Resource server — API, который принимает токены.</p>
+          <p>В authorization code flow браузер уходит на страницу входа сервера авторизации и возвращается с одноразовым code. Клиент меняет code на токены прямым запросом со своим секретом или PKCE. Токен никогда не проходит через адресную строку браузера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>PKCE связывает запрос code и его обмен случайным секретом, поэтому перехваченный code бесполезен; сейчас его применяют и для серверных клиентов.</li>
+            <li>OpenID Connect добавляет id token — кто вошёл; access token — что можно делать. Путать их нельзя: id token не предназначен для вызова API.</li>
+            <li>Для сервис-сервис без пользователя используется client credentials. Implicit и password grant устарели.</li>
+            <li>Для SPA рекомендуют BFF: токены на сервере, браузеру — cookie.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="oauth2-jwt-opaque" data-freq="2">
+      <h3>Как отозвать JWT и чем он отличается от opaque token?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JWT проверяется локально по подписи, поэтому отозвать его до истечения нельзя: сервис не спрашивает сервер авторизации. Решение — короткий срок жизни access token, 5–15 минут, и refresh token, который проверяет сервер авторизации и может отказать.</p>
+          <p>Opaque token — случайная строка. Сервис проверяет его introspection-запросом к серверу авторизации, поэтому отзыв действует сразу, но каждый запрос зависит от этого сервера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Чёрный список jti в Redis возвращает отзыв для JWT, но добавляет сетевой вызов, от которого JWT избавлял.</li>
+            <li>Для опасных операций проверяют свежесть входа по auth_time или требуют второй фактор.</li>
+            <li>Допуск часов 60 секунд продлевает жизнь любого токена на минуту.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="oauth2-keycloak-roles" data-freq="2">
+      <h3>Роль в Keycloak назначена, а hasRole отвечает 403. Почему?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Стандартный JwtAuthenticationConverter делает authorities только из claim scope с префиксом SCOPE_. Keycloak кладёт роли в realm_access.roles и resource_access.&lt;client&gt;.roles, и Spring их не видит.</p>
+          <p>Я пишу свой конвертер: достаю вложенный список ролей, добавляю префикс ROLE_ и объединяю со scope. После этого hasRole работает.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Имя пользователя берётся из sub, а это UUID в Keycloak; для логов удобнее principalClaimName=preferred_username.</li>
+            <li>Роли клиента и роли realm — разные пространства; правило должно знать, какие оно проверяет.</li>
+            <li>Конвертер стоит покрыть тестом на реальном токене Keycloak, а не на собранном вручную.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html">Spring Security Reference: OAuth 2.0 Resource Server JWT</a> — основа урока: путь проверки, валидаторы, аудитория, конвертер authorities.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/client/index.html">OAuth2 Client</a> и <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/login/index.html">OAuth2 Login</a> — oauth2Login, client credentials, RestClient-интерцептор.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700: OAuth 2.0 Security Best Current Practice</a> — PKCE, отказ от implicit и password grant, ограничение аудитории.</li>
+      <li><a href="https://www.keycloak.org/docs/latest/server_admin/">Keycloak Server Administration</a> — realm и client roles и как они попадают в токен.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
