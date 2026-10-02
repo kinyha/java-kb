@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Testing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-testing">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring: Testing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Тест в Spring поднимает настоящий контекст приложения — целиком через @SpringBootTest или только один слой через срез вроде @WebMvcTest. Подъём дорогой, поэтому TestContext кеширует контексты и отдаёт готовый следующему классу с той же конфигурацией. Любое отличие — другой @MockitoBean, свойство, профиль — даёт новый контекст, и набор тестов незаметно становится медленным. @Transactional на тесте откатывает изменения, а Testcontainers даёт вместо H2 настоящий PostgreSQL.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Тест платежа должен поймать ошибку слоя, а не ждать минуту ради всего приложения</h2>
+      <p>Платёжный сервис принимает POST <code>/payments</code>, проверяет сумму, списывает через банк и сохраняет платёж в PostgreSQL. Ошибки бывают в каждом слое: контроллер вернул 500 вместо 400, SQL работает в H2, но не в PostgreSQL, транзакция не откатилась. Юнит-тест с моками ловит ошибки логики, но не видит ни валидации Spring MVC, ни SQL, ни транзакций — их делает контейнер.</p>
+      <p>Spring Test поднимает настоящий контекст в тесте. Вопрос в том, какой контекст и как часто. Полный контекст с базой честнее, но медленнее. Срез поднимает только один слой и проверяет его быстро. Тема разбирает, как выбрать, и почему набор из двухсот тестов иногда идёт десять минут, хотя каждый тест быстрый.</p>
+      <p>Демо — небольшой Maven-проект <a href="../examples/testing/">examples/testing</a>: приложение и четыре тестовых класса A–D, которые запускаются по алфавиту. Им нужен Docker для PostgreSQL. Стек: JDK 21, Spring Boot 4.1.1, Testcontainers 2, PostgreSQL 17.</p>
+      <pre><code class="language-bash">cd examples/testing
+mvn test # Docker должен быть запущен: B и D поднимают PostgreSQL в контейнере.</code></pre>
+    </section>
+
+    <section class="step" id="slice">
+      <h2>Срез @WebMvcTest поднимает только веб-слой, остальное подменяют</h2>
+      <p><code>@WebMvcTest(PaymentController.class)</code> включает автоконфигурации Spring MVC, Jackson и валидации и регистрирует только указанный контроллер и веб-компоненты: <code>@ControllerAdvice</code>, фильтры, конвертеры. Сервисы, репозитории и DataSource не создаются. Контроллеру нужен PaymentService, поэтому тест даёт mock:</p>
+      <pre><code class="language-java">@WebMvcTest(PaymentController.class)
+class A_PaymentControllerTest {
+    @Autowired MockMvcTester mvc;
+    @MockitoBean PaymentService service; // Бин-заглушка вместо настоящего сервиса.
+
+    @Test
+    void negativeAmountReturns400WithoutCallingService() {
+        var result = mvc.post().uri("/payments").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"account\":\"acc-1\",\"cents\":-5}");
+        assertThat(result).hasStatus(400);
+        verify(service, never()).pay(any()); // Валидация остановила запрос раньше.
+    }
+}</code></pre>
+      <pre class="out">DEMO slice beans=112, has PaymentRepository=false, has DataSource=0
+DEMO invalid amount -> 400
+DEMO B: full context beans=195</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 268" role="img" aria-label="Слева полный контекст @SpringBootTest: контроллер, сервис, BankClient, репозиторий, DataSource и PostgreSQL, всего 195 бинов. Справа срез @WebMvcTest: только контроллер и MVC-инфраструктура, сервис заменён mock, репозитория, банка и базы нет, всего 112 бинов.">
+            <path d="M360 24 L 360 256" class="dg-sep"/>
+            <text x="20" y="22" class="dg-cap">@SPRINGBOOTTEST: 195 БИНОВ</text>
+            <text x="374" y="22" class="dg-cap">@WEBMVCTEST: 112 БИНОВ</text>
+            <!-- полный контекст -->
+            <rect x="20" y="36" width="320" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="20" y="80" width="320" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="20" y="124" width="155" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="185" y="124" width="155" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="20" y="168" width="320" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="20" y="212" width="320" height="34" rx="6" class="dg-cell hit"/>
+            <!-- срез -->
+            <rect x="374" y="36" width="326" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="374" y="80" width="326" height="34" rx="6" class="dg-cell"/>
+            <rect x="374" y="124" width="158" height="34" rx="6" class="dg-sep" fill="none"/>
+            <rect x="542" y="124" width="158" height="34" rx="6" class="dg-sep" fill="none"/>
+            <rect x="374" y="168" width="326" height="34" rx="6" class="dg-sep" fill="none"/>
+            <rect x="374" y="212" width="326" height="34" rx="6" class="dg-sep" fill="none"/>
+            <g text-anchor="middle">
+              <text x="180" y="58" class="dg-in">PaymentController + MVC</text>
+              <text x="180" y="102" class="dg-in">PaymentService</text>
+              <text x="97" y="146" class="dg-in">BankClient</text>
+              <text x="262" y="146" class="dg-in">Repository</text>
+              <text x="180" y="190" class="dg-in">DataSource, Hikari</text>
+              <text x="180" y="234" class="dg-in">PostgreSQL в контейнере</text>
+              <text x="537" y="58" class="dg-in">PaymentController + MVC</text>
+              <text x="537" y="102" class="dg-in">PaymentService: mock</text>
+              <text x="453" y="146" class="dg-n">нет</text>
+              <text x="621" y="146" class="dg-n">нет</text>
+              <text x="537" y="190" class="dg-n">нет</text>
+              <text x="537" y="234" class="dg-n">нет</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>Срез проверяет то, что делает Spring MVC: разбор JSON, валидацию, коды ответа, обработчики ошибок. Логику сервиса он не проверяет — её заменяет mock.</figcaption>
+      </figure>
+      <p>Срезов много, и у каждого своя граница: <code>@DataJpaTest</code> — JPA и репозитории с тестовой транзакцией, <code>@JdbcTest</code> — JdbcTemplate и DataSource, <code>@JsonTest</code> — сериализация, <code>@RestClientTest</code> — HTTP-клиент с заглушкой сервера, <code>@DataRedisTest</code>, <code>@WebFluxTest</code>. В Boot 4 срезы переехали в модули своих технологий: <code>@WebMvcTest</code> теперь лежит в <code>spring-boot-webmvc-test</code>, пакет <code>org.springframework.boot.webmvc.test.autoconfigure</code>, и подключается стартером <code>spring-boot-starter-webmvc-test</code>.</p>
+      <div class="trap">
+        <p class="myth">@WebMvcTest всегда поднимает только веб-слой, как бы ни было устроено приложение.</p>
+        <p class="fact">Срез фильтрует то, что находит сканирование. Первая версия демо держала сервис и репозиторий вложенными static-классами внутри класса @SpringBootApplication, и срез упал: No qualifying bean of type 'JdbcClient' для PaymentRepository. Вложенные классы с @Component в конфигурационном классе регистрируются как member classes, в обход фильтров среза. То же ломает свой @ComponentScan на главном классе. Компоненты держат в отдельных файлах.</p>
+      </div>
+    </section>
+
+    <section class="step" id="cache">
+      <h2>Контекст кешируется по конфигурации теста, и любое отличие создаёт новый</h2>
+      <p>Подъём полного контекста с базой занимает секунды. Если делать его в каждом из двухсот классов, набор тестов будет идти минуты. Поэтому Spring TestContext хранит поднятые контексты в статическом кеше на время работы JVM. Ключ кеша — <code>MergedContextConfiguration</code>: классы конфигурации, @Import, профили, свойства, инициализаторы и customizers. <code>@MockitoBean</code> тоже часть ключа: набор подменённых бинов меняет контекст.</p>
+      <pre><code class="language-java">@SpringBootTest @Import(Containers.class) @Transactional class B_RepositoryWriteTest { … }
+@SpringBootTest @Import(Containers.class)                class C_RepositoryReadTest { … }
+@SpringBootTest @Import(Containers.class) @AutoConfigureMockMvc
+class D_PaymentFlowTest { @MockitoBean BankClient bank; … } // Ещё и mock банка.</code></pre>
+      <pre class="out">Tests run: 2, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.921 s -- in kb.testing.A_PaymentControllerTest
+DEMO B: count inside test=1, contexts=1
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 1.571 s -- in kb.testing.B_RepositoryWriteTest
+DEMO C: count=0, contexts=1
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.006 s -- in kb.testing.C_RepositoryReadTest
+DEMO D: rows before=0, after=1, contexts=2
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.870 s -- in kb.testing.D_PaymentFlowTest
+Spring test ApplicationContext cache statistics: [size = 3, maxSize = 32, contextUsageCount = 1, parentContextCount = 0, hitCount = 63, missCount = 3, failureCount = 0]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Четыре тестовых класса и кеш контекстов. A со срезом WebMvcTest получает свой контекст. B и C с одинаковой конфигурацией делят один полный контекст с PostgreSQL: C берёт его из кеша за 6 мс. D отличается mock-ом BankClient и MockMvc и получает третий контекст со своим контейнером PostgreSQL.">
+            <defs>
+              <marker id="tc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="tc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">ТЕСТЫ</text>
+            <text x="190" y="22" class="dg-cap">КЛЮЧ КЕША</text>
+            <text x="520" y="22" class="dg-cap">КОНТЕКСТ</text>
+            <rect x="20" y="36" width="120" height="34" rx="6" class="dg-box"/>
+            <rect x="20" y="96" width="120" height="34" rx="6" class="dg-box"/>
+            <rect x="20" y="140" width="120" height="34" rx="6" class="dg-box"/>
+            <rect x="20" y="184" width="120" height="34" rx="6" class="dg-box"/>
+            <rect x="190" y="36" width="280" height="34" rx="6" class="dg-cell"/>
+            <rect x="190" y="116" width="280" height="40" rx="6" class="dg-cell"/>
+            <rect x="190" y="184" width="280" height="34" rx="6" class="dg-cell"/>
+            <rect x="520" y="36" width="180" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="520" y="116" width="180" height="40" rx="6" class="dg-cell hit"/>
+            <rect x="520" y="184" width="180" height="34" rx="6" class="dg-cell hit"/>
+            <path d="M140 53 L 186 53" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M140 113 C 165 113, 165 130, 186 130" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M140 157 C 165 157, 165 142, 186 142" class="dg-line ok" marker-end="url(#tc-ok)"/>
+            <path d="M140 201 L 186 201" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M470 53 L 516 53" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M470 136 L 516 136" class="dg-line" marker-end="url(#tc-n)"/>
+            <path d="M470 201 L 516 201" class="dg-line" marker-end="url(#tc-n)"/>
+            <g text-anchor="middle">
+              <text x="80" y="58" class="dg-in">A 0.92 с</text>
+              <text x="80" y="118" class="dg-in">B 1.57 с</text>
+              <text x="80" y="162" class="dg-ok">C 0.006 с</text>
+              <text x="80" y="206" class="dg-in">D 0.87 с</text>
+            </g>
+            <text x="202" y="58" class="dg-n">WebMvcTest + mock PaymentService</text>
+            <text x="202" y="134" class="dg-n">SpringBootTest + Containers</text>
+            <text x="202" y="148" class="dg-n">(@Transactional в ключ не входит)</text>
+            <text x="202" y="206" class="dg-n">… + MockMvc + mock BankClient</text>
+            <text x="532" y="58" class="dg-in">срез, 112 бинов</text>
+            <text x="532" y="134" class="dg-in">полный, 195 бинов</text>
+            <text x="532" y="148" class="dg-n">PostgreSQL №1</text>
+            <text x="532" y="206" class="dg-in">полный, PostgreSQL №2</text>
+          </svg>
+        </div>
+        <figcaption>C не поднимал ничего: его ключ совпал с ключом B. Контейнер PostgreSQL — бин контекста, поэтому у D свой второй контейнер.</figcaption>
+      </figure>
+      <p>Счётчик <code>contexts</code> растёт в конструкторе репозитория, то есть на каждый полный контекст. B создал первый, C получил его из кеша за 6 мс, D создал второй. В статистике кеша три контекста: срез, полный и полный с mock-ом. Включить её можно через <code>logging.level.org.springframework.test.context.cache=DEBUG</code>.</p>
+      <p>Отсюда главный приём ускорения набора тестов: меньше уникальных конфигураций. Каждый класс со своим набором <code>@MockitoBean</code>, своим <code>@TestPropertySource</code> или профилем — новый контекст и новые секунды. Общие подмены выносят в базовый класс или общую тестовую конфигурацию, чтобы классы делили контекст. <code>@DirtiesContext</code> выбрасывает контекст из кеша; его ставят, только когда тест действительно портит состояние синглтонов.</p>
+      <p>Кеш держит до 32 контекстов (<code>spring.test.context.cache.maxSize</code>) и выбрасывает самые давно использованные. Каждый живой контекст держит свои пулы соединений, потоки и контейнеры. Большой набор с десятками уникальных конфигураций может исчерпать соединения базы или память ещё до того, как кеш начнёт вытеснять.</p>
+    </section>
+
+    <section class="step" id="transactional">
+      <h2>@Transactional в тесте откатывает изменения, но не всё, что сделал тест</h2>
+      <p>B и C в выводе выше делят один контекст и одну базу. B сохранил платёж и внутри теста видит одну строку. C после него видит ноль: <code>@Transactional</code> на тестовом классе открывает транзакцию вокруг каждого метода и откатывает её в конце. Тесты не мешают друг другу без ручной очистки таблиц.</p>
+      <pre><code class="language-java">@SpringBootTest
+@Import(Containers.class)
+@Transactional // Тестовая транзакция откатывается после каждого метода.
+class B_RepositoryWriteTest {
+    @Test
+    void savesPayment() {
+        repository.save("acc-1", 500, "APPROVED");
+        assertThat(repository.count()).isEqualTo(1); // Видно в той же транзакции.
+    }
+}</code></pre>
+      <p>У отката есть цена: в тесте не происходит коммит. Ошибки, которые проявляются только при коммите, тест не увидит: отложенные ограничения базы, flush Hibernate, который случается перед коммитом, слушатели <code>@TransactionalEventListener(AFTER_COMMIT)</code>. Чтобы закоммитить внутри теста, есть <code>@Commit</code> и <code>TestTransaction.flagForCommit()</code>.</p>
+      <p>Откат действует только на транзакцию потока теста. D не помечен <code>@Transactional</code>, и строка осталась в базе: <code>rows before=0, after=1</code>. То же случится, если код под тестом работает в другом потоке (<code>@Async</code>), открывает <code>REQUIRES_NEW</code> или тест ходит в приложение по HTTP через <code>webEnvironment = RANDOM_PORT</code>: сервер обрабатывает запрос в своём потоке и коммитит. Такие тесты чистят данные сами — удалением, уникальными ключами на каждый тест или отдельной схемой.</p>
+      <div class="trap">
+        <p class="myth">Если интеграционный тест помечен @Transactional, после него база всегда чистая.</p>
+        <p class="fact">Откатывается только транзакция, открытая в потоке теста. HTTP-запрос к серверу на случайном порту, @Async и REQUIRES_NEW коммитят в своих транзакциях, и данные остаются для следующих тестов.</p>
+      </div>
+    </section>
+
+    <section class="step" id="mocks">
+      <h2>@MockitoBean заменяет бин в контексте, MockMvc вызывает контроллер без сервера</h2>
+      <p>Mockito-аннотация <code>@Mock</code> создаёт mock в обычном юнит-тесте, контекст о нём не знает. <code>@MockitoBean</code> из Spring Framework 6.2 заменяет бин в контексте: все, кто внедряет BankClient, получают mock. После каждого теста mock сбрасывается. Прежняя <code>@MockBean</code> из Boot устарела в Boot 3.4 и удалена в Boot 4. Есть и <code>@MockitoSpyBean</code> — настоящий бин с возможностью переопределить отдельные методы.</p>
+      <pre><code class="language-java">@SpringBootTest
+@AutoConfigureMockMvc
+@Import(Containers.class)
+class D_PaymentFlowTest {
+    @Autowired MockMvcTester mvc;
+    @MockitoBean BankClient bank; // Настоящий банк недоступен из теста.
+
+    @Test
+    void fullPathFromHttpToDatabase() {
+        when(bank.charge(anyString(), anyLong())).thenReturn("APPROVED");
+        var result = mvc.post().uri("/payments").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"account\":\"acc-2\",\"cents\":700}");
+        assertThat(result).hasStatus(201); // Контроллер, сервис, транзакция и SQL настоящие.
+    }
+}</code></pre>
+      <p>MockMvc прогоняет запрос через настоящий DispatcherServlet, фильтры, конвертеры и валидацию, но без сети и без Tomcat. Запрос выполняется в потоке теста. <code>MockMvcTester</code> из Framework 6.2 даёт тот же MockMvc с проверками в стиле AssertJ: <code>hasStatus</code>, <code>bodyJson().extractingPath</code>.</p>
+      <p>Когда нужен настоящий сервер — проверить Tomcat, фильтры сервлет-контейнера, таймауты — используют <code>@SpringBootTest(webEnvironment = RANDOM_PORT)</code> и HTTP-клиент. В Framework 7 для этого появился <code>RestTestClient</code>. Помни о предыдущем шаге: такой тест не откатывает данные.</p>
+      <p>Моки внешних систем удобны, но проверяют только твоё представление о них. Если банк меняет формат ответа, тест с mock-ом останется зелёным. Для HTTP-клиентов полезен <code>@RestClientTest</code> с <code>MockRestServiceServer</code> или WireMock — они проверяют реальный разбор ответа. Контракт с другими сервисами фиксируют контрактными тестами.</p>
+    </section>
+
+    <section class="step" id="testcontainers">
+      <h2>Testcontainers даёт настоящий PostgreSQL, а @ServiceConnection — настройки к нему</h2>
+      <p>H2 в режиме совместимости похож на PostgreSQL, но не равен ему. Репозиторий демо пишет <code>insert … returning id</code> и создаёт таблицу с <code>bigserial</code>. Это синтаксис PostgreSQL. Тест на H2 либо упадёт, либо будет проверять другой SQL, чем работает в проде. Testcontainers запускает настоящую базу в Docker на время тестов.</p>
+      <pre><code class="language-java">// Один контейнер на контекст; @ServiceConnection сам задаёт spring.datasource.*.
+@TestConfiguration(proxyBeanMethods = false)
+class Containers {
+    @Bean
+    @ServiceConnection
+    PostgreSQLContainer postgres() {
+        return new PostgreSQLContainer("postgres:17-alpine");
+    }
+}</code></pre>
+      <p><code>@ServiceConnection</code> (с Boot 3.1) берёт адрес, порт, логин и пароль из запущенного контейнера и подставляет их в автоконфигурацию DataSource. Раньше это делали через <code>@DynamicPropertySource</code> вручную. Контейнер — бин контекста: он стартует вместе с контекстом и останавливается с ним. Поэтому кеш контекстов заодно кеширует и контейнер, а у каждого нового контекста свой контейнер, как у D в демо.</p>
+      <p>В Testcontainers 2 изменились имена: модуль называется <code>testcontainers-postgresql</code> вместо <code>postgresql</code>, а класс лежит в пакете <code>org.testcontainers.postgresql</code> и больше не параметризован типом. Примеры из интернета для версии 1.x придётся поправить.</p>
+      <p>Цена — Docker в CI и время старта контейнера. Его сокращают одним контейнером на весь набор: static-поле в базовом классе или общая конфигурация, которую импортируют все интеграционные тесты, чтобы контекст был один. Для локальной разработки есть повторное использование контейнеров между запусками и <code>spring-boot-docker-compose</code>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>@SpringBootTest поднимает весь контекст, срез вроде @WebMvcTest — только свой слой; остальное подменяют @MockitoBean.</li>
+        <li>Контексты кешируются по полной конфигурации теста; уникальные моки, свойства и профили множат контексты и время.</li>
+        <li>@Transactional откатывает только транзакцию потока теста: HTTP на RANDOM_PORT, @Async и REQUIRES_NEW коммитят.</li>
+        <li>@MockitoBean заменил удалённую в Boot 4 @MockBean; MockMvcTester проверяет MVC без сервера.</li>
+        <li>Testcontainers с @ServiceConnection даёт настоящую базу; контейнер живёт столько же, сколько контекст.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="testing-slices" data-freq="3">
+      <h3>Чем @SpringBootTest отличается от @WebMvcTest и когда что использовать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@SpringBootTest поднимает весь контекст приложения: все бины, базу, клиентов. Он проверяет совместную работу слоёв, но медленный. @WebMvcTest — срез: только контроллеры и инфраструктура Spring MVC, без сервисов и базы, их подменяю через @MockitoBean. В демо срез поднял 112 бинов против 195 у полного контекста.</p>
+          <p>Срезом проверяю то, что делает фреймворк в своём слое: JSON, валидацию, коды ответов, обработку ошибок. Полный контекст с Testcontainers — для пути от HTTP до базы. Логику без Spring — обычными юнит-тестами.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Другие срезы: @DataJpaTest, @JdbcTest, @JsonTest, @RestClientTest; в Boot 4 они лежат в модулях своих технологий.</li>
+            <li>Вложенные @Component-классы в главном классе и свой @ComponentScan ломают фильтрацию срезов.</li>
+            <li>Срез с кучей @MockitoBean — сигнал, что контроллер делает слишком много.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="testing-context-cache" data-freq="2">
+      <h3>Почему набор Spring-тестов медленный и как его ускорить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обычно из-за числа поднятых контекстов. Spring TestContext кеширует контекст по конфигурации теста, и классы с одинаковой конфигурацией используют один контекст. Но каждый уникальный набор @MockitoBean, свойств, профилей или @Import создаёт новый контекст, а @DirtiesContext выбрасывает его.</p>
+          <p>Я свожу тесты к нескольким общим конфигурациям: общий базовый класс с моками, один контейнер базы на набор, срезы вместо полного контекста там, где он не нужен. Статистику кеша видно в DEBUG-логе org.springframework.test.context.cache.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Кеш живёт в JVM; параллельные форки surefire поднимают контексты каждый у себя.</li>
+            <li>maxSize кеша по умолчанию 32; живые контексты держат пулы соединений и контейнеры.</li>
+            <li>@MockitoBean входит в ключ кеша, поэтому разный набор моков — разный контекст.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="testing-transactional" data-freq="2">
+      <h3>Что делает @Transactional в тесте и какие у него ловушки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Открывает транзакцию вокруг каждого тестового метода и откатывает её в конце, так что тесты не оставляют данных. В демо один тест сохранил платёж, а следующий класс с тем же контекстом увидел пустую таблицу.</p>
+          <p>Ловушка — откатывается только транзакция потока теста. Запрос к серверу на RANDOM_PORT, @Async и REQUIRES_NEW коммитят свои транзакции, и данные остаются. И коммита в тесте нет, поэтому ошибки, которые проявляются при коммите, тест не видит.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Hibernate может не выполнить flush до отката; для проверки SQL вызывают flush явно.</li>
+            <li>AFTER_COMMIT-слушатели в тесте с откатом не срабатывают; для них нужен @Commit или тест без транзакции.</li>
+            <li>Тесты без транзакции чистят данные сами: уникальные ключи, удаление, отдельная схема.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот тест проходит один, но ломает соседние?</summary>
+          <pre><code class="language-java">@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
+@Transactional
+class PaymentApiTest {
+    @Autowired RestTestClient client;
+
+    @Test
+    void createsPayment() {
+        client.post().uri("/payments").body(new PaymentRequest("acc-1", 500))
+              .exchange().expectStatus().isCreated();
+    }
+}</code></pre>
+          <p>Запрос обрабатывает Tomcat в своём потоке и коммитит в своей транзакции. Тестовая транзакция в потоке теста пустая, её откат ничего не убирает. Платёж остаётся в базе, и тесты, которые считают строки, начинают зависеть от порядка запуска. Нужно чистить данные явно или проверять через MockMvc, где запрос идёт в потоке теста.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="testing-mocks" data-freq="2">
+      <h3>Чем @MockitoBean отличается от @Mock?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@Mock создаёт mock Mockito в обычном тесте, контекст Spring о нём не знает, и его передают в конструктор вручную. @MockitoBean заменяет бин в контексте Spring: все бины, которые внедряют этот тип, получат mock. Он сбрасывается после каждого теста.</p>
+          <p>@MockitoBean появился в Spring Framework 6.2 и заменил @MockBean из Boot, который устарел в 3.4 и удалён в Boot 4.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>@MockitoSpyBean оборачивает настоящий бин и позволяет переопределить отдельные методы.</li>
+            <li>Набор подменённых бинов входит в ключ кеша контекстов.</li>
+            <li>Mock внешней системы проверяет твоё представление о ней; разбор настоящих ответов проверяют MockRestServiceServer или WireMock.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-boot/reference/testing/index.html">Spring Boot Reference: Testing</a> — основа урока: @SpringBootTest, срезы, Testcontainers и @ServiceConnection.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/testing/testcontext-framework.html">Spring Framework Reference: TestContext Framework</a> — кеш контекстов, тестовые транзакции, @MockitoBean, MockMvcTester.</li>
+      <li><a href="https://java.testcontainers.org/">Testcontainers for Java</a> — модули, жизненный цикл контейнеров, переход на 2.x.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

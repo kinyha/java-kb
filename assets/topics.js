@@ -574,7 +574,7 @@ window.KB_TREE = [
         { id: 'spring-async', freq: 2, status: 'draft', title: 'Scheduling & Async',
           scope: '@Async и его пул, @Scheduled, TaskExecutor, ShedLock в кластере' },
       ] },
-      { id: 'spring-testing', freq: 2, status: 'empty', title: 'Testing',
+      { id: 'spring-testing', freq: 2, status: 'draft', title: 'Testing',
         scope: '@SpringBootTest, тестовые срезы, MockMvc, @MockitoBean, кеш контекста, Testcontainers' },
       { id: 'spring-cloud', freq: 1, status: 'empty', title: 'Spring Cloud',
         scope: 'Config, Gateway, discovery, Resilience4j, OpenFeign' },
