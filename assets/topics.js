@@ -223,7 +223,7 @@ window.KB_TREE = [
           scope: 'ROW_NUMBER, RANK и DENSE_RANK, LAG и LEAD, нарастающий итог, топ-N в группе' },
         { id: 'sql-practice', freq: 3, status: 'empty', title: 'SQL Practice',
           scope: 'задачи на live coding: дубликаты, второй по величине, топ-N в группе, агрегаты по счетам' },
-        { id: 'plsql', freq: 2, status: 'empty', title: 'Stored Procedures',
+        { id: 'plsql', freq: 2, status: 'draft', title: 'Stored Procedures',
           scope: 'процедуры и функции, триггеры, PL/pgSQL и PL/SQL, курсоры, когда логика живёт в БД' },
       ] },
       { id: 'schema', title: 'Schema', items: [

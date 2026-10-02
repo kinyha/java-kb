@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stored Procedures · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="plsql">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Stored Procedures</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Хранимые функции и процедуры выполняют логику внутри базы: PL/pgSQL в PostgreSQL, PL/SQL в Oracle. Их главный выигрыш — меньше кругов по сети: несколько запросов с проверками становятся одним вызовом, а данные не уходят в приложение. Функция возвращает значение и вызывается в SELECT; процедура вызывается CALL и может сама коммитить. Триггеры выполняются на каждое изменение строки и подходят для аудита и инвариантов, но делают запись дороже и скрывают логику. Курсор читает большой результат порциями. Цена логики в базе — тестирование, версионирование, отладка и масштабирование, поэтому в неё выносят то, что действительно связано с данными.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Банк держит логику в PL/SQL, а новый сервис на Java читает миллион строк и падает по памяти</h2>
+      <p>В банковских системах до сих пор много логики живёт в базе: расчёт процентов, проводки, проверки лимитов в PL/SQL-пакетах. Новый Java-сервис должен вызывать эти процедуры, обрабатывать их ошибки и не ломать их инварианты. А его ночная выгрузка читает миллион операций одним запросом и падает с <code>OutOfMemoryError</code>, хотя обрабатывает строки по одной.</p>
+      <p>Тема разбирает хранимые функции, процедуры, триггеры и курсоры на примере PL/pgSQL и то, когда логика должна жить в базе. Блокировки и порядок захвата — в <a href="db-locks.html">Locks</a>, круги по сети и N+1 — в <a href="slow-queries.html">Slow Queries</a>, JDBC — в <a href="jdbc.html">JDBC &amp; Connection Pools</a>. Демо <a href="../examples/db-tx/PlpgsqlDemo.java">PlpgsqlDemo.java</a> работает с PostgreSQL 17 в Docker.</p>
+    </section>
+
+    <section class="step" id="function">
+      <h2>Функция выполняет несколько шагов за один вызов</h2>
+      <pre><code class="language-sql">create function transfer(p_from int, p_to int, p_amount bigint) returns bigint
+language plpgsql as $$
+declare v_balance bigint;
+begin
+    -- Блокируем счета в порядке id, чтобы встречные переводы не попали в deadlock.
+    perform 1 from account where id in (p_from, p_to) order by id for update;
+    select balance into v_balance from account where id = p_from;
+    if v_balance &lt; p_amount then
+        raise exception 'insufficient funds on account %', p_from using errcode = 'P0901';
+    end if;
+    update account set balance = balance - p_amount where id = p_from;
+    update account set balance = balance + p_amount where id = p_to;
+    return v_balance - p_amount;
+end $$;</code></pre>
+      <pre class="out">== 2000 transfers: from the app (3 statements + commit) 1048 ms, one function call + commit 556 ms
+== transfer over balance -&gt; SQLState P0901: ERROR: insufficient funds on account 1</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Слева перевод из приложения: блокировка, списание, зачисление и коммит — четыре круга между приложением и базой, и всё это время строки заблокированы. Справа вызов функции и коммит — два круга, блокировки держатся только внутри базы.">
+            <defs><marker id="rt-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="22" class="dg-cap bad">ИЗ ПРИЛОЖЕНИЯ: 4 КРУГА</text>
+            <text x="470" y="22" class="dg-cap">ФУНКЦИЯ: 2 КРУГА</text>
+            <text x="100" y="42" class="dg-in" text-anchor="middle">app</text>
+            <path d="M100 50 L 100 180" class="dg-sep" fill="none"/>
+            <text x="280" y="42" class="dg-in" text-anchor="middle">база</text>
+            <path d="M280 50 L 280 180" class="dg-sep" fill="none"/>
+            <text x="500" y="42" class="dg-in" text-anchor="middle">app</text>
+            <path d="M500 50 L 500 180" class="dg-sep" fill="none"/>
+            <text x="690" y="42" class="dg-in" text-anchor="middle">база</text>
+            <path d="M690 50 L 690 180" class="dg-sep" fill="none"/>
+            <rect x="274" y="56" width="12" height="118" rx="3" class="dg-cell miss"/>
+            <text x="294" y="112" class="dg-bad">строки</text><text x="294" y="128" class="dg-bad">заблокированы</text>
+            <path d="M100 58 L 276 66" class="dg-line" marker-end="url(#rt-n)"/>
+            <path d="M276 72 L 104 80" class="dg-line ok" marker-end="url(#rt-n)"/>
+            <text x="92" y="63" class="dg-n" text-anchor="end">for update</text>
+            <path d="M100 88 L 276 96" class="dg-line" marker-end="url(#rt-n)"/>
+            <path d="M276 102 L 104 110" class="dg-line ok" marker-end="url(#rt-n)"/>
+            <text x="92" y="93" class="dg-n" text-anchor="end">debit</text>
+            <path d="M100 118 L 276 126" class="dg-line" marker-end="url(#rt-n)"/>
+            <path d="M276 132 L 104 140" class="dg-line ok" marker-end="url(#rt-n)"/>
+            <text x="92" y="123" class="dg-n" text-anchor="end">credit</text>
+            <path d="M100 148 L 276 156" class="dg-line" marker-end="url(#rt-n)"/>
+            <path d="M276 162 L 104 170" class="dg-line ok" marker-end="url(#rt-n)"/>
+            <text x="92" y="153" class="dg-n" text-anchor="end">commit</text>
+            <rect x="684" y="60" width="12" height="40" rx="3" class="dg-cell miss"/>
+            <path d="M500 62 L 686 70" class="dg-line" marker-end="url(#rt-n)"/>
+            <path d="M686 82 L 504 90" class="dg-line ok" marker-end="url(#rt-n)"/>
+            <text x="492" y="67" class="dg-n" text-anchor="end">transfer()</text>
+            <path d="M500 122 L 686 130" class="dg-line" marker-end="url(#rt-n)"/>
+            <path d="M686 142 L 504 150" class="dg-line ok" marker-end="url(#rt-n)"/>
+            <text x="492" y="127" class="dg-n" text-anchor="end">commit</text>
+            <text x="20" y="196" class="dg-s">Каждый круг — задержка сети, и всё это время транзакция держит блокировки.</text>
+          </svg>
+        </div>
+        <figcaption>Функция выигрывает не скоростью PL/pgSQL, а тем, что транзакция не ждёт приложение между шагами.</figcaption>
+      </figure>
+      <p>Перевод из приложения — три запроса и коммит, четыре круга по сети на перевод. Через функцию — один вызов и коммит: вдвое быстрее даже на локальной машине, а в реальной сети разница больше. Пока транзакция ждёт следующего запроса приложения, она держит блокировки строк; в функции весь путь от блокировки до изменения проходит без пауз, и блокировки держатся меньше. Ошибка из функции приходит в Java как <code>SQLException</code> с заданным SQLSTATE <code>P0901</code>, по которому приложение отличает «недостаточно средств» от прочих ошибок.</p>
+      <p>Функция выполняется в транзакции вызывающего: <code>raise exception</code> откатывает всё, что она сделала. Блок <code>BEGIN ... EXCEPTION</code> внутри PL/pgSQL перехватывает ошибку, но создаёт подтранзакцию, и в цикле по тысячам строк это заметно дорого. У функции важна категория изменчивости: <code>IMMUTABLE</code> и <code>STABLE</code> позволяют планировщику вычислять её реже и использовать в индексах по выражению, а неверно объявленная <code>IMMUTABLE</code> функция, читающая таблицы, даёт неверные результаты.</p>
+    </section>
+
+    <section class="step" id="procedure">
+      <h2>Процедура может коммитить сама, функция — нет</h2>
+      <pre><code class="language-sql">create procedure archive_old_payments() language plpgsql as $$
+declare v_rows int;
+begin
+    loop
+        delete from payment where id in (select id from payment where created_at &lt; now() - interval '3 years' limit 10000);
+        get diagnostics v_rows = row_count;
+        exit when v_rows = 0;
+        commit;                       -- пачками, без одной огромной транзакции
+    end loop;
+end $$;
+call archive_old_payments();</code></pre>
+      <p>С PostgreSQL 11 есть процедуры: они вызываются <code>CALL</code>, не возвращают значение в запрос и могут выполнять <code>COMMIT</code> и <code>ROLLBACK</code> внутри. Это нужно для длинной фоновой работы пачками: каждая пачка коммитится отдельно, блокировки и горизонт VACUUM не держатся часами, как разобрано в <a href="mvcc.html">MVCC</a>. Функция всегда выполняется внутри транзакции вызывающего и коммитить не может. В Oracle процедуры и функции объединяют в пакеты PL/SQL с общим состоянием сессии; в PostgreSQL пакетов нет, их заменяют схемы.</p>
+    </section>
+
+    <section class="step" id="trigger">
+      <h2>Триггер выполняется на каждую строку: удобно для аудита, дорого для массовых изменений</h2>
+      <pre><code class="language-sql">create function audit_balance() returns trigger language plpgsql as $$
+begin
+    if new.balance &lt;&gt; old.balance then
+        insert into account_audit(account_id, old_balance, new_balance) values (old.id, old.balance, new.balance);
+    end if;
+    return new;
+end $$;
+create trigger account_audit_trg after update on account for each row execute function audit_balance();</code></pre>
+      <pre class="out">== update 1000 accounts: without trigger 2.2 ms, with row trigger 3.2 ms, audit rows 1000</pre>
+      <p>Триггер аудита записал строку истории на каждое изменение баланса — независимо от того, какой сервис или скрипт изменил счёт. Это его сила: инвариант или аудит, который нельзя обойти. Цена — каждый UPDATE теперь две записи, и массовое обновление тысячи счетов стало в полтора раза дольше; на миллионах строк с несколькими триггерами разница кратная. Вторая цена — скрытность: разработчик смотрит в код сервиса и не видит, что изменение счёта пишет ещё в две таблицы и проверяет лимиты.</p>
+      <p>Триггеры уместны для аудита, поддержания денормализованных счётчиков и инвариантов, которые нельзя выразить ограничением. Бизнес-процессы — отправка писем, вызовы других сервисов — в триггерах не делают: они выполняются внутри транзакции, и откат её не отменит отправленное. Для событий наружу есть outbox, как в <a href="outbox.html">Transactional Outbox</a>, и запись в таблицу outbox из триггера — один из рабочих способов его наполнять.</p>
+    </section>
+
+    <section class="step" id="cursor">
+      <h2>Курсор читает большой результат порциями, а не целиком в память</h2>
+      <pre><code class="language-java">c.setAutoCommit(false);          // курсор драйвер открывает только в транзакции
+var st = c.createStatement();
+st.setFetchSize(1000);           // 0 — по умолчанию: весь результат в память
+var rs = st.executeQuery("select g, md5(g::text) from generate_series(1, 1000000) g");</code></pre>
+      <pre class="out">== read 1M rows, fetchSize    0: first row after  624 ms, heap growth at first row ~138 MB, rows 1000000
+== read 1M rows, fetchSize 1000: first row after   24 ms, heap growth at first row ~0 MB, rows 1000000</pre>
+      <p>По умолчанию драйвер PostgreSQL читает весь результат в память, прежде чем отдать первую строку: 138 МБ кучи и 624 мс до первой строки на миллионе строк. На десятках миллионов это <code>OutOfMemoryError</code> из истории выше. С <code>setFetchSize(1000)</code> при выключенном автокоммите драйвер открывает серверный курсор и забирает строки по тысяче: первая строка через 24 мс, память почти не растёт. В JPA то же делает <code>Stream</code> из репозитория с подсказкой <code>HINT_FETCH_SIZE</code>. Внутри PL/pgSQL цикл <code>for row in select ...</code> сам использует курсор, а курсор, объявленный явно, можно вернуть из функции как <code>refcursor</code>.</p>
+      <div class="trap">
+        <p class="myth">Логика в хранимых процедурах всегда быстрее, поэтому её стоит переносить в базу.</p>
+        <p class="fact">Быстрее она за счёт меньшего числа кругов по сети и коротких блокировок — в демо перевод вдвое быстрее. Но база — самый дорогой и трудно масштабируемый ресурс, а логику в ней сложнее тестировать, версионировать и отлаживать. В базу выносят операции, тесно связанные с данными: атомарные переводы, массовые преобразования, аудит. Остальное остаётся в приложении.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Функция PL/pgSQL делает несколько шагов за один вызов: 2000 переводов за 556 мс против 1048 из приложения; ошибки — со своим SQLSTATE.</li>
+        <li>Процедура (CALL, PostgreSQL 11+) может коммитить пачками; функция — только в транзакции вызывающего.</li>
+        <li>Триггер на строку — аудит и инварианты, которые не обойти, но каждое изменение дороже и логика скрыта.</li>
+        <li>setFetchSize с выключенным автокоммитом читает курсором: 24 мс до первой строки вместо 624 и почти без памяти.</li>
+        <li>В базу выносят то, что связано с данными; остальное — в приложении.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="plsql-when" data-freq="2">
+      <h3>Когда логику стоит держать в хранимых процедурах?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда она тесно связана с данными и выигрывает от выполнения рядом с ними: атомарный перевод с проверками за один вызов вместо нескольких кругов по сети, массовые преобразования без выгрузки в приложение, аудит и инварианты, которые нельзя обойти. Минусы — сложнее тестировать, версионировать и отлаживать, а нагрузка ложится на базу, которую трудно масштабировать.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Изменения функций и процедур — миграции, как и схема.</li>
+            <li>Короткая транзакция в функции держит блокировки меньше, чем та же логика из приложения.</li>
+            <li>SECURITY DEFINER выполняется с правами владельца; нужен явный search_path.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="plsql-func-proc" data-freq="2">
+      <h3>Чем функция отличается от процедуры в PostgreSQL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Функция возвращает значение, вызывается в SELECT и выполняется внутри транзакции вызывающего — коммитить не может. Процедура (с PostgreSQL 11) вызывается CALL, ничего не возвращает в запрос и может выполнять COMMIT и ROLLBACK внутри, что нужно для обработки пачками.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Категории IMMUTABLE, STABLE, VOLATILE влияют на оптимизацию; неверная категория даёт неверные результаты.</li>
+            <li>BEGIN … EXCEPTION создаёт подтранзакцию и дорог в циклах.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что опасного в этом триггере?</summary>
+          <pre><code class="language-sql">create function notify_merchant() returns trigger language plpgsql as $$
+begin
+    perform http_post('https://partner.example/hook', row_to_json(new)::text);   -- расширение http
+    return new;
+end $$;
+create trigger payment_notify after insert on payment for each row execute function notify_merchant();</code></pre>
+          <p>Сетевой вызов внутри триггера выполняется в транзакции вставки: она ждёт партнёра и держит блокировки, а медленный или недоступный партнёр замедлит или сломает вставку платежей. Если транзакция откатится, уведомление уже уйдёт. Триггер должен только записать событие в таблицу outbox, а отправку делает отдельный ретранслятор после коммита.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="plsql-cursor" data-freq="2">
+      <h3>Как прочитать из базы миллион строк в Java, не съев всю память?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Драйвер PostgreSQL по умолчанию загружает весь результат в память. Нужно выключить автокоммит и задать setFetchSize — тогда драйвер откроет серверный курсор и будет забирать строки порциями. В демо первая строка пришла через 24 мс вместо 624, а куча почти не выросла.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Spring Data — Stream с HINT_FETCH_SIZE внутри транзакции; в JdbcTemplate — setFetchSize.</li>
+            <li>Долгий курсор держит транзакцию и горизонт VACUUM; большие выгрузки делят на порции по keyset.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/plpgsql.html">PostgreSQL 17: PL/pgSQL</a> — основа урока: функции, процедуры, исключения, курсоры, триггеры.</li>
+      <li><a href="https://jdbc.postgresql.org/documentation/query/#getting-results-based-on-a-cursor">pgjdbc: Getting results based on a cursor</a> — fetchSize и автокоммит.</li>
+      <li><a href="https://www.postgresql.org/docs/17/xfunc-volatility.html">Function Volatility Categories</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
