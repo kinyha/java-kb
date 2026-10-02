@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Locks · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="db-locks">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Locks</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Блокировка строки — способ сказать «я принимаю решение по этим данным, не меняйте их, пока я не закончу». <code>SELECT ... FOR UPDATE</code> блокирует строки до конца транзакции, и конкурент ждёт; <code>NOWAIT</code> и <code>SKIP LOCKED</code> позволяют не ждать. Оптимистичная блокировка не держит ничего, а проверяет версию при записи и требует повтора при конфликте. Две транзакции, захватывающие строки в разном порядке, попадают во взаимоблокировку, и PostgreSQL через секунду убивает одну. Блокировки таблиц берут DDL-команды, и ожидающий <code>ALTER TABLE</code> останавливает за собой даже обычные SELECT.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Переводы между счетами иногда падают с deadlock, а миграция на минуту остановила весь сервис</h2>
+      <p>Сервис переводов блокирует оба счёта и меняет балансы. Под нагрузкой часть переводов падает с <code>deadlock detected</code>, хотя код «правильный». В другой день разработчик запустил миграцию, добавляющую колонку — операция мгновенная, — и на минуту все запросы к таблице счетов встали: миграция ждала долгий отчёт, а остальные ждали миграцию.</p>
+      <p>Тема разбирает блокировки PostgreSQL: строк и таблиц, пессимистичные и оптимистичные, взаимоблокировки и очередь ожидания. Аномалии, от которых блокировки защищают, — в <a href="db-tx.html">ACID &amp; Isolation</a>, почему читатели не блокируют писателей — в <a href="mvcc.html">MVCC</a>, <code>@Version</code> и блокировки в JPA — в <a href="jpa-locking.html">Locking &amp; Caching</a>. Демо <a href="../examples/db-tx/LocksDemo.java">LocksDemo.java</a> работает с PostgreSQL 17 в Docker, несколькими соединениями JDBC.</p>
+    </section>
+
+    <section class="step" id="row-locks">
+      <h2>FOR UPDATE блокирует строку до конца транзакции, и конкурент ждёт</h2>
+      <pre><code class="language-java">a: select balance from account where id = 'acc-1' for update;   // A заблокировала строку.
+b: select balance from account where id = 'acc-1' for update;   // B ждёт.
+a: update account set balance = balance - 30 ...; commit;       // B получает строку.</code></pre>
+      <pre class="out">== waiting: Lock/transactionid — select balance from account where id = 'acc-1' for update
+== B got the row after 318 ms, balance 70</pre>
+      <p>B ждала, пока A не закоммитит, и получила уже новое значение 70: блокировка превратила «прочитать, проверить, записать» в последовательные операции. <code>pg_stat_activity</code> показывает ожидание типа <code>Lock/transactionid</code>: в PostgreSQL блокировка строки записывается в саму строку, а ждут завершения транзакции, которая её держит. Блокировки строк держатся до конца транзакции — коммита или отката, — поэтому транзакция с блокировками должна быть короткой и не ходить в сеть: вызов банка внутри неё держит строку всё время ответа банка.</p>
+      <table class="mx">
+        <thead><tr><th>Режим</th><th>Кто берёт</th><th>Что блокирует</th></tr></thead>
+        <tbody>
+          <tr><td><code>FOR UPDATE</code></td><td>Явно; DELETE, UPDATE ключевых колонок</td><td>Любые изменения и все остальные блокировки строки</td></tr>
+          <tr><td><code>FOR NO KEY UPDATE</code></td><td>Обычный UPDATE неключевых колонок</td><td>Изменения, но не FOR KEY SHARE</td></tr>
+          <tr><td><code>FOR SHARE</code></td><td>Явно</td><td>Изменения; другие FOR SHARE совместимы</td></tr>
+          <tr><td><code>FOR KEY SHARE</code></td><td>Проверка внешнего ключа при вставке в дочернюю таблицу</td><td>Удаление и смену ключа</td></tr>
+        </tbody>
+      </table>
+      <p>Четыре режима нужны, чтобы вставка платежа со ссылкой на магазин не ждала, пока кто-то обновляет название магазина: проверка внешнего ключа берёт <code>FOR KEY SHARE</code>, а обычный UPDATE — <code>FOR NO KEY UPDATE</code>, и они совместимы.</p>
+    </section>
+
+    <section class="step" id="no-wait">
+      <h2>NOWAIT, SKIP LOCKED и lock_timeout — когда ждать нельзя</h2>
+      <pre class="out">== FOR UPDATE NOWAIT: 55P03 ERROR: could not obtain lock on row in relation "account"</pre>
+      <p><code>NOWAIT</code> сразу возвращает ошибку 55P03, если строка занята: пользователю лучше сразу ответить «операция уже выполняется», чем держать его запрос. <code>SKIP LOCKED</code> пропускает занятые строки и возвращает свободные — так несколько воркеров разбирают очередь задач в таблице, не мешая друг другу, как ретрансляторы в <a href="outbox.html">Transactional Outbox</a>. <code>lock_timeout</code> ограничивает ожидание любой блокировки временем, после которого запрос падает с той же 55P03. Для запросов приложения его ставят чуть меньше таймаута HTTP-запроса, чтобы зависшее ожидание не держало соединение из пула.</p>
+    </section>
+
+    <section class="step" id="optimistic">
+      <h2>Оптимистичная блокировка ничего не держит, а проверяет версию при записи</h2>
+      <pre><code class="language-sql">update account set balance = :new, version = version + 1
+where id = 'acc-2' and version = :readVersion;   -- 0 строк: кто-то успел раньше</code></pre>
+      <pre class="out">== optimistic: A updated 1 row, B updated 0 rows (version changed) -&gt; B retries</pre>
+      <p>Обе транзакции прочитали версию 0 без блокировок. A записала и увеличила версию, а UPDATE B с условием <code>version = 0</code> не нашёл строки: B узнаёт о конфликте по счётчику обновлённых строк и повторяет операцию, перечитав данные. Так работает <code>@Version</code> в JPA. Оптимистичный подход выигрывает, когда конфликты редки и между чтением и записью проходит много времени — например, пользователь редактирует карточку магазина минуту. Пессимистичный — когда конфликты часты: при оптимистичном каждый конфликт стоит повторной работы, а при сотне конкурентов на одну строку повторы съедят всё.</p>
+    </section>
+
+    <section class="step" id="deadlock">
+      <h2>Встречные переводы захватывают строки в разном порядке и попадают во взаимоблокировку</h2>
+      <p>Перевод A со счёта 1 на счёт 2 и встречный перевод B со счёта 2 на счёт 1 начинаются одновременно. Каждый первым делом списывает со своего счёта, блокируя его строку, а потом идёт за второй:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="A блокирует acc-1, B блокирует acc-2. A ждёт acc-2, B ждёт acc-1: цикл ожидания. Через deadlock_timeout PostgreSQL проверяет граф ожидания, находит цикл и отменяет B, после чего A завершается.">
+            <defs>
+              <marker id="dl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="40" y="30" width="140" height="56" rx="9" class="dg-box"/>
+            <rect x="40" y="120" width="140" height="56" rx="9" class="dg-box"/>
+            <rect x="500" y="30" width="160" height="56" rx="9" class="dg-cell"/>
+            <rect x="500" y="120" width="160" height="56" rx="9" class="dg-cell"/>
+            <g text-anchor="middle">
+              <text x="110" y="62" class="dg-in">A: 1 → 2</text>
+              <text x="110" y="152" class="dg-in">B: 2 → 1</text>
+              <text x="580" y="62" class="dg-in">acc-1</text>
+              <text x="580" y="152" class="dg-in">acc-2</text>
+            </g>
+            <path data-s="1-3" d="M180 50 L 496 50" class="dg-line" marker-end="url(#dl-n)"/>
+            <text data-s="1-3" x="300" y="42" class="dg-n">держит</text>
+            <path data-s="1-2" d="M180 160 L 496 160" class="dg-line" marker-end="url(#dl-n)"/>
+            <text data-s="1-2" x="300" y="176" class="dg-n">держит</text>
+            <path data-s="2" d="M180 70 C 340 80, 380 130, 496 140" class="dg-line bad" marker-end="url(#dl-bad)"/>
+            <text data-s="2" x="226" y="98" class="dg-bad">A ждёт</text>
+            <path data-s="3" d="M180 70 C 340 80, 380 130, 496 140" class="dg-line ok" marker-end="url(#dl-n)"/>
+            <text data-s="3" x="226" y="98" class="dg-ok">A получает</text>
+            <path data-s="2" d="M180 140 C 340 130, 380 80, 496 66" class="dg-line bad" marker-end="url(#dl-bad)"/>
+            <text data-s="2" x="226" y="128" class="dg-bad">B ждёт</text>
+            <rect data-s="3" x="34" y="114" width="152" height="68" rx="11" class="dg-cell miss" fill-opacity="0.5"/>
+            <text data-s="1" x="20" y="202" class="dg-t">Каждый списал со своего счёта и держит его строку.</text>
+            <text data-s="2" x="20" y="202" class="dg-bad">A ждёт acc-2 у B, B ждёт acc-1 у A: цикл.</text>
+            <text data-s="3" x="20" y="202" class="dg-ok">Через deadlock_timeout B отменена 40P01, A продолжает.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>A заблокировала acc-1, B — acc-2, каждая своим первым UPDATE.</li>
+          <li>A пытается обновить acc-2 и ждёт B, B пытается обновить acc-1 и ждёт A. Ни одна не закончится сама.</li>
+          <li>Через deadlock_timeout (1 секунда) ожидающий процесс проверяет граф ожиданий, находит цикл и отменяет одну из транзакций ошибкой 40P01. Вторая получает строку и завершается.</li>
+        </ol>
+      </figure>
+      <pre class="out">== deadlock detected after 1009 ms: A ok; B 40P01 ERROR: deadlock detected</pre>
+      <p>PostgreSQL не ищет взаимоблокировки постоянно: проверка запускается, если ожидание длится дольше <code>deadlock_timeout</code>, поэтому до ошибки прошла секунда. Транзакция-жертва откатывается целиком, и её нужно повторить. Предотвращают взаимоблокировки единым порядком захвата: перевод блокирует счета в порядке возрастания id — <code>select ... where id in (:from, :to) order by id for update</code> — независимо от направления. Тогда второй перевод будет ждать первый, но цикла не возникнет. Короткие транзакции и повтор при 40P01 закрывают остальное.</p>
+    </section>
+
+    <section class="step" id="table-locks">
+      <h2>Ожидающий ALTER TABLE ставит в очередь за собой все запросы к таблице</h2>
+      <p>Любой запрос к таблице берёт на неё лёгкую блокировку: SELECT — <code>ACCESS SHARE</code>, UPDATE — <code>ROW EXCLUSIVE</code>. Они совместимы друг с другом. Но большинство <code>ALTER TABLE</code> требуют <code>ACCESS EXCLUSIVE</code>, несовместимую ни с чем. Демо держит открытой транзакцию отчёта, запускает добавление колонки и затем обычный SELECT:</p>
+      <pre class="out">   waiting: alter table account add column note text (relation)
+   waiting: select balance from account where id = 'acc-1' (relation)
+== plain SELECT behind waiting ALTER: 57014 after 1001 ms
+   report finished -&gt; ALTER done
+== ALTER with lock_timeout 200ms: 55P03 after 211 ms, others not blocked</pre>
+      <p>ALTER ждёт, пока отчёт отпустит <code>ACCESS SHARE</code>. А SELECT, пришедший после ALTER, встаёт в очередь за ним: его блокировка совместима с отчётом, но не с ожидающим ALTER, и PostgreSQL не пропускает его вперёд, чтобы ALTER не ждал вечно. Сама операция добавления колонки мгновенна, но пока долгий отчёт не закончится, таблица недоступна для всех — SELECT упал по <code>statement_timeout</code> через секунду. Так миграция и остановила сервис.</p>
+      <p>Защита — <code>lock_timeout</code> для DDL: если блокировку не удалось получить за 200 мс, ALTER падает, очередь рассасывается, а миграцию повторяют позже. Миграционные инструменты делают это обёрткой с повторами. Как менять схему без простоя, разобрано в <a href="db-migrations.html">Schema Migrations</a>.</p>
+      <div class="trap">
+        <p class="myth">ALTER TABLE ADD COLUMN без значения по умолчанию мгновенный, поэтому его можно запускать под нагрузкой без подготовки.</p>
+        <p class="fact">Мгновенно само изменение, но ему нужна ACCESS EXCLUSIVE, и пока он её ждёт, все новые запросы к таблице стоят за ним. Один долгий запрос превращает мгновенную миграцию в остановку таблицы. DDL запускают с lock_timeout и повторами.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>FOR UPDATE держит строку до конца транзакции: B ждала 318 мс и получила новое значение. Внутри транзакции с блокировками — никаких сетевых вызовов.</li>
+        <li>NOWAIT — сразу 55P03, SKIP LOCKED — свободные строки, lock_timeout — предел ожидания.</li>
+        <li>Оптимистичная версия: 0 обновлённых строк сигналит о конфликте и требует повтора.</li>
+        <li>Встречные переводы дали 40P01 через deadlock_timeout; лечат единым порядком захвата и повтором.</li>
+        <li>Ожидающий ALTER TABLE блокирует все запросы за собой; DDL — с lock_timeout.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="locks-pess-opt" data-freq="3">
+      <h3>Оптимистичная или пессимистичная блокировка: что и когда?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Пессимистичная — SELECT ... FOR UPDATE: строка блокируется на время транзакции, конкуренты ждут. Подходит при частых конфликтах и коротких транзакциях. Оптимистичная — колонка версии и UPDATE ... WHERE version = :v: ничего не держится, конфликт обнаруживается по нулю обновлённых строк, операцию повторяют. Подходит при редких конфликтах и долгом времени между чтением и записью.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>При частых конфликтах оптимистичный подход тратит ресурсы на повторы.</li>
+            <li>Пессимистичная блокировка держит строку и соединение; сетевые вызовы внутри неё продлевают ожидание всех.</li>
+            <li>NOWAIT и SKIP LOCKED меняют ожидание на ошибку или пропуск.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="locks-deadlock" data-freq="3">
+      <h3>Как возникает deadlock в базе и как его избежать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Две транзакции захватывают одни и те же строки в разном порядке: A держит первую и ждёт вторую, B держит вторую и ждёт первую. PostgreSQL через deadlock_timeout (1 с) находит цикл и отменяет одну транзакцию с 40P01. Избегают единым порядком захвата — например, по возрастанию id, — короткими транзакциями и повтором при 40P01.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Порядок обновления строк в одном UPDATE не определён; для нескольких строк блокируют явно с ORDER BY.</li>
+            <li>Взаимоблокировки бывают и между блокировками строк и внешних ключей, и при DDL.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот перевод иногда падает с deadlock?</summary>
+          <pre><code class="language-java">@Transactional
+public void transfer(String from, String to, long amount) {
+    Account a = accounts.findByIdForUpdate(from);
+    Account b = accounts.findByIdForUpdate(to);
+    a.debit(amount);
+    b.credit(amount);
+}</code></pre>
+          <p>Строки блокируются в порядке «откуда, куда», а встречный перевод блокирует их в обратном порядке: каждая транзакция держит свой счёт и ждёт чужой. Нужно блокировать оба счёта в едином порядке — по возрастанию id, одним запросом с ORDER BY id FOR UPDATE — и повторять транзакцию при 40P01.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="locks-ddl" data-freq="2">
+      <h3>Почему миграция может остановить все запросы к таблице?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Большинство ALTER TABLE берут ACCESS EXCLUSIVE, несовместимую ни с какими запросами. Если таблицу читает долгий запрос, ALTER ждёт его, а все новые запросы встают в очередь за ALTER. Даже мгновенная операция блокирует таблицу на время самого долгого запроса. Защита — lock_timeout для DDL и повторы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>CREATE INDEX CONCURRENTLY не блокирует запись, но работает дольше и не в транзакции.</li>
+            <li>Долгие транзакции и idle in transaction опасны и для миграций, и для VACUUM.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/explicit-locking.html">PostgreSQL 17: Explicit Locking</a> — основа урока: режимы блокировок таблиц и строк, взаимоблокировки.</li>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть III — блокировки строк, очередь ожидания, deadlock_timeout.</li>
+      <li><a href="https://www.postgresql.org/docs/17/sql-select.html#SQL-FOR-UPDATE-SHARE">SELECT: The Locking Clause</a> — FOR UPDATE, NOWAIT, SKIP LOCKED.</li>
+      <li><a href="https://postgres.ai/blog/20210923-zero-downtime-postgres-schema-migrations-lock-timeout-and-retries">Postgres.ai: Zero-downtime migrations — lock_timeout and retries</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

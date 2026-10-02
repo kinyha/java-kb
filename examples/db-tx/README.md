@@ -7,4 +7,5 @@ docker run -d --name kb-pg -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:17-alp
 cd examples/db-tx
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
 java -cp "$(cat target/classpath.txt)" IsolationDemo.java
+java -cp "$(cat target/classpath.txt)" LocksDemo.java
 ```

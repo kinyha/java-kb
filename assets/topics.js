@@ -235,7 +235,7 @@ window.KB_TREE = [
       { id: 'tx', title: 'Transactions', source: 'PostgreSQL изнутри, ч. I и III; DDIA, гл. Transactions', items: [
         { id: 'db-tx', freq: 3, status: 'draft', title: 'ACID & Isolation',
           scope: 'ACID, уровни изоляции, dirty read, non-repeatable read, phantom, lost update, write skew, значения по умолчанию' },
-        { id: 'db-locks', freq: 3, status: 'empty', title: 'Locks',
+        { id: 'db-locks', freq: 3, status: 'draft', title: 'Locks',
           scope: 'блокировки строк и таблиц, SELECT FOR UPDATE, SKIP LOCKED, optimistic и pessimistic, deadlock' },
         { id: 'mvcc', freq: 2, status: 'empty', title: 'MVCC',
           scope: 'версии строк, снимки данных, почему читатели не блокируют писателей, xmin и xmax' },
