@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Indexes · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="indexes">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Indexes</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>B-tree индекс — отсортированный список значений с адресами строк, по которому база находит нужный диапазон за несколько страниц вместо чтения всей таблицы. В составном индексе порядок колонок решает всё: сначала колонки с условием равенства, потом колонка диапазона или сортировки. Покрывающий индекс содержит все нужные запросу колонки и отвечает без обращения к таблице. Индекс бесполезен, если запрос выбирает большую долю строк или строки разбросаны по всем страницам, если колонка обёрнута в функцию или шаблон начинается с <code>%</code>. Каждый индекс замедляет запись и занимает место.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Лента платежей магазина читала миллион строк ради двадцати</h2>
+      <p>Личный кабинет магазина показывает 20 последних платежей за период. На тестовой базе запрос шёл миллисекунды, на проде — сотни: таблица выросла до сотен миллионов строк. Индекс по <code>created_at</code> и <code>merchant</code> уже был, но помог слабо. Другой разработчик добавил индекс по статусу, чтобы ускорить отчёт по успешным платежам, — отчёт не ускорился, а вставка платежей замедлилась.</p>
+      <p>Тема разбирает, как устроен B-tree, почему порядок колонок важен, что такое покрывающий индекс и когда индекс не помогает. Чтение планов подробно — в <a href="query-tuning.html">Query Plans</a>, другие типы индексов — в <a href="index-types.html">Index Types</a>, keyset-пагинация по индексу — в <a href="api-practices.html">API Design</a>. Демо <a href="../examples/db-tx/IndexDemo.java">IndexDemo.java</a> работает с PostgreSQL 17 в Docker на таблице из миллиона платежей и показывает <code>EXPLAIN (ANALYZE, BUFFERS)</code>: сколько страниц прочитал запрос и сколько он шёл.</p>
+    </section>
+
+    <section class="step" id="btree">
+      <h2>B-tree — отсортированные значения со ссылками на строки</h2>
+      <p>Листья B-tree индекса — значения ключа в отсортированном порядке, и у каждого адрес строки в таблице. Над листьями — несколько уровней внутренних страниц, по которым поиск спускается к нужному листу: для миллиона строк это три уровня, для миллиарда — четыре-пять. Найдя начало диапазона, поиск идёт по листьям слева направо, а за каждой строкой ходит в таблицу. Поэтому индекс выигрывает, когда диапазон узкий, и проигрывает полному чтению, когда нужна большая часть таблицы.</p>
+      <pre><code class="language-sql">select id, amount from pay
+where merchant = 42 and created_at &gt;= '2026-09-01'
+order by created_at desc limit 20;</code></pre>
+      <pre class="out">== no index
+   Buffers: shared hit=12196
+   -&gt;  Seq Scan on pay (actual rows=160 loops=1)
+   Filter: ((created_at &gt;= '2026-09-01 00:00:00+03'::timestamp with time zone) AND (merchant = 42))
+   Rows Removed by Filter: 999840
+   Execution Time: 17.296 ms</pre>
+      <p>Без индекса база прочитала все 12 196 страниц таблицы, проверила миллион строк и отбросила 999 840 ради 160 подходящих, а потом отсортировала их ради двадцати. 17 мс на миллионе строк — терпимо, но время растёт линейно с таблицей.</p>
+    </section>
+
+    <section class="step" id="composite">
+      <h2>В составном индексе сначала равенство, потом диапазон</h2>
+      <pre class="out">== index (created_at, merchant)
+   Buffers: shared hit=39 read=80
+   -&gt;  Index Scan Backward using pay_created_merchant on pay (actual rows=20 loops=1)
+   Index Cond: ((created_at &gt;= '2026-09-01 00:00:00+03'::timestamp with time zone) AND (merchant = 42))
+   Execution Time: 0.330 ms
+== index (merchant, created_at)
+   Buffers: shared hit=20 read=3
+   -&gt;  Index Scan Backward using pay_merchant_created on pay (actual rows=20 loops=1)
+   Index Cond: ((merchant = 42) AND (created_at &gt;= '2026-09-01 00:00:00+03'::timestamp with time zone))
+   Execution Time: 0.035 ms</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Листья индекса (created_at, merchant): записи упорядочены по времени, магазины перемешаны, поиск идёт по всем записям после 1 сентября и отбрасывает чужие магазины. Листья индекса (merchant, created_at): записи магазина 42 лежат подряд и упорядочены по времени, поиск читает ровно двадцать последних.">
+            <text x="20" y="22" class="dg-cap bad">(created_at, merchant): ДИАПАЗОН ПО ВРЕМЕНИ, МАГАЗИН — ФИЛЬТР</text>
+            <rect x="20" y="36" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="55" y="54" class="dg-n" text-anchor="middle">09-01</text>
+            <text x="55" y="72" class="dg-in" text-anchor="middle">m-7</text>
+            <rect x="96" y="36" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="131" y="54" class="dg-n" text-anchor="middle">09-01</text>
+            <text x="131" y="72" class="dg-in" text-anchor="middle">m-42</text>
+            <rect x="172" y="36" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="207" y="54" class="dg-n" text-anchor="middle">09-01</text>
+            <text x="207" y="72" class="dg-in" text-anchor="middle">m-900</text>
+            <rect x="248" y="36" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="283" y="54" class="dg-n" text-anchor="middle">09-02</text>
+            <text x="283" y="72" class="dg-in" text-anchor="middle">m-3</text>
+            <rect x="324" y="36" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="359" y="54" class="dg-n" text-anchor="middle">09-02</text>
+            <text x="359" y="72" class="dg-in" text-anchor="middle">m-42</text>
+            <rect x="400" y="36" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="435" y="54" class="dg-n" text-anchor="middle">09-02</text>
+            <text x="435" y="72" class="dg-in" text-anchor="middle">m-77</text>
+            <rect x="476" y="36" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="511" y="54" class="dg-n" text-anchor="middle">09-03</text>
+            <text x="511" y="72" class="dg-in" text-anchor="middle">m-1</text>
+            <rect x="552" y="36" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="587" y="54" class="dg-n" text-anchor="middle">09-03</text>
+            <text x="587" y="72" class="dg-in" text-anchor="middle">m-42</text>
+            <rect x="628" y="36" width="70" height="44" rx="5" class="dg-cell miss"/>
+            <text x="663" y="54" class="dg-n" text-anchor="middle">…</text>
+            <text x="663" y="72" class="dg-in" text-anchor="middle">…</text>
+            <text x="20" y="98" class="dg-n">читает все записи с 1 сентября подряд, ищет среди них магазин 42</text>
+            <text x="20" y="128" class="dg-cap">(merchant, created_at): МАГАЗИН 42 ЛЕЖИТ ПОДРЯД</text>
+            <rect x="20" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="55" y="160" class="dg-n" text-anchor="middle">m-41</text>
+            <text x="55" y="178" class="dg-in" text-anchor="middle">09-30</text>
+            <rect x="96" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="131" y="160" class="dg-n" text-anchor="middle">m-42</text>
+            <text x="131" y="178" class="dg-in" text-anchor="middle">08-30</text>
+            <rect x="172" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="207" y="160" class="dg-n" text-anchor="middle">m-42</text>
+            <text x="207" y="178" class="dg-in" text-anchor="middle">09-01</text>
+            <rect x="248" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="283" y="160" class="dg-n" text-anchor="middle">m-42</text>
+            <text x="283" y="178" class="dg-in" text-anchor="middle">…</text>
+            <rect x="324" y="142" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="359" y="160" class="dg-n" text-anchor="middle">m-42</text>
+            <text x="359" y="178" class="dg-in" text-anchor="middle">09-29</text>
+            <rect x="400" y="142" width="70" height="44" rx="5" class="dg-cell hit"/>
+            <text x="435" y="160" class="dg-n" text-anchor="middle">m-42</text>
+            <text x="435" y="178" class="dg-in" text-anchor="middle">09-30</text>
+            <rect x="476" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="511" y="160" class="dg-n" text-anchor="middle">m-43</text>
+            <text x="511" y="178" class="dg-in" text-anchor="middle">01-01</text>
+            <rect x="552" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="587" y="160" class="dg-n" text-anchor="middle">m-43</text>
+            <text x="587" y="178" class="dg-in" text-anchor="middle">…</text>
+            <rect x="628" y="142" width="70" height="44" rx="5" class="dg-cell"/>
+            <text x="663" y="160" class="dg-n" text-anchor="middle">…</text>
+            <text x="663" y="178" class="dg-in" text-anchor="middle">…</text>
+            <text x="20" y="204" class="dg-n">спускается к (42, конец) и читает назад ровно 20 записей</text>
+          </svg>
+        </div>
+        <figcaption>Индекс отсортирован по первой колонке, а внутри неё — по второй. Условие равенства на первой колонке сужает поиск до непрерывного куска, и вторая колонка в нём уже упорядочена.</figcaption>
+      </figure>
+      <p>Оба индекса содержат обе колонки, но работают по-разному. В <code>(created_at, merchant)</code> записи упорядочены по времени, а магазины внутри перемешаны: поиск идёт от конца назад по всем платежам после 1 сентября и проверяет магазин у каждой — 119 страниц. В <code>(merchant, created_at)</code> все платежи магазина 42 лежат подряд, уже упорядоченные по времени: поиск спускается к концу этого куска и читает ровно 20 записей — 23 страницы, в десять раз быстрее. Отдельная сортировка не нужна: индекс отдаёт строки в нужном порядке.</p>
+      <p>Правило для составного индекса: сначала колонки с условием равенства, затем одна колонка с диапазоном или сортировкой. Колонки после диапазона индекс использует только как фильтр. Индекс <code>(a, b)</code> обслуживает и запросы только по <code>a</code>, но не только по <code>b</code>. Начиная с PostgreSQL 18 появился skip scan, который частично снимает это ограничение для колонок с малым числом значений, но для PostgreSQL 17 правило строгое.</p>
+    </section>
+
+    <section class="step" id="covering">
+      <h2>Покрывающий индекс отвечает без обращения к таблице</h2>
+      <pre class="out">== covering index (merchant, created_at) include (amount)
+   Buffers: shared hit=1 read=3
+   -&gt;  Index Only Scan Backward using pay_merchant_created_cov on pay (actual rows=20 loops=1)
+   Index Cond: ((merchant = 42) AND (created_at &gt;= '2026-09-01 00:00:00+03'::timestamp with time zone))
+   Heap Fetches: 0
+   Execution Time: 0.020 ms</pre>
+      <p>Если в индексе есть все колонки, которые нужны запросу, база может не ходить в таблицу вовсе: Index Only Scan прочитал 4 страницы вместо 23. <code>INCLUDE (amount)</code> кладёт колонку в листья индекса, не делая её частью ключа сортировки. Есть оговорка, связанная с <a href="mvcc.html">MVCC</a>: индекс не знает, видима ли версия строки, и Index Only Scan проверяет карту видимости — страницы, где все версии видны всем. Её обновляет VACUUM, поэтому на часто меняемой таблице без свежей очистки <code>Heap Fetches</code> будет большим, и выигрыш исчезнет. Здесь после VACUUM — ноль обращений к таблице.</p>
+    </section>
+
+    <section class="step" id="selectivity">
+      <h2>Индекс проигрывает, когда нужна большая часть таблицы или строки разбросаны</h2>
+      <pre class="out">== status = 'FAILED' (5% of rows)
+   Buffers: shared hit=12196 read=44
+   -&gt;  Index Scan using pay_status_idx on pay (actual rows=50000 loops=1)
+   Index Cond: (status = 'FAILED'::text)
+   Execution Time: 9.550 ms
+== status = 'CAPTURED' (95% of rows)
+   Buffers: shared hit=12196
+   -&gt;  Seq Scan on pay (actual rows=950000 loops=1)
+   Filter: (status = 'CAPTURED'::text)
+   Rows Removed by Filter: 50000
+   Execution Time: 40.026 ms</pre>
+      <p>Для 95 % строк планировщик выбрал полный проход по таблице и был прав: идти по индексу к каждой из 950 тысяч строк дороже, чем прочитать таблицу подряд. Индекс по статусу для такого отчёта бесполезен и только замедляет запись. Интереснее строка с FAILED: строк всего 5 %, индекс использован, но прочитаны все 12 196 страниц таблицы. Неудачные платежи — каждый двадцатый, на каждой странице есть хотя бы один, и индексный поиск всё равно трогает все страницы. Важна не только доля строк, но и их корреляция с физическим порядком: недавние платежи лежат рядом, а платежи одного статуса разбросаны.</p>
+      <p>Для редких значений помогает частичный индекс — <code>create index on pay(created_at) where status = 'FAILED'</code>: он хранит только нужные строки и меньше весит, о нём — в <a href="index-types.html">Index Types</a>.</p>
+    </section>
+
+    <section class="step" id="not-used">
+      <h2>Функция над колонкой и шаблон с % в начале выключают индекс</h2>
+      <pre class="out">== email = ...
+   -&gt;  Bitmap Index Scan on pay_email_idx (actual rows=20 loops=1)
+   Execution Time: 0.052 ms
+== lower(email) = ...
+   Seq Scan on pay (actual rows=20 loops=1)
+   Filter: (lower(email) = 'user777@mail.example'::text)
+   Rows Removed by Filter: 999980
+   Execution Time: 110.246 ms
+== lower(email) = ... with index on lower(email)
+   -&gt;  Bitmap Index Scan on pay_lower_idx (actual rows=20 loops=1)
+   Index Cond: (lower(email) = 'user777@mail.example'::text)
+   Execution Time: 0.049 ms
+== email like '%777@mail.example'
+   Seq Scan on pay (actual rows=1000 loops=1)
+   Filter: (email ~~ '%777@mail.example'::text)
+   Execution Time: 38.257 ms
+== insert 200k rows with 0 extra indexes: 121 ms
+== insert 200k rows with 4 extra indexes: 475 ms</pre>
+      <p>Индекс хранит значения <code>email</code>, а не <code>lower(email)</code>, поэтому условие с функцией превратило 0,05 мс в 110: полный проход с вычислением функции для миллиона строк. Решение — индекс по выражению, который хранит ровно то, что ищет запрос. Шаблон с <code>%</code> в начале не может использовать упорядоченность B-tree: неизвестно, с чего начинается строка; для поиска подстроки нужен триграммный GIN-индекс. Те же грабли — неявное приведение типов (сравнение <code>varchar</code>-колонки с числом), <code>OR</code> по разным колонкам и арифметика над колонкой: <code>created_at + interval '1 day' &gt; now()</code> вместо <code>created_at &gt; now() - interval '1 day'</code>.</p>
+      <p>У индексов есть цена. Вставка 200 тысяч строк с четырьмя дополнительными индексами заняла 475 мс вместо 121: каждый индекс обновляется при каждой вставке и при любом UPDATE, который не HOT. Индексы занимают место и память в shared buffers и раздуваются так же, как таблицы. Неиспользуемые индексы находят по <code>idx_scan = 0</code> в <code>pg_stat_user_indexes</code> и удаляют.</p>
+      <div class="trap">
+        <p class="myth">Если запрос медленный, нужно добавить индекс на каждую колонку из WHERE.</p>
+        <p class="fact">Отдельные индексы на колонки не заменяют один составной в правильном порядке: в демо индекс (created_at, merchant) прочитал 119 страниц, а (merchant, created_at) — 23. Индекс по колонке с низкой селективностью планировщик не использует, а каждый лишний индекс замедляет запись: 475 мс против 121.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>B-tree — отсортированные значения со ссылками на строки; без индекса — 12 196 страниц и миллион проверок ради 20 строк.</li>
+        <li>Составной индекс: сначала равенство, потом диапазон или сортировка; (merchant, created_at) — 23 страницы против 119.</li>
+        <li>INCLUDE даёт Index Only Scan: 4 страницы, Heap Fetches 0 — если карта видимости свежая.</li>
+        <li>Большая доля строк или разбросанные строки делают индекс бесполезным; частичный индекс для редких значений.</li>
+        <li>Функция над колонкой и LIKE '%…' выключают индекс; индекс по выражению и GIN. Каждый индекс замедляет запись.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="idx-composite" data-freq="3">
+      <h3>Как выбрать порядок колонок в составном индексе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Индекс отсортирован по первой колонке, внутри неё — по второй. Поэтому сначала идут колонки с условием равенства, затем одна колонка с диапазоном или ORDER BY. Тогда подходящие строки лежат непрерывным куском, уже упорядоченным. Индекс (a, b) обслуживает запросы по a и по a с b, но не по одной b.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Колонки после диапазона используются только как фильтр внутри диапазона.</li>
+            <li>Индекс может отдать строки в нужном порядке и убрать сортировку, включая обратный порядок.</li>
+            <li>Skip scan в PostgreSQL 18 частично ослабляет правило для первой колонки с малым числом значений.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Какой индекс нужен этому запросу?</summary>
+          <pre><code class="language-sql">select id, amount, created_at from payment
+where merchant_id = :m and status = 'CAPTURED' and created_at &gt;= :from
+order by created_at desc limit 50;
+-- есть индексы: (created_at), (merchant_id), (status)</code></pre>
+          <p>Три одноколоночных индекса не дают упорядоченного куска: база выберет один и будет фильтровать и сортировать остальное. Нужен составной (merchant_id, status, created_at) — равенства, затем диапазон и сортировка, — а с INCLUDE (amount) запрос станет index-only. Индекс только по status с низкой селективностью, скорее всего, лишний и замедляет запись.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="idx-not-used" data-freq="3">
+      <h3>Почему база может не использовать индекс?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Запрос выбирает большую долю строк, и полный проход дешевле. Строки разбросаны по страницам, и индекс всё равно трогает почти все. Колонка обёрнута в функцию или выражение, есть неявное приведение типов, шаблон LIKE начинается с %. Порядок колонок составного индекса не подходит к условию. Статистика устарела, и планировщик ошибается в оценке строк.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Индекс по выражению для функций, GIN с pg_trgm для подстрок.</li>
+            <li>Корреляция физического порядка с индексом влияет на стоимость Index Scan; Bitmap Scan сглаживает разбросанное чтение.</li>
+            <li>ANALYZE обновляет статистику; EXPLAIN ANALYZE показывает расхождение оценки и факта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="idx-covering" data-freq="2">
+      <h3>Что такое покрывающий индекс и Index Only Scan?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Индекс, содержащий все колонки, нужные запросу: ключевые и добавленные через INCLUDE. Тогда база отвечает из индекса без чтения таблицы — Index Only Scan. В демо это 4 страницы вместо 23.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>PostgreSQL проверяет видимость по карте видимости, которую обновляет VACUUM; без неё растут Heap Fetches.</li>
+            <li>INCLUDE-колонки не участвуют в сортировке и уникальности, но увеличивают размер индекса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Markus Winand, <a href="https://use-the-index-luke.com/">Use The Index, Luke</a> — основа урока: B-tree, составные индексы, функции и LIKE.</li>
+      <li><a href="https://www.postgresql.org/docs/17/indexes-multicolumn.html">PostgreSQL 17: Multicolumn Indexes</a> и <a href="https://www.postgresql.org/docs/17/indexes-index-only-scans.html">Index-Only Scans</a>.</li>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть V — устройство B-tree и методы доступа.</li>
+      <li><a href="https://www.postgresql.org/docs/17/indexes-expressional.html">Indexes on Expressions</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

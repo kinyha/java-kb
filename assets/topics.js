@@ -241,7 +241,7 @@ window.KB_TREE = [
           scope: 'версии строк, снимки данных, почему читатели не блокируют писателей, xmin и xmax' },
       ] },
       { id: 'perf', title: 'Performance', source: 'Use The Index, Luke; PostgreSQL изнутри, ч. IV–V', items: [
-        { id: 'indexes', freq: 3, status: 'empty', title: 'Indexes',
+        { id: 'indexes', freq: 3, status: 'draft', title: 'Indexes',
           scope: 'устройство B-tree, составной индекс и порядок колонок, покрывающий индекс, селективность, когда индекс не используется' },
         { id: 'index-types', freq: 1, status: 'empty', title: 'Index Types',
           scope: 'hash, GIN, GiST, BRIN, частичные индексы, индексы по выражению' },
