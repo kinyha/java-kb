@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Security: Architecture · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-security">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Security: Architecture</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Spring Security — это цепочка обычных сервлетных фильтров, которая стоит перед контроллерами. Запрос проходит её сверху вниз: сначала из него достают, кто пришёл, потом решают, можно ли ему сюда. Результат первого шага лежит в SecurityContext — ThreadLocal текущего запроса. Почти любое странное поведение — 401 вместо 403, пропавший пользователь в другом потоке, preflight без заголовков — объясняется тем, какой фильтр сработал и в каком порядке.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Стартер закрыл весь API, и даже правильный POST получает 401</h2>
+      <p>Платёжному API нужна защита. Команда добавляет <code>spring-boot-starter-security</code> и ни строчки конфигурации. Сервис поднимается, а в логе появляется сгенерированный пароль пользователя <code>user</code>. Мобильное приложение тут же начинает получать ошибки, а браузер внезапно открывает страницу входа.</p>
+      <p>Демо повторяет этот момент. Пароль задан через <code>spring.security.user.password=secret</code>, чтобы не читать его из лога. Программа шлёт пять запросов к одному контроллеру:</p>
+      <pre><code class="language-bash">cd examples/security
+./run.sh SecurityDemo # Boot 4.1.1, Spring Security 7.1; только стартеры webmvc и security.</code></pre>
+      <pre class="out">GET  no auth, JSON  -> 401 WWW-Authenticate: Basic realm="Realm", charset="UTF-8"
+GET  no auth, HTML  -> 302 Location: /login
+GET  user           -> 200 payment 1
+POST user           -> 401 WWW-Authenticate: Basic realm="Realm", charset="UTF-8"
+OPTIONS preflight   -> 401 WWW-Authenticate: Basic realm="Realm", charset="UTF-8"</pre>
+      <p>Первые три строки объяснимы: без логина JSON-клиент получает 401, браузер — переход на форму, с логином всё работает. Последние две выглядят как ошибка. POST с тем же правильным паролем получает 401. Запрос браузера «можно ли сюда с чужого сайта» тоже получает 401.</p>
+      <p>Чтобы предсказывать такие ответы, а не подбирать настройки наугад, нужно понять, как устроен путь запроса. Он целиком состоит из фильтров, и шаги ниже проходят его от Tomcat до контроллера. Аутентификация паролем и хранение пользователей — тема <a href="spring-authn.html">Authentication</a>, правила доступа — <a href="spring-authz.html">Authorization</a>, токены — <a href="spring-oauth2.html">OAuth2 &amp; JWT</a>.</p>
+    </section>
+
+    <section class="step" id="filters">
+      <h2>Security живёт в фильтрах сервлета, до DispatcherServlet</h2>
+      <p>Tomcat прогоняет каждый запрос через цепочку <code>jakarta.servlet.Filter</code>, и только потом отдаёт его <code>DispatcherServlet</code>. Spring Security встраивается в эту цепочку одним фильтром. Поэтому он видит запрос раньше контроллеров, interceptor-ов MVC и <code>@ControllerAdvice</code>, и может ответить 401, не дойдя до них.</p>
+      <p>Встраивание двухступенчатое. Tomcat создаёт свои фильтры по собственным правилам и ничего не знает о бинах Spring. Поэтому в него регистрируется <code>DelegatingFilterProxy</code> — тонкий фильтр, который на каждом запросе находит в контексте бин с именем <code>springSecurityFilterChain</code> и передаёт работу ему. В Boot это делает <code>DelegatingFilterProxyRegistrationBean</code>; его порядок среди фильтров сервлета задаёт <code>spring.security.filter.order</code>, по умолчанию -100.</p>
+      <p>Бин <code>springSecurityFilterChain</code> — это <code>FilterChainProxy</code>. Он хранит список <code>SecurityFilterChain</code>, выбирает <b>первую</b> цепочку, которой подходит запрос, и прогоняет запрос через её фильтры. У каждой цепочки свой набор: у API нет формы входа, у сайта есть CSRF. Ещё FilterChainProxy проверяет URL через <code>StrictHttpFirewall</code> (отклоняет <code>;</code>, <code>//</code>, закодированные слеши) и очищает SecurityContext после запроса.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 300" role="img" aria-label="Цепочка фильтров Tomcat. Обычный фильтр передаёт запрос в DelegatingFilterProxy. Тот берёт из контекста Spring бин springSecurityFilterChain — FilterChainProxy. FilterChainProxy проверяет цепочки по порядку: api для /api/** подходит, запрос проходит её 13 фильтров и попадает в DispatcherServlet. Цепочка web не проверяется.">
+            <defs>
+              <marker id="sf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sf-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- Tomcat и его цепочка фильтров -->
+            <rect x="14" y="30" width="692" height="230" rx="12" class="dg-sep" fill="none"/>
+            <rect x="26" y="74" width="118" height="50" rx="8" class="dg-box"/>
+            <rect x="166" y="74" width="172" height="50" rx="8" class="dg-box"/>
+            <!-- контекст Spring -->
+            <rect x="360" y="44" width="218" height="204" rx="10" class="dg-sep" fill="none"/>
+            <rect x="372" y="70" width="194" height="50" rx="8" class="dg-box"/>
+            <rect x="372" y="146" width="194" height="40" rx="7" class="dg-cell hit"/>
+            <rect x="372" y="198" width="194" height="40" rx="7" class="dg-cell"/>
+            <rect x="600" y="140" width="96" height="52" rx="8" class="dg-box"/>
+            <!-- стрелки -->
+            <path d="M144 99 L 162 99" class="dg-line" marker-end="url(#sf-n)"/>
+            <path d="M338 95 L 368 95" class="dg-line" marker-end="url(#sf-n)"/>
+            <path d="M420 120 L 420 142" class="dg-line ok" marker-end="url(#sf-ok)"/>
+            <path d="M566 166 L 596 166" class="dg-line ok" marker-end="url(#sf-ok)"/>
+            <text x="20" y="22" class="dg-cap">TOMCAT: ФИЛЬТРЫ СЕРВЛЕТА</text>
+            <text x="370" y="62" class="dg-n">контекст Spring</text>
+            <g text-anchor="middle">
+              <text x="85" y="97" class="dg-in">другой</text>
+              <text x="85" y="113" class="dg-n">фильтр</text>
+              <text x="252" y="97" class="dg-in">DelegatingFilter</text>
+              <text x="252" y="113" class="dg-in">Proxy</text>
+              <text x="469" y="93" class="dg-in">FilterChainProxy</text>
+              <text x="469" y="110" class="dg-n">springSecurityFilterChain</text>
+              <text x="469" y="171" class="dg-in">api: /api/** · 13</text>
+              <text x="469" y="223" class="dg-in">web: всё прочее · 16</text>
+              <text x="648" y="163" class="dg-in">Dispatcher</text>
+              <text x="648" y="179" class="dg-in">Servlet</text>
+            </g>
+            <text x="428" y="136" class="dg-n">первая подходящая</text>
+            <text x="26" y="150" class="dg-s">Tomcat знает только</text>
+            <text x="26" y="166" class="dg-s">DelegatingFilterProxy;</text>
+            <text x="26" y="182" class="dg-s">бин ищется в контексте</text>
+            <text x="26" y="198" class="dg-s">на каждом запросе.</text>
+            <text x="20" y="284" class="dg-s">Числа — фильтры цепочек из второго запуска демо.</text>
+          </svg>
+        </div>
+        <figcaption>Цепочки проверяются по порядку, и запрос проходит ровно одну. Если первая цепочка ловит всё, вторая никогда не сработает.</figcaption>
+      </figure>
+      <p>Список фильтров можно увидеть в самом приложении. Демо достаёт бин <code>FilterChainProxy</code> и печатает фильтры каждой цепочки. Для настроек Boot по умолчанию цепочка одна:</p>
+      <pre><code class="language-java">var proxy = ctx.getBean("springSecurityFilterChain", FilterChainProxy.class);
+for (SecurityFilterChain chain : proxy.getFilterChains()) { // В порядке проверки.
+    chain.getFilters().forEach(f -&gt; System.out.println(f.getClass().getSimpleName()));
+}</code></pre>
+      <pre class="out">chain: 16 filters
+  DisableEncodeUrlFilter
+  WebAsyncManagerIntegrationFilter
+  SecurityContextHolderFilter
+  HeaderWriterFilter
+  CsrfFilter
+  LogoutFilter
+  UsernamePasswordAuthenticationFilter
+  DefaultResourcesFilter
+  DefaultLoginPageGeneratingFilter
+  DefaultLogoutPageGeneratingFilter
+  BasicAuthenticationFilter
+  RequestCacheAwareFilter
+  SecurityContextHolderAwareRequestFilter
+  AnonymousAuthenticationFilter
+  ExceptionTranslationFilter
+  AuthorizationFilter</pre>
+      <p>Этот список и есть алгоритм обработки запроса. Важен не каждый фильтр, а порядок групп: восстановить контекст, проверить CSRF, попробовать аутентифицировать, подставить анонима, перевести исключения в HTTP-ответ, проверить права. Тот же список при старте печатает лог <code>DefaultSecurityFilterChain</code> на уровне DEBUG, а для разбора одного запроса включают <code>logging.level.org.springframework.security=DEBUG</code>.</p>
+    </section>
+
+    <section class="step" id="request-path">
+      <h2>Сначала фильтры выясняют, кто пришёл, потом последний решает, можно ли</h2>
+      <p>Каждый фильтр делает одно дело и передаёт запрос дальше. Пройдём запрос <code>GET /api/admin/stats</code> с Basic-заголовком обычного пользователя через цепочку API из второго запуска демо. Правило цепочки: <code>/api/admin/**</code> только для роли ADMIN.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Запрос проходит слева направо фильтры SecurityContextHolderFilter, CorsFilter, BasicAuthenticationFilter, ExceptionTranslationFilter и AuthorizationFilter. Basic-фильтр кладёт в SecurityContext пользователя user с ролью USER. AuthorizationFilter бросает AccessDeniedException, ExceptionTranslationFilter ловит его и отвечает 403. Контроллер не вызывается.">
+            <defs>
+              <marker id="sp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">ЦЕПОЧКА API</text>
+            <!-- фильтры в порядке цепочки -->
+            <rect x="20" y="40" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="136" y="40" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="252" y="40" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="368" y="40" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="484" y="40" width="104" height="50" rx="7" class="dg-cell"/>
+            <rect x="600" y="40" width="100" height="50" rx="7" class="dg-box"/>
+            <!-- подсветка активного фильтра -->
+            <rect data-s="1" x="20" y="40" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="2" x="252" y="40" width="104" height="50" rx="7" class="dg-cell hit"/>
+            <rect data-s="3-4" x="484" y="40" width="104" height="50" rx="7" class="dg-cell miss"/>
+            <rect data-s="4-" x="368" y="40" width="104" height="50" rx="7" class="dg-cell miss"/>
+            <rect data-s="4-" x="600" y="40" width="100" height="50" rx="7" class="dg-sep" fill="none"/>
+            <!-- SecurityContext запроса -->
+            <rect x="136" y="136" width="336" height="44" rx="8" class="dg-box"/>
+            <!-- стрелки по шагам -->
+            <path data-s="2" d="M304 90 L 304 132" class="dg-line" marker-end="url(#sp-n)"/>
+            <path data-s="3" d="M536 136 C 536 116, 536 108, 536 94" class="dg-line" marker-end="url(#sp-n)"/>
+            <path data-s="4" d="M484 26 C 470 26, 440 26, 432 36" class="dg-line bad" marker-end="url(#sp-bad)"/>
+            <path data-s="5" d="M368 96 C 300 120, 120 120, 30 100" class="dg-line bad" marker-end="url(#sp-bad)"/>
+            <g text-anchor="middle">
+              <text x="72" y="62" class="dg-n">SecurityContext</text>
+              <text x="72" y="77" class="dg-n">HolderFilter</text>
+              <text x="188" y="69" class="dg-n">CorsFilter</text>
+              <text x="304" y="62" class="dg-n">BasicAuth</text>
+              <text x="304" y="77" class="dg-n">Filter</text>
+              <text x="420" y="62" class="dg-n">Exception</text>
+              <text x="420" y="77" class="dg-n">Translation</text>
+              <text x="536" y="62" class="dg-n">Authorization</text>
+              <text x="536" y="77" class="dg-n">Filter</text>
+              <text x="650" y="69" class="dg-in">контроллер</text>
+            </g>
+            <text x="148" y="154" class="dg-n">SecurityContext</text>
+            <text data-s="1" x="148" y="171" class="dg-in">Authentication: null</text>
+            <text data-s="2-" x="148" y="171" class="dg-ok">user [ROLE_USER]</text>
+            <text data-s="3" x="548" y="122" class="dg-n">роли</text>
+            <text data-s="4" x="496" y="20" class="dg-bad">AccessDeniedException</text>
+            <text data-s="5" x="200" y="128" class="dg-bad">403</text>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="226" class="dg-t">Контекст пуст: запрос ещё анонимный.</text>
+            <text data-s="2" x="20" y="226" class="dg-ok">Пароль верный: в контексте user.</text>
+            <text data-s="3" x="20" y="226" class="dg-bad">hasRole(ADMIN): у user только USER.</text>
+            <text data-s="4" x="20" y="226" class="dg-bad">Исключение летит назад по стеку.</text>
+            <text data-s="5" x="20" y="226" class="dg-bad">Ответ 403, контроллер не вызван.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>SecurityContextHolderFilter достаёт контекст из SecurityContextRepository. У API без сессий там пусто, и в SecurityContextHolder кладётся пустой контекст. CorsFilter пропускает запрос: заголовка Origin нет.</li>
+          <li>BasicAuthenticationFilter декодирует заголовок Authorization и просит AuthenticationManager проверить пароль. Пароль верный: в контекст ложится Authentication пользователя user с ролью USER.</li>
+          <li>ExceptionTranslationFilter ничего не делает с запросом и просто вызывает следующий фильтр внутри try. AuthorizationFilter сравнивает правило hasRole(ADMIN) с ролями из контекста.</li>
+          <li>Ролей не хватает. AuthorizationFilter бросает AccessDeniedException, и оно летит назад по стеку вызовов фильтров.</li>
+          <li>ExceptionTranslationFilter ловит исключение. Пользователь уже аутентифицирован, поэтому ответ — 403. Будь он анонимом, фильтр вызвал бы AuthenticationEntryPoint: 401 с WWW-Authenticate или переход на форму входа.</li>
+        </ol>
+      </figure>
+      <p>Правило из последнего шага стоит запомнить точно. <b>401</b> значит «не знаю, кто ты» — сработал AuthenticationEntryPoint. <b>403</b> значит «знаю, кто ты, но нельзя» — сработал AccessDeniedHandler. ExceptionTranslationFilter выбирает между ними по тому, анонимен ли текущий пользователь. Запуск демо с двумя пользователями:</p>
+      <pre class="out">GET  admin as user  -> 403
+GET  admin as admin -> 200 stats</pre>
+      <p>ExceptionTranslationFilter ловит только исключения, которые летят из фильтров после него. Ошибку в собственном фильтре, поставленном раньше, он не переведёт в ответ. Поэтому свой фильтр аутентификации ставят перед AuthorizationFilter: <code>http.addFilterBefore(apiKeyFilter, AuthorizationFilter.class)</code>, и в нём не бросают исключения наружу, а оставляют контекст пустым.</p>
+      <div class="trap">
+        <p class="myth">Если поставить @Component на свой фильтр безопасности, он встанет в цепочку Spring Security.</p>
+        <p class="fact">Boot регистрирует любой бин-Filter в цепочке Tomcat, рядом с DelegatingFilterProxy, а не внутри SecurityFilterChain. Фильтр отработает на каждом запросе, вне правил securityMatcher, и иногда дважды, если его ещё и добавили через addFilterBefore. Свой фильтр безопасности создают внутри конфигурации цепочки или отключают его автоматическую регистрацию через FilterRegistrationBean с setEnabled(false).</p>
+      </div>
+    </section>
+
+    <section class="step" id="context">
+      <h2>SecurityContext — ThreadLocal текущего запроса, и в другой поток он не переходит</h2>
+      <p><code>SecurityContextHolder.getContext().getAuthentication()</code> работает в любом месте кода без параметров. Это возможно, потому что контекст лежит в ThreadLocal потока, который обрабатывает запрос. Фильтры кладут его туда в начале и очищают в конце, чтобы следующий запрос на том же потоке пула не получил чужого пользователя.</p>
+      <p>Следствие: в другом потоке контекста нет. Контроллер демо читает имя пользователя у себя и внутри <code>CompletableFuture.supplyAsync</code>, который выполняется в общем ForkJoinPool:</p>
+      <pre><code class="language-java">@GetMapping("/api/whoami")
+String whoami() throws Exception {
+    String here = name(); // Поток Tomcat: контекст положил фильтр.
+    // Поток ForkJoinPool: его ThreadLocal никто не заполнял.
+    String other = CompletableFuture.supplyAsync(SecurityDemo::name).get();
+    return "request thread=" + here + ", pool thread=" + other;
+}</code></pre>
+      <pre class="out">GET  whoami         -> 200 request thread=user, pool thread=null</pre>
+      <p>Код аудита, который пишет «кто списал деньги» из пула потоков, запишет null или упадёт. Решения: передать пользователя явным параметром, обернуть пул в <code>DelegatingSecurityContextExecutor</code> или <code>DelegatingSecurityContextAsyncTaskExecutor</code>, которые копируют контекст в задачу и очищают после. Режим <code>MODE_INHERITABLETHREADLOCAL</code> копирует контекст только при создании потока; пулы переиспользуют потоки, поэтому с ним пользователь одного запроса может достаться другому.</p>
+      <p>Между запросами контекст хранит <code>SecurityContextRepository</code>. Для формы входа это HTTP-сессия: после логина пользователь лежит в сессии, а cookie JSESSIONID связывает следующий запрос с ним. Для API с Basic или токеном сессия не нужна: <code>SessionCreationPolicy.STATELESS</code> не создаёт её, и пользователь восстанавливается из заголовка на каждом запросе. С Spring Security 6 контекст сохраняется в репозиторий только явно: свой фильтр логина должен вызвать <code>securityContextRepository.saveContext</code>, иначе на следующем запросе пользователь «забудется».</p>
+    </section>
+
+    <section class="step" id="chains">
+      <h2>Несколько цепочек разделяют API без сессий и сайт с формой</h2>
+      <p>У одного сервиса бывают разные клиенты. Мобильное приложение ходит в <code>/api/**</code> с Basic или токеном и не хранит cookie. Админка открывается в браузере и использует форму входа и сессию. Одной цепочке пришлось бы совмещать обе модели. Две цепочки дают каждой свой набор фильтров:</p>
+      <pre><code class="language-java">@Bean
+@Order(1) // Проверяется первой.
+SecurityFilterChain api(HttpSecurity http) throws Exception {
+    http.securityMatcher("/api/**") // Без него цепочка поймала бы все запросы.
+        .authorizeHttpRequests(a -&gt; a
+            .requestMatchers("/api/admin/**").hasRole("ADMIN")
+            .anyRequest().authenticated())
+        .httpBasic(Customizer.withDefaults())
+        .csrf(c -&gt; c.disable()) // Нет cookie-сессии — нечего подделывать.
+        .sessionManagement(s -&gt; s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .cors(Customizer.withDefaults()); // Берёт бин corsConfigurationSource.
+    return http.build();
+}
+
+@Bean
+@Order(2) // Всё, что не /api/**: форма входа, сессия, CSRF.
+SecurityFilterChain web(HttpSecurity http) throws Exception {
+    http.authorizeHttpRequests(a -&gt; a.anyRequest().authenticated())
+        .formLogin(Customizer.withDefaults());
+    return http.build();
+}</code></pre>
+      <pre><code class="language-bash">./run.sh SecurityDemo custom</code></pre>
+      <pre class="out">POST user           -> 200 created
+GET  /home no auth  -> 302 Location: /login
+chain: 13 filters
+  DisableEncodeUrlFilter
+  WebAsyncManagerIntegrationFilter
+  SecurityContextHolderFilter
+  HeaderWriterFilter
+  CorsFilter
+  LogoutFilter
+  BasicAuthenticationFilter
+  RequestCacheAwareFilter
+  SecurityContextHolderAwareRequestFilter
+  AnonymousAuthenticationFilter
+  SessionManagementFilter
+  ExceptionTranslationFilter
+  AuthorizationFilter</pre>
+      <p>В цепочке API нет CsrfFilter и фильтров формы, и POST с паролем теперь проходит. Запрос вне <code>/api/**</code> попадает во вторую цепочку и получает переход на форму входа.</p>
+      <p><code>securityMatcher</code> решает, <b>какая цепочка</b> обработает запрос. <code>requestMatchers</code> внутри <code>authorizeHttpRequests</code> решают, <b>какое правило</b> применить внутри цепочки. Их путают: правило <code>requestMatchers("/api/**")</code> в цепочке без securityMatcher не ограничивает цепочку, она по-прежнему ловит всё. Как только в контексте есть свой бин <code>SecurityFilterChain</code>, цепочка Boot по умолчанию отключается.</p>
+      <div class="trap">
+        <p class="myth">Цепочки объединяются: если /api/** не пустила первая, запрос проверит вторая.</p>
+        <p class="fact">FilterChainProxy берёт первую цепочку, чей securityMatcher подошёл, и больше ни одну не смотрит. Цепочка с @Order(1) без securityMatcher делает все остальные мёртвыми; Spring Security при старте падает, если такая цепочка стоит не последней.</p>
+      </div>
+    </section>
+
+    <section class="step" id="csrf-cors">
+      <h2>CSRF защищает cookie от чужих сайтов, CORS разрешает чужим сайтам читать ответ</h2>
+      <p><b>CSRF</b> — атака через браузер жертвы. Пользователь залогинен в админке платёжного сервиса, cookie сессии лежит в браузере. Он открывает чужую страницу, а на ней форма, которая сама отправляет <code>POST /admin/refunds</code> на наш домен. Браузер приложит cookie автоматически, и сервер увидит обычный запрос залогиненного админа. Защита — секретный токен, который сервер выдаёт своей странице и проверяет в каждом изменяющем запросе. Чужая страница его не знает.</p>
+      <p>Поэтому CsrfFilter проверяет POST, PUT, PATCH и DELETE и пропускает GET, HEAD, OPTIONS и TRACE. Безопасные методы не должны ничего менять: GET, который списывает деньги, CSRF-защита не спасёт. Для API без cookie, где клиент сам кладёт токен в заголовок <code>Authorization</code>, CSRF отключают: браузер не подставит такой заголовок на чужой странице. Если же SPA ходит в API с cookie-сессией, CSRF оставляют и передают токен через cookie <code>XSRF-TOKEN</code> и заголовок <code>X-XSRF-TOKEN</code>.</p>
+      <h3>Почему POST с правильным паролем получил 401, а не 403</h3>
+      <p>Вернёмся к загадке из первого шага. В цепочке по умолчанию CsrfFilter стоит раньше BasicAuthenticationFilter. POST без CSRF-токена отклоняется ещё до проверки пароля. Дальше включается механизм ошибок сервлета, и это видно в DEBUG-логе того же запроса:</p>
+      <pre><code class="language-text">Securing POST /api/payments
+Invalid CSRF token found for http://localhost/api/payments   # CsrfFilter: токена нет (порт убран)
+Responding with 403 status code                              # AccessDeniedHandlerImpl
+Securing GET /error                                          # Tomcat: error dispatch на /error
+Set SecurityContextHolder to anonymous SecurityContext       # Basic на error dispatch не работает
+No match found. Using default entry point ...BasicAuthenticationEntryPoint  # /error требует логина</code></pre>
+      <p>403 вызывает <code>sendError</code>, и Tomcat делает внутренний переход на <code>/error</code>. Этот переход снова проходит FilterChainProxy. BasicAuthenticationFilter, как и большинство фильтров-наследников <code>OncePerRequestFilter</code>, на error dispatch не срабатывает, поэтому запрос анонимный. Страница <code>/error</code> закрыта правилом <code>anyRequest().authenticated()</code>, и клиент получает 401 вместо настоящих 403. В своей цепочке открывают error dispatch: <code>.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()</code> или <code>.requestMatchers("/error").permitAll()</code>. После этого клиент видит честный 403.</p>
+      <h3>CORS</h3>
+      <p><b>CORS</b> работает в обратную сторону. Браузер по умолчанию не даёт скрипту сайта <code>shop.example</code> читать ответы нашего API на другом домене. Для запросов с нестандартными заголовками или методами он сначала шлёт preflight: <code>OPTIONS</code> с заголовками <code>Origin</code> и <code>Access-Control-Request-Method</code>, без логина и cookie. Если ответ не содержит <code>Access-Control-Allow-Origin</code> с этим сайтом, настоящий запрос не уйдёт.</p>
+      <p>Preflight не несёт логина, поэтому в цепочке по умолчанию он получил 401. <code>.cors()</code> ставит CorsFilter перед фильтрами аутентификации: тот сам отвечает на preflight и не пускает его дальше. Во втором запуске разрешён только магазин:</p>
+      <pre><code class="language-java">@Bean // Имя бина важно: по нему его ищет .cors().
+CorsConfigurationSource corsConfigurationSource() {
+    var c = new CorsConfiguration();
+    c.setAllowedOrigins(List.of("https://shop.example"));
+    c.setAllowedMethods(List.of("GET", "POST"));
+    c.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+    var source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/api/**", c);
+    return source;
+}</code></pre>
+      <pre class="out">OPTIONS preflight   -> 200 Access-Control-Allow-Origin: https://shop.example
+OPTIONS evil origin -> 403 Invalid CORS request</pre>
+      <p>Имя метода здесь не косметика. Когда в приложении есть Spring MVC, <code>.cors()</code> берёт бин <code>corsConfigurationSource</code> по имени, а при его отсутствии — CORS-настройки MVC. В первой версии демо метод назывался <code>cors()</code>, и preflight получал 200 <b>без</b> заголовка Allow-Origin: Security пропускал его, MVC не находил настроек, а браузер такой ответ отвергает. На стороне сервера всё выглядит успешным, ошибка видна только в консоли браузера.</p>
+      <div class="note warn">
+        <p>CORS — не защита API. Его проверяет браузер, а curl, Postman и чужой backend игнорируют. Он защищает пользователя от чужих сайтов, а не сервер от чужих клиентов. Доступ к API по-прежнему определяют аутентификация и правила авторизации.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Tomcat вызывает DelegatingFilterProxy, тот — бин FilterChainProxy, тот — первую подходящую SecurityFilterChain. Всё это происходит до DispatcherServlet.</li>
+        <li>Порядок фильтров — это алгоритм: контекст, CSRF, аутентификация, аноним, перевод исключений, авторизация.</li>
+        <li>401 — неизвестный пользователь и AuthenticationEntryPoint, 403 — известный без прав и AccessDeniedHandler. Error dispatch на закрытый /error превращает 403 в 401.</li>
+        <li>SecurityContext лежит в ThreadLocal; в пул потоков его переносят явно.</li>
+        <li>CSRF нужен там, где браузер сам шлёт cookie. CORS разрешает чужому сайту читать ответ и проверяется браузером, а не сервером.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="security-architecture" data-freq="3">
+      <h3>Как запрос проходит через Spring Security?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spring Security — это фильтры сервлета. В цепочку Tomcat регистрируется DelegatingFilterProxy, который на каждом запросе передаёт работу бину springSecurityFilterChain, то есть FilterChainProxy. Тот выбирает первую SecurityFilterChain, которой подходит запрос, и прогоняет его через её фильтры. Всё это происходит до DispatcherServlet.</p>
+          <p>Внутри цепочки порядок такой: восстановить SecurityContext, проверить CSRF, попробовать аутентифицировать по форме, Basic или токену, подставить анонима, затем ExceptionTranslationFilter и AuthorizationFilter, который проверяет правила. Если права не прошли, контроллер не вызывается вообще.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>DelegatingFilterProxy нужен потому, что Tomcat создаёт фильтры сам и не знает о бинах; прокси ищет бин лениво, когда контекст уже поднят.</li>
+            <li>FilterChainProxy — единая точка входа: StrictHttpFirewall, очистка контекста после запроса, DEBUG-лог пути запроса.</li>
+            <li>Цепочек может быть несколько с securityMatcher и @Order. Срабатывает ровно одна; общая цепочка без securityMatcher должна стоять последней.</li>
+            <li>Бин-Filter с @Component Boot регистрирует в цепочке Tomcat, а не в SecurityFilterChain, и он отработает на всех запросах.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Фильтр API-ключей для партнёров срабатывает дважды и проверяет даже /actuator/health. Почему?</summary>
+          <pre><code class="language-java">@Component
+class ApiKeyFilter implements Filter { /* проверяет X-Api-Key и пишет аудит */ }
+
+@Bean
+SecurityFilterChain partners(HttpSecurity http, ApiKeyFilter apiKey) throws Exception {
+    http.securityMatcher("/partners/**")
+        .addFilterBefore(apiKey, AuthorizationFilter.class);
+    return http.build();
+}</code></pre>
+          <p>Из-за @Component Boot зарегистрировал фильтр ещё и в цепочке Tomcat, рядом с DelegatingFilterProxy. Там securityMatcher не действует, поэтому фильтр видит все запросы, включая health. На /partners/** он вызывается второй раз внутри SecurityFilterChain. OncePerRequestFilter скрыл бы повтор, но не убрал бы лишнюю регистрацию для всех остальных путей. Исправление: убрать @Component и создать фильтр внутри конфигурации цепочки или оставить бин и отключить его регистрацию через FilterRegistrationBean с setEnabled(false).</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="security-401-403" data-freq="3">
+      <h3>Когда Spring Security отвечает 401, а когда 403?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>401 значит, что сервер не знает, кто пришёл: запрос анонимный или логин не прошёл. Тогда ExceptionTranslationFilter вызывает AuthenticationEntryPoint, который отвечает 401 с WWW-Authenticate для API или редиректом на форму для браузера. 403 значит, что пользователь известен, но прав не хватает: срабатывает AccessDeniedHandler.</p>
+          <p>Выбор делает ExceptionTranslationFilter, когда ловит AccessDeniedException от AuthorizationFilter: если пользователь анонимный, это 401, если аутентифицирован — 403.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ошибка CSRF в цепочке по умолчанию возникает до аутентификации. Её 403 уходит на /error, error dispatch идёт анонимно, и закрытый /error превращает ответ в 401. Лечится permitAll для DispatcherType.ERROR.</li>
+            <li>ExceptionTranslationFilter обрабатывает только исключения из фильтров после себя. Свой фильтр раньше него должен сам формировать ответ или оставлять контекст пустым.</li>
+            <li>Ответы 401 и 403 настраиваются: свой AuthenticationEntryPoint и AccessDeniedHandler пишут ProblemDetail вместо HTML-страницы.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему preflight-запрос браузера может получить 401, хотя пользователь залогинен?</summary>
+          <p>Preflight OPTIONS браузер отправляет без cookie и заголовка Authorization. Если CorsFilter не настроен, запрос идёт в фильтры аутентификации анонимным и упирается в anyRequest().authenticated(). Решение — .cors() в цепочке: CorsFilter стоит раньше аутентификации и сам отвечает на preflight.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="security-csrf" data-freq="3">
+      <h3>Что такое CSRF и когда защиту можно отключить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>CSRF — атака, при которой чужой сайт заставляет браузер жертвы отправить запрос на наш сервис. Браузер сам прикладывает cookie сессии, и сервер видит законного пользователя. Защита — токен, который знает только наша страница, и CsrfFilter проверяет его на POST, PUT, PATCH и DELETE.</p>
+          <p>Отключить можно там, где аутентификация не опирается на то, что браузер шлёт сам: stateless API с токеном в заголовке Authorization. Если API работает через cookie-сессию, в том числе SPA, защиту оставляю и передаю токен через cookie XSRF-TOKEN и заголовок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>GET не проверяется на CSRF, поэтому GET не должен менять состояние: списание через GET защиту обходит.</li>
+            <li>SameSite=Lax у cookie сильно уменьшает риск, но не заменяет токен: остаются поддомены и старые браузеры.</li>
+            <li>Basic-аутентификация браузера тоже подставляется автоматически после ввода пароля, поэтому для неё CSRF актуален так же, как для cookie.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="security-cors" data-freq="2">
+      <h3>Чем CORS отличается от CSRF и как настроить CORS в Spring Security?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>CSRF защищает сервер от запросов, которые чужой сайт отправляет от имени пользователя. CORS — политика браузера, которая решает, может ли скрипт чужого сайта читать наши ответы. Перед сложными запросами браузер шлёт preflight OPTIONS без логина, и сервер отвечает разрешёнными origin, методами и заголовками.</p>
+          <p>В Spring Security я включаю .cors() в цепочке и объявляю бин CorsConfigurationSource с конкретными origin. CorsFilter стоит перед аутентификацией, поэтому preflight не получает 401.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>При наличии Spring MVC .cors() ищет бин по имени corsConfigurationSource. С другим именем preflight получает 200 без Allow-Origin, и ошибка видна только в браузере.</li>
+            <li>allowedOrigins("*") нельзя сочетать с allowCredentials(true); для нескольких поддоменов есть allowedOriginPatterns.</li>
+            <li>CORS не защищает API от curl и других серверов: это защита пользователя в браузере, а не контроль доступа.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="security-context-thread" data-freq="2">
+      <h3>Почему в @Async-методе SecurityContextHolder возвращает null?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>SecurityContextHolder по умолчанию хранит контекст в ThreadLocal. Фильтры заполняют его для потока Tomcat, который обрабатывает запрос. @Async, CompletableFuture или свой пул выполняют код в другом потоке, где ThreadLocal пуст, поэтому Authentication там null.</p>
+          <p>Я передаю пользователя явно параметром или оборачиваю пул в DelegatingSecurityContextAsyncTaskExecutor, который копирует контекст в задачу и очищает после неё.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>MODE_INHERITABLETHREADLOCAL копирует контекст только при создании потока. В пуле потоки живут долго, и задача может увидеть пользователя давно завершённого запроса.</li>
+            <li>Контекст очищается в конце запроса, иначе поток пула отдал бы пользователя следующему запросу.</li>
+            <li>В WebFlux ThreadLocal не работает вовсе: там ReactiveSecurityContextHolder хранит контекст в Reactor Context.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/architecture.html">Spring Security Reference: Servlet Architecture</a> — основа урока: DelegatingFilterProxy, FilterChainProxy, SecurityFilterChain, ExceptionTranslationFilter.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html">Servlet Authentication Architecture</a> — SecurityContextHolder, стратегии хранения и SecurityContextRepository.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html">Cross Site Request Forgery</a> и <a href="https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html">CORS</a> — когда отключать CSRF, токен для SPA, бин corsConfigurationSource.</li>
+      <li>Laurențiu Spilcă, Spring Security in Action, 2-е изд., главы 2–5 и 9–10 — путь запроса через фильтры, свои фильтры, CSRF и CORS на примерах.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

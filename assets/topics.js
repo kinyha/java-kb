@@ -555,7 +555,7 @@ window.KB_TREE = [
           scope: 'репозитории, derived queries, @Query, проекции, пагинация, Spring Data JDBC' },
       ] },
       { id: 'security', title: 'Security', source: 'Spring Security Reference: Architecture, Authentication, Authorization, OAuth2', items: [
-        { id: 'spring-security', freq: 3, status: 'empty', title: 'Architecture',
+        { id: 'spring-security', freq: 3, status: 'draft', title: 'Architecture',
           scope: 'DelegatingFilterProxy, SecurityFilterChain, SecurityContext, путь запроса через фильтры, CSRF и CORS в Spring' },
         { id: 'spring-authn', freq: 2, status: 'empty', title: 'Authentication',
           scope: 'AuthenticationManager, UserDetailsService, PasswordEncoder, сессии и stateless' },
