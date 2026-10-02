@@ -559,7 +559,7 @@ window.KB_TREE = [
           scope: 'DelegatingFilterProxy, SecurityFilterChain, SecurityContext, путь запроса через фильтры, CSRF и CORS в Spring' },
         { id: 'spring-authn', freq: 2, status: 'draft', title: 'Authentication',
           scope: 'AuthenticationManager, UserDetailsService, PasswordEncoder, сессии и stateless' },
-        { id: 'spring-authz', freq: 2, status: 'empty', title: 'Authorization',
+        { id: 'spring-authz', freq: 2, status: 'draft', title: 'Authorization',
           scope: 'правила по URL, @PreAuthorize и method security, роли и authorities' },
         { id: 'spring-oauth2', freq: 3, status: 'empty', title: 'OAuth2 & JWT',
           scope: 'Resource Server, проверка JWT, OAuth2 Client и Login, Keycloak' },

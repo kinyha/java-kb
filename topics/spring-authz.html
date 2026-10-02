@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Security: Authorization · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-authz">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Security: Authorization</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Авторизация решает, можно ли уже известному пользователю сделать то, о чём он просит. В Spring это происходит на двух уровнях. Правила URL в цепочке фильтров грубо отсекают целые разделы: админка только для админов. Правила на методах сервисов смотрят на аргументы и результат: клиент читает только свой счёт. Оба уровня спрашивают одно и то же — права текущего пользователя из SecurityContext — и оба легко обойти незаметно: неправильным порядком правил или вызовом метода изнутри того же класса.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Залогиненный клиент читает чужой счёт, и аутентификация тут не поможет</h2>
+      <p>Платёжный API отдаёт баланс по адресу <code>/api/accounts/{id}/balance</code>. Все запросы требуют логина. Клиент alice заходит под собой и меняет в адресе свой id на <code>bob</code>. Если сервер проверяет только «пользователь залогинен», alice видит чужие деньги. Это самая частая уязвимость веб-API, у неё даже есть имя: IDOR, небезопасная прямая ссылка на объект.</p>
+      <p>Аутентификация ответила на вопрос «кто это» — это alice. Вопрос «можно ли alice смотреть счёт bob» — другой. Его задают правила авторизации, и у них два уровня:</p>
+      <ul>
+        <li><b>правила URL</b> — в цепочке фильтров, до контроллера: кто вообще может зайти в <code>/api/payments/admin/**</code>;</li>
+        <li><b>правила методов</b> — на бинах сервисов: может ли этот пользователь вызвать <code>balance("bob")</code> и получить этот платёж.</li>
+      </ul>
+      <p>Первый уровень дешёвый и не знает о данных. Второй знает об аргументах и результате, поэтому только он закрывает IDOR. Демо <a href="../examples/security/AuthzDemo.java">AuthzDemo.java</a> показывает ошибки обоих уровней на четырёх пользователях: alice с ролью USER, bob с ролью SUPPORT, ops с правом <code>ADMIN</code> без префикса и admin с ролью ADMIN.</p>
+      <pre><code class="language-bash">cd examples/security
+./run.sh AuthzDemo        # правила URL в неправильном порядке
+./run.sh AuthzDemo fixed  # узкое правило первым</code></pre>
+    </section>
+
+    <section class="step" id="url-rules">
+      <h2>Правила URL проверяются сверху вниз до первого совпадения</h2>
+      <p>Последний фильтр цепочки, <code>AuthorizationFilter</code>, передаёт запрос в <code>AuthorizationManager</code>. Для правил URL это <code>RequestMatcherDelegatingAuthorizationManager</code>: список пар «шаблон запроса → правило» в том порядке, в каком они написаны в <code>authorizeHttpRequests</code>. Менеджер берёт <b>первую</b> пару, чей шаблон подошёл, и применяет её правило. Остальные не смотрит.</p>
+      <p>Команда сначала защитила все платежи, а через месяц добавила отчёт для админов строкой ниже:</p>
+      <pre><code class="language-java">http.authorizeHttpRequests(a -&gt; a
+    .requestMatchers("/api/payments/**").authenticated()        // Ловит и admin/report.
+    .requestMatchers("/api/payments/admin/**").hasRole("ADMIN") // До неё не доходит.
+    .anyRequest().authenticated());</code></pre>
+      <pre class="out">report as alice      -> 200 report
+report as ops        -> 200 report
+report as admin      -> 200 report</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Слева правила в порядке из кода: первым стоит широкое /api/payments/**, запрос alice к отчёту совпадает с ним, правило authenticated пропускает, отчёт отдан. Справа узкое правило admin стоит первым, запрос совпадает с ним, у alice нет роли ADMIN, ответ 403.">
+            <defs>
+              <marker id="az-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              <marker id="az-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <path d="M360 24 L 360 250" class="dg-sep"/>
+            <!-- левая половина: широкое правило первым -->
+            <rect x="20" y="66" width="326" height="36" rx="7" class="dg-cell hit"/>
+            <rect x="20" y="112" width="326" height="36" rx="7" class="dg-sep" fill="none"/>
+            <rect x="20" y="158" width="326" height="36" rx="7" class="dg-sep" fill="none"/>
+            <!-- правая половина: узкое правило первым -->
+            <rect x="374" y="66" width="326" height="36" rx="7" class="dg-cell miss"/>
+            <rect x="374" y="112" width="326" height="36" rx="7" class="dg-sep" fill="none"/>
+            <rect x="374" y="158" width="326" height="36" rx="7" class="dg-sep" fill="none"/>
+            <!-- запрос попадает в первое совпавшее правило -->
+            <path d="M30 50 L 30 62" class="dg-line bad" marker-end="url(#az-bad)"/>
+            <path d="M384 50 L 384 62" class="dg-line ok" marker-end="url(#az-ok)"/>
+            <text x="20" y="20" class="dg-cap bad">ШИРОКОЕ ПРАВИЛО ПЕРВЫМ</text>
+            <text x="374" y="20" class="dg-cap">УЗКОЕ ПРАВИЛО ПЕРВЫМ</text>
+            <text x="20" y="44" class="dg-n">GET /api/payments/admin/report, alice</text>
+            <text x="374" y="44" class="dg-n">тот же запрос</text>
+            <text x="32" y="89" class="dg-in">1 /api/payments/** → authenticated</text>
+            <text x="32" y="135" class="dg-in">2 .../admin/** → hasRole(ADMIN)</text>
+            <text x="32" y="181" class="dg-in">3 anyRequest → authenticated</text>
+            <text x="386" y="89" class="dg-in">1 .../admin/** → hasRole(ADMIN)</text>
+            <text x="386" y="135" class="dg-in">2 /api/payments/** → authenticated</text>
+            <text x="386" y="181" class="dg-in">3 anyRequest → authenticated</text>
+            <text x="20" y="226" class="dg-bad">200: отчёт отдан любому</text>
+            <text x="20" y="244" class="dg-s">правило 2 недостижимо</text>
+            <text x="374" y="226" class="dg-ok">403: у alice нет ROLE_ADMIN</text>
+            <text x="374" y="244" class="dg-s">правила 2 и 3 не проверялись</text>
+          </svg>
+        </div>
+        <figcaption>Подсвечено первое совпавшее правило. Пунктирные правила для этого запроса не существуют, сколько бы строгими они ни были.</figcaption>
+      </figure>
+      <p>Исправление — переставить строки: от узких шаблонов к широким, <code>anyRequest()</code> последним. Второй запуск демо:</p>
+      <pre class="out">report as alice      -> 403
+report as ops        -> 403
+report as admin      -> 200 report</pre>
+      <p>Spring Security ловит только самый грубый случай: <code>anyRequest()</code> не на последнем месте роняет старт. Перекрытие двух обычных шаблонов он не замечает. Поэтому для каждого закрытого раздела нужен тест «пользователь без роли получает 403», а не только «админ получает 200».</p>
+      <p>Последнее правило стоит выбирать осознанно. <code>anyRequest().authenticated()</code> открывает любому залогиненному каждый новый эндпоинт, про который забыли написать правило. <code>anyRequest().denyAll()</code> закрывает их по умолчанию, и забытое правило проявится сразу как 403 в тесте, а не как утечка в проде.</p>
+    </section>
+
+    <section class="step" id="roles">
+      <h2>Роль — это authority с префиксом ROLE_</h2>
+      <p>Права пользователя — список строк <code>GrantedAuthority</code>. Отдельного понятия «роль» в ядре нет. Роль — соглашение: authority, которое начинается с <code>ROLE_</code>. <code>roles("ADMIN")</code> при создании пользователя сохраняет <code>ROLE_ADMIN</code>, а <code>hasRole("ADMIN")</code> при проверке ищет <code>ROLE_ADMIN</code>. <code>hasAuthority("ADMIN")</code> ищет строку как есть.</p>
+      <p>В демо у ops право записано как <code>authorities("ADMIN")</code>, без префикса. Даже с правильным порядком правил он получил 403 на отчёт: <code>hasRole("ADMIN")</code> искал <code>ROLE_ADMIN</code> и не нашёл. Такая ошибка возникает при загрузке прав из базы или LDAP, где колонка хранит <code>ADMIN</code>, а код проверяет роль.</p>
+      <table class="mx">
+        <thead><tr><th>Создание пользователя</th><th>Хранится</th><th>hasRole("ADMIN")</th><th>hasAuthority("ADMIN")</th></tr></thead>
+        <tbody>
+          <tr><td><code>roles("ADMIN")</code></td><td><code>ROLE_ADMIN</code></td><td>да</td><td>нет</td></tr>
+          <tr><td><code>authorities("ADMIN")</code></td><td><code>ADMIN</code></td><td>нет</td><td>да</td></tr>
+          <tr><td>JWT со scope <code>payments.read</code></td><td><code>SCOPE_payments.read</code></td><td>нет</td><td>нет; нужно <code>hasAuthority("SCOPE_payments.read")</code></td></tr>
+        </tbody>
+      </table>
+      <p>Принято так: роль описывает, кто человек (<code>ROLE_SUPPORT</code>), а authority без префикса — конкретное действие (<code>payments:refund</code>). Проверять действия гибче: роль поддержки сегодня может делать возвраты, завтра — нет, и это меняется в данных, а не в коде. Иерархию ролей, где ADMIN включает SUPPORT, задаёт бин <code>RoleHierarchy</code>; без него <code>hasRole("SUPPORT")</code> откажет админу.</p>
+    </section>
+
+    <section class="step" id="method-security">
+      <h2>Method security проверяет правило на прокси, до вызова метода</h2>
+      <p>Правило «клиент видит только свой счёт» зависит от аргумента. Шаблон URL его не выразит красиво, а сервис вызывают ещё и из очередей и планировщиков, где URL нет. Поэтому правило ставят на метод сервиса:</p>
+      <pre><code class="language-java">@Configuration
+@EnableMethodSecurity // Без неё аннотации ниже молча игнорируются.
+class Security { /* ... */ }
+
+@Service
+class AccountService {
+    // SpEL: роль поддержки или свой счёт; #id — параметр метода.
+    @PreAuthorize("hasRole('SUPPORT') or #id == authentication.name")
+    public String balance(String id) { return id + ": 1200"; }
+}</code></pre>
+      <pre class="out">alice balance alice  -> 200 alice: 1200
+alice balance bob    -> 403
+bob   balance alice  -> 200 alice: 1200</pre>
+      <p>Механизм — тот же Spring AOP, что у <code>@Transactional</code>. <code>@EnableMethodSecurity</code> регистрирует advisor, и контейнер оборачивает AccountService прокси. Контроллер получает ссылку на прокси. При вызове прокси отдаёт метод и аргументы <code>AuthorizationManagerBeforeMethodInterceptor</code>, тот вычисляет выражение и либо вызывает настоящий объект, либо бросает <code>AuthorizationDeniedException</code>. Это наследник AccessDeniedException, поэтому ExceptionTranslationFilter превращает его в 403.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Контроллер вызывает balance(bob) у прокси. Прокси передаёт вызов в AuthorizationManager, тот вычисляет выражение для alice и получает false, вызов отклоняется с 403, настоящий метод не вызывается. Затем контроллер вызывает summary(bob): у него нет аннотации, прокси сразу вызывает настоящий объект, а тот вызывает this.balance(bob) напрямую, мимо прокси, и баланс bob уходит alice.">
+            <defs>
+              <marker id="am-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="am-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="40" width="150" height="56" rx="9" class="dg-box"/>
+            <rect x="226" y="40" width="190" height="56" rx="9" class="dg-box"/>
+            <rect x="476" y="40" width="224" height="56" rx="9" class="dg-box"/>
+            <rect x="226" y="140" width="300" height="60" rx="9" class="dg-box"/>
+            <!-- состояния -->
+            <rect data-s="2" x="226" y="140" width="300" height="60" rx="9" class="dg-cell"/>
+            <rect data-s="3" x="226" y="140" width="300" height="60" rx="9" class="dg-cell miss"/>
+            <rect data-s="3" x="476" y="40" width="224" height="56" rx="9" class="dg-sep" fill="none"/>
+            <rect data-s="5" x="476" y="40" width="224" height="56" rx="9" class="dg-cell miss"/>
+            <!-- вызовы -->
+            <path data-s="1-3" d="M170 60 L 222 60" class="dg-line" marker-end="url(#am-n)"/>
+            <path data-s="2-3" d="M300 96 L 300 136" class="dg-line" marker-end="url(#am-n)"/>
+            <path data-s="3" d="M226 186 C 120 186, 95 140, 95 100" class="dg-line bad" marker-end="url(#am-bad)"/>
+            <path data-s="4-5" d="M170 60 L 222 60" class="dg-line" marker-end="url(#am-n)"/>
+            <path data-s="4-5" d="M416 60 L 472 60" class="dg-line" marker-end="url(#am-n)"/>
+            <path data-s="5" d="M640 96 C 660 126, 560 126, 572 100" class="dg-line bad" marker-end="url(#am-bad)"/>
+            <path data-s="5" d="M476 82 C 300 120, 200 120, 100 100" class="dg-line bad" marker-end="url(#am-bad)"/>
+            <g text-anchor="middle">
+              <text x="95" y="64" class="dg-in">Api</text>
+              <text x="95" y="82" class="dg-n">контроллер</text>
+              <text x="321" y="64" class="dg-in">прокси</text>
+              <text x="321" y="82" class="dg-n">AccountService$$Spring…</text>
+              <text x="588" y="64" class="dg-in">AccountService</text>
+              <text x="588" y="82" class="dg-n">настоящий объект</text>
+            </g>
+            <text x="240" y="160" class="dg-in">AuthorizationManager</text>
+            <text x="240" y="176" class="dg-n">hasRole('SUPPORT')</text>
+            <text x="240" y="190" class="dg-n">or #id == authentication.name</text>
+            <text data-s="1-3" x="176" y="52" class="dg-n">balance("bob")</text>
+            <text data-s="2" x="400" y="160" class="dg-n">id=bob, name=alice</text>
+            <text data-s="3" x="400" y="160" class="dg-bad">false</text>
+            <text data-s="3" x="40" y="140" class="dg-bad">403</text>
+            <text data-s="3" x="500" y="114" class="dg-n">не вызван</text>
+            <text data-s="4-5" x="176" y="52" class="dg-n">summary("bob")</text>
+            <text data-s="4" x="422" y="52" class="dg-n">без правила</text>
+            <text data-s="5" x="560" y="140" class="dg-bad">this.balance("bob")</text>
+            <text data-s="5" x="200" y="126" class="dg-bad">bob: 1200</text>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="246" class="dg-t">alice вызывает balance("bob") через прокси.</text>
+            <text data-s="2" x="20" y="246" class="dg-t">Прокси спрашивает правило до вызова метода.</text>
+            <text data-s="3" x="20" y="246" class="dg-bad">Правило ложно: 403, метод не выполнялся.</text>
+            <text data-s="4" x="20" y="246" class="dg-t">summary без аннотации: прокси пропускает.</text>
+            <text data-s="5" x="20" y="246" class="dg-bad">Вызов изнутри объекта идёт мимо прокси.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Контроллер держит ссылку не на AccountService, а на прокси, который создал Spring. Вызов balance("bob") приходит в прокси.</li>
+          <li>Прокси видит @PreAuthorize и передаёт выражение, аргументы и текущий Authentication в AuthorizationManager. В выражении id равен bob, authentication.name равен alice, роли SUPPORT нет.</li>
+          <li>Выражение ложно. Интерцептор бросает AuthorizationDeniedException, ExceptionTranslationFilter отвечает 403. Настоящий метод не вызывался.</li>
+          <li>Теперь alice вызывает summary("bob"). На summary аннотации нет, и прокси сразу передаёт вызов настоящему объекту.</li>
+          <li>Внутри summary вызывает balance через this — прямую ссылку на себя, а не на прокси. Правило не проверяется, и баланс bob уходит alice.</li>
+        </ol>
+      </figure>
+      <p>Выражение <code>#id</code> ссылается на имя параметра. Оно доступно, если класс скомпилирован с флагом <code>-parameters</code>: Spring Boot включает его в своей Maven- и Gradle-конфигурации, демо — в <code>run.sh</code>. Без флага имени параметра в байткоде нет, и выражение не находит переменную. Для надёжности параметр можно назвать явно аннотацией <code>@P("id")</code>.</p>
+    </section>
+
+    <section class="step" id="post-and-bypass">
+      <h2>@PostAuthorize проверяет результат, а вызов через this обходит любую аннотацию</h2>
+      <p>Иногда владельца нельзя узнать из аргументов: платёж ищут по id, а владелец записан в самом платеже. Тогда проверяют результат. <code>@PostAuthorize</code> выполняет метод, кладёт результат в <code>returnObject</code> и только потом вычисляет выражение:</p>
+      <pre><code class="language-java">@PostAuthorize("returnObject.owner() == authentication.name")
+public Payment payment(String id) { // Выполнится в любом случае.
+    return new Payment(id, id.equals("p-1") ? "alice" : "bob", 500);
+}</code></pre>
+      <pre class="out">alice payment p-1    -> 200 Payment[id=p-1, owner=alice, amount=500]
+alice payment p-2    -> 403</pre>
+      <p>Платёж p-2 принадлежит bob, и alice получила 403. Но метод уже выполнился: запрос к базе прошёл, и если бы метод что-то менял или писал в аудит «платёж выдан», это бы произошло. <code>@PostAuthorize</code> годится только для чтения без побочных эффектов. Для списков есть <code>@PostFilter</code>, но он загружает все записи и отбрасывает чужие в памяти. На тысяче платежей правильнее фильтровать в запросе: <code>WHERE owner = :currentUser</code>.</p>
+      <p>Теперь утечка из последнего шага схемы. Демо вызывает <code>summary</code>, который внутри обращается к <code>balance</code>:</p>
+      <pre><code class="language-java">// Аннотации нет: прокси пропускает вызов к настоящему объекту.
+public String summary(String id) {
+    return "summary of " + balance(id); // this.balance — мимо прокси и правила.
+}</code></pre>
+      <pre class="out">alice summary bob    -> 200 summary of bob: 1200</pre>
+      <p>Это то же ограничение прокси, что и у <code>@Transactional</code>, разобранное в <a href="spring-aop.html">AOP &amp; Proxies</a>. Правило висит на прокси, а вызов изнутри объекта идёт по ссылке <code>this</code> на настоящий объект. Так же правило не сработает на <code>private</code> методе и на <code>final</code> методе класса с CGLIB-прокси. Защиты две: ставить правило на каждый публичный метод, который отдаёт защищённые данные, или выносить проверяемую операцию в отдельный бин, чтобы вызов шёл через его прокси.</p>
+      <div class="trap">
+        <p class="myth">@PreAuthorize на методе сервиса защищает данные, которые этот метод возвращает.</p>
+        <p class="fact">Аннотация защищает вызов через прокси. Другой метод того же класса может прочитать те же данные через this без проверки. Защищай точку входа, через которую данные уходят наружу, и проверяй её тестом с чужим пользователем.</p>
+      </div>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Сложное правило выносят в бин, а доступ к спискам решают в запросе</h2>
+      <p>Выражение вроде <code>hasRole('SUPPORT') or #id == authentication.name</code> терпимо, но правило «поддержка видит счета только своего региона, а менеджер — счета своих магазинов» в SpEL превращается в строку, которую никто не тестирует. Такое правило выносят в бин и вызывают из выражения: <code>@PreAuthorize("@accountAccess.canRead(#id, authentication)")</code>. Логика становится обычным Java-кодом с юнит-тестами.</p>
+      <p>Можно собрать свою аннотацию: <code>@PreAuthorize("hasRole('SUPPORT')")</code> на аннотации <code>@SupportOnly</code> работает как мета-аннотация. С Security 6.3 у неё бывают параметры через шаблоны выражений. Это убирает повторение строк SpEL по всему коду.</p>
+      <p>Проверка на методе работает с одним объектом за раз. Для экранов со списками и поиском правило доступа становится частью запроса к базе: фильтр по владельцу, региону, магазину. В JPA для этого используют параметр текущего пользователя в запросе репозитория; Spring Data умеет подставлять <code>?#{authentication.name}</code> в <code>@Query</code> с модулем security-data. Полные ACL на каждый объект Spring Security тоже поддерживает, но они тяжёлые и нужны редко.</p>
+      <p>Правила проверяют тестами с разными пользователями. <code>@WithMockUser(roles = "USER")</code> подставляет пользователя без логина, и для каждого закрытого действия пишут хотя бы один тест «чужой получает 403». Тестирование разобрано в <a href="spring-testing.html">Testing</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Правила URL проверяются по порядку до первого совпадения: узкие шаблоны пиши выше широких, anyRequest последним.</li>
+        <li>Роль — authority с префиксом ROLE_. hasRole добавляет префикс сам, hasAuthority сравнивает строку как есть.</li>
+        <li>@PreAuthorize работает на прокси и видит аргументы; без @EnableMethodSecurity аннотации молча игнорируются.</li>
+        <li>@PostAuthorize проверяет результат уже выполненного метода — только для чтения без побочных эффектов.</li>
+        <li>Вызов через this, private и final методы обходят правило. Доступ к спискам фильтруй в запросе к базе.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="authz-role-authority" data-freq="3">
+      <h3>Чем hasRole отличается от hasAuthority?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Права пользователя — это строки GrantedAuthority. Роль — просто authority с префиксом ROLE_. hasRole("ADMIN") ищет строку ROLE_ADMIN, а hasAuthority("ADMIN") ищет ADMIN без изменений. Метод roles("ADMIN") при создании пользователя сам добавляет префикс.</p>
+          <p>Ошибка бывает, когда права загружают из базы как ADMIN, а проверяют через hasRole: пользователь получает 403 при правильной роли. Я различаю их по смыслу: роль описывает, кто человек, authority вроде payments:refund — конкретное действие.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JWT Resource Server превращает scope в authority с префиксом SCOPE_, их проверяют через hasAuthority.</li>
+            <li>Иерархию ролей задаёт бин RoleHierarchy; без неё админ не получает права поддержки автоматически.</li>
+            <li>Префикс меняется бином GrantedAuthorityDefaults, но лучше этого не делать: ломаются ожидания библиотек и коллег.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="authz-preauthorize" data-freq="3">
+      <h3>Как работает @PreAuthorize и когда он не срабатывает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@EnableMethodSecurity включает advisor, и Spring оборачивает бины с аннотациями в прокси. При вызове прокси вычисляет SpEL-выражение с текущим Authentication и аргументами метода. Если оно ложно, бросается AuthorizationDeniedException, и клиент получает 403, а метод не выполняется.</p>
+          <p>Не срабатывает там, где нет прокси: при вызове метода изнутри того же класса через this, на private методах, на final методах при CGLIB, на объектах, созданных через new, и если забыли @EnableMethodSecurity.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ссылки на параметры вроде #id требуют компиляции с -parameters или аннотации @P.</li>
+            <li>@PostAuthorize выполняет метод до проверки, поэтому подходит только для чтения без побочных эффектов; @PostFilter фильтрует в памяти.</li>
+            <li>Сложное правило выносят в бин и вызывают как @bean.method(...) в выражении, чтобы тестировать его обычным кодом.</li>
+            <li>Старая @EnableGlobalMethodSecurity заменена на @EnableMethodSecurity, где prePostEnabled включён по умолчанию.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди обход проверки в сервисе возвратов</summary>
+          <pre><code class="language-java">@Service
+class RefundService {
+    @PreAuthorize("hasAuthority('payments:refund')")
+    public void refund(String paymentId) { /* деньги уходят клиенту */ }
+
+    public void refundAll(List&lt;String&gt; ids) {
+        ids.forEach(this::refund); // Вызывается из контроллера для пакета.
+    }
+}</code></pre>
+          <p>refundAll не защищён, а refund внутри него вызывается через this, мимо прокси. Любой пользователь, которому доступен эндпоинт пакетного возврата, вернёт деньги без права payments:refund. Исправление: та же аннотация на refundAll или вызов refund через другой бин.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="authz-url-order" data-freq="2">
+      <h3>В каком порядке применяются правила authorizeHttpRequests?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сверху вниз до первого совпадения шаблона. Если широкое правило /api/payments/** стоит выше узкого /api/payments/admin/**, узкое никогда не применится, и админский раздел откроется любому залогиненному. Поэтому узкие шаблоны пишу первыми, anyRequest — последним.</p>
+          <p>Spring Security проверяет только то, что anyRequest стоит в конце. Перекрытие обычных шаблонов он не видит, поэтому на каждый закрытый раздел нужен тест с пользователем без роли.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>anyRequest().denyAll() вместо authenticated() закрывает новые эндпоинты по умолчанию, пока для них не написали правило.</li>
+            <li>securityMatcher выбирает цепочку, а requestMatchers внутри authorizeHttpRequests выбирают правило внутри цепочки; это разные уровни.</li>
+            <li>Правила URL и method security складываются: запрос должен пройти оба.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="authz-idor" data-freq="2">
+      <h3>Как не дать пользователю прочитать чужие данные по id в URL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Правила URL тут не помогут: они знают путь, но не владельца объекта. Проверяю на уровне сервиса. Если владелец виден из аргумента, ставлю @PreAuthorize с выражением вроде #id == authentication.name. Если только из результата — @PostAuthorize с returnObject.owner, для операций чтения.</p>
+          <p>Для списков и поиска фильтрую в самом запросе: WHERE owner = текущий пользователь. Так чужие записи не загружаются вовсе.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Последовательные id облегчают перебор; UUID снижают риск, но не заменяют проверку.</li>
+            <li>Отказ можно отдавать как 404 вместо 403, чтобы не подтверждать существование чужого объекта.</li>
+            <li>Проверка должна стоять на каждой точке выхода данных: экспорт, отчёт, пакетная операция, а не только на основном методе.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/authorization/architecture.html">Spring Security Reference: Authorization Architecture</a> — основа урока: AuthorizationManager, GrantedAuthority, роли и иерархия.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html">Authorize HttpServletRequests</a> — порядок requestMatchers, denyAll, правила по диспетчеру.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html">Method Security</a> — @PreAuthorize, @PostAuthorize, мета-аннотации, бины в выражениях.</li>
+      <li><a href="https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/">OWASP API1:2023 Broken Object Level Authorization</a> — почему IDOR первая уязвимость API и как её находят.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
