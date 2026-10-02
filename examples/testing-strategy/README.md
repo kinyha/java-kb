@@ -1,0 +1,13 @@
+# Testing strategy demo
+
+Пример к теме Backend › Testing › Testing Strategy: покрытие JaCoCo против мутационного тестирования PIT. Нужны JDK 21 и Maven.
+
+```bash
+cd examples/testing-strategy
+mvn -q test -Dtest=WeakFeeTest jacoco:report
+cut -d, -f3,6-9 target/site/jacoco/jacoco.csv
+mvn test-compile org.pitest:pitest-maven:mutationCoverage -DtargetTests=kb.fees.WeakFeeTest
+mvn test-compile org.pitest:pitest-maven:mutationCoverage -DtargetTests=kb.fees.StrongFeeTest
+```
+
+Отчёт PIT: target/pit-reports/index.html.

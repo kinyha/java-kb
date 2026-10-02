@@ -201,7 +201,7 @@ window.KB_TREE = [
           scope: 'ограниченный контекст, агрегат, сущность и value object, доменные события' },
       ] },
       { id: 'testing', title: 'Testing', items: [
-        { id: 'testing-strategy', freq: 2, status: 'empty', title: 'Testing Strategy',
+        { id: 'testing-strategy', freq: 2, status: 'draft', title: 'Testing Strategy',
           scope: 'пирамида тестов, unit, интеграционные, контрактные, e2e, тестовые данные' },
         { id: 'test-doubles', freq: 2, status: 'empty', title: 'Test Doubles',
           scope: 'stub, mock, spy и fake, чем стаб отличается от мока, что мокать и что нет' },
