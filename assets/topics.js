@@ -155,7 +155,7 @@ window.KB_TREE = [
           scope: 'cache-aside, read-through, write-through, write-behind, TTL, инвалидация, cache stampede' },
         { id: 'http-cache', freq: 1, status: 'draft', title: 'HTTP Cache & CDN',
           scope: 'Cache-Control, ETag, условные запросы, push и pull CDN' },
-        { id: 'redis', freq: 3, status: 'empty', title: 'Redis Basics',
+        { id: 'redis', freq: 3, status: 'draft', title: 'Redis Basics',
           scope: 'структуры данных, TTL и политики вытеснения, однопоточная модель, pipelining' },
         { id: 'redis-ops', freq: 2, status: 'empty', title: 'Redis in Production',
           scope: 'RDB и AOF, репликация, Sentinel, Cluster, распределённые блокировки' },
