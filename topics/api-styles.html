@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>API: gRPC, GraphQL, SOAP · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="api-styles">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>API: gRPC, GraphQL, SOAP</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>У каждого стиля API своя сильная сторона. gRPC — строгий контракт, бинарный Protobuf поверх HTTP/2, стриминг и сроки выполнения, которые передаются по цепочке вызовов; хорош между сервисами. GraphQL — одна точка входа, где клиент сам выбирает поля и связи; хорош для экранов приложений, но требует пакетной загрузки против N+1 и защиты от дорогих запросов. SOAP — XML-конверты по строгому WSDL, которые до сих пор живут в банках и госсистемах. REST остаётся выбором по умолчанию для публичных API.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Разным клиентам платёжной системы нужны разные формы API</h2>
+      <p>У платёжной системы три вида клиентов. Внутренние сервисы — антифрод, сверка, уведомления — вызывают друг друга тысячи раз в секунду, и им нужны быстрые типизированные вызовы с понятными сроками. Мобильное приложение на одном экране показывает платёж, магазин, возвраты и бонусы, и шесть REST-запросов на экран дают заметную задержку на мобильной сети. А старый банк-партнёр принимает только SOAP с подписанными XML-конвертами.</p>
+      <p>Одного стиля на всех не бывает. Тема разбирает, как устроены gRPC, GraphQL и SOAP, какие у них ловушки и когда что выбирать. REST разобран в <a href="api-design.html">REST</a>. Демо в <a href="../examples/api-styles/">examples/api-styles</a> используют настоящие библиотеки: gRPC 1.84 на Netty и graphql-java 26.1 с DataLoader. Запуск — <code>./run.sh GrpcDemo</code> и <code>./run.sh GraphQlDemo</code> на JDK 21 с Maven.</p>
+    </section>
+
+    <section class="step" id="grpc">
+      <h2>gRPC — вызов метода по контракту, Protobuf внутри кадров HTTP/2</h2>
+      <p>В gRPC контракт пишут в файле <code>.proto</code>: сервис, методы и сообщения с номерами полей. Генератор строит по нему клиентский стаб и серверный интерфейс на любом языке, поэтому клиент на Go и сервер на Java совпадают по типам на этапе компиляции. Вызов уходит запросом HTTP/2 на путь <code>/пакет.Сервис/Метод</code>, а сообщения кодируются Protobuf — компактно и быстро.</p>
+      <pre><code class="language-text">service Payments {
+  rpc GetPayment (PaymentId) returns (Payment);              // unary: запрос — ответ
+  rpc WatchPayment (PaymentId) returns (stream PaymentEvent); // сервер шлёт поток событий
+}
+message PaymentId { string id = 1; }  // Номер поля — часть контракта навсегда.</code></pre>
+      <p>Демо обходится без генерации кода, чтобы показать сам транспорт: сообщения — строки, а маршаллер превращает их в байты кадра. С Protobuf меняется только маршаллер.</p>
+      <pre><code class="language-java">MethodDescriptor&lt;String, String&gt; GET = MethodDescriptor.&lt;String, String&gt;newBuilder()
+        .setType(MethodDescriptor.MethodType.UNARY)
+        .setFullMethodName("payments.Payments/GetPayment") // HTTP/2 путь вызова.
+        .setRequestMarshaller(TEXT).setResponseMarshaller(TEXT).build();
+
+ClientCalls.blockingUnaryCall(channel, GET, CallOptions.DEFAULT, "p-1");
+ClientCalls.blockingUnaryCall(channel, GET, CallOptions.DEFAULT, "x-9"); // Сервер: NOT_FOUND.
+ClientCalls.blockingServerStreamingCall(channel, WATCH, CallOptions.DEFAULT, "p-1");</code></pre>
+      <pre class="out">unary: p-1:CAPTURED
+unknown: NOT_FOUND — payment x-9 not found
+stream: p-1:AUTHORIZED p-1:CAPTURED p-1:SETTLED</pre>
+      <p>Ошибки в gRPC — не коды HTTP, а свои статусы: <code>NOT_FOUND</code>, <code>INVALID_ARGUMENT</code>, <code>UNAVAILABLE</code>, <code>DEADLINE_EXCEEDED</code>. HTTP-ответ при этом обычно 200, а статус приходит в трейлере. Поэтому обычный HTTP-балансировщик и мониторинг не видят ошибок gRPC без специальной поддержки. Стриминг бывает в обе стороны: сервер шлёт поток событий платежа, клиент шлёт поток записей, или оба одновременно. Номера полей Protobuf нельзя менять и переиспользовать — правила эволюции схемы разобраны в <a href="serialization.html">Serialization Formats</a>.</p>
+    </section>
+
+    <section class="step" id="deadlines">
+      <h2>Срок вызова доходит до сервера, но остановить работу сервер должен сам</h2>
+      <p>У каждого вызова gRPC может быть deadline — момент, после которого ответ клиенту не нужен. Срок передаётся серверу в заголовке <code>grpc-timeout</code>, и сервер видит, сколько осталось. Демо вызывает медленный метод со сроком 100 мс, а сервер работает 300:</p>
+      <pre><code class="language-java">// Клиент: срок 100 мс.
+ClientCalls.blockingUnaryCall(channel, GET, CallOptions.DEFAULT.withDeadlineAfter(100, MILLISECONDS), "slow");
+
+// Сервер: видит срок, но работает 300 мс и только потом проверяет отмену.
+var deadline = Context.current().getDeadline();
+sleep(300);
+System.out.println("server: cancelled by client=" + Context.current().isCancelled());</code></pre>
+      <pre class="out">server: deadline left ~90 ms
+deadline: DEADLINE_EXCEEDED after ~100 ms
+server: cancelled by client=true</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Шкала времени от 0 до 300 мс. Клиент ждёт до 100 мс и получает DEADLINE_EXCEEDED. Сервер узнаёт про срок в начале, видит 90 мс, но продолжает работу до 300 мс, хотя после 100 мс результат никому не нужен.">
+            <text x="20" y="22" class="dg-cap">ОДИН ВЫЗОВ, ВРЕМЯ В МС</text>
+            <text x="20" y="62" class="dg-n">клиент</text>
+            <rect x="100" y="44" width="200" height="28" rx="4" class="dg-cell"/>
+            <rect x="300" y="44" width="10" height="28" class="dg-cell miss"/>
+            <text x="320" y="63" class="dg-bad">DEADLINE_EXCEEDED</text>
+            <text x="20" y="122" class="dg-n">сервер</text>
+            <rect x="100" y="104" width="200" height="28" rx="4" class="dg-cell hit"/>
+            <rect x="300" y="104" width="400" height="28" rx="4" class="dg-cell miss"/>
+            <text x="110" y="123" class="dg-n">полезная работа</text>
+            <text x="310" y="123" class="dg-bad">впустую: клиент уже ушёл</text>
+            <path d="M100 160 L 700 160" class="dg-line"/>
+            <text x="100" y="178" class="dg-n" text-anchor="middle">0</text>
+            <text x="300" y="178" class="dg-n" text-anchor="middle">100</text>
+            <text x="700" y="178" class="dg-n" text-anchor="end">300</text>
+            <text x="20" y="196" class="dg-s">Отмена сигнализируется, но не прерывает код: его прерывает только проверка.</text>
+          </svg>
+        </div>
+        <figcaption>Клиент ушёл на сотой миллисекунде, а сервер две трети своего времени работал на пустоту. При перегрузке такие «зомби-запросы» съедают ресурсы, нужные живым запросам.</figcaption>
+      </figure>
+      <p>gRPC сигнализирует отмену, но не прерывает код обработчика. Сервер должен сам проверять <code>Context.current().isCancelled()</code> между шагами или подписаться на отмену, а главное — передавать оставшийся срок в свои исходящие вызовы. gRPC делает это автоматически для вызовов из того же контекста: если обработчик вызывает антифрод через gRPC, тот получит не больше оставшихся 90 мс. Так срок пользовательского запроса распространяется по всей цепочке сервисов, и никто не работает дольше, чем клиент готов ждать. С HTTP-клиентами это приходится делать вручную.</p>
+      <p>Ещё одна особенность — долгоживущие соединения HTTP/2. Клиент gRPC держит одно соединение и шлёт по нему все вызовы, поэтому балансировщик уровня L4 не распределяет нагрузку. Об этом — в <a href="http-versions.html">HTTP/2 &amp; HTTP/3</a>.</p>
+    </section>
+
+    <section class="step" id="graphql">
+      <h2>GraphQL отдаёт ровно запрошенные поля, но наивные резолверы ходят в базу на каждый объект</h2>
+      <p>GraphQL — одна точка входа и схема типов. Клиент присылает запрос, в котором перечисляет нужные поля и связи, и получает ответ ровно этой формы. Экран истории платежей просит id платежа и название магазина — сумма в ответ не попадёт, потому что её не просили:</p>
+      <pre><code class="language-java">String query = "{ payments { id merchant { name } } }"; // amount не запрошен.</code></pre>
+      <pre class="out">response: {payments=[{id=p-1, merchant={name=Coffee}}, {id=p-2, merchant={name=Books}}, {id=p-3, merchant={name=Coffee}}, {id=p-4, merchant={name=Taxi}}, {id=p-5, merchant={name=Books}}]}</pre>
+      <p>На сервере у каждого поля есть резолвер — функция, которая достаёт значение. Резолвер <code>merchant</code> вызывается для каждого платежа отдельно. Если он ходит в базу напрямую, пять платежей дают пять запросов, включая повторные для одного и того же магазина. Это та же проблема N+1, что и в <a href="jpa-relations.html">Relations &amp; Fetching</a>, только на уровне API.</p>
+      <pre><code class="language-java">// Наивно: один SQL на каждый вызов резолвера.
+env -&gt; merchantById(((Payment) env.getSource()).merchantId());
+
+// DataLoader: копит ключи в течение уровня запроса и загружает их одним вызовом.
+env -&gt; env.getDataLoader("merchants").load(((Payment) env.getSource()).merchantId());
+DataLoaderFactory.newDataLoader(ids -&gt; CompletableFuture.supplyAsync(() -&gt; merchantsByIds(ids)));</code></pre>
+      <pre class="out">naive: 5 merchant queries
+  select * from merchant where id = 'm-1'
+  select * from merchant where id = 'm-2'
+  select * from merchant where id = 'm-1'
+  select * from merchant where id = 'm-3'
+  select * from merchant where id = 'm-2'
+dataloader: 1 merchant queries
+  select * from merchant where id in [m-1, m-2, m-3]</pre>
+      <p>DataLoader не загружает магазин сразу. Он копит ключи, пока GraphQL обходит все платежи текущего уровня, убирает дубли и вызывает пакетную функцию один раз. Пять запросов превратились в один с тремя уникальными id. DataLoader живёт на один запрос: его кеш нельзя делить между пользователями, иначе один увидит данные, загруженные для другого. В Spring for GraphQL пакетную загрузку дают <code>@BatchMapping</code> и <code>BatchLoaderRegistry</code>.</p>
+    </section>
+
+    <section class="step" id="graphql-costs">
+      <h2>Гибкость GraphQL стоит кеширования, защиты от тяжёлых запросов и проверки прав на каждое поле</h2>
+      <p>Раз клиент сам составляет запрос, он может составить и очень дорогой: платежи, у каждого — магазин, у магазина — все платежи, у них — снова магазины, десять уровней. Один такой запрос кладёт базу. Поэтому сервер ограничивает глубину и вычисляет сложность запроса до выполнения, отклоняя слишком дорогие. Для своих приложений часто включают persisted queries: клиент присылает не текст, а id заранее одобренного запроса.</p>
+      <p>HTTP-кеш почти не помогает: все запросы идут POST на один адрес <code>/graphql</code>, и прокси с CDN не могут их различить. Кешируют на уровне резолверов или с помощью persisted queries через GET. Ошибки тоже устроены иначе: ответ обычно 200 с массивом <code>errors</code> рядом с частично заполненными данными, поэтому мониторинг по кодам HTTP их не видит.</p>
+      <p>Проверка прав — на уровне полей и объектов, а не адресов. В REST достаточно закрыть <code>/admin/**</code>; в GraphQL поле <code>merchant.bankAccount</code> доступно через любой путь графа, и проверять доступ нужно там, где оно резолвится. Каждый новый путь к объекту — новый способ обойти проверку, сделанную в другом месте.</p>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>SOAP живёт в старых интеграциях, а выбор стиля зависит от клиента и границы</h2>
+      <p>SOAP — протокол обмена XML-конвертами с жёсткой схемой в WSDL. Конверт содержит заголовок и тело, а стандарты WS-* добавляют подпись и шифрование отдельных частей сообщения (WS-Security), надёжную доставку и транзакции. Его выбирали за строгий контракт и подпись на уровне сообщения, которая переживает любые прокси. Сегодня SOAP редко выбирают для нового API, но в банках, страховании и госсистемах он работает десятилетиями. В Java с ним работают через JAX-WS или Spring Web Services; клиентский код генерируется по WSDL.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>REST</th><th>gRPC</th><th>GraphQL</th><th>SOAP</th></tr></thead>
+        <tbody>
+          <tr><td>Контракт</td><td>OpenAPI, по желанию</td><td>.proto, обязателен</td><td>Схема, обязательна</td><td>WSDL, обязателен</td></tr>
+          <tr><td>Формат</td><td>JSON</td><td>Protobuf</td><td>JSON</td><td>XML</td></tr>
+          <tr><td>HTTP-кеш</td><td>Да</td><td>Нет</td><td>Почти нет</td><td>Нет</td></tr>
+          <tr><td>Стриминг</td><td>SSE, WebSocket отдельно</td><td>Встроен, в обе стороны</td><td>Подписки</td><td>Нет</td></tr>
+          <tr><td>Где хорош</td><td>Публичные API, партнёры</td><td>Между сервисами</td><td>Экраны приложений, BFF</td><td>Старые банковские интеграции</td></tr>
+        </tbody>
+      </table>
+      <p>Типичная система использует несколько стилей одновременно: REST наружу для партнёров, gRPC между внутренними сервисами, GraphQL в backend-for-frontend для мобильного приложения и адаптер к SOAP-банку на краю. Важно не смешивать их внутри одной границы и не выбирать модный стиль там, где клиенту нужен обычный кешируемый REST. Браузерам gRPC напрямую недоступен — нужен gRPC-Web и прокси, поэтому для публичного веба он редкость.</p>
+      <div class="trap">
+        <p class="myth">GraphQL быстрее REST, потому что клиент получает всё одним запросом.</p>
+        <p class="fact">Один запрос клиента может превратиться на сервере в сотни запросов к базе, если резолверы не пакетируют загрузку. GraphQL экономит круги по сети для клиента, а нагрузку переносит на сервер. Без DataLoader и ограничения сложности он медленнее и опаснее REST.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>gRPC: контракт .proto, Protobuf поверх HTTP/2, стриминг, свои статусы вместо кодов HTTP; хорош между сервисами.</li>
+        <li>Deadline передаётся серверу и дальше по цепочке, но код обработчика сам должен проверять отмену: в демо сервер работал 300 мс при сроке 100.</li>
+        <li>GraphQL отдаёт запрошенные поля; наивные резолверы дают N+1 (5 запросов), DataLoader пакетирует их в один.</li>
+        <li>GraphQL требует ограничения сложности, своего кеширования и проверки прав на поля.</li>
+        <li>SOAP — для существующих интеграций; стиль выбирают по клиенту и границе, часто несколько сразу.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="styles-grpc-rest" data-freq="2">
+      <h3>Когда выбрать gRPC, а когда REST?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>gRPC — для вызовов между внутренними сервисами: строгий контракт в .proto, генерация кода, компактный Protobuf, HTTP/2 с мультиплексированием, стриминг и сроки вызовов. REST — для публичных и партнёрских API: понятен любому клиенту, работает в браузере, кешируется прокси и CDN, ошибки видны по кодам HTTP.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Deadline в gRPC передаётся по цепочке, но обработчик сам проверяет отмену, иначе работает впустую.</li>
+            <li>Статус gRPC приходит в трейлере при HTTP 200; балансировщикам и мониторингу нужна поддержка gRPC.</li>
+            <li>Долгоживущее HTTP/2-соединение требует L7- или клиентской балансировки.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим обработчиком gRPC при перегрузке?</summary>
+          <pre><code class="language-java">public void getRisk(RiskRequest r, StreamObserver&lt;RiskScore&gt; out) {
+    var history = historyRepository.load(r.getAccountId()); // 400 мс на тяжёлый аккаунт
+    var score = model.score(history);                        // ещё 200 мс
+    out.onNext(score);
+    out.onCompleted();
+}</code></pre>
+          <p>Клиент платежа ждёт антифрод 150 мс. Обработчик не смотрит на срок и отмену: после ухода клиента он ещё 450 мс грузит историю и считает модель. Под нагрузкой такие брошенные запросы съедают потоки и соединения базы, нужные живым запросам. Нужно проверять Context.current().isCancelled() между шагами, передавать оставшийся срок в запрос к базе как таймаут и сразу отвечать DEADLINE_EXCEEDED, если времени не осталось.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="styles-graphql-n1" data-freq="2">
+      <h3>Что такое проблема N+1 в GraphQL и как её решают?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Резолвер связи вызывается отдельно для каждого родительского объекта. Если он ходит в базу напрямую, список из N платежей даёт N запросов за магазинами. В демо пять платежей дали пять запросов, из них два повторных.</p>
+          <p>Решение — DataLoader: он копит ключи всего уровня, убирает дубли и загружает их одним пакетным запросом. В демо остался один запрос с тремя id. В Spring for GraphQL это @BatchMapping.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>DataLoader и его кеш живут на один запрос; общий кеш между пользователями даёт утечку данных.</li>
+            <li>Глубину и сложность запроса ограничивают до выполнения, иначе один запрос кладёт базу.</li>
+            <li>Права проверяют на уровне полей: к объекту можно прийти разными путями графа.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="styles-graphql-when" data-freq="1">
+      <h3>Когда GraphQL оправдан, а когда нет?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Оправдан, когда много разных клиентов собирают экраны из связанных данных и им важна каждая поездка по сети: мобильные приложения, BFF. Клиент сам выбирает поля и связи и получает всё одним запросом. Не оправдан для простых API, публичных интеграций и там, где важен HTTP-кеш: все запросы — POST на один адрес.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ошибки приходят в массиве errors при HTTP 200 вместе с частичными данными.</li>
+            <li>Persisted queries дают и защиту от произвольных запросов, и кеширование через GET.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://grpc.io/docs/what-is-grpc/core-concepts/">gRPC: Core concepts</a> и <a href="https://grpc.io/docs/guides/deadlines/">Deadlines</a> — основа урока о gRPC: типы вызовов, сроки, отмена и их распространение.</li>
+      <li><a href="https://graphql.org/learn/">GraphQL: Learn</a> и <a href="https://www.graphql-java.com/documentation/batching">graphql-java: Batching with DataLoader</a> — схема, резолверы, пакетная загрузка.</li>
+      <li><a href="https://grpc.github.io/grpc/core/md_doc_statuscodes.html">gRPC Status Codes</a> — какие коды есть и когда их повторять.</li>
+      <li><a href="https://www.w3.org/TR/soap12/">W3C SOAP 1.2</a> — структура конверта и привязка к HTTP.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

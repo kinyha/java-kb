@@ -131,7 +131,7 @@ window.KB_TREE = [
           scope: 'ресурсы, методы и идемпотентность, коды ответов, модель зрелости Ричардсона, HATEOAS' },
         { id: 'api-practices', freq: 2, status: 'draft', title: 'API Design',
           scope: 'пагинация, фильтрация и сортировка, версионирование, формат ошибок RFC 9457, обратная совместимость' },
-        { id: 'api-styles', freq: 2, status: 'empty', title: 'gRPC, GraphQL, SOAP',
+        { id: 'api-styles', freq: 2, status: 'draft', title: 'gRPC, GraphQL, SOAP',
           scope: 'когда что выбирать, Protobuf и стриминг в gRPC, схема и N+1 в GraphQL, WSDL' },
         { id: 'api-contracts', freq: 2, status: 'empty', title: 'OpenAPI & Contracts',
           scope: 'contract-first и code-first, генерация клиентов, проверка совместимости контракта' },
