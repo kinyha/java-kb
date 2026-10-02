@@ -10,4 +10,5 @@ java -cp "$(cat target/classpath.txt)" IsolationDemo.java
 java -cp "$(cat target/classpath.txt)" LocksDemo.java
 java -cp "$(cat target/classpath.txt)" MvccDemo.java   # номера транзакций зависят от истории базы
 java -cp "$(cat target/classpath.txt)" VacuumDemo.java
+java -cp "$(cat target/classpath.txt)" ArchitectureDemo.java   # перезапускает контейнер kb-pg ради пустого кеша
 ```

@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Architecture &amp; WAL · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="postgres">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Architecture &amp; WAL</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>PostgreSQL запускает отдельный процесс ОС на каждое соединение, поэтому тысячи соединений дороги, и перед базой ставят пул. Данные читаются страницами по 8 КБ через общий кеш shared buffers. Изменение сначала записывается в журнал WAL, и коммит ждёт только сброса журнала на диск, а сами страницы попадают в файлы позже, на checkpoint. После сбоя база проигрывает WAL от последнего checkpoint. Первое изменение страницы после checkpoint пишет в журнал её целиком, поэтому частые checkpoint раздувают WAL. Большие значения уходят в отдельную TOAST-таблицу и читаются, только когда их просят.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Пятьсот подов исчерпали соединения, а после каждого checkpoint росла задержка записи</h2>
+      <p>Платёжный сервис масштабировали до пятисот подов, у каждого пул на 20 соединений, и база перестала принимать новые: <code>too many clients already</code>. На графиках записи каждые пять минут видны всплески задержки и объёма журнала. А запрос суммы платежей по магазину вдруг стал медленным после того, как в таблицу добавили колонку с JSON-деталями.</p>
+      <p>Все три истории объясняются устройством PostgreSQL: процессы, общий буфер, журнал предзаписи, checkpoint и TOAST. Многоверсионность — в <a href="mvcc.html">MVCC</a>, очистка — в <a href="vacuum.html">VACUUM</a>, пулы соединений на стороне Java — в <a href="jdbc.html">JDBC &amp; Connection Pools</a>. Демо <a href="../examples/db-tx/ArchitectureDemo.java">ArchitectureDemo.java</a> работает с PostgreSQL 17 в Docker и измеряет всё встроенными средствами: <code>pg_stat_activity</code>, <code>EXPLAIN (BUFFERS)</code>, позиции WAL.</p>
+    </section>
+
+    <section class="step" id="processes">
+      <h2>Каждое соединение — отдельный процесс, и тысячи соединений дороги</h2>
+      <pre class="out">== background processes
+   autovacuum launcher            1
+   background writer              1
+   checkpointer                   1
+   client backend                 1
+   logical replication launcher   1
+   walwriter                      1
+== after opening 20 more connections: client backends = 21 (one OS process each)</pre>
+      <p>Главный процесс postmaster принимает подключения и на каждое порождает процесс client backend. Фоновые процессы делают общую работу: walwriter сбрасывает журнал, checkpointer и background writer пишут изменённые страницы в файлы, autovacuum launcher запускает очистку. Двадцать новых соединений — двадцать новых процессов ОС.</p>
+      <p>Процесс — это мегабайты памяти, свой кеш каталога и планов, а под нагрузкой ещё <code>work_mem</code> на каждую сортировку или хеш в запросе. Тысячи процессов конкурируют за процессор и снимки: получение снимка проходит по списку всех активных транзакций. Поэтому <code>max_connections</code> держат в сотнях, а не в тысячах. Между приложениями и базой ставят PgBouncer в режиме транзакций: пятьсот подов держат соединения к нему, а он раздаёт сотню серверных соединений тем, у кого сейчас транзакция. Размер пула HikariCP в каждом поде уменьшают: базе полезно примерно столько активных запросов, сколько у неё ядер и дисков, а не столько, сколько потоков у приложения.</p>
+    </section>
+
+    <section class="step" id="buffers">
+      <h2>Данные читаются страницами через shared buffers</h2>
+      <pre class="out">== cold: Buffers: shared read=1911 dirtied=1911
+== cold: Execution Time: 40.722 ms
+== warm: Buffers: shared hit=1911
+== warm: Execution Time: 20.546 ms
+   shared_buffers = 128MB</pre>
+      <p>Таблица хранится страницами по 8 КБ, и любой запрос работает со страницами в общем кеше shared buffers. После перезапуска кеш пуст: первый проход прочитал 1911 страниц (<code>shared read</code>), второй нашёл их все в памяти (<code>shared hit</code>) и выполнился вдвое быстрее. «Read» здесь не обязательно диск: PostgreSQL читает через кеш ОС, и страница могла быть в нём. Поэтому shared buffers обычно ставят около четверти памяти — остальное работает кешем ОС.</p>
+      <p>Неожиданная деталь — <code>dirtied=1911</code> у чтения. Строки были вставлены до перезапуска, и при первом чтении PostgreSQL проверил статус транзакций, создавших их, и записал результат прямо в заголовки строк — hint bits, — чтобы не проверять снова. Страницы стали изменёнными, и их придётся записать. Первый SELECT после массовой загрузки создаёт запись на диск — это нормально.</p>
+    </section>
+
+    <section class="step" id="wal">
+      <h2>Коммит ждёт только сброса журнала, а страницы пишутся позже</h2>
+      <p>Писать каждую изменённую страницу на диск при коммите было бы медленно: изменения разбросаны по файлам, а страница пишется целиком. Вместо этого PostgreSQL ведёт журнал предзаписи WAL: последовательный файл, куда каждое изменение пишется компактной записью до того, как изменится сама страница. Коммит ждёт, пока журнал до его записи будет сброшен на диск, и после этого изменения переживут сбой.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="UPDATE меняет страницу в shared buffers и пишет запись в WAL-буферы. COMMIT сбрасывает WAL на диск и подтверждает клиенту; страница остаётся изменённой в памяти. Checkpoint записывает изменённые страницы в файлы данных. После сбоя база проигрывает WAL с последнего checkpoint.">
+            <defs><marker id="wl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">ПАМЯТЬ</text>
+            <text x="20" y="146" class="dg-cap">ДИСК</text>
+            <rect x="20" y="34" width="200" height="70" rx="9" class="dg-box"/>
+            <text x="120" y="56" class="dg-in" text-anchor="middle">backend</text>
+            <rect x="260" y="34" width="200" height="70" rx="9" class="dg-box"/>
+            <text x="360" y="56" class="dg-in" text-anchor="middle">shared buffers</text>
+            <rect x="500" y="34" width="200" height="70" rx="9" class="dg-box"/>
+            <text x="600" y="56" class="dg-in" text-anchor="middle">WAL buffers</text>
+            <rect x="260" y="156" width="200" height="56" rx="9" class="dg-cell"/>
+            <text x="360" y="180" class="dg-in" text-anchor="middle">файлы данных</text>
+            <rect x="500" y="156" width="200" height="56" rx="9" class="dg-cell"/>
+            <text x="600" y="180" class="dg-in" text-anchor="middle">WAL на диске</text>
+            <rect data-s="1-3" x="300" y="70" width="120" height="24" rx="4" class="dg-cell miss"/>
+            <text data-s="1-3" x="310" y="87" class="dg-bad">страница dirty</text>
+            <rect data-s="4" x="300" y="70" width="120" height="24" rx="4" class="dg-cell hit"/>
+            <text data-s="4" x="310" y="87" class="dg-ok">записана</text>
+            <text data-s="1" x="520" y="87" class="dg-n">запись UPDATE</text>
+            <path data-s="1" d="M220 70 L 296 80" class="dg-line" marker-end="url(#wl-n)"/>
+            <path data-s="1" d="M220 60 C 360 20, 440 30, 516 70" class="dg-line" marker-end="url(#wl-n)"/>
+            <path data-s="2" d="M600 104 L 600 152" class="dg-line ok" marker-end="url(#wl-n)"/>
+            <text data-s="2" x="608" y="132" class="dg-ok">fsync</text>
+            <text data-s="2" x="40" y="88" class="dg-ok">COMMIT → OK</text>
+            <path data-s="4" d="M360 104 L 360 152" class="dg-line ok" marker-end="url(#wl-n)"/>
+            <text data-s="4" x="368" y="132" class="dg-ok">checkpoint</text>
+            <path data-s="5" d="M500 190 L 464 190" class="dg-line" marker-end="url(#wl-n)"/>
+            <text data-s="5" x="40" y="190" class="dg-n">после сбоя: replay WAL</text>
+            <text data-s="1" x="20" y="226" class="dg-t">UPDATE: страница меняется в памяти, запись — в WAL-буферы.</text>
+            <text data-s="2" x="20" y="226" class="dg-ok">COMMIT ждёт только последовательного сброса WAL.</text>
+            <text data-s="3" x="20" y="226" class="dg-t">Изменённая страница остаётся в памяти: ничего не потеряно, она есть в WAL.</text>
+            <text data-s="4" x="20" y="226" class="dg-ok">Checkpoint пишет изменённые страницы в файлы данных.</text>
+            <text data-s="5" x="20" y="226" class="dg-t">Сбой: страницы восстанавливаются из WAL с последнего checkpoint.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Backend изменяет страницу в shared buffers и добавляет запись об изменении в WAL-буферы.</li>
+          <li>При COMMIT журнал до этой записи сбрасывается на диск одним последовательным fsync, и клиент получает OK.</li>
+          <li>Сама страница остаётся изменённой в памяти. Если база упадёт сейчас, изменение не потеряно: оно есть в WAL.</li>
+          <li>Checkpoint записывает все изменённые страницы в файлы данных и отмечает позицию в журнале, до которой всё на диске.</li>
+          <li>После сбоя PostgreSQL берёт последний checkpoint и проигрывает WAL после него, восстанавливая страницы.</li>
+        </ol>
+      </figure>
+      <pre class="out">== WAL for 10k inserted rows: 1447 kB (lsn 0/28F9BE10 -&gt; 0/29105A30)
+== 1000 single-row commits, synchronous_commit=on  0.19 ms per commit
+== 1000 single-row commits, synchronous_commit=off 0.11 ms per commit</pre>
+      <p>Вставка десяти тысяч строк дала 1,4 МБ журнала: позиция LSN — это смещение в журнале в байтах. <code>synchronous_commit=off</code> разрешает отвечать на коммит, не дожидаясь fsync: при сбое теряются последние доли секунды подтверждённых транзакций, но база остаётся целостной. В демо выигрыш маленький, потому что fsync на виртуальном диске Docker под macOS почти бесплатен; на реальном диске он стоит от долей до единиц миллисекунд, и разница заметна. Отключать его имеет смысл для данных, которые можно потерять, — логов, метрик, — и точечно: <code>SET LOCAL synchronous_commit = off</code> в отдельной транзакции. Тот же WAL уходит на реплики и используется для логического декодирования, как в <a href="outbox.html">Transactional Outbox</a>.</p>
+    </section>
+
+    <section class="step" id="checkpoint">
+      <h2>После checkpoint первое изменение страницы пишет её в журнал целиком</h2>
+      <pre class="out">== first UPDATE after checkpoint: WAL 22 MB
+== same UPDATE again:             WAL 795 kB</pre>
+      <p>Одно и то же обновление 3100 строк, разбросанных по всей таблице, дало 22 МБ журнала сразу после checkpoint и 795 КБ при повторе. Причина — full page writes. Страница 8 КБ записывается на диск не атомарно, и при сбое посреди записи на диске окажется «рваная» страница: половина старая, половина новая. Записи WAL о небольшом изменении такую страницу не восстановят. Поэтому первое изменение каждой страницы после checkpoint пишет в журнал её полный образ, а дальнейшие изменения — только разницу.</p>
+      <p>Отсюда всплески после каждого checkpoint: объём журнала и нагрузка на запись резко растут, потом спадают. Частота checkpoint определяется <code>checkpoint_timeout</code> (5 минут) и <code>max_wal_size</code> (1 ГБ) — что наступит раньше. Увеличивают их, чтобы checkpoint были реже: меньше полных образов страниц, но дольше восстановление после сбоя. <code>checkpoint_completion_target = 0.9</code> растягивает запись страниц на 90 % интервала, сглаживая нагрузку на диск. В логах предупреждение <code>checkpoints are occurring too frequently</code> — сигнал поднять <code>max_wal_size</code>.</p>
+    </section>
+
+    <section class="step" id="toast">
+      <h2>Большие значения уходят в TOAST и читаются, только когда их просят</h2>
+      <p>Строка должна поместиться на страницу 8 КБ, а значения бывают больше. Если строка длиннее примерно 2 КБ, PostgreSQL сначала сжимает длинные значения, а если не помогает — выносит их в отдельную TOAST-таблицу, оставляя в строке указатель. Демо записывает в 20 000 платежей по 6 КБ несжимаемых деталей:</p>
+      <pre class="out">== TOAST: main 17 MB, toast 156 MB
+   sum(amount): Buffers: shared hit=2060 read=141 written=141
+   sum(length(details)): Buffers: shared hit=49250 read=13013 written=6955</pre>
+      <p>Основная таблица почти не выросла — 17 МБ, а детали заняли 156 МБ в TOAST. Сумма по <code>amount</code> прочитала две тысячи страниц: детали ей не нужны, и в TOAST она не ходила. Длина деталей потребовала шестьдесят тысяч страниц. Поэтому <code>SELECT *</code> в запросе, которому нужны две колонки, может читать в двадцать раз больше данных, а JPA-сущность с большим JSON в поле подтягивает его при каждой загрузке. Повторяющийся текст в первом варианте демо сжался так хорошо, что остался прямо в строке, и TOAST-таблица была пустой — сжатие тоже часть механизма.</p>
+      <div class="trap">
+        <p class="myth">Коммит в PostgreSQL записывает изменённые строки в файлы таблицы.</p>
+        <p class="fact">Коммит ждёт только сброса журнала WAL — последовательной записи. Изменённые страницы остаются в shared buffers и попадают в файлы позже, на checkpoint или от background writer. После сбоя их восстанавливают из WAL.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Процесс на соединение: 20 соединений — 20 процессов; max_connections в сотнях, перед базой PgBouncer.</li>
+        <li>Страницы по 8 КБ через shared buffers: cold read=1911, warm hit=1911; первое чтение после загрузки ставит hint bits и пачкает страницы.</li>
+        <li>WAL пишется до изменения страниц, коммит ждёт fsync журнала; synchronous_commit=off теряет последние коммиты, но не целостность.</li>
+        <li>Первое изменение страницы после checkpoint — полный образ: 22 МБ против 795 КБ журнала.</li>
+        <li>Большие значения сжимаются или уходят в TOAST: 156 МБ отдельно, и запрос без этой колонки их не читает.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="pg-wal" data-freq="3">
+      <h3>Что такое WAL и как PostgreSQL гарантирует durability?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>WAL — журнал предзаписи: каждое изменение сначала записывается в последовательный журнал, а потом меняется страница в памяти. Коммит ждёт сброса журнала на диск, а изменённые страницы записываются в файлы позже, на checkpoint. После сбоя база берёт последний checkpoint и проигрывает журнал после него.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Full page writes: первое изменение страницы после checkpoint пишет её образ целиком, защищая от рваных страниц.</li>
+            <li>synchronous_commit=off отвечает до fsync: теряются последние коммиты, но не целостность.</li>
+            <li>Тот же журнал питает физическую репликацию, PITR и логическое декодирование.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pg-connections" data-freq="2">
+      <h3>Почему в PostgreSQL нельзя держать тысячи соединений и что делать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждое соединение — отдельный процесс ОС с собственной памятью, кешами и work_mem на операции запроса. Тысячи процессов съедают память и процессор, а получение снимка дорожает с числом активных транзакций. Решение — пул: HikariCP в приложении с небольшим размером и PgBouncer в режиме транзакций перед базой, чтобы много клиентов делили сотню серверных соединений.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В transaction pooling не работают сессионные вещи: SET, advisory-блокировки на сессию, LISTEN, серверные prepared statements без поддержки в пулере.</li>
+            <li>Полезный параллелизм базы ограничен ядрами и дисками; больше активных запросов — только очередь.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой конфигурацией?</summary>
+          <pre><code class="language-yaml"># 300 подов сервиса платежей
+spring.datasource.hikari.maximum-pool-size: 50
+# postgresql.conf
+max_connections = 20000
+work_mem = 256MB</code></pre>
+          <p>300 подов по 50 соединений — 15 000 процессов PostgreSQL. Каждый может взять work_mem 256 МБ на каждую сортировку или хеш в запросе, и под нагрузкой память кончится, а OOM killer убьёт базу. Нужны маленький пул в подах (например, 5–10), PgBouncer в режиме транзакций, max_connections в сотнях и умеренный work_mem с повышением для отдельных тяжёлых запросов.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pg-toast" data-freq="1">
+      <h3>Что такое TOAST и как он влияет на запросы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Механизм хранения больших значений: если строка больше примерно 2 КБ, длинные значения сжимаются, а если не помогает — выносятся в отдельную TOAST-таблицу, в строке остаётся указатель. Запрос, которому большая колонка не нужна, её не читает; SELECT * и загрузка сущностей с большими полями читают её всегда.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Обновление других колонок не переписывает неизменённое TOAST-значение.</li>
+            <li>Большие JSON часто выносят в отдельную таблицу или грузят лениво, чтобы горячие запросы их не трогали.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Егор Рогов, «PostgreSQL изнутри», части I–II — основа урока: процессы, буферный кеш, WAL, checkpoint, TOAST.</li>
+      <li><a href="https://www.postgresql.org/docs/17/wal-intro.html">PostgreSQL 17: Write-Ahead Logging</a> и <a href="https://www.postgresql.org/docs/17/wal-configuration.html">WAL Configuration</a>.</li>
+      <li><a href="https://www.postgresql.org/docs/17/storage-toast.html">PostgreSQL 17: TOAST</a>.</li>
+      <li><a href="https://www.pgbouncer.org/features.html">PgBouncer: pooling modes</a> — что работает в режиме транзакций.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -251,7 +251,7 @@ window.KB_TREE = [
           scope: 'pg_stat_statements, OFFSET и keyset-пагинация, N+1, пакетная запись' },
       ] },
       { id: 'postgres', title: 'PostgreSQL Internals', source: 'PostgreSQL изнутри (Рогов), ч. I–II', items: [
-        { id: 'postgres', freq: 2, status: 'empty', title: 'Architecture & WAL',
+        { id: 'postgres', freq: 2, status: 'draft', title: 'Architecture & WAL',
           scope: 'процессы, shared buffers, WAL, checkpoint, TOAST' },
         { id: 'vacuum', freq: 2, status: 'draft', title: 'VACUUM',
           scope: 'autovacuum, bloat, HOT-обновления, wraparound' },
