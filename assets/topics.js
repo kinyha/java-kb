@@ -93,7 +93,7 @@ window.KB_TREE = [
       { id: 'os', title: 'Operating Systems', source: 'Operating Systems: Three Easy Pieces — Virtualization, Concurrency, Persistence', items: [
         { id: 'processes', freq: 2, status: 'draft', title: 'Processes & Threads',
           scope: 'процесс и поток, переключение контекста, планировщик, IPC, сигналы, fork' },
-        { id: 'os-memory', freq: 1, status: 'empty', title: 'Virtual Memory',
+        { id: 'os-memory', freq: 1, status: 'draft', title: 'Virtual Memory',
           scope: 'виртуальная память, страницы, page fault, swap, кеши CPU, OOM killer' },
         { id: 'os-io', freq: 2, status: 'empty', title: 'I/O Models',
           scope: 'файловые дескрипторы, блокирующий и неблокирующий I/O, select и epoll, page cache, zero-copy' },
