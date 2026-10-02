@@ -547,7 +547,7 @@ window.KB_TREE = [
           scope: 'DataSource, HikariCP, PreparedStatement, JdbcTemplate, транзакции в JDBC' },
         { id: 'spring-tx', freq: 3, status: 'draft', title: 'Transactions',
           scope: '@Transactional через прокси, propagation, isolation, rollback rules, readOnly, self-invocation' },
-        { id: 'jpa', freq: 3, status: 'empty', title: 'JPA Basics',
+        { id: 'jpa', freq: 3, status: 'draft', title: 'JPA Basics',
           scope: 'entity, persistence context, состояния entity, dirty checking, flush' },
         { id: 'jpa-relations', freq: 3, status: 'empty', title: 'Relations & Fetching',
           scope: 'связи и owning side, lazy и eager, N+1, fetch join, EntityGraph, маппинг наследования, составные ключи' },

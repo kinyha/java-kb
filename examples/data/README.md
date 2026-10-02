@@ -68,3 +68,23 @@ readonly показывает запись H2 при JDBC readOnly hint. thread 
 
 Общая основа зависимостей также включает Hibernate 7.4.5.Final, JPA 3.2,
 Spring Data JPA/JDBC 4.1.1 и Caffeine JCache 3.2.4 для последующих демо Data.
+
+## JPA Basics
+
+```bash
+./run.sh JpaDemo dirty
+./run.sh JpaDemo merge
+./run.sh JpaDemo query
+./run.sh JpaDemo bulk
+```
+
+JpaDemo создаёт Hibernate SessionFactory и новый платёж с суммой 100.
+dirty сравнивает два find, JDBC-чтение до и после flush, rollback и clear.
+merge показывает отдельную managed-копию и позднюю правку исходного объекта.
+query сравнивает скалярные JPQL-запросы при AUTO и COMMIT; результат COMMIT
+показан именно для Hibernate 7.4.5.Final. bulk изменяет строку напрямую и
+обновляет прежний объект через refresh. Второй уровень кеша выключен.
+
+Чтение суммы через JDBC использует соединение текущей транзакции: оно обходит
+память EntityManager и не вызывает автоматический flush JPQL. Счётчик UPDATE
+наблюдает SQL через StatementInspector. Каждый запуск создаёт отдельную H2.

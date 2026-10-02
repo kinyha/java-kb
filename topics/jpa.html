@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JPA Basics · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jpa">
+<main class="page">
+  <header class="topic-head"><h1>JPA Basics</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сервис загружает платёж, меняет его сумму и завершает транзакцию. Hibernate следит за загруженным объектом и сам готовит SQL для изменений. Пока объект принадлежит текущему контексту, повторное чтение того же платежа вернёт ту же ссылку. Поэтому при странном результате сначала выясни, какой объект изменился, кто сейчас за ним следит и когда изменения дошли до базы.</p>
+    </div>
+
+    <section class="step" id="payment-change">
+      <h2>Изменение загруженного платежа сохраняется без вызова save</h2>
+      <p>В обработчик возврата приходит платёж №17. Сервис уменьшает сумму и заканчивает работу. В коде нет <code>UPDATE</code>, а в базе сумма изменилась. Другой обработчик делает то же самое с объектом, пришедшим из предыдущего запроса, — и в базе ничего не происходит. Разница в том, кто управляет объектом в момент изменения.</p>
+      <p>JPA — привычное название спецификации Jakarta Persistence. Она задаёт модель объектов, операций и запросов. Hibernate — конкретная реализация этой модели. Spring управляет границей транзакции и даёт приложению <code>EntityManager</code>; Spring Data добавляет репозитории. Это разные слои, и для автоматического сохранения управляемого объекта репозиторий вообще не нужен.</p>
+      <p><b>Entity</b> представляет запись с устойчивой идентичностью. Два объекта с одинаковыми полями ещё не обязательно один платёж; главным остаётся его первичный ключ. В простом примере деньги хранятся в минимальных единицах валюты, поэтому сумма — <code>long</code>. Для произвольной точности используют <code>BigDecimal</code> с согласованными scale и правилами округления.</p>
+      <pre><code class="language-java">@Entity(name = "Payment") // Имя типа в JPQL; это не имя таблицы.
+@Table(name = "payments")
+public static class Payment {
+    @Id Long id; // Аннотация на поле выбирает доступ к полям.
+    @Column(nullable = false, unique = true) String merchantRef;
+    @Column(nullable = false) long amount;
+    @Enumerated(EnumType.STRING) @Column(nullable = false) Status status;
+    protected Payment() {} // Провайдер создаёт объект при чтении строки.
+    Payment(Long id, long amount) {
+        this.id = id; this.amount = amount;
+        this.merchantRef = "shop-" + id; this.status = Status.NEW;
+    }
+}
+enum Status { NEW, PAID }
+
+em.getTransaction().begin();
+Payment p = em.find(Payment.class, 17L); // Загрузили в текущий контекст.
+p.amount = 250;                        // Это изменение управляемого объекта.
+em.getTransaction().commit();          // Здесь Hibernate синхронизирует изменения.</code></pre>
+      <p>Это фрагмент полного <a href="../examples/data/JpaDemo.java">JpaDemo.java</a>. В нём Hibernate 7.4.5.Final, Jakarta Persistence 3.2, H2 2.4.240 и JDK 21.0.11. Общий <a href="../examples/data/pom.xml">pom.xml</a> использует BOM Boot 4.1.1. Дальше показан настоящий вывод четырёх режимов демо; каждый запуск начинает с платежа №17 и суммы 100.</p>
+      <p>Entity требует конструктора без аргументов и не подходит для <code>record</code>: состояние меняется, а провайдеру часто нужен прокси. Положение <code>@Id</code> выбирает доступ к полям или свойствам. Для смешанного доступа укажи <code>@Access</code>; наличие setter само по себе не определяет сохранение.</p>
+      <div class="note warn">
+        <p><code>@Column(nullable = false)</code> описывает отображение в таблицу. Это не заменяет проверку запроса на входе. Ошибка ограничения может обнаружиться только при выполнении SQL. В проде схему ведут миграции; <code>hbm2ddl.auto=create-drop</code> из демо удаляет учебные таблицы и для платёжной базы не подходит.</p>
+      </div>
+    </section>
+
+    <section class="step" id="context-identity">
+      <h2>Контекст связывает ключ записи с одним управляемым объектом</h2>
+      <p>Persistence context — рабочая память провайдера для управляемых сущностей. У него есть соответствие «тип сущности и ключ → объект», сведения о состоянии объекта и данные для обнаружения изменений. Если сервис дважды вызывает <code>find(Payment.class, 17L)</code> в одном контексте, он получает одну и ту же Java-ссылку. Второй вызов не обязан снова читать строку.</p>
+      <p>Это важно для согласованности графа: изменение платежа через одну ветку сразу видно через другую. Отдельный контекст загружает отдельный объект той же строки.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 268" role="img" aria-label="Две переменные сервиса ссылаются на один Payment в контексте A. Ключ Payment 17 ведёт к этому объекту и его исходному снимку. Контекст B держит другой объект той же строки базы.">
+            <defs><marker id="jp-id" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="28" width="154" height="114" rx="8" class="dg-box"/>
+            <rect x="214" y="28" width="274" height="216" rx="10" class="dg-sep" fill="none"/>
+            <rect x="234" y="66" width="234" height="36" rx="6" class="dg-cell"/>
+            <rect x="234" y="128" width="130" height="54" rx="7" class="dg-cell hit"/>
+            <rect x="374" y="128" width="94" height="54" rx="7" class="dg-cell"/>
+            <rect x="526" y="28" width="174" height="84" rx="8" class="dg-box"/>
+            <rect x="526" y="158" width="174" height="86" rx="8" class="dg-box"/>
+            <path d="M174 80 C 198 80, 198 145, 230 145" class="dg-line" marker-end="url(#jp-id)"/>
+            <path d="M174 114 C 198 114, 198 166, 230 166" class="dg-line" marker-end="url(#jp-id)"/>
+            <path d="M299 102 L299 124" class="dg-line" marker-end="url(#jp-id)"/>
+            <path d="M488 86 L522 74" class="dg-line" marker-end="url(#jp-id)"/>
+            <path d="M613 158 L613 116" class="dg-line" marker-end="url(#jp-id)"/>
+            <text x="32" y="51" class="dg-t">сервис</text>
+            <text x="32" y="84" class="dg-in">first</text><text x="32" y="118" class="dg-in">second</text>
+            <text x="230" y="49" class="dg-t">контекст A</text>
+            <text x="246" y="90" class="dg-in">ключ: Payment + 17</text>
+            <text x="245" y="149" class="dg-in">объект p</text><text x="245" y="169" class="dg-in">amount=250</text>
+            <text x="384" y="149" class="dg-s">снимок</text><text x="384" y="169" class="dg-in">100</text>
+            <text x="230" y="219" class="dg-s">один ключ → одна ссылка</text>
+            <text x="540" y="52" class="dg-t">строка в БД</text><text x="540" y="77" class="dg-in">id=17</text><text x="540" y="98" class="dg-in">amount=100</text>
+            <text x="540" y="179" class="dg-t">контекст B</text><text x="540" y="202" class="dg-in">другой объект</text><text x="540" y="226" class="dg-in">amount=100</text>
+            <text x="626" y="139" class="dg-n" text-anchor="start">чтение</text>
+          </svg>
+        </div>
+        <figcaption>Изменение amount в контексте A сразу видно обеим переменным сервиса, но строка базы до синхронизации остаётся прежней.</figcaption>
+      </figure>
+      <pre><code class="language-java">Payment first = em.find(Payment.class, 17L);
+Payment second = em.find(Payment.class, 17L);
+System.out.println("same instance=" + (first == second)); // Сравниваем именно ссылки.</code></pre>
+      <pre class="out">same instance=true</pre>
+      <p>Это кеш первого уровня, а не кеш любых запросов. JPQL может выполнить SQL и сопоставить строки имеющимся объектам. Если другая транзакция поменяла платёж, повторный <code>find</code> не обновит его поля. Для перечитывания есть <code>refresh</code>, а для защиты конкурентной записи — блокировки или версия.</p>
+      <h3>Кто создаёт контекст в Spring</h3>
+      <p><code>EntityManagerFactory</code> создают на приложение. Настоящий <code>EntityManager</code> нельзя делить между параллельными потоками, включая виртуальные: внутри изменяемый граф и очередь операций. Между задачами передавай id или DTO; каждой транзакционной задаче нужен свой контекст.</p>
+      <p><code>@PersistenceContext</code> внедряет Spring-оболочку, которая находит контекст текущей транзакции. Singleton-сервис хранит эту оболочку в поле, но не должен хранить там загруженный <code>Payment</code>: следующий запрос обслуживает другого клиента и другой контекст.</p>
+      <pre><code class="language-java">@Service
+class RefundService {
+    @PersistenceContext EntityManager em; // Spring-оболочка, а не один контекст на всех.
+
+    @Transactional
+    public void reduceAmount(long id, long amount) {
+        Payment p = em.find(Payment.class, id); // Контекст текущей транзакции.
+        p.amount = amount;
+    } // JpaTransactionManager завершит транзакцию и синхронизирует изменения.
+}</code></pre>
+      <div class="trap">
+        <p class="myth">Если объект есть в Java-памяти, Hibernate продолжает за ним следить.</p>
+        <p class="fact">За объектом следит конкретный контекст. Java-ссылка может жить после его закрытия сколько угодно, но сама по себе не приводит к SQL. Это и есть причина, по которой один setter сохраняется, а другой остаётся только в памяти.</p>
+      </div>
+    </section>
+
+    <section class="step" id="entity-states">
+      <h2>Операция меняет состояние объекта, а merge возвращает другую ссылку</h2>
+      <p>Жизненный цикл entity отвечает на практический вопрос: с какого момента и до какого момента изменения объекта участвуют в синхронизации. <b>New</b> — объект создали через <code>new</code>, но ещё не передали контексту. <b>Managed</b> — контекст им управляет. <b>Detached</b> — идентичность есть, а связи с прежним контекстом больше нет. <b>Removed</b> — объект помечен на удаление, которое должно дойти до базы.</p>
+      <p><code>persist</code> делает новый объект управляемым. Это не обещание немедленного INSERT: время SQL зависит от генерации ключа и момента синхронизации. <code>find</code> получает управляемый объект. <code>detach</code> убирает один объект, <code>clear</code> — весь контекст, а <code>close</code> закрывает его. Перед отделением объекта сохрани нужные изменения через <code>flush</code>, иначе контекст больше не обнаружит их при завершении транзакции.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 274" role="img" aria-label="Новый Payment становится managed после persist. Managed становится detached после detach или close, removed после remove. Merge копирует detached в отдельный managed объект, исходная ссылка остаётся detached.">
+            <defs><marker id="jp-state" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="22" y="48" width="136" height="54" rx="8" class="dg-box"/>
+            <rect x="286" y="48" width="142" height="54" rx="8" class="dg-cell hit"/>
+            <rect x="552" y="48" width="144" height="54" rx="8" class="dg-cell miss"/>
+            <rect x="286" y="196" width="142" height="54" rx="8" class="dg-box"/>
+            <path d="M158 75 L282 75" class="dg-line" marker-end="url(#jp-state)"/>
+            <path d="M428 75 L548 75" class="dg-line" marker-end="url(#jp-state)"/>
+            <path d="M357 102 L357 192" class="dg-line" marker-end="url(#jp-state)"/>
+            <path d="M300 196 C232 172, 232 133, 300 106" class="dg-line" marker-end="url(#jp-state)"/>
+            <g text-anchor="middle">
+              <text x="90" y="72" class="dg-in">new</text><text x="90" y="91" class="dg-s">создан через new</text>
+              <text x="357" y="72" class="dg-in">managed</text><text x="357" y="91" class="dg-s">есть в контексте</text>
+              <text x="624" y="72" class="dg-in">removed</text><text x="624" y="91" class="dg-s">ожидает DELETE</text>
+              <text x="357" y="220" class="dg-in">detached</text><text x="357" y="239" class="dg-s">вне контекста</text>
+              <text x="220" y="60" class="dg-s">persist</text><text x="490" y="60" class="dg-s">remove</text>
+            </g>
+            <text x="372" y="140" class="dg-s" text-anchor="start">detach, clear, close</text>
+            <text x="34" y="149" class="dg-s">merge: скопировать поля</text>
+            <text x="34" y="170" class="dg-s">в управляемый объект</text>
+            <text x="457" y="218" class="dg-s">исходный detached</text>
+            <text x="457" y="239" class="dg-s">остаётся detached</text>
+          </svg>
+        </div>
+        <figcaption>Стрелка merge означает перенос состояния, а не повторное подключение исходной Java-ссылки.</figcaption>
+      </figure>
+      <h3>Почему результат merge надо использовать</h3>
+      <p>Сервис получил платёж из старого контекста. <code>merge(detached)</code> ищет или создаёт управляемый объект с той же идентичностью и копирует в него поля. Возвращается управляемый результат. Переданный объект остаётся отделённым: поздние изменения этой исходной ссылки больше никуда не копируются сами.</p>
+      <pre><code class="language-java">Payment detached;
+try (EntityManager old = factory.createEntityManager()) {
+    detached = old.find(Payment.class, 17L);
+} // Старый контекст закрыт.
+detached.amount = 300;
+
+tx(factory, em -&gt; {
+    Payment managed = em.merge(detached); // Копируем текущее состояние в новый контекст.
+    System.out.println("merge same instance=" + (managed == detached));
+    System.out.println("contains original=" + em.contains(detached)
+            + ", copy=" + em.contains(managed));
+    detached.amount = 900; // Правка старой ссылки уже не влияет на managed.
+}); // commit сохраняет 300 из managed.
+System.out.println("after merge: database=" + savedAmount(factory)
+        + ", original=" + detached.amount);</code></pre>
+      <pre><code class="language-bash"># Из examples/data: режим запускает именно фрагмент выше.
+./run.sh JpaDemo merge</code></pre>
+      <pre class="out">merge same instance=false
+contains original=false, copy=true
+after merge: database=300, original=900</pre>
+      <p>Managed-объекту merge не нужен. Новому нужен persist, а для detached вызов persist — ошибка, обнаруживаемая при вызове или синхронизации. Remove тоже требует управляемого объекта: загрузи платёж в текущей транзакции и удали.</p>
+      <p>Полный <code>merge</code> полученного от клиента объекта часто слишком широк. Клиент мог прислать старую сумму, пустую коллекцию или поле, которое ему нельзя менять. Для команды «подтвердить платёж» загрузить entity и вызвать доменный метод безопаснее, чем переносить всю клиентскую копию поверх текущего состояния. Защита от параллельной записи через <code>@Version</code> разобрана в <a href="jpa-locking.html">Locking &amp; Caching</a>.</p>
+      <details class="deep">
+        <summary>Под капотом: идентичность в базе и equals — разные задачи</summary>
+        <p>Контекст узнаёт entity по типу и ключу; equals нужен твоим коллекциям. Генерируемый id меняется после INSERT. Зависимый от него hashCode ломает размещение в HashSet. Выбирай устойчивый бизнес-ключ с UNIQUE либо сравнение ненулевых id со стабильным hashCode; отдельно учитывай прокси и наследование.</p>
+        <p>Не включай весь граф в equals, hashCode и toString: связи способны выполнить SQL и уйти в рекурсию. Меняющиеся сумма и статус тоже не определяют идентичность платежа.</p>
+      </details>
+    </section>
+
+    <section class="step" id="dirty-flush">
+      <h2>Flush выполняет SQL, а commit решает судьбу транзакции</h2>
+      <p>Dirty checking обнаруживает изменения управляемых объектов. При загрузке Hibernate сохраняет сведения об исходных значениях. Во время flush он проверяет состояние, готовит INSERT, UPDATE и DELETE и выполняет нужные операции через JDBC. Изменение поля в Java и запись строки в базе разделены во времени.</p>
+      <p>Демо читает сумму напрямую через JDBC на том же соединении. Это принципиально: обычный <code>find</code> вернул бы уже изменённый объект из контекста, а JPQL-запрос мог бы сначала вызвать автоматический flush. Такой опыт ничего не сказал бы о том, когда появился UPDATE.</p>
+      <pre><code class="language-java">em.getTransaction().begin();
+Payment first = em.find(Payment.class, 17L);
+Payment second = em.find(Payment.class, 17L);
+System.out.println("same instance=" + (first == second));
+sql.clear(); // StatementInspector считает реально подготовленные UPDATE.
+first.amount = 250;
+System.out.println("before flush: database=" + databaseAmount(em)
+        + ", updates=" + sql.updates());
+em.flush(); // SQL дошёл до соединения, но commit ещё не был вызван.
+System.out.println("after flush: database=" + databaseAmount(em)
+        + ", updates=" + sql.updates());
+em.getTransaction().rollback();
+em.close();
+System.out.println("after rollback: database=" + savedAmount(factory));
+
+// Чтение строки без EntityManager.find и без JPQL.
+long databaseAmount(EntityManager em) {
+    return em.unwrap(Session.class).doReturningWork(connection -&gt; {
+        try (var s = connection.prepareStatement(
+                "select amount from payments where id = 17");
+             ResultSet row = s.executeQuery()) {
+            row.next(); return row.getLong(1);
+        }
+    });
+}</code></pre>
+      <pre><code class="language-bash">./run.sh JpaDemo dirty # Счётчики исключают SQL начального наполнения.</code></pre>
+      <pre class="out">same instance=true
+before flush: database=100, updates=0
+after flush: database=250, updates=1
+after rollback: database=100</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 248" role="img" aria-label="Платёж загружается с суммой 100. Объект меняют на 250, снимок и строка остаются 100. Flush посылает UPDATE и меняет строку внутри транзакции на 250. Rollback возвращает строку к 100, контекст закрывается.">
+            <defs><marker id="jp-flush" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="24" y="25" class="dg-cap">КОНТЕКСТ</text><text x="492" y="25" class="dg-cap">JDBC / ТРАНЗАКЦИЯ</text>
+            <rect x="20" y="42" width="350" height="156" rx="10" class="dg-sep" fill="none"/>
+            <rect x="42" y="75" width="140" height="68" rx="7" class="dg-cell hit"/>
+            <rect x="210" y="75" width="140" height="68" rx="7" class="dg-cell"/>
+            <rect x="492" y="75" width="198" height="68" rx="7" class="dg-box"/>
+            <text x="54" y="96" class="dg-t">объект p</text><text x="222" y="96" class="dg-t">снимок</text><text x="504" y="96" class="dg-t">строка №17</text>
+            <g data-s="1"><text x="54" y="123" class="dg-in">100</text><text x="222" y="123" class="dg-in">100</text><text x="504" y="123" class="dg-in">100</text></g>
+            <g data-s="2-3"><text x="54" y="123" class="dg-in">250</text><text x="222" y="123" class="dg-in">100</text><text x="504" y="123" class="dg-in">100</text></g>
+            <g data-s="4"><text x="54" y="123" class="dg-in">250</text><text x="222" y="123" class="dg-in">250</text><text x="504" y="123" class="dg-in">250</text></g>
+            <g data-s="5"><rect x="20" y="42" width="350" height="156" rx="10" class="dg-cell miss"/><text x="42" y="96" class="dg-bad">контекст закрыт</text><text x="42" y="123" class="dg-s">старый p больше не managed</text><text x="504" y="123" class="dg-in">100</text></g>
+            <g data-s="1"><path d="M504 147 L504 161 L46 161 L46 147" class="dg-line" marker-end="url(#jp-flush)"/><text x="388" y="183" class="dg-s">SELECT</text></g>
+            <g data-s="3"><path d="M182 109 L206 109" class="dg-line" marker-end="url(#jp-flush)"/><text x="42" y="178" class="dg-s">250 ≠ 100: нужен UPDATE</text></g>
+            <g data-s="4"><path d="M370 109 L488 109" class="dg-line" marker-end="url(#jp-flush)"/><text x="390" y="96" class="dg-s">UPDATE</text></g>
+            <g data-s="1"><text x="24" y="228" class="dg-in">UPDATE: 0; транзакция открыта</text></g>
+            <g data-s="2"><text x="24" y="228" class="dg-in">setter: изменил только объект; UPDATE: 0</text></g>
+            <g data-s="3"><text x="24" y="228" class="dg-in">flush: обнаружил разницу</text></g>
+            <g data-s="4"><text x="24" y="228" class="dg-in">UPDATE: 1; фиксации ещё нет</text></g>
+            <g data-s="5"><text x="24" y="228" class="dg-in">rollback: база снова хранит 100</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>SELECT загружает строку со значением 100. Контекст хранит объект и исходное состояние для сравнения.</li>
+          <li>Присваивание меняет сумму объекта на 250. В соединение ещё не уходил UPDATE.</li>
+          <li>Flush обнаруживает изменение относительно снимка. Сервису не нужно вызывать отдельный метод сохранения.</li>
+          <li>UPDATE меняет строку внутри открытой транзакции на 250. Это соединение видит новую сумму; транзакция ещё может откатиться.</li>
+          <li>Rollback отменяет UPDATE. Мы закрываем контекст и читаем через новый: в базе снова 100.</li>
+        </ol>
+      </figure>
+      <p>Commit синхронизирует нужные изменения и фиксирует транзакцию. Flush нужен для раннего SQL: проверить ограничение или подготовить данные для следующей операции. Блокировки остаются до завершения транзакции, а изменения ещё можно откатить.</p>
+      <p>Rollback не является кнопкой «вернуть все Java-поля назад». Ранее полученная ссылка может по-прежнему хранить 250, хотя база снова хранит 100. После ошибки откатывай транзакцию и начинай следующую попытку с нового контекста. Не продолжай тот же бизнес-процесс на прежнем графе, рассчитывая, что он стал точной копией базы.</p>
+      <details class="deep">
+        <summary>Под капотом: снимки, усиление байткода и порядок SQL</summary>
+        <p>Bytecode enhancement помогает entity отмечать изменённые атрибуты и сокращает сравнение графа. Но setter всё ещё не означает немедленный SQL. Порядок SQL тоже не равен порядку Java-вызовов: новый INSERT может обогнать DELETE и встретить прежний UNIQUE-ключ.</p>
+        <p>При IDENTITY INSERT часто нужен раньше, чтобы получить ключ; SEQUENCE позволяет получить ключ отдельно. Поэтому время записи проверяют по фактическому SQL и стратегии ключа. Промежуточный flush должен решать конкретную задачу.</p>
+      </details>
+    </section>
+
+    <section class="step" id="queries-sync">
+      <h2>Запрос способен вызвать flush, а массовый UPDATE обходит объекты</h2>
+      <p>Сервис поменял платёж, а затем посчитал сумму платежей через JPQL. Если выполнить SELECT по старым строкам, результат противоречит изменениям текущего сервиса. Поэтому <code>FlushModeType.AUTO</code>, режим JPA по умолчанию, обеспечивает видимость изменений, влияющих на результат запроса. Hibernate перед JPQL-запросом к затронутым таблицам может выполнить flush.</p>
+      <p>Это не значит «AUTO всегда выполняет все UPDATE перед любым SELECT». Провайдер учитывает запрос и свои правила синхронизации. Для native SQL поведение дополнительно зависит от API и сведений о затронутых таблицах. Если корректность конкретной операции требует уже выполненного SQL, вызови <code>flush</code> явно, а не пытайся угадать, распознает ли провайдер зависимость.</p>
+      <pre><code class="language-java">// Первый опыт: режим AUTO, в базе исходно 100.
+tx(factory, em -&gt; {
+    Payment p = em.find(Payment.class, 17L); p.amount = 200;
+    sql.clear();
+    long result = em.createQuery(
+            "select p.amount from Payment p where p.id = 17", Long.class)
+        .getSingleResult(); // Скалярный результат приходит из SELECT, а не из поля p.
+    System.out.println("AUTO query=" + result + ", updates=" + sql.updates());
+}); // В базе теперь 200.
+
+// Второй опыт: COMMIT откладывает синхронизацию; используем тот же провайдер.
+tx(factory, em -&gt; {
+    em.setFlushMode(FlushModeType.COMMIT);
+    Payment p = em.find(Payment.class, 17L); p.amount = 300;
+    sql.clear();
+    long result = em.createQuery(
+            "select p.amount from Payment p where p.id = 17", Long.class)
+        .getSingleResult();
+    System.out.println("COMMIT query=" + result + ", memory=" + p.amount
+            + ", updates=" + sql.updates());
+});
+System.out.println("after commit: database=" + savedAmount(factory));</code></pre>
+      <pre><code class="language-bash">./run.sh JpaDemo query</code></pre>
+      <pre class="out">AUTO query=200, updates=1
+COMMIT query=200, memory=300, updates=0
+after commit: database=300</pre>
+      <p>В режиме COMMIT влияние несинхронизированных изменений на результат запроса спецификация не определяет. Вывод 200 здесь — поведение указанного Hibernate, а не универсальная гарантия для всех провайдеров. Выбирать COMMIT ради уменьшения SQL и затем ожидать от всех запросов актуального состояния объектов — противоречивое решение.</p>
+      <h3>Один запрос меняет много строк, но не обновляет уже загруженный граф</h3>
+      <p>JPQL <code>update</code> и <code>delete</code> выполняют массовую операцию над таблицами. Провайдер не загружает каждую сущность, не вызывает её доменные методы и не исправляет все соответствующие Java-поля. Это полезно для архивации миллионов платежей, но старые управляемые объекты после такого SQL уже не отражают строки.</p>
+      <pre><code class="language-java">tx(factory, em -&gt; {
+    Payment p = em.find(Payment.class, 17L); // В памяти amount=100.
+    int rows = em.createQuery(
+            "update Payment p set p.amount = 900 where p.id = 17")
+        .executeUpdate(); // Изменяет строку напрямую, минуя p.
+    System.out.println("bulk rows=" + rows + ", memory=" + p.amount
+            + ", database=" + databaseAmount(em));
+    System.out.println("find same instance=" + (p == em.find(Payment.class, 17L)));
+    em.refresh(p); // SELECT перезаписывает состояние управляемого объекта.
+    System.out.println("after refresh: memory=" + p.amount);
+});</code></pre>
+      <pre><code class="language-bash">./run.sh JpaDemo bulk</code></pre>
+      <pre class="out">bulk rows=1, memory=100, database=900
+find same instance=true
+after refresh: memory=900</pre>
+      <p>Повторный <code>find</code> не спас: контекст честно вернул прежнюю ссылку. Для одного объекта подходит <code>refresh</code>. Для массовой операции обычно проще сначала синхронизировать нужные изменения, выполнить SQL и очистить контекст, а затем перечитать требуемые данные. В Spring Data этому соответствуют настройки <code>@Modifying</code>; сам вызов репозитория не меняет природу массового UPDATE.</p>
+      <div class="note warn">
+        <p><code>refresh</code> заменяет локальные поля данными строки и способен потерять ещё не сохранённые изменения. <code>clear</code> отделяет весь граф и тоже не выполняет flush сам. Перед ними реши, какие изменения надо сохранить. Это действие над рабочим состоянием, а не безобидная команда «почистить кеш».</p>
+      </div>
+    </section>
+
+    <section class="step" id="production-boundaries">
+      <h2>Граница контекста должна совпадать с понятной единицей работы</h2>
+      <p>Держи контекст вокруг короткой бизнес-операции: загрузить платёж, проверить переход, изменить состояние, зафиксировать. Долгий вызов банка внутри транзакции удерживает соединение и увеличивает конкуренцию за данные. Результат внешнего вызова не откатывается вместе с JDBC-транзакцией.</p>
+      <p>Чем больше управляемых объектов, тем больше памяти занимают объекты, коллекции и сведения провайдера, и тем больше работы остаётся для flush. Долгоживущий контекст, читающий выгрузку за месяц, способен удержать весь граф. Для больших потоков данных используют порции, проекции или прямой SQL, а для записи порциями — осмысленные <code>flush</code> и <code>clear</code>. Размер пакета и JDBC batch разобраны в соседней теме.</p>
+      <pre><code class="language-java">tx(factory, em -&gt; {
+    Payment p = em.find(Payment.class, 17L);
+    p.amount = 700;
+    em.clear(); // Нет flush: объект отделили раньше, чем синхронизировали правку.
+    System.out.println("after clear: managed=" + em.contains(p));
+}); // commit уже не найдёт изменение отделённого p.
+System.out.println("after clear+commit: database=" + savedAmount(factory));</code></pre>
+      <pre class="out">after clear: managed=false
+after clear+commit: database=100</pre>
+      <p>Это последние две строки режима <code>dirty</code>: после предыдущего rollback строка снова содержит 100. Добавление <code>em.flush()</code> перед <code>clear()</code> изменит смысл — UPDATE попадёт в транзакцию и сможет сохраниться при её commit. Но вызов flush после каждой строки убирает преимущества накопления изменений и увеличивает число обращений к базе.</p>
+      <h3>Что возвращать за границу сервиса</h3>
+      <p>Верни DTO, собранный внутри известной границы. Сериализация entity может выполнить случайные SELECT или упасть после закрытия контекста. Выбор данных без N+1 разобран в <a href="jpa-relations.html">Relations &amp; Fetching</a>.</p>
+      <p>Open EntityManager in View держит контекст до конца веб-запроса и позволяет дочитывать связи после сервиса. Это маскирует неявный SQL и не превращает HTTP-запрос в одну транзакцию. Extended-контекст тоже живёт дольше одной операции, но требует явного управления временем жизни; он не делает singleton-сущности безопасными.</p>
+      <p>При расследовании смотри SQL, границу транзакции, количество сущностей и время flush. Через contains проверь managed-состояние; найди clear и массовые UPDATE. Для сложной агрегации используй проекцию или JDBC. ReadOnly и правила <code>@Transactional</code> разобраны в <a href="spring-tx.html">Transactions</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Автоматически сохраняются изменения managed-объекта в конкретном контексте, а не любой Java-ссылки на entity.</li>
+        <li>Один ключ в одном контексте означает один объект. Это объясняет повторный find и устаревшее состояние после внешнего SQL.</li>
+        <li>Merge копирует состояние и возвращает управляемую ссылку. Исходная отделённая ссылка остаётся отделённой.</li>
+        <li>Flush выполняет SQL внутри транзакции; rollback всё ещё может отменить эти изменения.</li>
+        <li>Массовые операции и clear требуют явного решения о синхронизации, иначе память и строки расходятся.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="jpa-hibernate-context" data-freq="3">
+      <h3>Чем отличаются JPA и Hibernate? Что делает persistence context?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JPA — спецификация, Hibernate её реализует. EntityManager загружает платёж в контекст: тот связывает тип и ключ с одним объектом и следит за изменениями. Два find дают одну ссылку. Spring задаёт транзакционную границу, Spring Data добавляет репозитории; для изменения managed-объекта дополнительный save не нужен.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Идентичность контекста не равна изоляции базы. Объект остаётся в памяти, даже если другая транзакция изменила строку. Refresh и защита конкурентной записи решают разные задачи.</li>
+            <li>EntityManagerFactory разделяют между потоками; настоящий EntityManager и entity-граф параллельно не используют. Внедрённая Spring-оболочка выбирает контекст текущей транзакции.</li>
+            <li>JPQL способен выполнить SQL даже при наличии сущностей в контексте. Кеш первого уровня хранит идентичность объектов, а не ответы любых запросов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="jpa-lifecycle-merge" data-freq="3">
+      <h3>Какие состояния есть у entity? Что делают persist и merge?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>New ещё не принадлежит контексту, managed отслеживается, detached отделён, removed помечен на удаление. Persist подключает новый объект. Merge переносит состояние detached в управляемый результат, а исходная ссылка остаётся detached. Продолжаю с возвращённой ссылкой; для команды клиента чаще загружаю актуальный платёж и меняю разрешённые поля.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Persist detached-объекта не заменяет UPDATE. Момент обнаружения ошибки зависит от вызова и последующей синхронизации.</li>
+            <li>Merge может читать строку и каскадно переносить связанный граф. Это цена операции над состоянием, а не бесплатное подключение ссылки.</li>
+            <li>Автоматически сгенерированный id и прокси требуют аккуратного equals/hashCode. Изменение hashCode после persist ломает размещение объекта в HashSet.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Контроллер получает JSON с id и вызывает merge всего объекта. Что проверишь?</summary>
+          <p>Разрешено ли клиенту менять все поля и связи; как отличаются «поле не прислали» и «обнулить поле»; есть ли защита от старой версии. Для подтверждения платежа лучше отдельная команда с id, проверка владения и перехода состояния в транзакции. Merge не заменяет авторизацию и валидацию бизнес-перехода.</p>
+        </details>
+      </div>
+    </article>
+    <article class="q" id="jpa-dirty-flush-commit" data-freq="3">
+      <h3>Как работают dirty checking и flush? Чем flush отличается от commit?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При flush Hibernate обнаруживает изменения управляемых сущностей и выполняет SQL. Setter до этого меняет объект. Flush синхронизирует данные внутри транзакции, commit фиксирует её, а rollback способен отменить уже выполненный UPDATE. Успешный flush ещё не означает устойчивое сохранение платежа.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Bytecode enhancement помогает отслеживать изменённые атрибуты, но момент SQL всё равно определяется синхронизацией и стратегией ключа.</li>
+            <li>Порядок SQL при flush не обязан совпадать с порядком Java-вызовов. Ограничения UNIQUE и внешние ключи делают это заметным.</li>
+            <li>Откат базы не возвращает Java-граф к прежним полям. После ошибки транзакции я перечитываю данные в новом контексте, а не продолжаю прежнюю попытку.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="jpa-query-bulk" data-freq="3">
+      <h3>Почему SELECT вызывает UPDATE? Почему после массового UPDATE entity старая?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В AUTO провайдер учитывает изменения, влияющие на запрос, поэтому перед SELECT может выполнить flush. Массовый JPQL UPDATE, наоборот, меняет строки без обновления Java-графа. Повторный find даёт старый объект. Я делаю refresh либо синхронизирую нужные изменения, очищаю контекст и перечитываю данные.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В COMMIT влияние ещё не синхронизированных правок на результаты запросов не определено спецификацией. Поведение конкретного Hibernate не превращаю в переносимую гарантию.</li>
+            <li>Bulk-операции обходят доменные методы и обычный жизненный цикл каждой entity. При необходимости версий, аудита и инвариантов это надо учитывать отдельно.</li>
+            <li>Refresh и clear могут уничтожить несохранённое рабочее состояние. Сначала выбираю, что сохранить, а затем очищаю.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="jpa-context-production" data-freq="2">
+      <h3>Какие проблемы даёт слишком долгий persistence context?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Контекст удерживает сущности и сведения о состоянии. Большая выгрузка увеличивает память и работу flush; я беру порции или проекции. За веб-границу возвращаю DTO, чтобы JSON не выполнял случайный SQL. Контекст и транзакция должны обслуживать понятную бизнес-операцию.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Open EntityManager in View продлевает время жизни контекста, но не делает весь HTTP-запрос атомарной транзакцией. Ленивая загрузка после сервиса имеет свои условия чтения.</li>
+            <li>Entity в singleton-поле или общей асинхронной задаче смешивает время жизни данных и контекста. Между задачами передаю id или неизменяемые данные.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2">Jakarta Persistence 3.2</a> — основа урока: главы 2–3, состояние entity, контекст, merge и синхронизация; разделы 3.11.2 и 4.11 о запросах и массовых операциях.</li>
+      <li><a href="https://docs.hibernate.org/orm/7.4/userguide/html_single/">Hibernate ORM 7.4 User Guide</a> — разделы Persistence Context, Flushing и Bytecode Enhancement: реализация модели и диагностика SQL.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/orm/jpa.html">Spring Framework: JPA</a> — внедрение EntityManager, JpaTransactionManager и время жизни контекста.</li>
+      <li><a href="https://www.manning.com/books/java-persistence-with-hibernate-second-edition">Java Persistence with Hibernate, 2-е издание</a> — модель единицы работы, жизненный цикл и практическая цена отслеживания графа.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
