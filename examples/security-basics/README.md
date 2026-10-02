@@ -6,4 +6,5 @@
 cd examples/security-basics
 java AuthDemo.java
 java JwtAttacksDemo.java
+java OAuthFlowDemo.java
 ```

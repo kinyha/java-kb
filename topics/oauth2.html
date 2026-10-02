@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OAuth 2.0 &amp; OIDC · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="oauth2">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>OAuth 2.0 &amp; OIDC</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>OAuth 2.0 — протокол делегирования: пользователь разрешает приложению действовать в API от его имени с ограниченными правами, не отдавая пароль. Приложение получает от сервера авторизации короткий код через браузер и меняет его на токен по прямому каналу. PKCE связывает код с секретом приложения, поэтому перехваченный код бесполезен; state связывает ответ с браузером; redirect_uri сравнивается точно. Сервисы без пользователя получают токен по client credentials. OpenID Connect добавляет поверх OAuth вход: id token сообщает приложению, кто пользователь, а access token остаётся пропуском в API.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Бухгалтерский сервис хочет читать платежи магазина и просит пароль от кабинета</h2>
+      <p>Магазин подключает сторонний сервис бухгалтерии, которому нужна выписка платежей. Самый простой способ — ввести в бухгалтерии логин и пароль от платёжного кабинета. Тогда бухгалтерия получает всё: может делать выплаты, менять реквизиты и пароль. Забрать доступ можно только сменой пароля, которая отключит и всех остальных. А если бухгалтерию взломают, утечёт пароль владельца магазина.</p>
+      <p>OAuth решает это делегированием: владелец разрешает бухгалтерии одно действие — читать платежи, — а бухгалтерия получает токен с этим правом, без пароля и с возможностью отозвать его отдельно. Тема разбирает потоки OAuth и OpenID Connect на уровне протокола: что передаётся через браузер, что по прямому каналу и какие атаки закрывает каждая проверка. Настройка в Spring и Keycloak — в <a href="spring-oauth2.html">OAuth2 &amp; JWT</a>, формат токенов — в <a href="jwt.html">JWT</a>. Демо <a href="../examples/security-basics/OAuthFlowDemo.java">OAuthFlowDemo.java</a> реализует сервер авторизации с проверками из RFC в одном процессе: <code>java OAuthFlowDemo.java</code> на JDK 21. Verifier и state случайные при каждом запуске.</p>
+    </section>
+
+    <section class="step" id="roles">
+      <h2>Четыре роли: владелец, клиент, сервер авторизации и API</h2>
+      <table class="mx">
+        <thead><tr><th>Роль</th><th>В примере</th><th>Что делает</th></tr></thead>
+        <tbody>
+          <tr><td>Resource owner</td><td>Владелец магазина</td><td>Даёт согласие на доступ</td></tr>
+          <tr><td>Client</td><td>Бухгалтерия, мобильное приложение</td><td>Получает токен и вызывает API</td></tr>
+          <tr><td>Authorization server</td><td>Keycloak, Okta, Auth0</td><td>Аутентифицирует владельца, выдаёт токены</td></tr>
+          <tr><td>Resource server</td><td>Платёжный API</td><td>Проверяет токен и права</td></tr>
+        </tbody>
+      </table>
+      <p>Права в OAuth выражаются <b>scope</b> — строками вроде <code>payments:read</code>, которые клиент запрашивает, а владелец подтверждает на экране согласия. Scope ограничивает клиента, а не пользователя: токен бухгалтерии со scope <code>payments:read</code> не даёт делать выплаты, даже если сам владелец может. Окончательное решение о доступе всё равно принимает API: scope разрешает тип действия, а принадлежность конкретного магазина пользователю проверяется по данным.</p>
+      <p>Клиенты бывают <b>конфиденциальные</b> — серверные приложения, которые могут хранить секрет, — и <b>публичные</b> — SPA и мобильные приложения, где любой секрет извлекается из кода. Для публичных клиентов секрет бессмыслен, и их защищает PKCE.</p>
+    </section>
+
+    <section class="step" id="code-flow">
+      <h2>Authorization code передаёт через браузер только код, а токен — по прямому каналу</h2>
+      <p>Браузер — ненадёжный канал: адреса попадают в историю, логи и заголовок Referer, а на мобильных устройствах редирект на схему приложения может перехватить другое приложение. Поэтому через браузер передаётся только короткоживущий одноразовый код, а токен приложение получает прямым POST на сервер авторизации:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Приложение создаёт verifier и отправляет браузер на /authorize с challenge и state. Пользователь входит на сервере авторизации. Сервер возвращает браузер на redirect_uri с кодом и state. Приложение меняет код и verifier на токен прямым запросом. С токеном приложение вызывает API.">
+            <defs>
+              <marker id="cf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cf-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="30" width="160" height="150" rx="9" class="dg-box"/>
+            <rect x="280" y="30" width="160" height="60" rx="9" class="dg-cell"/>
+            <rect x="540" y="30" width="160" height="60" rx="9" class="dg-box"/>
+            <rect x="540" y="120" width="160" height="60" rx="9" class="dg-box"/>
+            <g text-anchor="middle">
+              <text x="100" y="52" class="dg-in">приложение</text>
+              <text x="360" y="56" class="dg-in">браузер</text>
+              <text x="360" y="76" class="dg-n">канал ненадёжный</text>
+              <text x="620" y="56" class="dg-in">сервер авторизации</text>
+              <text x="620" y="146" class="dg-in">платёжный API</text>
+            </g>
+            <text data-s="1-" x="32" y="80" class="dg-n">verifier: секрет</text>
+            <text data-s="4-" x="32" y="104" class="dg-ok">access token</text>
+            <rect data-s="2-3" x="552" y="62" width="136" height="20" rx="4" class="dg-cell hit"/>
+            <text data-s="2-3" x="560" y="77" class="dg-n">challenge, вход</text>
+            <path data-s="1" d="M180 50 L 276 50" class="dg-line" marker-end="url(#cf-n)"/>
+            <path data-s="1" d="M440 50 L 536 50" class="dg-line" marker-end="url(#cf-n)"/>
+            <text data-s="1" x="190" y="112" class="dg-n">/authorize: challenge,</text>
+            <text data-s="1" x="190" y="128" class="dg-n">state, redirect_uri, scope</text>
+            <path data-s="3" d="M536 80 L 444 80" class="dg-line" marker-end="url(#cf-n)"/>
+            <path data-s="3" d="M276 80 L 184 80" class="dg-line" marker-end="url(#cf-n)"/>
+            <text data-s="3" x="190" y="112" class="dg-n">302 redirect_uri</text>
+            <text data-s="3" x="190" y="128" class="dg-n">?code=c-1&amp;state=…</text>
+            <path data-s="4" d="M180 150 C 360 210, 470 100, 600 94" class="dg-line ok" marker-end="url(#cf-ok)"/>
+            <text data-s="4" x="214" y="124" class="dg-ok">POST /token: code + verifier</text>
+            <path data-s="5" d="M180 160 C 360 200, 470 160, 536 156" class="dg-line ok" marker-end="url(#cf-ok)"/>
+            <text data-s="5" x="250" y="150" class="dg-ok">Authorization: Bearer …</text>
+            <text data-s="1" x="20" y="222" class="dg-t">Приложение отправляет браузер за согласием.</text>
+            <text data-s="2" x="20" y="222" class="dg-t">Пользователь входит и соглашается на scope.</text>
+            <text data-s="3" x="20" y="222" class="dg-t">Через браузер возвращается только код.</text>
+            <text data-s="4" x="20" y="222" class="dg-ok">Токен — по прямому каналу, в обмен на verifier.</text>
+            <text data-s="5" x="20" y="222" class="dg-ok">С токеном приложение вызывает API.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Приложение генерирует случайный verifier и хранит его у себя. В браузер уходит только challenge — SHA-256 от verifier, — а также state, redirect_uri и scope.</li>
+          <li>Пользователь вводит пароль на странице сервера авторизации, а не приложения, и подтверждает scope. Сервер запоминает challenge вместе с будущим кодом.</li>
+          <li>Сервер возвращает браузер на redirect_uri с одноразовым кодом и тем же state. Это всё, что прошло через ненадёжный канал.</li>
+          <li>Приложение отправляет код и verifier прямым POST на /token. Сервер вычисляет SHA-256 от verifier и сравнивает с запомненным challenge.</li>
+          <li>Приложение вызывает API с access-токеном в заголовке Authorization.</li>
+        </ol>
+      </figure>
+      <pre class="out">== authorization code + PKCE
+verifier  = 7Fh7kFov7SIw... (stays in the app)
+challenge = DW3E1T6pb9lV... (sent to /authorize)
+302 -&gt; https://app.pay.example/cb?code=c-1&amp;state=&lt;state&gt;
+app checks state: match
+attacker with stolen code -&gt; 400 invalid_grant (PKCE verifier)
+app with verifier         -&gt; 200 access_token(sub=anna, aud=payments, scope=payments:read, exp=5m) + refresh_token
+same code again           -&gt; 400 invalid_grant (unknown or used code)</pre>
+      <p>Атакующий перехватил код c-1 и успел обменять его первым, но verifier он не знает: в браузере был только хеш, а обратить SHA-256 нельзя. Попытка сожгла код, и приложение проходит вход заново. Повторный обмен уже использованного кода отклоняется. В <a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700</a> PKCE рекомендован для всех клиентов, включая конфиденциальные, а в OAuth 2.1 обязателен.</p>
+    </section>
+
+    <section class="step" id="checks">
+      <h2>Точный redirect_uri и state закрывают кражу кода и подмену ответа</h2>
+      <pre class="out">== authorize checks
+redirect to evil.example  -&gt; 400 invalid redirect_uri, no redirect
+redirect with extra path  -&gt; 400 invalid redirect_uri, no redirect
+scope payouts:write       -&gt; https://app.pay.example/cb?error=invalid_scope&amp;state=s1
+without PKCE              -&gt; https://app.pay.example/cb?error=invalid_request&amp;error_description=pkce_required&amp;state=s2</pre>
+      <p><b>redirect_uri</b> сравнивается с зарегистрированным посимвольно. Если сервер разрешает префиксы или поддомены, атакующий подставит адрес, который отдаст код ему: <code>/cb/../steal</code> или страницу с открытым редиректом на том же домене. При неверном redirect_uri сервер не делает редирект вовсе, а показывает ошибку: иначе он сам отправит пользователя на чужой адрес. Остальные ошибки, как недопустимый scope, возвращаются на проверенный redirect_uri.</p>
+      <p><b>state</b> — случайное значение, которое приложение кладёт в сессию браузера перед редиректом и сверяет в ответе. Без него атакующий может подсунуть жертве ссылку на callback со своим кодом, и жертва окажется залогинена в аккаунт атакующего — платёжные данные, которые она введёт, уйдут ему. Это CSRF на callback. PKCE частично закрывает эту атаку, но state остаётся стандартной защитой.</p>
+      <p>Два старых потока больше не используют. <b>Implicit</b> возвращал токен прямо в адресе браузера, где он утекал через историю и Referer. <b>Resource owner password</b> заставлял приложение принимать пароль пользователя, ради отказа от чего OAuth и создавался. RFC 9700 запрещает оба, и в OAuth 2.1 их нет.</p>
+    </section>
+
+    <section class="step" id="client-credentials">
+      <h2>Client credentials — токен для сервиса, действующего от себя</h2>
+      <p>Ночная задача выплат вызывает платёжный API без пользователя. Ей не нужен браузер и согласие: она аутентифицируется собственными учётными данными и получает токен для себя:</p>
+      <pre class="out">== client credentials
+payouts-job               -&gt; 200 access_token(sub=payouts-job, scope=payouts:write, exp=5m), no refresh_token
+wrong secret              -&gt; 401 invalid_client
+public client shop-app    -&gt; 401 invalid_client</pre>
+      <p>Refresh-токен здесь не нужен: у сервиса есть учётные данные, и он просто запросит новый токен. Публичный клиент этот поток использовать не может — у него нет секрета. Секрет в заголовке Basic — самый простой способ; надёжнее аутентифицировать клиента подписанным JWT (<code>private_key_jwt</code>) или клиентским сертификатом mTLS, тогда общего секрета нет вовсе.</p>
+      <p>Когда сервис A вызывает сервис B от имени пользователя, токен пользователя не стоит пробрасывать как есть: его аудитория — A, и B не должен принимать чужие токены. Для этого есть Token Exchange (RFC 8693): A меняет токен пользователя на новый, с аудиторией B и урезанным scope.</p>
+    </section>
+
+    <section class="step" id="oidc">
+      <h2>OIDC добавляет вход: id token для приложения, access token для API</h2>
+      <p>OAuth отвечает на вопрос «что приложению можно делать», но не «кто пользователь». Access token предназначен API, его формат для клиента не определён, и использовать его как доказательство входа опасно: токен, выданный другому приложению, можно подсунуть. OpenID Connect — слой поверх authorization code flow. Клиент запрашивает scope <code>openid</code> и получает вместе с access token <b>id token</b> — JWT, адресованный самому клиенту:</p>
+      <table class="mx">
+        <thead><tr><th></th><th>ID token</th><th>Access token</th></tr></thead>
+        <tbody>
+          <tr><td>Для кого</td><td>Для клиента: <code>aud</code> = client_id</td><td>Для API: <code>aud</code> = API</td></tr>
+          <tr><td>Что значит</td><td>Пользователь вошёл, вот кто он</td><td>Предъявителю разрешены эти scope</td></tr>
+          <tr><td>Формат</td><td>Всегда JWT</td><td>JWT или непрозрачная строка</td></tr>
+          <tr><td>Куда отправлять</td><td>Никуда, клиент читает сам</td><td>В заголовке Authorization к API</td></tr>
+        </tbody>
+      </table>
+      <p>Клиент проверяет подпись id token, <code>iss</code>, <code>aud</code> равный своему client_id, срок и <code>nonce</code> — значение, которое он сам передал в запросе, чтобы старый id token нельзя было подставить повторно. Адреса эндпоинтов и ключей клиент берёт из discovery-документа <code>/.well-known/openid-configuration</code>. Единый вход (SSO) получается сам собой: у пользователя есть сессия на сервере авторизации, и следующее приложение получает код без ввода пароля.</p>
+      <p><b>SAML</b> решает ту же задачу входа в корпоративной среде: XML-утверждение, подписанное провайдером идентификации, передаётся через браузер POST-формой. Он старше OIDC и живёт в интеграциях с корпоративными каталогами, но для нового кода выбирают OIDC: проще, JSON и работает с мобильными клиентами.</p>
+      <div class="trap">
+        <p class="myth">OAuth — это способ входа через Google.</p>
+        <p class="fact">OAuth — делегирование доступа к API; он не говорит приложению, кто пользователь. Вход через Google — это OpenID Connect поверх OAuth, с id token, адресованным приложению. Аутентификация по одному access token позволяет подсунуть токен, выданный другому приложению.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>OAuth делегирует доступ: клиент получает токен со scope, а пароль остаётся у сервера авторизации.</li>
+        <li>Authorization code: через браузер только код, токен — прямым POST; PKCE делает перехваченный код бесполезным.</li>
+        <li>redirect_uri сравнивается точно, state защищает callback; implicit и password grant запрещены.</li>
+        <li>Client credentials — для сервисов без пользователя; между сервисами — Token Exchange.</li>
+        <li>OIDC: id token для клиента с aud = client_id и nonce; access token — только для API. SAML — корпоративное наследие.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="oauth-code-pkce" data-freq="3">
+      <h3>Как работает authorization code flow и зачем нужен PKCE?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Клиент отправляет браузер на /authorize с client_id, redirect_uri, scope и state. Пользователь входит на сервере авторизации и соглашается, сервер возвращает браузер на redirect_uri с одноразовым кодом. Клиент меняет код на токены прямым POST на /token. Через браузер проходит только код, а токен — по прямому каналу.</p>
+          <p>PKCE защищает код от перехвата: клиент генерирует verifier, отправляет в /authorize его SHA-256, а при обмене предъявляет сам verifier. Перехвативший код не знает verifier и токен не получит.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Публичные клиенты не могут хранить секрет, поэтому для них PKCE — единственная привязка кода к клиенту; RFC 9700 рекомендует его всем.</li>
+            <li>Метод challenge — S256; plain допустим только если SHA-256 недоступен.</li>
+            <li>Implicit и password grant запрещены RFC 9700 и отсутствуют в OAuth 2.1.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что опасного в такой настройке клиента на сервере авторизации?</summary>
+          <pre><code class="language-text">client_id:      shop-app
+client_type:    public
+redirect_uris:  https://app.pay.example/*
+grant_types:    authorization_code, implicit
+pkce_required:  false</code></pre>
+          <p>Шаблон redirect_uri позволяет увести код на любую страницу домена, включая страницу с открытым редиректом. Implicit отдаёт токен в адресе браузера. Публичному клиенту без PKCE перехваченный код даёт токен. Нужно точное значение redirect_uri, только authorization_code и обязательный PKCE с S256.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="oauth-oidc" data-freq="3">
+      <h3>Чем OpenID Connect отличается от OAuth 2.0, а id token от access token?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>OAuth — делегирование доступа к API; он не сообщает клиенту, кто пользователь. OIDC — слой поверх OAuth для входа: scope openid, id token, userinfo-эндпоинт и discovery. ID token — JWT для клиента, aud равен client_id, в нём sub и данные о входе. Access token — для API, его отправляют в Authorization, и клиент не должен на него опираться как на доказательство входа.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Клиент проверяет подпись, iss, aud, exp и nonce id token.</li>
+            <li>Вход по access token уязвим: токен, выданный другому приложению, подходит.</li>
+            <li>SSO — следствие сессии на сервере авторизации; SAML решает ту же задачу через XML и встречается в корпоративных интеграциях.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="oauth-m2m" data-freq="2">
+      <h3>Как сервис получает токен без пользователя и как передать права пользователя дальше по цепочке?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Client credentials: сервис аутентифицируется своими учётными данными на /token и получает access token на себя, без refresh-токена. Права задаются scope, выданными этому клиенту.</p>
+          <p>Чтобы вызвать следующий сервис от имени пользователя, используют Token Exchange: обменять токен пользователя на новый с аудиторией следующего сервиса и урезанными правами, а не пробрасывать исходный.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Вместо общего секрета — private_key_jwt или mTLS для аутентификации клиента.</li>
+            <li>Каждый сервис принимает только токены со своей aud, иначе токен одного сервиса работает во всех.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700: Best Current Practice for OAuth 2.0 Security</a> — основа урока: PKCE, точный redirect_uri, запрет implicit и password grant.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc6749">RFC 6749: The OAuth 2.0 Authorization Framework</a> и <a href="https://www.rfc-editor.org/rfc/rfc7636">RFC 7636: PKCE</a> — потоки и ошибки.</li>
+      <li><a href="https://openid.net/specs/openid-connect-core-1_0.html">OpenID Connect Core 1.0</a> — id token, nonce, проверки клиента.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc8693">RFC 8693: OAuth 2.0 Token Exchange</a> — передача прав между сервисами.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

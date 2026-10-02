@@ -143,7 +143,7 @@ window.KB_TREE = [
           scope: 'сессии и cookie, Basic, API-ключи, stateful и stateless аутентификация' },
         { id: 'jwt', freq: 3, status: 'draft', title: 'JWT',
           scope: 'структура токена, подпись HS256 и RS256, access и refresh token, отзыв токена, где хранить на клиенте' },
-        { id: 'oauth2', freq: 3, status: 'empty', title: 'OAuth 2.0 & OIDC',
+        { id: 'oauth2', freq: 3, status: 'draft', title: 'OAuth 2.0 & OIDC',
           scope: 'роли, authorization code и PKCE, client credentials, scopes, OpenID Connect и id token, SSO, SAML' },
         { id: 'web-security', freq: 2, status: 'empty', title: 'Web Vulnerabilities',
           scope: 'OWASP Top 10, SQL injection, XSS, CSRF, CORS, CSP' },
