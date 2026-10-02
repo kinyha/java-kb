@@ -10,6 +10,7 @@ public final class Payments {
     public interface PaymentRepository {
         Optional<Payment> findById(String id);
         boolean existsById(String id);
+        /** Новый платёж; повторный id — IllegalStateException, запись не меняется. */
         void save(Payment p);
     }
 

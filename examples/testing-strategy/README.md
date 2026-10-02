@@ -18,3 +18,10 @@ mvn test-compile org.pitest:pitest-maven:mutationCoverage -DtargetTests=kb.fees.
 mvn test -Dtest=DoublesTest -Dfragile=none
 python3 report.py
 ```
+
+Контракт фейка: один набор правил для JDBC-репозитория (H2), исправленного и наивного фейка; наивный падает намеренно:
+
+```bash
+mvn test -Dtest='*ContractTest,*RepositoryTest' -Dfragile=none
+python3 report.py JdbcPaymentRepositoryTest InMemoryPaymentRepositoryTest NaiveFakeContractTest
+```
