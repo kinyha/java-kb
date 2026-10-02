@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: RabbitMQ in Spring · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-amqp">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring: RabbitMQ in Spring</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>В RabbitMQ отправитель пишет не в очередь, а в exchange, и брокер по ключу маршрутизации раскладывает копии по привязанным очередям. Сообщение живёт в очереди, пока потребитель его не подтвердит, а потом исчезает. Spring AMQP даёт RabbitTemplate для отправки и @RabbitListener, который подтверждает сообщение после успешного метода. Без настройки исключение в листенере возвращает сообщение в очередь, и оно мгновенно приходит снова — тысячи раз в секунду.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Событие платежа нужно трём получателям с разными правилами</h2>
+      <p>Платёжный сервис сообщает о каждом платеже. Бухгалтерии нужны только успешные, дежурным — только неудачные, аудиту — все. Добавится антифрод, и ему нужны крупные платежи. Если отправитель сам знает про каждого получателя, каждое новое правило — релиз платёжного сервиса.</p>
+      <p>RabbitMQ выносит маршрутизацию в брокер. Отправитель публикует сообщение с ключом вроде <code>payment.completed</code> в <b>exchange</b>. Exchange по <b>привязкам</b> (bindings) кладёт копию в каждую подходящую <b>очередь</b>. Получатель читает свою очередь и подтверждает обработку, после чего брокер удаляет сообщение. Новому получателю достаточно своей очереди и привязки.</p>
+      <p>В этом главное отличие от Kafka из <a href="spring-kafka.html">Kafka in Spring</a>. Kafka хранит журнал, и каждый читатель сам двигает своё смещение; прочитанное остаётся. RabbitMQ — почтовое отделение: брокер решает, куда доставить, и забывает сообщение после подтверждения.</p>
+      <p>Демо <a href="../examples/rabbit/RabbitDemo.java">RabbitDemo.java</a> работает с настоящим RabbitMQ 4.3 в Docker. Стек: JDK 21, Spring Boot 4.1.1, Spring AMQP 4.1.</p>
+      <pre><code class="language-bash">docker run -d --name kb-rabbit -p 5672:5672 rabbitmq:4-management
+cd examples/rabbit
+./run.sh RabbitDemo routing # exchange, привязки, подтверждение и возврат
+./run.sh RabbitDemo requeue # исключение без настройки
+./run.sh RabbitDemo dlx     # повторы и dead letter exchange</code></pre>
+    </section>
+
+    <section class="step" id="routing">
+      <h2>Exchange по ключу раскладывает копии по очередям</h2>
+      <p>Топологию объявляют бинами. <code>RabbitAdmin</code>, который создаёт Boot, при первом подключении объявляет в брокере все бины Exchange, Queue и Binding, а также содержимое <code>Declarables</code>:</p>
+      <pre><code class="language-java">@Bean
+Declarables topology() {
+    var ex = new TopicExchange("payments");
+    var ledger = QueueBuilder.durable("ledger").build(); // durable: очередь переживёт рестарт брокера.
+    var alerts = QueueBuilder.durable("alerts").build();
+    var audit = QueueBuilder.durable("audit").build();
+    return new Declarables(ex, ledger, alerts, audit,
+            BindingBuilder.bind(ledger).to(ex).with("payment.completed"),
+            BindingBuilder.bind(alerts).to(ex).with("payment.failed"),
+            BindingBuilder.bind(audit).to(ex).with("payment.*")); // * — ровно одно слово.
+}
+
+for (String key : List.of("payment.completed", "payment.failed", "refund.completed")) {
+    template.convertAndSend("payments", key, key); // exchange, routing key, тело.
+}</code></pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 264" role="img" aria-label="Платёжный сервис публикует три сообщения в topic exchange payments. payment.completed попадает в очереди ledger и audit, payment.failed — в alerts и audit. refund.completed не подходит ни одной привязке, и брокер возвращает его отправителю с NO_ROUTE.">
+            <defs>
+              <marker id="rr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="98" width="130" height="56" rx="9" class="dg-box"/>
+            <rect x="200" y="98" width="140" height="56" rx="9" class="dg-box"/>
+            <rect x="490" y="26" width="210" height="46" rx="8" class="dg-cell hit"/>
+            <rect x="490" y="103" width="210" height="46" rx="8" class="dg-cell hit"/>
+            <rect x="490" y="180" width="210" height="46" rx="8" class="dg-cell hit"/>
+            <path d="M150 126 L 196 126" class="dg-line" marker-end="url(#rr-n)"/>
+            <path d="M340 112 C 410 112, 410 49, 486 49" class="dg-line" marker-end="url(#rr-n)"/>
+            <path d="M340 126 L 486 126" class="dg-line" marker-end="url(#rr-n)"/>
+            <path d="M340 140 C 410 140, 410 203, 486 203" class="dg-line" marker-end="url(#rr-n)"/>
+            <path d="M270 154 C 270 236, 85 236, 85 158" class="dg-line bad" marker-end="url(#rr-bad)"/>
+            <g text-anchor="middle">
+              <text x="85" y="122" class="dg-in">payments</text>
+              <text x="85" y="140" class="dg-n">отправитель</text>
+              <text x="270" y="122" class="dg-in">payments</text>
+              <text x="270" y="140" class="dg-n">topic exchange</text>
+            </g>
+            <text x="378" y="46" class="dg-n">payment.completed</text>
+            <text x="362" y="120" class="dg-n">payment.failed</text>
+            <text x="400" y="216" class="dg-n">payment.*</text>
+            <text x="504" y="46" class="dg-in">ledger</text>
+            <text x="504" y="62" class="dg-n">completed</text>
+            <text x="504" y="123" class="dg-in">alerts</text>
+            <text x="504" y="139" class="dg-n">failed</text>
+            <text x="504" y="200" class="dg-in">audit</text>
+            <text x="504" y="216" class="dg-n">completed, failed</text>
+            <text x="110" y="252" class="dg-bad">refund.completed: нет привязки, NO_ROUTE</text>
+          </svg>
+        </div>
+        <figcaption>audit получил оба сообщения: шаблон payment.* совпал с обоими ключами. Exchange кладёт копию в каждую подходящую очередь, а не выбирает одну.</figcaption>
+      </figure>
+      <pre class="out">ledger=[payment.completed], alerts=[payment.failed], audit=[payment.completed, payment.failed]</pre>
+      <table class="mx">
+        <thead><tr><th>Тип exchange</th><th>Как выбирает очереди</th></tr></thead>
+        <tbody>
+          <tr><td><code>direct</code></td><td>Ключ совпадает с ключом привязки точно</td></tr>
+          <tr><td><code>topic</code></td><td>По шаблону из слов через точку: <code>*</code> — одно слово, <code>#</code> — ноль и больше</td></tr>
+          <tr><td><code>fanout</code></td><td>Во все привязанные очереди, ключ игнорируется</td></tr>
+          <tr><td><code>headers</code></td><td>По заголовкам сообщения вместо ключа</td></tr>
+          <tr><td>exchange по умолчанию <code>""</code></td><td>В очередь с именем, равным ключу; так работает <code>send("", "queue-name", …)</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="publish">
+      <h2>Подтверждение брокера не означает, что сообщение куда-то попало</h2>
+      <p>По умолчанию <code>convertAndSend</code> пишет в сокет и возвращается. Брокер мог не принять сообщение, а приложение об этом не узнает. Для надёжной отправки включают два механизма:</p>
+      <pre><code class="language-yaml">spring:
+  rabbitmq:
+    publisher-confirm-type: correlated # Брокер подтверждает приём: ack или nack.
+    publisher-returns: true            # Брокер возвращает сообщения без маршрута...
+    template:
+      mandatory: true                  # ...если отправитель об этом попросил.</code></pre>
+      <pre><code class="language-java">template.setReturnsCallback(r -&gt; System.out.println("returned " + r.getRoutingKey() + ": " + r.getReplyText()));
+var cd = new CorrelationData(key);
+template.convertAndSend("payments", key, key, cd);
+System.out.println("sent " + key + ": confirm ack=" + cd.getFuture().get(5, TimeUnit.SECONDS).ack());</code></pre>
+      <pre class="out">sent payment.completed: confirm ack=true
+sent payment.failed: confirm ack=true
+sent refund.completed: confirm ack=true
+returned refund.completed: NO_ROUTE</pre>
+      <p>Для <code>refund.completed</code> брокер ответил <code>ack=true</code>, хотя сообщение не попало ни в одну очередь. Confirm значит «брокер принял сообщение и отвечает за него», а не «сообщение лежит в очереди». Без <code>mandatory</code> сообщение без маршрута молча удаляется, и даже return не придёт. Поэтому надёжная отправка смотрит на оба ответа: nack — повторить, return — ошибка топологии, которую нельзя лечить повтором.</p>
+      <p>Чтобы принятое сообщение пережило рестарт брокера, нужны долговечная очередь и постоянное сообщение. Spring по умолчанию отправляет с <code>deliveryMode=PERSISTENT</code>, а <code>QueueBuilder.durable</code> создаёт долговечную очередь. В RabbitMQ 4 для важных данных рекомендуют quorum-очереди: они реплицируются на несколько узлов кластера через Raft. Classic-очередь живёт на одном узле.</p>
+      <p>Как и в Kafka, отправка не атомарна с транзакцией базы. Платёж закоммитился, а сообщение не ушло — или наоборот. Надёжная схема — <a href="outbox.html">Transactional Outbox</a>.</p>
+    </section>
+
+    <section class="step" id="ack">
+      <h2>Исключение в листенере по умолчанию возвращает сообщение в очередь, и оно приходит снова</h2>
+      <p><code>@RabbitListener</code> создаёт контейнер, который держит канал к брокеру и получает сообщения пачками до <code>prefetch</code> (по умолчанию 250) неподтверждённых штук. Режим <code>AcknowledgeMode.AUTO</code>: метод вернулся — контейнер отправляет <code>basic.ack</code>, и брокер удаляет сообщение. Метод бросил исключение — контейнер отправляет <code>basic.reject</code> с <code>requeue=true</code>, и брокер кладёт сообщение обратно в голову очереди.</p>
+      <pre><code class="language-java">@RabbitListener(queues = {"charges-classic", "charges-quorum"})
+void on(String body, Message m) {
+    deliveries.computeIfAbsent(m.getMessageProperties().getConsumerQueue(), q -&gt; new AtomicInteger())
+              .incrementAndGet();
+    throw new IllegalStateException("bank declined"); // Каждая доставка падает.
+}
+
+// По одному сообщению в classic- и quorum-очередь, ждём 3 секунды.</code></pre>
+      <pre class="out">deliveries in 3 s: classic=21205, quorum=4621
+quorum x-delivery-count on last delivery: null
+left in queue: classic=0, quorum=0</pre>
+      <p>Одно сообщение за три секунды доставлено двадцать тысяч раз. Брокер возвращает его в очередь и тут же отдаёт тому же потребителю. Процессор занят, лог забит стеками, а очередь показывает ноль сообщений: единственное сообщение всё время «в работе». Остальные сообщения очереди за ним стоят.</p>
+      <p>Quorum-очередь в RabbitMQ 4 имеет лимит доставок, по умолчанию 20, после которого сообщение удаляется или уходит в dead letter. От этого цикла он не спас: заголовок <code>x-delivery-count</code> так и не появился, а доставок было больше четырёх тысяч. Рассчитывать на лимит брокера вместо своей обработки ошибок нельзя.</p>
+      <p>Исключения, которые не имеет смысла повторять, Spring сам отклоняет без возврата: <code>MessageConversionException</code> (тело не разобрать) считается фатальным. Для остальных выбор за тобой. Бросить <code>AmqpRejectAndDontRequeueException</code> — сообщение не вернётся. Настройка <code>spring.rabbitmq.listener.simple.default-requeue-rejected=false</code> меняет поведение для всех исключений. И то и другое без dead letter exchange означает удаление сообщения.</p>
+      <div class="trap">
+        <p class="myth">Если листенер упал, сообщение вернётся в очередь и обработается позже, когда сервис восстановится.</p>
+        <p class="fact">Оно вернётся в голову очереди и придёт снова через миллисекунды, тому же потребителю. Без паузы и лимита это бесконечный цикл, который блокирует остальные сообщения. Повторы с паузой и dead letter настраивают явно.</p>
+      </div>
+    </section>
+
+    <section class="step" id="dlx">
+      <h2>Повторы с паузой в приложении, затем dead letter exchange в брокере</h2>
+      <p>Нормальная схема делит ответственность. Приложение делает несколько попыток с растущей паузой, чтобы пережить кратковременный сбой банка. Если не помогло, оно отклоняет сообщение без возврата, а брокер по аргументу очереди <code>x-dead-letter-exchange</code> перекладывает его в очередь мёртвых писем для разбора людьми.</p>
+      <pre><code class="language-java">var refunds = QueueBuilder.durable("refunds")
+        .deadLetterExchange("dlx")             // Куда брокер переложит отвергнутое.
+        .deadLetterRoutingKey("refunds.dead")
+        .build();</code></pre>
+      <pre><code class="language-yaml">spring:
+  rabbitmq:
+    listener:
+      simple:
+        retry:
+          enabled: true
+          max-retries: 2         # Boot 4: повторы сверх первой попытки.
+          initial-interval: 300ms
+          multiplier: 2          # 300 мс, затем 600 мс.</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Сообщение refund-7 из очереди refunds приходит в листенер. Три попытки внутри приложения с паузами 300 и 600 мс падают. После этого Spring отклоняет сообщение без возврата, брокер перекладывает его через exchange dlx в очередь refunds.dlq с заголовком x-death reason rejected.">
+            <defs>
+              <marker id="rd-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rd-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">БРОКЕР</text>
+            <text x="250" y="22" class="dg-cap">ПРИЛОЖЕНИЕ</text>
+            <rect x="20" y="40" width="160" height="54" rx="8" class="dg-box"/>
+            <rect x="250" y="40" width="210" height="100" rx="9" class="dg-box"/>
+            <rect x="20" y="150" width="160" height="54" rx="8" class="dg-box"/>
+            <rect x="510" y="150" width="190" height="54" rx="8" class="dg-box"/>
+            <rect data-s="1-3" x="34" y="66" width="132" height="22" rx="4" class="dg-cell"/>
+            <rect data-s="5" x="524" y="176" width="162" height="22" rx="4" class="dg-cell miss"/>
+            <path data-s="1" d="M180 66 L 246 66" class="dg-line" marker-end="url(#rd-n)"/>
+            <path data-s="4" d="M250 110 C 220 110, 210 80, 184 74" class="dg-line bad" marker-end="url(#rd-bad)"/>
+            <path data-s="5" d="M100 94 L 100 146" class="dg-line bad" marker-end="url(#rd-bad)"/>
+            <path data-s="5" d="M180 177 L 506 177" class="dg-line bad" marker-end="url(#rd-bad)"/>
+            <g text-anchor="middle">
+              <text x="100" y="58" class="dg-in">refunds</text>
+              <text x="100" y="168" class="dg-in">dlx</text>
+              <text x="100" y="188" class="dg-n">exchange</text>
+              <text x="605" y="168" class="dg-in">refunds.dlq</text>
+              <text x="355" y="60" class="dg-in">@RabbitListener</text>
+            </g>
+            <text data-s="1-3" x="46" y="81" class="dg-n">refund-7, unacked</text>
+            <text data-s="5" x="534" y="191" class="dg-bad">refund-7, x-death</text>
+            <text data-s="1" x="264" y="86" class="dg-bad">509 мс: попытка 1</text>
+            <text data-s="2" x="264" y="86" class="dg-bad">813 мс: попытка 2</text>
+            <text data-s="2" x="264" y="106" class="dg-n">пауза 300 мс в потоке</text>
+            <text data-s="3" x="264" y="86" class="dg-bad">1415 мс: попытка 3</text>
+            <text data-s="3" x="264" y="106" class="dg-n">пауза 600 мс; повторы всё</text>
+            <text data-s="4" x="264" y="86" class="dg-t">reject, requeue=false</text>
+            <text data-s="4" x="190" y="112" class="dg-n">reject</text>
+            <text data-s="5" x="300" y="170" class="dg-n">reason=rejected</text>
+            <text data-s="1" x="20" y="222" class="dg-t">Брокер выдал сообщение; оно не подтверждено.</text>
+            <text data-s="2" x="20" y="222" class="dg-t">Повтор внутри приложения: брокер о нём не знает.</text>
+            <text data-s="3" x="20" y="222" class="dg-bad">Третья попытка упала: повторы исчерпаны.</text>
+            <text data-s="4" x="20" y="222" class="dg-t">RejectAndDontRequeueRecoverer: reject без возврата.</text>
+            <text data-s="5" x="20" y="222" class="dg-ok">Брокер переложил сообщение в refunds.dlq.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Брокер выдаёт refund-7 листенеру. Сообщение помечено как неподтверждённое и остаётся за этим потребителем.</li>
+          <li>Метод упал. Интерцептор повторов ждёт 300 мс в том же потоке и вызывает метод снова. Брокер ничего не знает о повторе: сообщение всё ещё у потребителя.</li>
+          <li>Третья попытка после паузы 600 мс тоже упала. Лимит max-retries: 2 исчерпан.</li>
+          <li>RejectAndDontRequeueRecoverer отклоняет сообщение с requeue=false.</li>
+          <li>У очереди refunds задан x-dead-letter-exchange, и брокер перекладывает сообщение в dlx, а оттуда в refunds.dlq. Заголовок x-death хранит причину и исходную очередь.</li>
+        </ol>
+      </figure>
+      <pre class="out">509 ms: attempt 1 for refund-7
+813 ms: attempt 2 for refund-7
+1415 ms: attempt 3 for refund-7
+DLQ got refund-7, x-death reason=rejected, queue=refunds</pre>
+      <p>В Boot 4 число повторов задаёт <code>max-retries</code>, и по умолчанию их 3, то есть 4 попытки. Первая версия демо использовала прежнее имя <code>max-attempts: 3</code> и получила четыре попытки, а не три, как было в Boot 3. При переходе на Boot 4 такие настройки стоит перепроверить по фактическому числу попыток.</p>
+      <p>Повторы внутри приложения держат поток контейнера: пока refund-7 ждёт паузы, этот потребитель не берёт другие сообщения. Паузы в минуты так не делают. Для долгих задержек используют очередь ожидания с TTL, из которой сообщение через dead letter возвращается в рабочую, или плагин отложенных сообщений.</p>
+      <p>Аргументы очереди фиксируются при её объявлении. Если добавить <code>deadLetterExchange</code> к уже существующей очереди, следующий запуск упадёт с <code>PRECONDITION_FAILED</code>: брокер не меняет аргументы. Для живых очередей dead letter задают политикой RabbitMQ, а не аргументом в коде.</p>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>RabbitMQ для маршрутизации задач, Kafka для журнала событий</h2>
+      <table class="mx">
+        <thead><tr><th></th><th>RabbitMQ</th><th>Kafka</th></tr></thead>
+        <tbody>
+          <tr><td>Что хранит</td><td>Очередь до подтверждения</td><td>Журнал на срок хранения, независимо от чтения</td></tr>
+          <tr><td>Маршрутизация</td><td>Брокер: exchange и привязки</td><td>Отправитель выбирает топик, ключ выбирает партицию</td></tr>
+          <tr><td>Перечитать прошлое</td><td>Нет</td><td>Да, сдвинув смещение</td></tr>
+          <tr><td>Масштаб потребителей</td><td>Сколько угодно конкурирующих на одну очередь</td><td>Не больше числа партиций в группе</td></tr>
+          <tr><td>Порядок</td><td>В очереди, пока один потребитель и нет requeue</td><td>В партиции</td></tr>
+          <tr><td>Ошибка обработки</td><td>Отклонить одно сообщение, остальные идут</td><td>Запись блокирует партицию, пока её не пропустят</td></tr>
+        </tbody>
+      </table>
+      <p>Для платёжного сервиса это часто значит обе системы. Задачи с индивидуальной судьбой — отправить чек, повторить вызов банка, разобрать отказ — удобно раздавать через RabbitMQ: каждое сообщение подтверждается и повторяется отдельно. Поток событий, который нужен многим сервисам и который полезно перечитать, например история платежей для аналитики, — в Kafka.</p>
+      <p>Конкурирующие потребители одной очереди ломают порядок: два потребителя с prefetch 250 обрабатывают соседние сообщения параллельно, а requeue кладёт упавшее сообщение обратно позже остальных. Если порядок по счёту важен, нужна одна очередь на группу счетов с единственным потребителем или Kafka с ключом.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Отправитель пишет в exchange; привязки решают, в какие очереди лягут копии.</li>
+        <li>Confirm ack значит «брокер принял», а не «положил в очередь»: без mandatory и returns сообщение без маршрута теряется молча.</li>
+        <li>AUTO ack: метод вернулся — ack, исключение — reject с возвратом в голову очереди и мгновенный повтор.</li>
+        <li>Повторы с паузой делает приложение, потом reject без возврата и dead letter exchange в брокере. В Boot 4 это retry.max-retries.</li>
+        <li>RabbitMQ удобен для задач с индивидуальной судьбой, Kafka — для журнала событий, который читают многие.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="amqp-model" data-freq="2">
+      <h3>Как сообщение доходит до потребителя в RabbitMQ и чем это отличается от Kafka?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Отправитель публикует сообщение с ключом маршрутизации в exchange. Exchange по привязкам кладёт копию в каждую подходящую очередь: direct по точному ключу, topic по шаблону, fanout во все. Потребитель читает очередь и подтверждает сообщение, после чего брокер его удаляет.</p>
+          <p>В Kafka отправитель пишет в топик, сообщения хранятся в журнале независимо от чтения, а каждая группа потребителей сама ведёт своё смещение и может перечитать прошлое. В RabbitMQ после подтверждения сообщения нет.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Exchange по умолчанию "" маршрутизирует в очередь с именем, равным ключу.</li>
+            <li>Конкурирующих потребителей на очередь может быть сколько угодно, но порядок между ними не гарантирован.</li>
+            <li>Quorum-очереди реплицируются через Raft и рекомендуются для важных данных; classic живёт на одном узле.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="amqp-listener-error" data-freq="2">
+      <h3>Что произойдёт, если @RabbitListener бросит исключение?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В режиме AUTO контейнер отправит reject с requeue=true, и брокер вернёт сообщение в голову очереди. Оно тут же придёт снова, и без настройки это бесконечный цикл: в демо одно сообщение доставлено двадцать тысяч раз за три секунды.</p>
+          <p>Я включаю повторы с паузой в приложении, после них сообщение отклоняется без возврата, а у очереди задан dead letter exchange, который перекладывает его в DLQ для разбора.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>MessageConversionException Spring считает фатальным и не возвращает; AmqpRejectAndDontRequeueException отклоняет без возврата явно.</li>
+            <li>Повторы интерцептора держат поток контейнера; для долгих пауз нужна очередь ожидания с TTL.</li>
+            <li>Лимит доставок quorum-очереди в демо не остановил цикл явного requeue; полагаться на него вместо своей обработки нельзя.</li>
+            <li>В Boot 4 число повторов — retry.max-retries; с прежним max-attempts: 3 демо получило четыре попытки вместо трёх.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="amqp-reliable-publish" data-freq="2">
+      <h3>Как убедиться, что отправленное сообщение не потерялось?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Включаю publisher confirms: брокер подтверждает приём каждого сообщения ack или nack. И publisher returns с mandatory: если сообщение не подошло ни одной очереди, брокер вернёт его. Confirm сам по себе не значит, что сообщение в очереди: в демо сообщение без маршрута получило ack и вернулось с NO_ROUTE.</p>
+          <p>Чтобы сообщение пережило рестарт брокера, очередь должна быть durable, а сообщение persistent; Spring отправляет persistent по умолчанию.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Отправка не атомарна с транзакцией базы; для гарантии используют outbox.</li>
+            <li>nack — повод повторить отправку, return — ошибка топологии, повтор её не исправит.</li>
+            <li>Транзакции канала AMQP медленные и редко нужны; confirms решают ту же задачу дешевле.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему после переименования привязки события о возвратах перестали доходить, а ошибок в логах нет?</summary>
+          <pre><code class="language-java">// Привязку refunds.completed переименовали в refund.completed, отправитель не обновили.
+rabbitTemplate.convertAndSend("payments", "refunds.completed", event);</code></pre>
+          <p>Ключ больше не совпадает ни с одной привязкой, и exchange удаляет сообщение. Без mandatory брокер ничего не возвращает, а confirm приходит с ack=true, поэтому отправитель считает отправку успешной. Нужно включить publisher-returns и template.mandatory, логировать и алертить возвраты, а изменения топологии проверять тестом с реальным брокером.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-amqp/reference/">Spring AMQP Reference</a> — основа урока: RabbitTemplate, контейнеры, подтверждения, обработка исключений, повторы.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/messaging/amqp.html">Spring Boot Reference: AMQP</a> — настройки spring.rabbitmq.*, retry, confirms и returns.</li>
+      <li><a href="https://www.rabbitmq.com/docs/confirms">RabbitMQ: Consumer Acknowledgements and Publisher Confirms</a> и <a href="https://www.rabbitmq.com/docs/dlx">Dead Letter Exchanges</a> — что значат ack, nack, return и x-death.</li>
+      <li><a href="https://www.rabbitmq.com/docs/quorum-queues">RabbitMQ: Quorum Queues</a> — репликация и лимит доставок.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

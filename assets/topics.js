@@ -567,7 +567,7 @@ window.KB_TREE = [
       { id: 'integration', title: 'Integration', source: 'Spring Framework Reference: Integration; Spring Boot Reference: Messaging, IO', items: [
         { id: 'spring-kafka', freq: 2, status: 'draft', title: 'Kafka in Spring',
           scope: 'KafkaTemplate, @KafkaListener, контейнеры и concurrency, повторы и DLT, транзакции' },
-        { id: 'spring-amqp', freq: 1, status: 'empty', title: 'RabbitMQ in Spring',
+        { id: 'spring-amqp', freq: 1, status: 'draft', title: 'RabbitMQ in Spring',
           scope: 'RabbitTemplate, @RabbitListener, подтверждения, повторы и DLX' },
         { id: 'spring-cache', freq: 2, status: 'draft', title: 'Caching',
           scope: '@Cacheable, @CacheEvict, CacheManager, ловушки с прокси, Redis как кеш' },
