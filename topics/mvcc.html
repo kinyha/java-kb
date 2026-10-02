@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MVCC · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="mvcc">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>MVCC</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>MVCC — многоверсионность: PostgreSQL не меняет строку на месте, а создаёт новую версию и помечает старую как удалённую. У каждой версии есть <code>xmin</code> — транзакция, которая её создала, и <code>xmax</code> — транзакция, которая её удалила. Запрос видит данные через снимок — список транзакций, чьи изменения ему видны, — и из нескольких версий строки выбирает ту, что видна в его снимке. Поэтому читатели не ждут писателей, а писатели — читателей. Старые версии остаются в таблице, пока их может увидеть хоть один снимок, и одна долгая транзакция не даёт VACUUM их убрать.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Отчёт читал таблицу полчаса, никому не мешал — а таблица за это время выросла вдвое</h2>
+      <p>Аналитический отчёт по кошелькам открывает транзакцию REPEATABLE READ и полчаса читает данные. Платёжный сервис всё это время обновляет балансы, и никто никого не ждёт. После отчёта выясняется, что таблица кошельков занимает вдвое больше места, запросы к ней замедлились, а autovacuum всё это время работал и ничего не мог убрать.</p>
+      <p>Обе стороны — отсутствие ожиданий и рост таблицы — следствия MVCC. Тема показывает, как PostgreSQL хранит версии строк, как снимок решает, какая версия видна, и почему открытая транзакция держит мусор. Уровни изоляции поверх снимков — в <a href="db-tx.html">ACID &amp; Isolation</a>, блокировки между писателями — в <a href="db-locks.html">Locks</a>, очистка — в <a href="vacuum.html">VACUUM</a>. Демо <a href="../examples/db-tx/MvccDemo.java">MvccDemo.java</a> работает с PostgreSQL 17 в Docker и смотрит на страницу таблицы через расширение <code>pageinspect</code>; номера транзакций в выводе зависят от истории базы.</p>
+    </section>
+
+    <section class="step" id="versions">
+      <h2>UPDATE создаёт новую версию строки, а старую помечает удалённой</h2>
+      <p>У каждой строки таблицы есть скрытые системные колонки. <code>ctid</code> — физический адрес версии: номер страницы и позиция на ней. <code>xmin</code> — id транзакции, которая создала версию, <code>xmax</code> — которая её удалила или заменила.</p>
+      <pre class="out">== after insert
+   ctid            xmin            xmax            id              balance
+   (0,1)           798             0               w-1             100
+== after update: the table shows one row...
+   ctid            xmin            xmax            id              balance
+   (0,2)           799             0               w-1             70
+== ...but the page holds two versions
+   lp              t_xmin          t_xmax          t_ctid
+   1               798             799             (0,2)
+   2               799             0               (0,2)</pre>
+      <p>Транзакция 798 вставила строку на позицию 1. UPDATE в транзакции 799 не изменил её: он записал новую версию на позицию 2 с <code>xmin = 799</code>, а у старой проставил <code>xmax = 799</code> и ссылку <code>t_ctid</code> на новую. Запрос к таблице показывает одну строку, а на странице лежат обе. DELETE работает так же, только без новой версии: он лишь проставляет <code>xmax</code>. Откат транзакции ничего не стирает — её версии просто становятся невидимыми, потому что статус транзакции «отменена».</p>
+    </section>
+
+    <section class="step" id="snapshot">
+      <h2>Снимок решает, какую версию видит запрос, поэтому читатели и писатели не ждут друг друга</h2>
+      <p>Снимок — это три числа: <code>xmin</code> снимка — все транзакции младше уже завершены; <code>xmax</code> — все транзакции начиная с него ещё не начались для снимка; между ними — список активных. Изменения видны, если создавшая версию транзакция закоммичена и не попадает в «будущее» или «активные» снимка. На READ COMMITTED снимок берётся на каждый запрос, на REPEATABLE READ — один на транзакцию.</p>
+      <pre class="out">== reader snapshot (xmin:xmax:in-progress)
+   snapshot        balance
+   800:800:        70
+== writer updated while reader is open, waited 1 ms
+== reader still sees its version; a new query sees the new one
+   ctid            xmin            balance
+   (0,2)           799             70
+   ctid            xmin            balance
+   (0,3)           800             40</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Цепочка версий строки w-1: версия 1 создана транзакцией 798 и удалена 799, версия 2 создана 799 и удалена 800, версия 3 создана 800. Снимок читателя 800:800 видит версию 2: транзакция 799 завершена, 800 для него в будущем. Новый запрос со снимком 801 видит версию 3.">
+            <text x="20" y="22" class="dg-cap">ВЕРСИИ СТРОКИ w-1 НА СТРАНИЦЕ</text>
+            <rect x="20" y="40" width="200" height="64" rx="7" class="dg-cell"/>
+            <rect data-s="1-" x="260" y="40" width="200" height="64" rx="7" class="dg-cell"/>
+            <rect data-s="3" x="256" y="36" width="208" height="72" rx="10" class="dg-cell hit"/>
+            <rect data-s="4" x="496" y="36" width="208" height="72" rx="10" class="dg-cell hit"/>
+            <rect data-s="2-" x="500" y="40" width="200" height="64" rx="7" class="dg-cell"/>
+            <text x="32" y="62" class="dg-in">(0,1) balance 100</text>
+            <text x="32" y="82" class="dg-n">xmin 798</text>
+            <text data-s="1-" x="32" y="98" class="dg-bad">xmax 799</text>
+            <text data-s="1-" x="272" y="62" class="dg-in">(0,2) balance 70</text>
+            <text data-s="1-" x="272" y="82" class="dg-n">xmin 799</text>
+            <text data-s="1" x="272" y="98" class="dg-n">xmax 0</text>
+            <text data-s="2-" x="272" y="98" class="dg-bad">xmax 800</text>
+            <text data-s="2-" x="512" y="62" class="dg-in">(0,3) balance 40</text>
+            <text data-s="2-" x="512" y="82" class="dg-n">xmin 800</text>
+            <text data-s="2-" x="512" y="98" class="dg-n">xmax 0</text>
+            <text data-s="3" x="260" y="140" class="dg-ok">снимок 800:800 читателя</text>
+            <text data-s="3" x="260" y="158" class="dg-n">799 завершена — видна; 800 в будущем — нет</text>
+            <text data-s="4" x="500" y="140" class="dg-ok">новый запрос, снимок 801</text>
+            <text data-s="4" x="500" y="158" class="dg-n">800 завершена — видна</text>
+            <text data-s="1" x="20" y="208" class="dg-t">UPDATE 799: новая версия, старая получила xmax.</text>
+            <text data-s="2" x="20" y="208" class="dg-t">Писатель 800 создал третью версию, не дожидаясь читателя.</text>
+            <text data-s="3" x="20" y="208" class="dg-ok">Читатель видит версию 2 по своему снимку.</text>
+            <text data-s="4" x="20" y="208" class="dg-ok">Новый запрос видит версию 3.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>UPDATE в транзакции 799 создал версию (0,2) и проставил xmax старой версии (0,1).</li>
+          <li>Читатель открыл снимок 800:800, а писатель в транзакции 800 обновил строку ещё раз — без ожидания: версию (0,2) никто не блокировал для чтения.</li>
+          <li>Читатель снова читает строку. Версия (0,3) создана транзакцией 800, а для снимка 800:800 она в будущем — невидима. Версия (0,2) создана 799 и удалена 800, которая для снимка ещё не случилась, — видна. Баланс 70.</li>
+          <li>Новый запрос берёт снимок после коммита 800 и видит версию (0,3) с балансом 40.</li>
+        </ol>
+      </figure>
+      <p>Писатель обновил строку за миллисекунду, хотя читатель её держал в открытой транзакции: читатель ничего не блокирует, он просто выбирает версию. Писатели блокируют только других писателей той же строки, как в <a href="db-locks.html">Locks</a>. Это главный выигрыш MVCC: долгие отчёты не мешают платежам.</p>
+    </section>
+
+    <section class="step" id="horizon">
+      <h2>Старую версию нельзя убрать, пока её может увидеть хоть один снимок</h2>
+      <pre class="out">== VACUUM while the reader's snapshot is open
+   tuples: 1 removed, 2 remain, 1 are dead but not yet removable
+   removable cutoff: 800, which was 1 XIDs old when operation ended
+== VACUUM after the reader finished
+   tuples: 1 removed, 1 remain, 0 are dead but not yet removable
+   removable cutoff: 801, which was 0 XIDs old when operation ended
+   lp              t_xmin          t_xmax          t_ctid
+   1               null            null            null
+   2               null            null            null
+   3               800             0               (0,3)</pre>
+      <p>Пока снимок читателя открыт, VACUUM удалил версию (0,1) — её не видит уже никто, — но версию (0,2) оставил: «dead but not yet removable». Граница очистки — <code>removable cutoff: 800</code>: версии, удалённые транзакциями старше 800, убрать можно, а удалённые 800 и позже — нет, потому что снимок читателя считает 800 будущей. После коммита читателя граница сдвинулась на 801, и вторая версия тоже ушла; на странице осталась только актуальная.</p>
+      <p>Это и есть история с отчётом: полчаса его снимок держал горизонт, каждое обновление баланса оставляло мёртвую версию, и таблица росла. Горизонт держат не только долгие запросы: сессия <code>idle in transaction</code>, которая открыла транзакцию и забыла её закрыть, неактивный слот репликации, реплика с <code>hot_standby_feedback</code> и долгим запросом. Мониторят возраст самой старой транзакции в <code>pg_stat_activity</code> и ставят <code>idle_in_transaction_session_timeout</code>. Как VACUUM переиспользует место и почему мёртвые версии не уменьшают файл, разобрано в <a href="vacuum.html">VACUUM</a>.</p>
+    </section>
+
+    <section class="step" id="other-dbs">
+      <h2>PostgreSQL хранит версии в таблице, Oracle и MySQL — в журнале отмены</h2>
+      <p>MVCC есть почти во всех современных базах, но устроен по-разному. PostgreSQL кладёт новую версию рядом со старой в саму таблицу, и старая остаётся там до VACUUM. Oracle и MySQL InnoDB обновляют строку на месте, а старое значение сохраняют в журнал отмены (undo); читатель со старым снимком восстанавливает нужную версию из undo.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>PostgreSQL</th><th>Oracle, MySQL InnoDB</th></tr></thead>
+        <tbody>
+          <tr><td>Где старые версии</td><td>В таблице, рядом с новыми</td><td>В отдельном журнале undo</td></tr>
+          <tr><td>Цена UPDATE</td><td>Новая версия и записи во всех индексах, если не HOT</td><td>Запись на месте плюс undo</td></tr>
+          <tr><td>Откат</td><td>Мгновенный: версии становятся невидимы</td><td>Применение undo, дольше</td></tr>
+          <tr><td>Долгий снимок</td><td>Раздувание таблицы и индексов</td><td>Рост undo; «snapshot too old» в Oracle</td></tr>
+          <tr><td>Очистка</td><td>VACUUM</td><td>Purge undo в фоне</td></tr>
+        </tbody>
+      </table>
+      <p>Поэтому в PostgreSQL частые UPDATE широких строк дороже, чем в InnoDB: каждый создаёт полную новую версию и, если меняется индексированная колонка или на странице нет места, новые записи во всех индексах. HOT-обновления, когда новая версия ложится на ту же страницу и индексы не меняются, смягчают это; о них — в <a href="vacuum.html">VACUUM</a>.</p>
+      <div class="trap">
+        <p class="myth">Длинная транзакция на чтение безопасна: она ничего не блокирует.</p>
+        <p class="fact">Она не блокирует запись, но держит горизонт очистки: VACUUM не может убрать версии, которые её снимок способен увидеть. В демо мёртвая версия осталась «dead but not yet removable», пока читатель был открыт. Полчаса такой транзакции на нагруженной таблице — раздувание и медленные запросы.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>UPDATE создаёт новую версию: на странице две строки (xmin 798 / xmax 799 и xmin 799).</li>
+        <li>Снимок xmin:xmax:активные решает видимость; читатель видел 70, новый запрос — 40, писатель не ждал.</li>
+        <li>Читатели не блокируют писателей и наоборот; писатели одной строки блокируют друг друга.</li>
+        <li>Открытый снимок держит горизонт: «1 are dead but not yet removable» до коммита читателя.</li>
+        <li>PostgreSQL хранит версии в таблице (VACUUM, раздувание), Oracle и InnoDB — в undo.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="mvcc-what" data-freq="3">
+      <h3>Что такое MVCC и почему в PostgreSQL читатели не блокируют писателей?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>MVCC — хранение нескольких версий строки. UPDATE создаёт новую версию и помечает старую удалённой; у версий есть xmin и xmax — транзакции, создавшие и удалившие их. Запрос читает через снимок и из версий выбирает видимую ему. Поэтому читателю не нужно блокировать строку, а писатель не ждёт читателей — он просто создаёт новую версию.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Снимок: xmin, xmax и список активных транзакций; на READ COMMITTED — на запрос, на REPEATABLE READ — на транзакцию.</li>
+            <li>Писатели одной строки всё равно блокируют друг друга.</li>
+            <li>Откат мгновенный: версии отменённой транзакции просто невидимы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="mvcc-bloat" data-freq="2">
+      <h3>Почему долгая транзакция вредит базе, даже если она только читает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Её снимок может увидеть старые версии строк, поэтому VACUUM не может их удалить: горизонт очистки стоит на её начале. Каждое обновление за это время оставляет мёртвую версию, таблица и индексы раздуваются, запросы замедляются. То же делают сессии idle in transaction, неактивные слоты репликации и hot_standby_feedback с долгими запросами на реплике.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Мониторят возраст xact_start в pg_stat_activity и backend_xmin.</li>
+            <li>idle_in_transaction_session_timeout и statement_timeout ограничивают ущерб.</li>
+            <li>Отчёты лучше гонять на реплике без hot_standby_feedback или на отдельной копии.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Чем опасен этот экспорт?</summary>
+          <pre><code class="language-java">@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+public void exportAll(OutputStream out) {
+    try (Stream&lt;Payment&gt; s = payments.streamAll()) {
+        s.forEach(p -&gt; s3.upload(out, p));    // часы: 50 млн строк, сеть до S3
+    }
+}</code></pre>
+          <p>Одна транзакция со снимком держится часами, пока идёт выгрузка по сети. Всё это время VACUUM не убирает мёртвые версии во всей базе, и нагруженные таблицы платежей раздуваются. Нужно выгружать порциями по keyset в коротких транзакциях, а если нужен согласованный снимок — делать экспорт с реплики или из логической копии.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mvcc-other" data-freq="1">
+      <h3>Чем MVCC в PostgreSQL отличается от MVCC в Oracle или MySQL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>PostgreSQL хранит старые версии прямо в таблице и убирает их VACUUM; откат мгновенный, но UPDATE создаёт полную новую версию и записи в индексах, а долгие снимки раздувают таблицы. Oracle и InnoDB меняют строку на месте и сохраняют старые значения в undo; читатели восстанавливают версии из undo, а долгие снимки раздувают undo.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>HOT-обновления в PostgreSQL избегают записи в индексы, если новая версия на той же странице и индексированные колонки не менялись.</li>
+            <li>В Oracle слишком старый снимок даёт ORA-01555 snapshot too old.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Егор Рогов, «PostgreSQL изнутри», часть I — основа урока: страницы и версии строк, снимки, горизонт.</li>
+      <li><a href="https://www.postgresql.org/docs/17/mvcc-intro.html">PostgreSQL 17: Concurrency Control</a> — MVCC и уровни изоляции.</li>
+      <li><a href="https://www.postgresql.org/docs/17/pageinspect.html">pageinspect</a> — просмотр страниц таблицы из демо.</li>
+      <li><a href="https://www.postgresql.org/docs/17/functions-info.html#FUNCTIONS-PG-SNAPSHOT">pg_current_snapshot</a> — формат снимка.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

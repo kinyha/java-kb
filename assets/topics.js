@@ -237,7 +237,7 @@ window.KB_TREE = [
           scope: 'ACID, уровни изоляции, dirty read, non-repeatable read, phantom, lost update, write skew, значения по умолчанию' },
         { id: 'db-locks', freq: 3, status: 'draft', title: 'Locks',
           scope: 'блокировки строк и таблиц, SELECT FOR UPDATE, SKIP LOCKED, optimistic и pessimistic, deadlock' },
-        { id: 'mvcc', freq: 2, status: 'empty', title: 'MVCC',
+        { id: 'mvcc', freq: 2, status: 'draft', title: 'MVCC',
           scope: 'версии строк, снимки данных, почему читатели не блокируют писателей, xmin и xmax' },
       ] },
       { id: 'perf', title: 'Performance', source: 'Use The Index, Luke; PostgreSQL изнутри, ч. IV–V', items: [

@@ -8,4 +8,5 @@ cd examples/db-tx
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
 java -cp "$(cat target/classpath.txt)" IsolationDemo.java
 java -cp "$(cat target/classpath.txt)" LocksDemo.java
+java -cp "$(cat target/classpath.txt)" MvccDemo.java   # номера транзакций зависят от истории базы
 ```
