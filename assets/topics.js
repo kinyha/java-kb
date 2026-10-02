@@ -307,7 +307,7 @@ window.KB_TREE = [
           scope: 'очереди задач, планировщики, повторы, async request-reply, возврат результата' },
       ] },
       { id: 'distributed', title: 'Distributed Systems', source: 'DDIA; microservices.io: Saga, CQRS, Event Sourcing', items: [
-        { id: 'idempotency', freq: 3, status: 'empty', title: 'Idempotency',
+        { id: 'idempotency', freq: 3, status: 'draft', title: 'Idempotency',
           scope: 'ключ идемпотентности, дедупликация, повторы, exactly-once на деле' },
         { id: 'dist-tx', freq: 3, status: 'empty', title: 'Distributed Transactions',
           scope: '2PC, saga, оркестрация и хореография, компенсации' },

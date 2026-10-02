@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Idempotency · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="idempotency">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Idempotency</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Операция идемпотентна, если повтор не меняет результат: второй запрос «списать по заказу 42» не списывает второй раз. В распределённой системе повторы неизбежны — таймаут не говорит, выполнился ли запрос, — поэтому всё, что меняет деньги, должно переживать повтор. Естественная идемпотентность — условное обновление или запись по ключу. Для операций вроде создания платежа клиент присылает ключ идемпотентности, а сервер атомарно занимает его, выполняет операцию один раз, сохраняет ответ и на повтор возвращает тот же ответ. Ключ передают и дальше, в банк, потому что сбой возможен между любыми двумя шагами.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Клиент не дождался ответа, повторил запрос, и деньги списались дважды</h2>
+      <p>Интернет-магазин вызывает API платёжного сервиса, чтобы списать 500 рублей. Банк отвечает медленно, и запрос магазина обрывается по таймауту через 200 мс. Магазин не знает, прошло ли списание, и повторяет запрос — так поступает любой разумный клиент, а заодно ретраи в HTTP-клиенте, балансировщике и сервисной сетке. Первый запрос тем временем завершился, и покупатель видит два списания.</p>
+      <p>Тема разбирает, как сделать операцию безопасной для повторов на уровне API и как довести эту гарантию до конца цепочки. Семантика методов HTTP — в <a href="http.html">HTTP</a>, идемпотентные консьюмеры сообщений — в <a href="messaging.html">Brokers &amp; Guarantees</a>, повторы и их настройка — в <a href="resilience.html">Resilience Patterns</a>. Демо <a href="../examples/idempotency/IdempotencyDemo.java">IdempotencyDemo.java</a> поднимает платёжный эндпоинт на JDK HttpServer с таблицей ключей в PostgreSQL 17; «банк» списывает 500 мс, дольше таймаута клиента.</p>
+    </section>
+
+    <section class="step" id="timeout">
+      <h2>Таймаут не говорит, выполнилась ли операция</h2>
+      <pre class="out">== without idempotency: client times out at 200 ms and retries
+   POST /naive/payments  key=null -&gt; HttpTimeoutException
+   POST /naive/payments  key=null -&gt; 201 {"payment":"p-2"}
+   bank charges: 2</pre>
+      <p>Клиент получил таймаут на первый запрос и успешный ответ на второй, а банк списал дважды. У таймаута три возможных объяснения: запрос не дошёл, дошёл и выполняется, выполнился, но не дошёл ответ. Клиент не может их различить, и единственный безопасный способ — повторить, если сервер гарантирует, что повтор не выполнит операцию второй раз.</p>
+      <p>Часть операций идемпотентна по своей природе. <code>PUT /payments/p-1/status = CAPTURED</code> или <code>update ... set status = 'CAPTURED' where id = ? and status = 'AUTHORIZED'</code> безопасно выполнить дважды: второй раз ничего не изменит. Вставка с уникальным ключом из предметной области — <code>unique (merchant_id, order_id)</code> — не создаст второй платёж по тому же заказу. А вот «создать новый платёж» или «списать ещё 500» сами по себе не идемпотентны, и для них нужен явный ключ.</p>
+    </section>
+
+    <section class="step" id="key">
+      <h2>Ключ идемпотентности занимают атомарно, а ответ сохраняют для повтора</h2>
+      <pre><code class="language-sql">create table idempotency_key(
+    merchant text, key text, request_hash text not null,
+    status text not null,                    -- IN_PROGRESS или DONE
+    response_code int, response_body text,
+    created_at timestamptz default now(),
+    primary key (merchant, key));            -- ключ уникален в рамках клиента</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Первый запрос с ключом k-1 вставляет строку IN_PROGRESS и вызывает банк. Параллельный запрос с тем же ключом не может вставить строку и, увидев IN_PROGRESS, получает 409. После ответа банка строка становится DONE с сохранённым ответом. Повтор получает сохранённый ответ без второго списания.">
+            <defs><marker id="ik-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="30" width="150" height="50" rx="9" class="dg-box"/><text x="95" y="60" class="dg-in" text-anchor="middle">запрос 1</text>
+            <rect x="20" y="120" width="150" height="50" rx="9" class="dg-box"/><text x="95" y="150" class="dg-in" text-anchor="middle">запрос 2 (повтор)</text>
+            <rect x="260" y="60" width="220" height="80" rx="9" class="dg-box"/>
+            <text x="370" y="82" class="dg-in" text-anchor="middle">idempotency_key k-1</text>
+            <text data-s="1-2" x="370" y="110" class="dg-bad" text-anchor="middle">IN_PROGRESS</text>
+            <text data-s="3-" x="370" y="110" class="dg-ok" text-anchor="middle">DONE, 201, p-3</text>
+            <rect x="560" y="60" width="140" height="50" rx="9" class="dg-box"/><text x="630" y="90" class="dg-in" text-anchor="middle">банк</text>
+            <path data-s="1" d="M170 55 L 256 85" class="dg-line" marker-end="url(#ik-n)"/>
+            <text data-s="1" x="176" y="44" class="dg-n">insert … on conflict</text>
+            <path data-s="1" d="M480 90 L 556 85" class="dg-line" marker-end="url(#ik-n)"/>
+            <path data-s="2" d="M170 145 L 256 120" class="dg-line bad" marker-end="url(#ik-n)"/>
+            <text data-s="2" x="176" y="186" class="dg-bad">ключ занят, IN_PROGRESS → 409</text>
+            <path data-s="3" d="M556 95 L 484 110" class="dg-line ok" marker-end="url(#ik-n)"/>
+            <text data-s="3" x="500" y="136" class="dg-ok">сохранить ответ</text>
+            <path data-s="4" d="M170 145 L 256 120" class="dg-line ok" marker-end="url(#ik-n)"/>
+            <text data-s="4" x="176" y="186" class="dg-ok">DONE → тот же 201, без списания</text>
+            <text data-s="1" x="20" y="206" class="dg-t">Первый запрос занял ключ и пошёл в банк.</text>
+            <text data-s="2" x="20" y="206" class="dg-bad">Параллельный повтор видит занятый ключ: 409, пусть повторит позже.</text>
+            <text data-s="3" x="20" y="206" class="dg-ok">Банк ответил: ключ переходит в DONE с ответом.</text>
+            <text data-s="4" x="20" y="206" class="dg-ok">Повтор получает сохранённый ответ.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Первый запрос вставляет строку ключа со статусом IN_PROGRESS. Уникальный первичный ключ гарантирует, что из параллельных запросов вставит только один.</li>
+          <li>Второй запрос с тем же ключом не вставил строку и видит IN_PROGRESS: операция ещё идёт. Он получает 409, а не выполняет списание параллельно.</li>
+          <li>Банк ответил. Сервер сохраняет код и тело ответа и переводит ключ в DONE.</li>
+          <li>Следующий повтор находит DONE и получает сохранённый ответ — тот же платёж p-3, без второго обращения в банк.</li>
+        </ol>
+      </figure>
+      <pre class="out">== with Idempotency-Key: same retry
+   POST /payments        key=k-1  -&gt; HttpTimeoutException
+   POST /payments        key=k-1  -&gt; 201 (replayed) {"payment":"p-3"}
+   bank charges: 1
+== two concurrent requests with the same key
+   POST /payments        key=k-2  -&gt; 409 {"title":"request with this key is in progress"}
+   POST /payments        key=k-2  -&gt; 201 {"payment":"p-4"}
+   bank charges: 1
+== same key, different body
+   POST /payments        key=k-1  -&gt; 422 {"title":"key reused with a different request"}</pre>
+      <p>Повтор после таймаута вернул тот же ответ с пометкой <code>Idempotent-Replayed</code>, а банк списал один раз. Два одновременных запроса с одним ключом не списали дважды: вставку выиграл один, второй получил 409. Ключ, присланный с другим телом, отклонён 422: это ошибка клиента, и тихо вернуть ответ на другой запрос было бы хуже. Для этого рядом с ключом хранится хеш запроса.</p>
+      <p>Ключ генерирует клиент — UUID на одну логическую операцию, — и он одинаков во всех повторах этой операции. Уникальность — в рамках клиента: <code>(merchant, key)</code>, иначе ключи разных магазинов столкнутся. Хранят ключи ограниченное время — Stripe держит их 24 часа, — после чего повтор считается новым запросом. Проверка «нет ли уже такого ключа» отдельным SELECT перед вставкой гонку не закрывает: только уникальное ограничение или атомарный <code>SET NX</code> в Redis.</p>
+    </section>
+
+    <section class="step" id="crash">
+      <h2>Сбой между списанием и сохранением ответа оставляет ключ в IN_PROGRESS</h2>
+      <p>Схема выше не закрывает один случай: сервер вызвал банк, банк списал, а сервер упал, не успев перевести ключ в DONE. Ключ навсегда IN_PROGRESS, клиент получает 409, а списание было. Повторить вызов банка нельзя — он спишет ещё раз. Выход — та же идея на следующем шаге: передать в банк собственный ключ идемпотентности, производный от ключа клиента. Тогда восстановление — повторить вызов банка с тем же ключом: банк вернёт результат уже выполненного списания. Зависшие IN_PROGRESS с истёкшей арендой разбирает фоновая задача.</p>
+      <p>Если операция целиком внутри своей базы — создать запись, изменить баланс, — всё проще: ключ, изменения и ответ записывают в одной транзакции, и сбой откатывает их вместе. Сложность появляется на каждой границе с внешней системой, и на каждой нужна своя идемпотентность: клиент → сервис по ключу клиента, сервис → банк по ключу операции, сервис → брокер через <a href="outbox.html">Transactional Outbox</a>, брокер → консьюмер по id события.</p>
+      <div class="trap">
+        <p class="myth">Достаточно проверить, был ли уже такой запрос, перед тем как его выполнять.</p>
+        <p class="fact">Проверка и выполнение — два шага, и два параллельных повтора оба увидят «не было». Ключ должен заниматься атомарно — уникальным ограничением или SET NX, — запрос, пока он выполняется, должен видеть статус IN_PROGRESS, а сбой посреди операции закрывается идемпотентностью следующего шага, а не проверкой.</p>
+      </div>
+    </section>
+
+    <section class="step" id="exactly-once">
+      <h2>«Ровно один раз» складывается из повторов и идемпотентности на каждом шаге</h2>
+      <p>Доставить сообщение или запрос ровно один раз через ненадёжную сеть невозможно: можно либо не повторять и иногда терять, либо повторять и иногда дублировать. На практике выбирают второе и делают каждый шаг идемпотентным, тогда эффект получается однократным. Цепочка платёжного сервиса выглядит так:</p>
+      <table class="mx">
+        <thead><tr><th>Шаг</th><th>Повторы возникают из-за</th><th>Защита</th></tr></thead>
+        <tbody>
+          <tr><td>Клиент → API</td><td>Таймауты, ретраи клиента и прокси</td><td>Idempotency-Key, сохранённый ответ</td></tr>
+          <tr><td>Сервис → банк</td><td>Таймауты, восстановление после сбоя</td><td>Ключ операции у банка, статус-запрос</td></tr>
+          <tr><td>Сервис → брокер</td><td>Падение между базой и отправкой</td><td>Outbox, at-least-once</td></tr>
+          <tr><td>Брокер → консьюмер</td><td>Повторная доставка</td><td>Таблица обработанных id, условные обновления</td></tr>
+        </tbody>
+      </table>
+      <p>Идемпотентность — не только защита от дублей, но и право повторять: сервисы с идемпотентными операциями можно смело ретраить, перезапускать и переигрывать сообщения из очереди при восстановлении.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Таймаут не говорит, выполнилась ли операция; без защиты повтор дал два списания.</li>
+        <li>Естественная идемпотентность — условные обновления и уникальные ключи предметной области; для создания — ключ клиента.</li>
+        <li>Ключ занимают атомарно (unique, SET NX), хранят статус, хеш запроса и ответ: повтор — тот же 201, параллельный — 409, другое тело — 422.</li>
+        <li>Сбой между внешним вызовом и сохранением закрывает ключ идемпотентности у следующего шага и фоновое восстановление.</li>
+        <li>Однократный эффект = повторы + идемпотентность на каждом шаге цепочки.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="idem-key" data-freq="3">
+      <h3>Как реализовать ключ идемпотентности в API?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Клиент присылает заголовок Idempotency-Key — уникальный для одной логической операции и одинаковый во всех её повторах. Сервер атомарно вставляет ключ в таблицу с уникальным ограничением и статусом IN_PROGRESS, выполняет операцию, сохраняет код и тело ответа и ставит DONE. Повтор с тем же ключом получает сохранённый ответ, параллельный — 409, тот же ключ с другим телом — 422.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ключ уникален в рамках клиента и хранится ограниченное время.</li>
+            <li>Хеш запроса рядом с ключом ловит повторное использование ключа для другого запроса.</li>
+            <li>Если операция только в своей базе — ключ, изменения и ответ в одной транзакции.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему эта защита пропускает двойные списания?</summary>
+          <pre><code class="language-java">public PaymentResponse pay(String key, PayRequest r) {
+    var cached = redis.get("idem:" + key);
+    if (cached != null) return json.read(cached);
+    PaymentResponse resp = bank.charge(r);
+    redis.set("idem:" + key, json.write(resp), Duration.ofHours(24));
+    return resp;
+}</code></pre>
+          <p>Проверка и запись разделены: два параллельных повтора оба не найдут ключ и оба спишут. Ключ должен заниматься атомарно до вызова банка — SET NX со статусом IN_PROGRESS, — а параллельный запрос должен получать 409. Если процесс упадёт после bank.charge, ключа в Redis не будет, и повтор спишет снова — в банк нужно передавать собственный ключ идемпотентности. Ключ не привязан к клиенту и телу запроса.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="idem-exactly-once" data-freq="3">
+      <h3>Как добиться exactly-once в распределённой системе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Доставку ровно один раз через ненадёжную сеть гарантировать нельзя, поэтому выбирают at-least-once — повторы — и делают каждый шаг идемпотентным: ключ идемпотентности на API, ключ операции у внешнего сервиса, outbox при публикации событий и дедупликация по id у консьюмера. Эффект становится однократным.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Идемпотентность даёт право на повторы, перезапуски и переигрывание сообщений.</li>
+            <li>Exactly-once в Kafka — только внутри Kafka; внешние эффекты защищают идемпотентностью.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="idem-natural" data-freq="2">
+      <h3>Какие операции идемпотентны сами по себе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Чтение; установка значения, а не приращение (PUT, set status = X); условное обновление с проверкой текущего состояния (where status = 'AUTHORIZED'); удаление по id; вставка с уникальным ключом предметной области (merchant_id, order_id). Неидемпотентны создание новой сущности без ключа и приращения: «списать ещё 500», increment.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Методы GET, PUT, DELETE идемпотентны по HTTP-семантике, но реализация может её нарушить.</li>
+            <li>Условное обновление по версии превращает приращение в идемпотентное.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.stripe.com/api/idempotent_requests">Stripe: Idempotent requests</a> и <a href="https://brandur.org/idempotency-keys">Brandur Leach: Implementing Stripe-like Idempotency Keys in Postgres</a> — основа урока.</li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/">IETF draft: The Idempotency-Key HTTP Header Field</a>.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9110#name-idempotent-methods">RFC 9110: Idempotent Methods</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
