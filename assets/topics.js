@@ -265,7 +265,7 @@ window.KB_TREE = [
           scope: 'ключ шардирования, решардинг, горячие шарды, запросы через шарды' },
       ] },
       { id: 'nosql', title: 'NoSQL', items: [
-        { id: 'nosql', freq: 2, status: 'empty', title: 'Overview',
+        { id: 'nosql', freq: 2, status: 'draft', title: 'Overview',
           scope: 'key-value, документные, колоночные, графовые, time series, SQL или NoSQL' },
         { id: 'mongodb', freq: 1, status: 'draft', title: 'MongoDB',
           scope: 'документы, индексы, replica set, шардинг' },

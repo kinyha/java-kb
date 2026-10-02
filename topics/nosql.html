@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NoSQL Overview · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="nosql">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>NoSQL Overview</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>NoSQL — не одна технология, а несколько моделей данных, каждая из которых жертвует частью возможностей реляционной базы ради одного свойства. Key-value даёт предельно быстрый доступ по ключу, документная модель — данные, читаемые и меняемые целиком, wide-column — горизонтальную запись огромных потоков, графовая — обход связей, поисковые движки — полнотекстовый поиск, time-series — метрики во времени. Выбирают не «SQL или NoSQL», а модель под конкретный способ доступа, и часто реляционной базы с jsonb и правильными индексами хватает. В одной системе обычно живут несколько хранилищ, каждое под свою задачу.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Команда выбрала MongoDB «для гибкости», а через год писала транзакции и соединения вручную</h2>
+      <p>Новый сервис платежей начали на MongoDB: схема меняется быстро, документы удобны. Через год в нём были переводы между счетами, отчёты с группировкой по магазинам и проверка уникальности заказа — всё то, что реляционная база делает сама, а здесь пришлось писать транзакциями, конвейерами агрегации и ручными проверками. В соседней команде наоборот: журнал из миллиардов событий в PostgreSQL упёрся в один сервер, а Cassandra решила бы задачу без шардирования вручную.</p>
+      <p>Тема — карта моделей данных и критерии выбора. Каждое хранилище разобрано отдельно: <a href="redis.html">Redis</a>, <a href="mongodb.html">MongoDB</a>, <a href="cassandra.html">Cassandra</a>, <a href="elasticsearch.html">Elasticsearch</a>; компромиссы согласованности — в <a href="cap.html">CAP &amp; Consistency</a>. Демо <a href="../examples/db-tx/JsonbDemo.java">JsonbDemo.java</a> показывает PostgreSQL 17 в роли документного хранилища.</p>
+    </section>
+
+    <section class="step" id="models">
+      <h2>Каждая модель оптимизирует один способ доступа и отказывается от остального</h2>
+      <table class="mx">
+        <thead><tr><th>Модель</th><th>Примеры</th><th>Сильная сторона</th><th>Чем платит</th><th>В платёжной системе</th></tr></thead>
+        <tbody>
+          <tr><td>Key-value</td><td>Redis, DynamoDB</td><td>Доступ по ключу за микросекунды</td><td>Запросы только по ключу</td><td>Кеш, сессии, лимиты, идемпотентность</td></tr>
+          <tr><td>Документная</td><td>MongoDB</td><td>Связанные данные одним документом, гибкая схема</td><td>Соединения и транзакции через документы</td><td>Карточки магазинов, настройки</td></tr>
+          <tr><td>Wide-column</td><td>Cassandra, ScyllaDB</td><td>Горизонтальная запись, несколько дата-центров</td><td>Запросы только по partition key, нет транзакций</td><td>Журнал событий, история операций</td></tr>
+          <tr><td>Поисковая</td><td>Elasticsearch, OpenSearch</td><td>Полнотекстовый поиск, агрегации по текстам</td><td>Не источник правды, отложенная видимость</td><td>Поиск платежей поддержкой</td></tr>
+          <tr><td>Графовая</td><td>Neo4j</td><td>Обход связей на много шагов</td><td>Масштабирование, нишевые запросы</td><td>Поиск колец мошенников</td></tr>
+          <tr><td>Time-series</td><td>Prometheus, TimescaleDB, ClickHouse</td><td>Сжатие и агрегаты по времени</td><td>Точечные обновления и удаления</td><td>Метрики, аналитика оборотов</td></tr>
+        </tbody>
+      </table>
+      <p>Общее у большинства — отказ от чего-то, что реляционная база даёт бесплатно: произвольных запросов, соединений, транзакций через много сущностей, строгой схемы. Взамен — горизонтальное масштабирование, предсказуемая задержка или модель, близкая к задаче. Поэтому первый вопрос — какие запросы будут, второй — какие гарантии нужны, и только третий — объём.</p>
+    </section>
+
+    <section class="step" id="postgres-documents">
+      <h2>Часто хватает реляционной базы с jsonb</h2>
+      <pre><code class="language-sql">create table payment_doc(
+    id bigint primary key, merchant_id int not null, doc jsonb not null,
+    check (doc ? 'currency' and (doc-&gt;&gt;'amount')::bigint &gt; 0));
+create index on payment_doc using gin (doc jsonb_path_ops);
+select count(*) from payment_doc where doc @&gt; '{"card": {"country": "KZ"}, "tags": ["chargeback"]}';</code></pre>
+      <pre class="out">== containment query on a document
+   Seq Scan on payment_doc (actual rows=10000 loops=1); Buffers: shared hit=9616; Execution Time: 37.929 ms
+   Bitmap Heap Scan on payment_doc (actual rows=10000 loops=1); Buffers: shared hit=9641; Execution Time: 6.307 ms
+== partial update of one field: tags ["chargeback", "refunded"], card brand VISA
+== bad document: 23514 ERROR: new row for relation "payment_doc" violates check constraint "payment_doc_doc_check"
+== SQL over documents, top merchants by chargebacks: m-0=500 m-50=500 m-100=500</pre>
+      <p>PostgreSQL хранит документ в jsonb, ищет по вложенным полям через GIN-индекс — 6 мс вместо 38 на полмиллиона документов, — меняет одно поле через <code>jsonb_set</code> и при этом сохраняет то, чего нет в документных базах из коробки: CHECK-ограничение отклонило документ с отрицательной суммой, а обычный SQL с группировкой работает поверх документов. Гибкая часть данных — атрибуты карты, теги, метаданные партнёра — живёт в jsonb, а важные поля — в колонках с типами и ограничениями.</p>
+      <p>Отдельная документная база оправдана, когда документы — основной и почти единственный способ работы с данными, их очень много и нужен встроенный шардинг, а транзакции через документы редки. Если же нужна «гибкость схемы» поверх по сути реляционных данных — счетов, переводов, заказов, — она обычно оборачивается ручной реализацией того, что база умела.</p>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>Выбор начинают с запросов и гарантий, и в системе обычно несколько хранилищ</h2>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="PostgreSQL — источник правды для платежей, счетов и переводов. Из него через outbox и CDC данные доставляются в Elasticsearch для поиска, в Cassandra или ClickHouse для журнала и аналитики. Redis стоит рядом как кеш и хранилище лимитов и ключей идемпотентности.">
+            <defs><marker id="pp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="80" width="200" height="70" rx="9" class="dg-cell hit"/>
+            <text x="120" y="108" class="dg-in" text-anchor="middle">PostgreSQL</text>
+            <text x="120" y="128" class="dg-ok" text-anchor="middle">источник правды</text>
+            <rect x="280" y="20" width="160" height="44" rx="9" class="dg-box"/><text x="360" y="47" class="dg-in" text-anchor="middle">Redis</text>
+            <rect x="500" y="20" width="200" height="44" rx="9" class="dg-box"/><text x="600" y="47" class="dg-in" text-anchor="middle">Elasticsearch</text>
+            <rect x="500" y="90" width="200" height="44" rx="9" class="dg-box"/><text x="600" y="117" class="dg-in" text-anchor="middle">ClickHouse</text>
+            <rect x="500" y="160" width="200" height="44" rx="9" class="dg-box"/><text x="600" y="187" class="dg-in" text-anchor="middle">Cassandra</text>
+            <rect x="280" y="96" width="160" height="38" rx="9" class="dg-cell"/><text x="360" y="120" class="dg-n" text-anchor="middle">outbox / CDC</text>
+            <path d="M220 115 L 276 115" class="dg-line" marker-end="url(#pp-n)"/>
+            <path d="M440 108 C 470 108, 470 42, 496 42" class="dg-line" marker-end="url(#pp-n)"/>
+            <path d="M440 115 L 496 112" class="dg-line" marker-end="url(#pp-n)"/>
+            <path d="M440 122 C 470 122, 470 182, 496 182" class="dg-line" marker-end="url(#pp-n)"/>
+            <path d="M200 80 C 220 50, 250 42, 276 42" class="dg-line" marker-end="url(#pp-n)"/>
+            <text x="240" y="82" class="dg-n">кеш, лимиты</text>
+            <text x="20" y="212" class="dg-s">Каждое хранилище отвечает за свой способ доступа; согласованность между ними — асинхронная.</text>
+          </svg>
+        </div>
+        <figcaption>Производные хранилища можно пересобрать из источника правды, поэтому их потеря — неудобство, а не катастрофа.</figcaption>
+      </figure>
+      <p>Типичная платёжная система держит деньги и связи в реляционной базе, а остальное раздаёт специализированным хранилищам: Redis для кеша и лимитов, Elasticsearch для поиска, колоночное хранилище для аналитики, иногда Cassandra для журнала огромного объёма. Данные в производные хранилища идут асинхронно — через outbox или CDC, — и каждое отстаёт от источника. Это polyglot persistence: выигрыш в каждой задаче оплачивается эксплуатацией нескольких систем и согласованием между ними, поэтому новое хранилище добавляют, когда существующее действительно не справляется.</p>
+      <div class="trap">
+        <p class="myth">NoSQL нужен, когда данных много, а SQL — когда мало.</p>
+        <p class="fact">PostgreSQL на одном сервере держит терабайты и десятки тысяч транзакций в секунду, а с секционированием и репликами — ещё больше. Выбор определяют способ доступа и гарантии: транзакции через сущности и произвольные запросы — к реляционной базе, запись огромного потока по ключу в нескольких дата-центрах — к Cassandra, полнотекстовый поиск — к Elasticsearch.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Key-value, документная, wide-column, поисковая, графовая, time-series — каждая оптимизирует один способ доступа.</li>
+        <li>Взамен отказываются от произвольных запросов, соединений, транзакций или строгой схемы.</li>
+        <li>PostgreSQL с jsonb: GIN-поиск 6 мс против 38, частичное обновление, CHECK по документу и SQL поверх документов.</li>
+        <li>В системе несколько хранилищ: источник правды и производные, наполняемые через outbox или CDC.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="nosql-choose" data-freq="3">
+      <h3>Как выбрать между SQL и NoSQL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По запросам и гарантиям. Если нужны транзакции через несколько сущностей, соединения, произвольные отчёты и ограничения целостности — реляционная база. Если доступ только по ключу с минимальной задержкой — key-value; данные читаются и меняются целиком документом — документная; огромный поток записи по ключу в нескольких дата-центрах — wide-column; полнотекстовый поиск — поисковый движок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>PostgreSQL с jsonb часто закрывает потребность в гибкой схеме без отдельной базы.</li>
+            <li>Polyglot persistence: источник правды плюс производные хранилища через CDC.</li>
+            <li>Масштаб — третий вопрос: один сервер PostgreSQL выдерживает больше, чем кажется.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что спорного в этом выборе хранилищ?</summary>
+          <pre><code class="language-text">Сервис переводов между счетами клиентов:
+- балансы и переводы — MongoDB, «чтобы не мучиться со схемой»
+- проверка лимитов — чтение баланса, проверка в коде, запись
+- история переводов для поддержки — та же коллекция, поиск по regex в описании</code></pre>
+          <p>Переводы затрагивают два счёта и требуют атомарности и проверки инвариантов — это задача реляционной базы с транзакциями и ограничениями; в MongoDB понадобятся транзакции на несколько документов и аккуратная модель. Проверка лимита чтением и записью в коде теряет обновления при гонке. Поиск по regex без индекса — полный проход; для поиска поддержки нужен Elasticsearch или GIN-индекс. Схему лучше держать в PostgreSQL, гибкие атрибуты — в jsonb.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="nosql-models" data-freq="2">
+      <h3>Какие модели данных относят к NoSQL и для чего каждая?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Key-value (Redis, DynamoDB) — доступ по ключу: кеш, сессии. Документная (MongoDB) — вложенные документы с гибкой схемой. Wide-column (Cassandra) — огромные потоки записи с запросами по partition key. Графовая (Neo4j) — обход связей. Поисковая (Elasticsearch) — полнотекстовый поиск. Time-series — метрики и события во времени.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Большинство жертвуют соединениями, произвольными запросами или транзакциями ради масштаба и задержки.</li>
+            <li>Многие NoSQL-базы со временем добавили транзакции и SQL-подобные языки, а реляционные — документы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="nosql-jsonb" data-freq="2">
+      <h3>Когда хватит PostgreSQL с jsonb вместо документной базы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда гибкая часть — атрибуты, метаданные, настройки — дополняет реляционные данные, а не заменяет их. jsonb индексируется GIN, поддерживает поиск по вложенным полям, частичное обновление и CHECK-ограничения, и при этом остаются транзакции, соединения и SQL. Отдельная документная база нужна, когда документы — основная модель, их очень много и нужен встроенный шардинг.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Важные поля держат колонками с типами, гибкие — в jsonb.</li>
+            <li>Обновление jsonb переписывает всё значение, большие документы уходят в TOAST.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», главы 2–3 — основа урока: модели данных и способы хранения.</li>
+      <li><a href="https://www.postgresql.org/docs/17/datatype-json.html">PostgreSQL 17: JSON Types</a> — jsonb, операторы и индексы.</li>
+      <li>Pramod Sadalage, Martin Fowler, «NoSQL Distilled» — агрегатно-ориентированные модели и polyglot persistence.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

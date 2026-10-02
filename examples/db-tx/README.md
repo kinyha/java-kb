@@ -17,6 +17,7 @@ java -cp "$(cat target/classpath.txt)" IndexTypesDemo.java
 java -cp "$(cat target/classpath.txt)" MigrationDemo.java
 java -cp "$(cat target/classpath.txt)" ModelingDemo.java
 java -cp "$(cat target/classpath.txt)" PartitionDemo.java
+java -cp "$(cat target/classpath.txt)" JsonbDemo.java
 
 # SlowQueriesDemo нужен pg_stat_statements:
 docker rm -f kb-pg
