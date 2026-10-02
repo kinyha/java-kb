@@ -127,7 +127,7 @@ window.KB_TREE = [
     source: 'roadmap.sh/backend, OWASP Top 10, GoF, awesome-java-backend-interview-rus: Разработка ПО',
     items: [
       { id: 'api', title: 'API', source: 'roadmap.sh/backend: Learn about APIs', items: [
-        { id: 'api-design', freq: 3, status: 'empty', title: 'REST',
+        { id: 'api-design', freq: 3, status: 'draft', title: 'REST',
           scope: 'ресурсы, методы и идемпотентность, коды ответов, модель зрелости Ричардсона, HATEOAS' },
         { id: 'api-practices', freq: 2, status: 'empty', title: 'API Design',
           scope: 'пагинация, фильтрация и сортировка, версионирование, формат ошибок RFC 9457, обратная совместимость' },

@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>API: REST · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="api-design">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>API: REST</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>REST — стиль, в котором API — это набор ресурсов с адресами, а действия над ними выражаются стандартными методами и кодами HTTP. Платёж — ресурс <code>/payments/p-1</code>, его создание — POST в коллекцию, ответ — 201 и адрес нового ресурса. Бизнес-действие вроде списания тоже становится ресурсом: <code>/payments/p-1/captures</code>. Ответ показывает текущее состояние и ссылки на действия, которые сейчас допустимы. Долгая операция возвращает 202 и адрес, где следить за результатом. Когда API следует этим правилам, клиенты, прокси и кеши понимают его без отдельного описания каждого эндпоинта.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>API из глаголов приходится заучивать по одному эндпоинту</h2>
+      <p>Первая версия платёжного API выглядела так: <code>POST /createPayment</code>, <code>POST /capturePayment</code>, <code>POST /cancelPayment?id=17</code>, <code>POST /getPaymentStatus</code>. Всё через POST, всё возвращает 200 с полем <code>success</code>. Каждый эндпоинт — отдельный договор: что принимает, что возвращает, можно ли повторить, что значит ошибка. Клиент не может закешировать статус, прокси не может повторить безопасный запрос, мониторинг не видит ошибок, потому что код всегда 200.</p>
+      <p>Это RPC поверх HTTP: HTTP используется как транспорт, а его семантика выброшена. REST предлагает обратное: смоделировать предметную область как ресурсы и выразить работу с ними через то, что HTTP уже умеет. Семантика методов и кодов разобрана в <a href="http.html">HTTP</a>; здесь — как построить на ней API. Демо <a href="../examples/api/RestDemo.java">RestDemo.java</a> поднимает на loopback маленький платёжный API на встроенном <code>HttpServer</code> и проходит жизненный цикл платежа: <code>java RestDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="resources">
+      <h2>Ресурс — существительное с адресом, и действие тоже можно сделать ресурсом</h2>
+      <p>Ресурс — то, о чём можно говорить отдельно: платёж, магазин, возврат, выписка. У него есть адрес и представление. Коллекция <code>/payments</code> содержит платежи, <code>/payments/p-1</code> — один платёж. Адрес описывает, что это, а метод — что с ним сделать, поэтому глаголов в адресе нет.</p>
+      <table class="mx">
+        <thead><tr><th>Нужно</th><th>RPC-стиль</th><th>REST</th></tr></thead>
+        <tbody>
+          <tr><td>Создать платёж</td><td><code>POST /createPayment</code></td><td><code>POST /payments</code> → 201, Location</td></tr>
+          <tr><td>Получить платёж</td><td><code>POST /getPayment</code></td><td><code>GET /payments/p-1</code></td></tr>
+          <tr><td>Списать деньги</td><td><code>POST /capturePayment</code></td><td><code>POST /payments/p-1/captures</code></td></tr>
+          <tr><td>Вернуть часть суммы</td><td><code>POST /refund?amount=200</code></td><td><code>POST /payments/p-1/refunds</code> → новый ресурс возврата</td></tr>
+          <tr><td>Найти платежи магазина</td><td><code>POST /searchPayments</code></td><td><code>GET /payments?merchant=m-7</code></td></tr>
+        </tbody>
+      </table>
+      <p>Самый частый вопрос — как выразить бизнес-действие, которое не похоже на создание или изменение поля. Ответ: превратить действие в ресурс. Возврат — не изменение платежа, а новый объект со своим id, суммой, статусом и историей. <code>POST /payments/p-1/refunds</code> создаёт возврат, и его можно потом получить, перечислить все возвраты платежа и повторить запрос с ключом идемпотентности. Альтернатива <code>PATCH /payments/p-1 {"status": "REFUNDED"}</code> прячет бизнес-операцию за изменением поля и теряет её данные: какую сумму вернули, кто, когда.</p>
+      <p>Адрес не обязан повторять схему базы. Таблица <code>payment_events</code> не должна стать ресурсом только потому, что существует, а ресурс «выписка за день» может собираться из пяти таблиц. Вложенность держат неглубокой: <code>/payments/p-1/refunds/r-3</code> ещё читается, а пять уровней означают, что ресурс заслуживает собственного корня <code>/refunds/r-3</code>.</p>
+    </section>
+
+    <section class="step" id="codes">
+      <h2>Метод и код ответа сообщают результат без чтения тела</h2>
+      <pre><code class="language-java">show(client, "POST", base + "/payments", "{\"amount\":500}");
+show(client, "POST", base + "/payments/p-1/cancellations", "{}"); // После списания.
+show(client, "DELETE", base + "/payments/p-1", null);              // Удалять платёж нельзя.
+show(client, "GET", base + "/payments/p-404", null);</code></pre>
+      <pre class="out">POST /payments -&gt; 201 Location: /payments/p-1
+    {"id":"p-1","status":"AUTHORIZED","links":{"self":"/payments/p-1","capture":"/payments/p-1/captures","cancel":"/payments/p-1/cancellations"}}
+POST /payments/p-1/cancellations -&gt; 409
+    {"title":"payment is CAPTURED, cancellations not allowed","instance":"/payments/p-1"}
+DELETE /payments/p-1 -&gt; 405 Allow: GET
+GET /payments/p-404 -&gt; 404
+    {"title":"payment not found","instance":"/payments/p-404"}</pre>
+      <p>Каждый ответ понятен по коду. 201 с <code>Location</code> — ресурс создан, вот его адрес; клиенту не нужно собирать URL самому. 409 Conflict — запрос корректен, но противоречит текущему состоянию: списанный платёж нельзя отменить. Это не 400 (запрос не битый) и не 422 (данные не противоречат правилам сами по себе). 405 с заголовком <code>Allow</code> говорит, какие методы ресурс поддерживает. 404 — такого платежа нет. Тело ошибки здесь в формате Problem Details из RFC 9457; правила его оформления и версионирования API — в <a href="api-practices.html">API Design</a>.</p>
+      <p>Выбор метода определяет, что посредники могут делать с запросом. GET безопасен и кешируем, PUT и DELETE идемпотентны, POST — нет, поэтому создание платежа требует ключа идемпотентности. Подробно — в <a href="http.html">HTTP</a>.</p>
+    </section>
+
+    <section class="step" id="hateoas">
+      <h2>Ответ показывает состояние и ссылки на действия, которые сейчас допустимы</h2>
+      <p>В представлении платежа демо есть поле <code>links</code>. Его содержимое зависит от состояния: авторизованный платёж можно списать или отменить, списанный — только вернуть.</p>
+      <pre class="out">GET /payments/p-1 -&gt; 200
+    {"id":"p-1","status":"AUTHORIZED","links":{"self":"/payments/p-1","capture":"/payments/p-1/captures","cancel":"/payments/p-1/cancellations"}}
+GET /payments/p-1 -&gt; 200
+    {"id":"p-1","status":"CAPTURED","links":{"self":"/payments/p-1","refund":"/payments/p-1/refunds"}}</pre>
+      <p>Это HATEOAS — гипермедиа как механизм состояния приложения. Клиент не хранит у себя таблицу переходов статусов: он показывает кнопку «Вернуть», если в ответе есть ссылка <code>refund</code>. Когда бизнес добавит правило «возврат только в течение 180 дней», сервер просто перестанет отдавать ссылку, и мобильное приложение не потребует релиза. Форматы HAL, JSON:API и Siren стандартизируют, как оформлять такие ссылки.</p>
+      <table class="mx">
+        <thead><tr><th>Уровень Ричардсона</th><th>Что есть</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>Один адрес, HTTP как транспорт</td><td>SOAP, <code>POST /api</code> с именем метода в теле</td></tr>
+          <tr><td>1</td><td>Ресурсы с отдельными адресами</td><td><code>POST /payments/p-1/getStatus</code></td></tr>
+          <tr><td>2</td><td>Ресурсы, методы и коды HTTP</td><td>Большинство «REST API»</td></tr>
+          <tr><td>3</td><td>Плюс ссылки на допустимые действия</td><td>Ответ с <code>links</code>, как в демо</td></tr>
+        </tbody>
+      </table>
+      <p>На практике почти все API, которые называют REST, — уровень 2, и этого обычно хватает. Филдинг, автор REST, считает гипермедиа обязательной частью стиля, но для внутренних API между сервисами её польза мала: клиент всё равно пишется под конкретный API. Уровень 3 окупается там, где поведение клиента зависит от состояния и клиентов много: мобильные приложения, партнёрские интеграции.</p>
+    </section>
+
+    <section class="step" id="async">
+      <h2>Долгая операция возвращает 202 и адрес, где следить за результатом</h2>
+      <p>Списание ждёт ответа банка, а он может прийти через несколько секунд. Держать HTTP-запрос открытым всё это время плохо: соединения клиента и балансировщика имеют таймауты, а повтор после обрыва может провести списание дважды. Вместо этого сервер принимает задачу и сразу отвечает 202 Accepted с адресом ресурса операции.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Клиент отправляет POST на /payments/p-1/captures. Сервер отвечает 202 и Location /operations/op-2. Клиент опрашивает операцию: первый раз RUNNING и Retry-After 1, второй раз DONE со ссылкой на платёж. Клиент получает платёж в статусе CAPTURED.">
+            <defs>
+              <marker id="as-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="as-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="40" width="140" height="150" rx="9" class="dg-box"/>
+            <rect x="280" y="40" width="200" height="56" rx="9" class="dg-box"/>
+            <rect x="280" y="134" width="200" height="56" rx="9" class="dg-box"/>
+            <rect x="560" y="40" width="140" height="56" rx="9" class="dg-box"/>
+            <rect data-s="2-3" x="292" y="160" width="176" height="24" rx="5" class="dg-cell"/>
+            <rect data-s="4-" x="292" y="160" width="176" height="24" rx="5" class="dg-cell hit"/>
+            <rect data-s="5" x="292" y="66" width="176" height="24" rx="5" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="90" y="62" class="dg-in">клиент</text>
+              <text x="380" y="62" class="dg-in">/payments/p-1</text>
+              <text x="380" y="156" class="dg-in">/operations/op-2</text>
+              <text x="630" y="62" class="dg-in">банк</text>
+              <text x="630" y="82" class="dg-n">отвечает не сразу</text>
+            </g>
+            <text data-s="1-4" x="302" y="84" class="dg-n">AUTHORIZED</text>
+            <text data-s="5" x="302" y="84" class="dg-ok">CAPTURED</text>
+            <text data-s="2-3" x="302" y="177" class="dg-n">RUNNING</text>
+            <text data-s="4-" x="302" y="177" class="dg-ok">DONE → payment</text>
+            <path data-s="1" d="M160 60 L 276 60" class="dg-line" marker-end="url(#as-n)"/>
+            <text data-s="1" x="168" y="52" class="dg-n">POST captures</text>
+            <path data-s="2" d="M480 68 L 556 68" class="dg-line" marker-end="url(#as-n)"/>
+            <path data-s="2" d="M276 150 C 220 150, 220 110, 164 110" class="dg-line ok" marker-end="url(#as-ok)"/>
+            <text data-s="2" x="168" y="128" class="dg-ok">202, Location</text>
+            <path data-s="3" d="M160 160 L 276 160" class="dg-line" marker-end="url(#as-n)"/>
+            <text data-s="3" x="168" y="152" class="dg-n">GET → RUNNING</text>
+            <text data-s="3" x="168" y="180" class="dg-n">Retry-After: 1</text>
+            <path data-s="4" d="M160 172 L 276 172" class="dg-line ok" marker-end="url(#as-ok)"/>
+            <text data-s="4" x="168" y="164" class="dg-ok">GET → DONE</text>
+            <path data-s="5" d="M160 80 L 276 80" class="dg-line ok" marker-end="url(#as-ok)"/>
+            <text data-s="5" x="168" y="72" class="dg-ok">GET</text>
+            <text data-s="1" x="20" y="216" class="dg-t">Клиент просит списать деньги.</text>
+            <text data-s="2" x="20" y="216" class="dg-t">Сервер принял задачу и сразу ответил 202.</text>
+            <text data-s="3" x="20" y="216" class="dg-t">Операция идёт; сервер подсказал, когда спросить.</text>
+            <text data-s="4" x="20" y="216" class="dg-ok">Готово: ссылка ведёт на результат.</text>
+            <text data-s="5" x="20" y="216" class="dg-ok">Платёж в статусе CAPTURED.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент отправляет POST на ресурс списаний платежа.</li>
+          <li>Сервер ставит задачу банку и сразу отвечает 202 Accepted с адресом ресурса операции. Соединение свободно, таймаут не грозит.</li>
+          <li>Клиент спрашивает операцию. Она ещё идёт, и сервер подсказывает заголовком Retry-After, когда спросить снова.</li>
+          <li>Банк ответил. Операция в статусе DONE и содержит ссылку на результат.</li>
+          <li>Клиент получает платёж уже в статусе CAPTURED, со ссылкой только на возврат.</li>
+        </ol>
+      </figure>
+      <pre class="out">POST /payments/p-1/captures -&gt; 202 Location: /operations/op-2
+    {"operation":"op-2","status":"RUNNING"}
+GET /operations/op-2 -&gt; 200 Retry-After: 1
+    {"operation":"op-2","status":"RUNNING"}
+GET /operations/op-2 -&gt; 200
+    {"operation":"op-2","status":"DONE","links":{"payment":"/payments/p-1"}}</pre>
+      <p>Опрос прост и надёжен: клиент сам решает, когда спросить, а потерянный ответ безопасно повторить, потому что GET идемпотентен. Минус — лишние запросы. Альтернатива — вебхук: клиент при создании передаёт адрес, и сервер сам отправит туда результат. Вебхук быстрее, но требует от клиента публичного адреса, повторов при недоступности, проверки подписи и защиты от дублей. Часто делают оба: вебхук для скорости и опрос как запасной путь.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>REST хорош для ресурсов и плох для процессов, которые не ложатся на них</h2>
+      <p>REST требует, чтобы каждый запрос был самодостаточным: сервер не хранит состояние сеанса клиента между запросами. Всё нужное — кто клиент, какой ресурс, какая версия — приходит в самом запросе: токен в Authorization, id в адресе, ETag в If-Match. Поэтому любой экземпляр сервиса может обработать любой запрос, а балансировщику не нужна привязка клиента к экземпляру.</p>
+      <p>У стиля есть пределы. Чтение сложного графа — платёж, магазин, возвраты, история — превращается в серию запросов или в специальный ресурс-проекцию, и тут GraphQL удобнее. Частые вызовы между сервисами с жёстким контрактом и стримингом удобнее делать на gRPC. Команды, которые не ложатся на ресурсы, вроде «пересчитать комиссии за месяц», честнее выразить ресурсом-задачей <code>POST /fee-recalculations</code>, чем притворяться, что это обновление поля. Сравнение стилей — в <a href="api-styles.html">gRPC, GraphQL, SOAP</a>.</p>
+      <div class="trap">
+        <p class="myth">REST — это когда CRUD-операции над таблицами базы выставлены как GET, POST, PUT и DELETE.</p>
+        <p class="fact">REST — про ресурсы предметной области и их состояние, а не про таблицы. API, повторяющий схему базы, переносит её в договор с клиентами: любое изменение таблиц ломает клиентов. Бизнес-действия вроде списания и возврата — тоже ресурсы, со своими данными и историей.</p>
+      </div>
+      <p>В Spring такой API строится на <code>@RestController</code>: <code>ResponseEntity.created(uri)</code> даёт 201 с Location, <code>ResponseEntity.accepted()</code> — 202, Spring HATEOAS собирает ссылки, а <code>ProblemDetail</code> оформляет ошибки. Путь запроса через Spring MVC разобран в <a href="spring-web.html">Spring MVC</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Ресурс — существительное с адресом; метод говорит, что сделать. Бизнес-действие оформляют ресурсом со своими данными: refunds, captures.</li>
+        <li>Коды отвечают без чтения тела: 201 с Location, 202 для долгих операций, 409 для конфликта с состоянием, 405 с Allow.</li>
+        <li>Ссылки в ответе показывают допустимые сейчас действия; большинство API — уровень 2 Ричардсона, и этого обычно хватает.</li>
+        <li>Долгая операция: 202, ресурс операции, опрос с Retry-After или вебхук.</li>
+        <li>REST не копирует схему базы; графы данных и потоковые вызовы лучше ложатся на GraphQL и gRPC.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="rest-what" data-freq="3">
+      <h3>Что такое REST и чем REST API отличается от RPC поверх HTTP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>REST — архитектурный стиль: система — набор ресурсов с адресами, работа с ними идёт стандартными методами HTTP, сервер не хранит состояние сеанса, ответы можно кешировать, а представления содержат ссылки на связанные ресурсы и действия. В RPC поверх HTTP адреса — это имена функций, почти всё идёт через POST, а результат — в теле с кодом 200.</p>
+          <p>Польза REST — единый договор: клиенты, прокси и кеши понимают методы и коды без описания каждого эндпоинта. Например, GET платежа можно закешировать и безопасно повторить.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Модель зрелости Ричардсона: 0 — один адрес, 1 — ресурсы, 2 — методы и коды, 3 — гипермедиа. Большинство API — уровень 2.</li>
+            <li>Бизнес-действия моделируют ресурсами-существительными: refunds, captures, а не PATCH поля status.</li>
+            <li>Отсутствие состояния сеанса на сервере позволяет любому экземпляру обработать любой запрос.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rest-action" data-freq="2">
+      <h3>Как в REST выразить действие, которое не похоже на CRUD, например возврат?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сделать действие ресурсом. Возврат — новый объект: POST /payments/p-1/refunds создаёт возврат с id, суммой и статусом, его можно потом получить и перечислить. Это лучше, чем PATCH платежа со статусом REFUNDED: теряется информация о самой операции, а частичные и повторные возвраты не выразить.</p>
+          <p>Если действие долгое, ресурс операции возвращают с кодом 202 и адресом, где следить за результатом.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>POST на ресурс-действие не идемпотентен, поэтому ему нужен ключ идемпотентности.</li>
+            <li>Нарушение правил состояния — 409 Conflict, а не 400: запрос корректен, но не подходит к текущему состоянию.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим API возвратов?</summary>
+          <pre><code class="language-text">PATCH /payments/p-1
+{"status": "REFUNDED", "refundAmount": 200}
+→ 200 {"success": false, "error": "refund window expired"}</code></pre>
+          <p>Возврат спрятан в изменение полей платежа: второй частичный возврат перезапишет первый, истории нет. Ошибка бизнес-правила возвращается с кодом 200, поэтому мониторинг и клиентская библиотека считают её успехом. Нужен ресурс возвратов POST /payments/p-1/refunds с ответом 201 и Location, а отказ по правилу — 409 или 422 с Problem Details.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rest-async" data-freq="2">
+      <h3>Как сделать в REST долгую операцию?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сервер принимает задачу и сразу отвечает 202 Accepted с заголовком Location на ресурс операции. Клиент опрашивает этот ресурс, сервер подсказывает интервал заголовком Retry-After, а по завершении операция содержит ссылку на результат. Так не нужно держать соединение открытым и рисковать таймаутом.</p>
+          <p>Альтернатива — вебхук: сервер сам вызывает адрес клиента, когда операция закончилась.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Вебхуку нужны повторы, подпись запроса и защита от дублей на стороне клиента; опрос остаётся запасным путём.</li>
+            <li>Ресурс операции хранит статус и ошибку, чтобы клиент мог узнать результат даже после обрыва.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rest-hateoas" data-freq="2">
+      <h3>Что такое HATEOAS и нужен ли он на практике?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ответ содержит не только данные, но и ссылки на действия, доступные в текущем состоянии. Авторизованный платёж приходит со ссылками capture и cancel, списанный — только с refund. Клиент показывает кнопки по ссылкам и не хранит у себя правила переходов.</p>
+          <p>Для внутренних API между сервисами польза небольшая. Для мобильных и партнёрских клиентов полезно: сервер меняет правила, не выпуская новую версию клиента.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Форматы ссылок: HAL, JSON:API, Siren; в Spring — Spring HATEOAS.</li>
+            <li>Ссылки не отменяют версионирование: изменение формата данных всё равно ломает клиентов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Roy Fielding, <a href="https://ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm">Architectural Styles and the Design of Network-based Software Architectures</a>, глава 5 — основа урока: ограничения REST, ресурсы, гипермедиа.</li>
+      <li><a href="https://martinfowler.com/articles/richardsonMaturityModel.html">Martin Fowler: Richardson Maturity Model</a> — уровни зрелости с примерами.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9110">RFC 9110: HTTP Semantics</a> — 201 с Location, 202, 405 с Allow, 409.</li>
+      <li><a href="https://google.aip.dev/151">Google API Improvement Proposals: AIP-151 Long-running operations</a> — ресурс операции для долгих действий.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
