@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JDBC &amp; Connection Pools · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jdbc">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>JDBC &amp; Connection Pools</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёж выполняет SQL через соединение с базой. DataSource даёт приложению это соединение, а пул позволяет использовать уже открытые соединения повторно. Пока код держит выданную оболочку, слот занят даже во время ожидания банка. PreparedStatement передаёт значения отдельно от SQL, JdbcTemplate управляет обычной работой с ресурсами. Чтобы списание и зачисление завершились вместе, им нужна одна транзакция на одном соединении.</p>
+    </div>
+
+    <section class="step" id="waiting-for-connection">
+      <h2>Платёж может ждать соединение ещё до первого SQL</h2>
+      <p>После роста нагрузки платежи стали завершаться через несколько секунд. База почти свободна, тяжёлых запросов в её журнале нет. Команда ускоряет SELECT, но задержка остаётся. Оказывается, запросы стоят перед <code>DataSource.getConnection()</code>: все соединения заняты другими платежами.</p>
+      <p>Каждый платёж взял соединение, прочитал счёт и отправил запрос в банк. Ответ банка ждёт две секунды, и всё это время соединение удерживается. Следующему платежу нужен свободный слот, хотя SQL предыдущего давно закончился. Поэтому время выполнения SQL и время владения соединением могут отличаться в десятки раз.</p>
+      <p><code>JDBC</code> — интерфейсы Java для работы с реляционной базой. Конкретный драйвер превращает операции этих интерфейсов в протокол PostgreSQL, MySQL или другой СУБД. <code>Connection</code> представляет соединение и его состояние: текущую транзакцию, autoCommit, изоляцию и параметры сессии. Код SQL выполняется в базе; JVM получает результат через драйвер.</p>
+      <p><code>DataSource</code> отвечает за получение соединений. Сам интерфейс не обещает пул: простая реализация способна открывать новое соединение при каждом обращении. HikariCP — реализация с пулом. Она хранит ограниченный набор открытых соединений и выдаёт приложению временный доступ к одному из них. <code>DriverManager</code> удобен для небольшого самостоятельного опыта, но сам повторное использование соединений не организует.</p>
+      <p>Дальше разберём путь платёжного запроса от получения соединения до его возврата. Полный <a href="../examples/data/JdbcDemo.java">JdbcDemo.java</a> запускается на JDK 21, Framework 7.0.9, HikariCP 7.0.2 и H2 2.4.240; версии библиотек задаёт BOM Boot 4.1.1. H2 работает внутри JVM, поэтому пример доказывает поведение JDBC и пула, а сетевые сбои PostgreSQL здесь не имитируются.</p>
+    </section>
+
+    <section class="step" id="pool-cycle">
+      <h2>Пул выдаёт временную оболочку над живым соединением</h2>
+      <p>Открыть сетевое соединение — значит установить связь, пройти аутентификацию и создать сессию базы. Делать это заново для каждого SQL дорого. Пул разделяет время жизни физического соединения и время, когда конкретный код им пользуется. <code>getConnection()</code> выдаёт оболочку, а <code>close()</code> этой оболочки возвращает соединение в пул.</p>
+      <p>Поставим в демо один слот. Пока первое соединение удерживается, тот же поток попробует получить второе. Никакого SQL второе обращение выполнить не успеет: получение закончится по сроку ожидания пула. Затем закроем первую оболочку и возьмём следующую. В H2 можно открыть оболочку через <code>unwrap</code> и сравнить настоящий объект соединения.</p>
+      <pre><code class="language-java">HikariConfig config = new HikariConfig();
+config.setJdbcUrl("jdbc:h2:mem:jdbc-demo;DB_CLOSE_DELAY=-1");
+config.setUsername("sa");
+config.setMaximumPoolSize(1); // Всего один слот: занятые и свободные вместе.
+config.setMinimumIdle(1);
+config.setConnectionTimeout(300); // Миллисекунды ожидания свободного соединения.
+config.setValidationTimeout(250);
+
+// В полном main пул закрывается после всех опытов через try-with-resources.
+HikariDataSource pool = new HikariDataSource(config);
+Connection first = pool.getConnection();
+var physical = first.unwrap(JdbcConnection.class); // H2: только для наблюдения в опыте.
+try (first) {
+    try (Connection second = pool.getConnection()) {
+        // SQL пошёл бы только после успешного получения соединения.
+    } catch (SQLException expected) {
+        System.out.println("second borrow=" + expected.getClass().getSimpleName());
+    }
+}
+System.out.println("logical closed=" + first.isClosed() + ", physical closed=" + physical.isClosed());
+try (Connection next = pool.getConnection()) {
+    System.out.println("new wrapper=" + (next != first)
+        + ", same physical=" + (next.unwrap(JdbcConnection.class) == physical));
+}</code></pre>
+      <pre><code class="language-bash">cd examples/data
+./run.sh JdbcDemo # Один запуск показывает пул, параметры SQL и три исхода перевода.</code></pre>
+      <pre class="out">held active=1, idle=0
+second borrow=SQLTransientConnectionException
+logical closed=true, physical closed=false
+new wrapper=true, same physical=true</pre>
+      <p>Это первый фрагмент вывода полного демо. Закрытая оболочка больше непригодна к работе, но физическое соединение живо. Следующий заём получил другую оболочку над тем же объектом. <code>unwrap</code> здесь нужен только для доказательства: рабочий код не должен сохранять физический объект и продолжать через него работу после возврата в пул.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 330" role="img" aria-label="Пул хранит одно физическое соединение C1. Первое получение создаёт оболочку A и занимает C1. Второе получение ждёт и заканчивается по сроку, пока A удерживается. close A возвращает C1. Новый заём получает оболочку B над тем же C1, сессия базы сохраняется.">
+            <defs>
+              <marker id="pool-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="pool-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="252" y="22" width="248" height="274" rx="10" class="dg-sep" fill="none"/>
+            <rect x="278" y="126" width="196" height="66" rx="8" class="dg-cell"/>
+            <rect data-s="2-3" x="278" y="126" width="196" height="66" rx="8" class="dg-cell hit"/>
+            <rect data-s="5" x="278" y="126" width="196" height="66" rx="8" class="dg-cell hit"/>
+            <rect x="552" y="126" width="148" height="66" rx="8" class="dg-box"/>
+            <rect data-s="2-5" x="20" y="48" width="186" height="56" rx="8" class="dg-cell"/>
+            <rect data-s="2-3" x="20" y="48" width="186" height="56" rx="8" class="dg-cell hit"/>
+            <rect data-s="3" x="20" y="218" width="186" height="56" rx="8" class="dg-cell miss"/>
+            <rect data-s="5" x="20" y="218" width="186" height="56" rx="8" class="dg-cell hit"/>
+            <path d="M474 159 L548 159" class="dg-line"/>
+            <path data-s="2-3" d="M206 76 L234 76 L234 146 L274 146" class="dg-line" marker-end="url(#pool-n)"/>
+            <path data-s="3" d="M206 246 L238 246" class="dg-line"/>
+            <path data-s="3" d="M231 237 L247 255 M247 237 L231 255" class="dg-line bad"/>
+            <path data-s="4" d="M206 88 L220 88 L220 180 L274 180" class="dg-line ok" marker-end="url(#pool-ok)"/>
+            <path data-s="5" d="M206 246 L260 246 L260 174 L274 174" class="dg-line" marker-end="url(#pool-n)"/>
+            <g text-anchor="middle">
+              <text x="376" y="48" class="dg-cap">HIKARI: ОДИН СЛОТ</text>
+              <text x="376" y="150" class="dg-in">физическое C1</text>
+              <text data-s="1" x="376" y="179" class="dg-n">свободно</text>
+              <text data-s="2-3" x="376" y="179" class="dg-in">выдано через A</text>
+              <text data-s="4" x="376" y="179" class="dg-ok">вернулось в пул</text>
+              <text data-s="5" x="376" y="179" class="dg-in">выдано через B</text>
+              <text x="626" y="152" class="dg-in">сессия H2</text>
+              <text x="626" y="178" class="dg-n">остаётся живой</text>
+              <text data-s="2-5" x="113" y="71" class="dg-in">оболочка A</text>
+              <text data-s="2-3" x="113" y="93" class="dg-n">держит соединение</text>
+              <text data-s="4-5" x="113" y="93" class="dg-n">закрыта</text>
+              <text data-s="3" x="113" y="241" class="dg-in">второе получение</text>
+              <text data-s="3" x="113" y="264" class="dg-bad">истекли 300ms</text>
+              <text data-s="5" x="113" y="241" class="dg-in">оболочка B</text>
+              <text data-s="5" x="113" y="264" class="dg-n">тот же C1</text>
+            </g>
+            <text data-s="4" x="230" y="112" class="dg-ok">close A</text>
+            <text data-s="1" x="20" y="310" class="dg-t">Физическое соединение уже открыто и свободно.</text>
+            <text data-s="2" x="20" y="310" class="dg-t">Первый заём получил оболочку A. Свободных слотов: 0.</text>
+            <text data-s="3" x="20" y="310" class="dg-bad">Второе получение не дошло до SQL: C1 удерживается.</text>
+            <text data-s="4" x="20" y="310" class="dg-ok">close закрыл A и освободил слот. Физический C1 жив.</text>
+            <text data-s="5" x="20" y="310" class="dg-t">Следующий заём получил новую оболочку B над C1.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Пул держит одно открытое соединение C1. В демо minimumIdle и maximumPoolSize равны 1.</li>
+          <li>Первый getConnection возвращает оболочку A. Физический C1 теперь занят, даже если SQL через него ещё не выполняется.</li>
+          <li>Пока A удерживается, второе получение ждёт свободное соединение. По пределу 300ms оно бросает SQLTransientConnectionException; база этого SQL не увидела.</li>
+          <li>Код закрывает A. Она становится непригодна для работы, а соединение возвращается в пул после очистки стандартного состояния.</li>
+          <li>Новое получение создаёт оболочку B. Сравнение через unwrap доказывает, что за ней тот же физический C1.</li>
+        </ol>
+      </figure>
+      <p>Пул сбрасывает отслеживаемые стандартные свойства соединения перед повторным использованием. Поэтому предыдущий код не должен оставлять следующему заёмщику свой autoCommit или изоляцию. Но произвольный SQL с настройкой сессии, временные объекты и состояние драйвера требуют отдельного внимания: пул не понимает смысл всех команд, выполненных в базе.</p>
+      <p><code>Connection</code> берут на короткий участок работы и закрывают через try-with-resources. Её не хранят в singleton-сервисе и не используют одновременно несколькими платежами. Общее физическое соединение означает общие транзакцию и состояние сессии. Даже если драйвер допускает некоторые параллельные обращения, независимых транзакций из этого не получится.</p>
+    </section>
+
+    <section class="step" id="prepared-sql">
+      <h2>PreparedStatement отделяет значения от структуры SQL</h2>
+      <p>Платёж указывает счёт и сумму. Если склеить счёт со строкой SQL, значение сможет превратиться в часть условия. <code>PreparedStatement</code> задаёт структуру запроса с <code>?</code>, а методы <code>setString</code> и <code>setLong</code> передают типизированные значения параметров. Кавычки и слова SQL внутри значения остаются данными.</p>
+      <p>Списание в демо проверяет остаток в той же команде, которая его меняет. Между отдельным SELECT остатка и последующим UPDATE другой платёж мог бы потратить деньги. Условие <code>cents &gt;= ?</code> и проверка количества изменённых строк дают понятный результат одной операции.</p>
+      <pre><code class="language-java">try (var statement = connection.prepareStatement(
+        "update account set cents = cents - ? where id = ? and cents &gt;= ?")) {
+    statement.setLong(1, 1_000L); // Индексы JDBC начинаются с 1. Сумма в копейках.
+    statement.setString(2, "payer");
+    statement.setLong(3, 1_000L); // Остаток проверяется атомарно вместе со списанием.
+    if (statement.executeUpdate() != 1) {
+        throw new IllegalStateException("payer missing or insufficient funds");
+    }
+} // Statement закрыт; соединение остаётся у вызывающего кода.</code></pre>
+      <p><code>executeUpdate()</code> возвращает число изменённых строк. Это часть проверки бизнес-операции: ноль означает, что счёт не найден или условие остатка не выполнено. <code>executeQuery()</code> возвращает <code>ResultSet</code>. Его курсор сначала стоит перед первой строкой; чтение начинается после успешного <code>next()</code>. Закрывать нужно результат, statement и затем соединение — каждый на своём уровне владения.</p>
+      <p>Проверим строку, которая при склейке могла бы изменить условие. Этот фрагмент полного демо использует JdbcTemplate, который создаёт PreparedStatement и связывает параметр за нас:</p>
+      <pre><code class="language-java">String input = "payer' OR '1'='1";
+var matches = jdbc.query("select id, cents from account where id = ?",
+    (rs, rowNum) -&gt; new Account(rs.getString("id"), rs.getLong("cents")), input);
+System.out.println("parameter rows=" + matches.size()); // Ищем именно такой id целиком.</code></pre>
+      <pre class="out">parameter rows=0</pre>
+      <p>В таблице есть <code>payer</code> и <code>merchant</code>, но нет счёта с указанной длинной строкой. Значение не расширило выборку. Параметр может заменить значение; имя таблицы, столбца и направление сортировки через <code>?</code> не выбирают. Для таких частей нужен ограниченный набор заранее известных вариантов SQL.</p>
+      <div class="trap">
+        <p class="myth">Любой PreparedStatement гарантирует единственную компиляцию запроса на сервере и всегда работает быстрее Statement.</p>
+        <p class="fact">JDBC задаёт интерфейс подготовки и параметров. Момент серверной подготовки, протокол и кеш плана зависят от драйвера и базы. Польза параметров для структуры SQL сохраняется, а производительность измеряют на конкретной системе. HikariCP сам кеш PreparedStatement не создаёт.</p>
+      </div>
+      <p>Для больших наборов однотипных записей полезен batch: параметры нескольких выполнений собираются и отправляются через <code>addBatch</code> / <code>executeBatch</code>. Драйвер может сократить число сетевых обменов. Batch не задаёт общую транзакцию сам; при частичном сбое учитывай режим autoCommit, сведения <code>BatchUpdateException</code> и возможности драйвера.</p>
+    </section>
+
+    <section class="step" id="jdbc-template">
+      <h2>JdbcTemplate управляет ресурсами, пока ты управляешь SQL</h2>
+      <p>В ручном JDBC легко закрыть statement, но забыть результат; обработать ошибку SQL, но потерять первоначальную причину при close. JdbcTemplate берёт на себя получение соединения, создание и закрытие обычных ресурсов и перевод <code>SQLException</code> в иерархию <code>DataAccessException</code>. SQL и преобразование строки в объект остаются у приложения.</p>
+      <p>Созданный и настроенный JdbcTemplate можно разделять между репозиториями. Он хранит DataSource и параметры работы, а не одну занятую Connection. Поэтому singleton-шаблон безопасен для параллельного использования после настройки. Менять его общие настройки перед каждым запросом нельзя: соседний запрос использует тот же объект.</p>
+      <pre><code class="language-java">record Account(String id, long cents) {}
+JdbcTemplate jdbc = new JdbcTemplate(pool); // Общий шаблон, соединение берётся на время работы.
+
+var payer = jdbc.queryForObject("select id, cents from account where id = ?",
+    (rs, rowNum) -&gt; new Account(rs.getString("id"), rs.getLong("cents")), "payer");
+// RowMapper читает текущую строку: next() вызывает сам шаблон.
+System.out.println("mapped=" + payer);
+
+try {
+    jdbc.queryForObject("select cents from account where id = ?", Long.class, "missing");
+} catch (DataAccessException expected) {
+    System.out.println("missing row=" + expected.getClass().getSimpleName());
+}
+try {
+    jdbc.update("insert into account(id, cents) values (?, ?)", "payer", 0L);
+} catch (DataAccessException expected) {
+    System.out.println("duplicate=" + expected.getClass().getSimpleName());
+}</code></pre>
+      <pre class="out">mapped=Account[id=payer, cents=10000]
+missing row=EmptyResultDataAccessException
+duplicate=DuplicateKeyException</pre>
+      <p>Показаны строки вывода того же запуска с пропуском строки <code>parameter rows</code> из предыдущего шага. <code>queryForObject</code> ожидает ровно одну строку. Ноль строк даёт <code>EmptyResultDataAccessException</code>, несколько — ошибку количества строк. Это отличается от SQL NULL в найденной строке: значение может быть null, хотя строка существует. В нашей таблице <code>cents</code> объявлено <code>NOT NULL</code>.</p>
+      <p><code>query</code> обычно возвращает список и подходит для выборки произвольного размера. <code>RowMapper</code> преобразует одну текущую строку; он не должен сам перемещать курсор. При чтении допускающего NULL числового столбца <code>getLong</code> даёт ноль, и нужен <code>wasNull</code> либо чтение объектного значения. Иначе «остаток отсутствует» превратится в «остаток равен нулю».</p>
+      <p>Исключения Spring позволяют различать повтор ключа, нарушение ограничения и ошибку доступа независимо от прямой зависимости на <code>SQLException</code>. Конкретное отображение зависит от SQLState, кодов ошибки и драйвера. Перевод исключения сам по себе не откатывает всю бизнес-операцию и не делает повтор безопасным.</p>
+      <p>Обычная выборка в список закрывает JDBC-ресурсы до возврата результата. При <code>queryForStream</code> владение меняется: возвращённый Stream нужно закрыть, обычно через try-with-resources. Пока он читается, результат и соединение могут оставаться заняты. <code>fetchSize</code> регулирует поведение получения строк у драйвера; он не превращает уже собираемый список в обработку с постоянным расходом памяти.</p>
+      <details class="deep">
+        <summary>Как шаблон узнаёт о Spring-транзакции</summary>
+        <p>JdbcTemplate получает соединение через <code>DataSourceUtils</code>. Если менеджер Spring уже привязал соединение этой DataSource к текущему потоку, шаблон использует его. После отдельного SQL ресурс освобождается логически; физическое соединение остаётся у транзакции до её конца.</p>
+        <p>Ручной вызов <code>setAutoCommit(false)</code> на отдельно взятой Connection такую привязку не создаёт. Если, удерживая её, вызвать JdbcTemplate, тот может запросить другое соединение. В пуле из одного слота получится ожидание самого себя, а в большем пуле SQL окажется в другой транзакции. Ручная транзакция демо поэтому выполняет обе команды напрямую через свою Connection. Работа менеджера и прокси разобрана в <a href="spring-tx.html">Transactions</a>.</p>
+      </details>
+      <p><code>NamedParameterJdbcTemplate</code> добавляет именованные параметры, например <code>:accountId</code>, а <code>JdbcClient</code> предлагает связный API для обычных запросов. Они используют ту же инфраструктуру JDBC. Выбор удобной записи не меняет правил владения соединением и границы транзакции.</p>
+    </section>
+
+    <section class="step" id="jdbc-transaction">
+      <h2>Списание и зачисление должны завершиться на одном соединении</h2>
+      <p>У плательщика 10 000 копеек, у магазина — ноль. Перевод на 1 000 копеек состоит из двух UPDATE. Между ними приложение готовит квитанцию и падает. При стандартном <code>autoCommit=true</code> списание уже зафиксировано отдельной транзакцией, а зачисление ещё не произошло. Закрытие соединения отменить зафиксированное списание не может.</p>
+      <pre><code class="language-java">try (Connection connection = pool.getConnection()) {
+    debit(connection); // При autoCommit=true UPDATE фиксируется отдельно.
+    throw new IllegalStateException("receipt failed"); // До credit(connection) не дошли.
+} catch (IllegalStateException expected) {
+    System.out.println("autoCommit failure: " + balances(jdbc));
+}</code></pre>
+      <pre class="out">autoCommit failure: payer=9000, merchant=0</pre>
+      <p>Чтобы обе записи составили одну операцию, берём одно соединение, выключаем autoCommit до первого SQL и фиксируем только после успеха. При ошибке явно вызываем rollback. Реальное списание и зачисление из демо проверяют число изменённых строк; исчезнувший магазин также сорвёт перевод, и списание будет отменено.</p>
+      <pre><code class="language-java">try (Connection connection = pool.getConnection()) {
+    connection.setAutoCommit(false); // Одна JDBC-транзакция для обеих команд.
+    try {
+        debit(connection); // UPDATE с проверкой остатка из шага 3.
+        if (fail) throw new IllegalStateException("receipt failed");
+        credit(connection); // UPDATE магазина; также требует ровно одну изменённую строку.
+        connection.commit(); // Теперь фиксируем обе записи.
+    } catch (SQLException | RuntimeException failure) {
+        try {
+            connection.rollback(); // Отменяем все изменения этой транзакции.
+        } catch (SQLException rollbackFailure) {
+            failure.addSuppressed(rollbackFailure); // Сохраняем исходную ошибку перевода.
+        }
+        throw failure;
+    }
+} // Hikari очищает стандартное состояние и возвращает соединение в пул.</code></pre>
+      <p>После первого неудачного опыта демо восстанавливает исходные остатки. Затем запускает транзакционный вариант с ошибкой и проверяет новое получение соединения. После этого повторяет перевод без ошибки. Это оставшиеся строки вывода:</p>
+      <pre class="out">rollback: payer=10000, merchant=0
+after return autoCommit=true
+commit: payer=9000, merchant=1000</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 318" role="img" aria-label="JDBC-транзакция отделяет изменения от зафиксированного состояния счетов. После списания в транзакции плательщик имеет 9000, магазин 0. Ошибка до зачисления приводит к rollback, изменения убираются; зафиксированные остатки остаются 10000 и 0. Затем Connection возвращается в пул.">
+            <defs>
+              <marker id="jt-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="jt-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="48" width="168" height="64" rx="8" class="dg-box"/>
+            <rect x="248" y="22" width="452" height="246" rx="10" class="dg-sep" fill="none"/>
+            <rect x="266" y="76" width="194" height="130" rx="8" class="dg-cell"/>
+            <rect data-s="2-3" x="266" y="76" width="194" height="130" rx="8" class="dg-cell hit"/>
+            <rect x="486" y="76" width="198" height="130" rx="8" class="dg-cell"/>
+            <rect data-s="4" x="486" y="76" width="198" height="130" rx="8" class="dg-cell hit"/>
+            <rect data-s="4" x="20" y="212" width="168" height="48" rx="8" class="dg-cell hit"/>
+            <path data-s="2" d="M188 80 L224 80 L224 114 L262 114" class="dg-line" marker-end="url(#jt-n)"/>
+            <path data-s="4" d="M188 96 L212 96 L212 184 L262 184" class="dg-line" marker-end="url(#jt-n)"/>
+            <path data-s="4" d="M363 210 L363 236 L192 236" class="dg-line ok" marker-end="url(#jt-ok)"/>
+            <g text-anchor="middle">
+              <text x="104" y="74" class="dg-in">Connection</text>
+              <text x="104" y="98" class="dg-n">autoCommit=false</text>
+              <text x="474" y="48" class="dg-cap">БАЗА</text>
+              <text x="363" y="101" class="dg-in">эта транзакция</text>
+              <text data-s="1" x="363" y="151" class="dg-n">изменений ещё нет</text>
+              <text data-s="2-3" x="363" y="141" class="dg-in">payer: 9000</text>
+              <text data-s="2-3" x="363" y="167" class="dg-in">merchant: 0</text>
+              <text data-s="2-3" x="363" y="195" class="dg-n">ещё не зафиксировано</text>
+              <text data-s="4" x="363" y="151" class="dg-n">изменения отменены</text>
+              <text x="585" y="101" class="dg-in">зафиксировано</text>
+              <text x="585" y="141" class="dg-in">payer: 10000</text>
+              <text x="585" y="167" class="dg-in">merchant: 0</text>
+              <text data-s="4" x="104" y="241" class="dg-in">возвращено в пул</text>
+            </g>
+            <text data-s="2" x="20" y="145" class="dg-n">UPDATE списания</text>
+            <text data-s="3" x="20" y="145" class="dg-bad">ошибка квитанции</text>
+            <text data-s="4" x="20" y="179" class="dg-n">rollback, затем close</text>
+            <text data-s="1" x="20" y="300" class="dg-t">Обе команды будут использовать одно соединение.</text>
+            <text data-s="2" x="20" y="300" class="dg-t">Списание выполнено внутри транзакции. Commit ещё не было.</text>
+            <text data-s="3" x="20" y="300" class="dg-bad">Java-код упал до зачисления. Управление переходит в catch.</text>
+            <text data-s="4" x="20" y="300" class="dg-ok">Rollback отменил списание. Зафиксированные деньги сохранились.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Получено одно соединение и выключен autoCommit. Зафиксированные остатки: payer=10000, merchant=0.</li>
+          <li>Выполнено списание 1000. Внутри этой транзакции осталось 9000, но commit ещё не вызван. Схема показывает логическую границу фиксации, а не устройство страниц СУБД.</li>
+          <li>Приложение выбрасывает исключение до зачисления. Ошибка Java сама по себе не отправляет rollback; его выполнит наш catch.</li>
+          <li>Catch отправляет rollback, изменения транзакции отменяются. Затем close возвращает соединение в пул. Зафиксированные остатки остаются 10000 и 0.</li>
+        </ol>
+      </figure>
+      <p>Факт закрытия ресурса и исход транзакции — разные вопросы. JDBC советует завершить активную транзакцию через commit или rollback до close; результат закрытия незавершённой транзакции зависит от реализации. Hikari умеет откатить оставленную изменённую транзакцию при возврате, но это последняя защита пула. Платёжный код должен явно выбирать исход и обрабатывать его ошибку.</p>
+      <p>Переключать <code>autoCommit</code> обратно в true до завершения работы опасно: JDBC фиксирует текущую транзакцию при таком изменении режима. В нашем коде возврат состояния происходит после явного commit или rollback. Если соединение взято и управляется менеджером Spring, вручную менять режим, фиксировать или закрывать его тоже не нужно: этим владеет менеджер.</p>
+      <div class="note warn">
+        <p>При сетевом разрыве во время commit приложение может получить исключение уже после фиксации в базе. Ошибка ответа не доказывает rollback. Для безопасного повтора платежа нужны идентификатор операции, уникальное ограничение и возможность проверить результат. Повторять весь перевод только по классу SQLException опасно.</p>
+      </div>
+      <p>Одна локальная JDBC-транзакция охватывает одну базу на одном соединении. Внешний банк её участником не становится. Удерживать блокировки и слот пула на всём внешнем вызове обычно дорого; согласование состояний банка и локального журнала проектируют отдельно. Изоляция, распространение и границы <code>@Transactional</code> разобраны в <a href="spring-tx.html">Transactions</a>.</p>
+    </section>
+
+    <section class="step" id="pool-production">
+      <h2>Настраивай время владения соединением и общий бюджет базы</h2>
+      <p>Вернёмся к задержке платежей. Начни с места ожидания: получение соединения, исполнение SQL, блокировка в базе или внешний вызов. Для пула полезны число занятых и свободных соединений, число ожидающих потоков, время получения и время использования. Для базы — активные запросы, блокировки и план медленного SQL. Пустой журнал SQL при очереди за соединением не означает, что пул сломан.</p>
+      <p>В обычном Boot стартер <code>spring-boot-starter-jdbc</code> подключает HikariCP. При доступном Hikari Boot предпочитает его и создаёт DataSource по настройкам; собственный бин DataSource меняет эту автоконфигурацию. Шаблон JDBC работает поверх той же DataSource. Пример настроек для сервиса с PostgreSQL, где драйвер PostgreSQL добавлен отдельно:</p>
+      <pre><code class="language-yaml">spring:
+  datasource:
+    url: jdbc:postgresql://db:5432/payments
+    username: ${DB_USER}
+    password: ${DB_PASSWORD} # Секрет приходит из окружения деплоя.
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 1500 # Миллисекунды до отказа в получении соединения.
+      validation-timeout: 500 # Проверка живости короче времени получения.
+# minimum-idle оставлен по умолчанию: равен maximum-pool-size.</code></pre>
+      <p>Этот YAML иллюстрирует настройки продового окружения и не используется H2-демо. Выбранный срок получения — 1500ms; стандартный Hikari — 30000ms. Значения Hikari ниже сверены для 7.0.2, время в этой таблице задано в миллисекундах.</p>
+      <table class="mx">
+        <thead><tr><th>Параметр</th><th>По умолчанию</th><th>Какой вопрос решает</th></tr></thead>
+        <tbody>
+          <tr><td><code>maximumPoolSize</code></td><td>10</td><td>Сколько физических соединений может держать этот пул, включая свободные</td></tr>
+          <tr><td><code>minimumIdle</code></td><td>Как maximumPoolSize</td><td>Какой запас свободных соединений пул пытается поддержать в пределах максимума</td></tr>
+          <tr><td><code>connectionTimeout</code></td><td>30000</td><td>Сколько ждать получения соединения; это не предел SQL</td></tr>
+          <tr><td><code>validationTimeout</code></td><td>5000</td><td>Сколько ждать проверки живости соединения</td></tr>
+          <tr><td><code>maxLifetime</code></td><td>1800000</td><td>Когда заменять старое физическое соединение; занятое не обрывается по этому сроку</td></tr>
+          <tr><td><code>idleTimeout</code></td><td>600000</td><td>Когда убрать лишнее свободное соединение; действует при minimumIdle ниже максимума</td></tr>
+        </tbody>
+      </table>
+      <p>Срок получения, срок SQL и сетевой срок — разные настройки. <code>Statement.setQueryTimeout</code> задаётся в секундах и относится к выполнению statement; детали отмены зависят от драйвера. Драйвер PostgreSQL имеет свои <code>connectTimeout</code> и <code>socketTimeout</code>. Последний ограничивает ожидание чтения из сокета. Уменьшение <code>connectionTimeout</code> Hikari не прервёт долгий UPDATE на уже полученном соединении.</p>
+      <p>Размер пула считают на все экземпляры приложения. Четыре экземпляра с десятью слотами способны занять сорок соединений; после масштабирования до двадцати экземпляров предел вырастет до двухсот. Базе ещё нужны соединения других сервисов, миграций и администрирования. Большой пул способен увеличить конкуренцию за CPU и блокировки, хотя очередь в приложении временно уменьшится.</p>
+      <p>Прикидка по средним значениям помогает найти порядок величины: 40 операций в секунду и 50ms владения соединением дают в среднем два занятых соединения. Если тот же путь держит его две секунды, получается восемьдесят. Это учебный расчёт, а не готовый размер пула: всплески, длинные хвосты и реальный предел базы нужно измерить.</p>
+      <p>Утечка и долгий законный заём выглядят похоже. <code>leakDetectionThreshold</code> пишет предупреждение и стек места получения, когда соединение удерживается слишком долго; он не отнимает его и не устраняет причину. По умолчанию диагностика выключена. Для расследования сравнивай стек с временем транзакции, открытым Stream и ожиданием банка.</p>
+      <p>Здоровое соединение тоже стареет. Срок жизни пула согласуют с пределами базы, прокси и сети; проверка свободного соединения не гарантирует, что сеть останется живой во время следующего SQL. При сбое определяй, удалось ли выполнить операцию и можно ли повторить её. Виртуальные потоки позволяют дешевле ждать, но не добавляют базе мощности и не делают количество JDBC-соединений неограниченным.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>DataSource даёт соединения; наличие пула определяет её реализация. Получение соединения может задержать запрос ещё до SQL.</li>
+        <li>close оболочки Hikari возвращает соединение в пул. Физическая сессия обычно живёт дольше отдельного платежа.</li>
+        <li>PreparedStatement отделяет значения от SQL. Имена таблиц и направление сортировки выбирают из известных вариантов отдельно.</li>
+        <li>JdbcTemplate управляет ресурсами и переводит ошибки. Общую транзакцию двух UPDATE нужно задать отдельно.</li>
+        <li>Для локального перевода нужны одно соединение, явный commit при успехе и rollback при ошибке. Потерянный ответ commit оставляет исход неизвестным.</li>
+        <li>Пул настраивают по времени владения и общему бюджету базы. Срок получения соединения не ограничивает исполнение SQL.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="data-source-pool" data-freq="2">
+      <h3>Чем отличаются DataSource, Connection и пул соединений?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>DataSource — точка получения соединений. Connection представляет соединение с базой и его состояние, включая транзакцию. Наличие пула зависит от реализации DataSource: Hikari хранит открытые соединения и выдаёт временные оболочки, простая реализация может открывать новое при каждом получении.</p>
+          <p>Я беру Connection на участок работы и закрываю через try-with-resources. У Hikari close возвращает её в пул; закрытая оболочка больше не используется. В демо новая оболочка получила тот же физический объект, поэтому дорогая сессия не создавалась заново.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Соединение несёт состояние сессии. Пул сбрасывает стандартные свойства, но произвольные настройки через SQL требуют отдельной дисциплины, особенно при выборе схемы или арендатора.</li>
+            <li>Connection не держу в singleton и не разделяю между независимыми параллельными платежами: их транзакции и настройки смешаются.</li>
+            <li>Физическое соединение может быть удалено из пула после сбоя или окончания срока жизни. Повторное использование — обычный путь, а не обещание вечной идентичности объекта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="prepared-statement" data-freq="2">
+      <h3>Что даёт PreparedStatement и защищает ли он от SQL injection?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Он отделяет структуру SQL от значений параметров. Я пишу условие id = ?, затем передаю id через setString. Кавычки и OR внутри такого значения остаются данными. В демо строка payer' OR '1'='1 не расширила выборку, а вернула ноль строк.</p>
+          <p>Защита относится к связанным значениям. Если я всё равно склею часть SQL из ввода, наличие PreparedStatement этого не исправит. Имя таблицы и направление сортировки выберу из ограниченного набора заранее известных вариантов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Серверная подготовка и повторное использование плана зависят от драйвера и СУБД. Интерфейс JDBC не обещает единственную компиляцию и выигрыш на любой нагрузке.</li>
+            <li>Hikari не кеширует PreparedStatement. Если кеш подготовки нужен, изучаю механизм конкретного драйвера и его цену по памяти и планам на соединение.</li>
+            <li>Связывание параметров защищает структуру SQL, но не проверяет право пользователя обратиться к счёту. Это отдельная проверка платёжного пути.</li>
+            <li>Для изменения остатка проверяю число изменённых строк. Параметризованный запрос, который обновил ноль строк, ещё не означает успешный перевод.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="template-resources" data-freq="2">
+      <h3>Что делает JdbcTemplate и почему его можно использовать как singleton?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JdbcTemplate управляет обычным циклом JDBC: получает соединение, создаёт statement, связывает значения, закрывает ресурсы и переводит SQLException в DataAccessException. Я оставляю в репозитории SQL и RowMapper, который читает одну текущую строку.</p>
+          <p>Шаблон хранит DataSource, а не одно занятое соединение. После настройки его можно безопасно разделять между репозиториями и потоками. queryForObject ожидает ровно одну строку: отсутствие строки даёт исключение, а не обычный null.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В Spring-транзакции шаблон через DataSourceUtils получает соединение, привязанное к текущему потоку. Вне неё отдельные операции сами по себе не образуют общий commit.</li>
+            <li>Ручной setAutoCommit(false) не привязывает Connection к шаблону. Смешение этих путей может взять второй слот и выполнить SQL в другой транзакции.</li>
+            <li>queryForStream возвращает ресурс, который закрывает вызывающий код. Долгая обработка результата способна всё это время занимать соединение.</li>
+            <li>SQL NULL в единственной найденной строке отличается от отсутствия строки. При чтении nullable чисел учитываю wasNull или использую объектный тип.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="local-jdbc-transaction" data-freq="3">
+      <h3>Как сделать перевод из двух UPDATE атомарным на уровне JDBC?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Выполню обе команды на одном соединении с autoCommit=false. После успеха вызову commit, при ошибке — rollback, затем закрою соединение. При autoCommit=true каждое изменение фиксируется отдельно: падение после списания оставит деньги списанными без зачисления.</p>
+          <p>В демо этот сбой оставил 9000 и 0. Явная транзакция с rollback сохранила 10000 и 0, а успешная фиксация дала 9000 и 1000. Проверяю также число обновлённых строк: пропавший получатель должен сорвать всю операцию.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Активную транзакцию завершаю до close. Полагаться на поведение закрытия как на бизнес-rollback непереносимо; изменение autoCommit на true может зафиксировать её.</li>
+            <li>Если rollback тоже падает, сохраняю первичную ошибку и добавляю вторую как suppressed. Иначе расследование начнётся с ошибки уборки вместо причины сбоя платежа.</li>
+            <li>Разрыв во время commit оставляет исход неизвестным: база могла зафиксировать изменения до потери ответа. Повтор требует ключа операции и проверки результата.</li>
+            <li>Внешний банк не входит в эту локальную транзакцию. Долгий внешний вызов внутри неё удерживает соединение и может удерживать блокировки; согласование состояний решается отдельно.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Два метода репозитория каждый берут своё Connection, выключают autoCommit, выполняют UPDATE и делают commit. Объединяет ли вызов обоих методов перевод в одну транзакцию?</summary>
+          <p>Нет: это два независимых завершения транзакции. Нужно передать одно соединение обеим операциям и зафиксировать его после общего успеха либо задать общую границу через менеджер Spring. Даже если пул последовательно выдаст один и тот же физический объект, между вызовами уже был commit; идентичность соединения не склеивает зафиксированные операции.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pool-exhaustion" data-freq="2">
+      <h3>Пул исчерпан, но база почти свободна. Что проверишь и будешь ли увеличивать пул?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала проверю время владения соединением и стеки кода, который его держит. Это может быть утечка, открытый Stream, длинная транзакция или ожидание банка после завершённого SQL. Затем сравню число занятых соединений, очередь получения и активность базы.</p>
+          <p>Увеличивать пул сразу не буду: сначала сокращу ненужное время владения. Если реальная параллельная работа требует больше слотов, проверю запас базы и число экземпляров приложения. Каждый экземпляр держит свой пул, поэтому масштабирование умножает общий предел соединений.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>connectionTimeout Hikari ограничивает получение соединения. Запрос на уже занятом соединении требует своих сроков statement, драйвера и базы.</li>
+            <li>Предупреждение leak detection говорит о слишком долгом заёме и показывает место получения. Оно не возвращает соединение принудительно и само не отличает утечку от долгой законной работы.</li>
+            <li>Вложенное получение может ждать соединение, которое удерживает сам вызывающий код. Для независимой вложенной транзакции нужен дополнительный бюджет слотов; это важно при REQUIRES_NEW.</li>
+            <li>Виртуальные потоки уменьшают цену ожидания в JVM. Лимит мощности базы, блокировки и число физических сессий остаются.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>connectionTimeout уменьшили до 500ms. UPDATE держит соединение и ждёт блокировку 20 секунд. Остановится ли он через полсекунды?</summary>
+          <p>Нет. Этот срок относится к getConnection, который уже завершился. Нужны подходящие пределы выполнения SQL и ожидания блокировки с учётом драйвера и базы. Другие запросы, которые ждут свободное соединение, действительно смогут получить отказ примерно по своему сроку получения.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/jdbc/core.html">Spring Framework: JDBC Core</a> и <a href="https://docs.spring.io/spring-framework/reference/data-access/jdbc/connections.html">Controlling Database Connections</a> — JdbcTemplate, RowMapper, параметры, обработка ошибок и DataSourceUtils.</li>
+      <li><a href="https://github.com/brettwooldridge/HikariCP/blob/HikariCP-7.0.2/README.md">HikariCP 7.0.2: Configuration</a> — значения по умолчанию, получение соединений, сроки, размер пула и диагностика долгого владения.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/Connection.html">JDK 21: Connection</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/PreparedStatement.html">PreparedStatement</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.sql/java/sql/Statement.html">Statement</a> — autoCommit, явное завершение транзакции, параметры и query timeout.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/data/sql.html">Spring Boot Reference: SQL Databases</a> — стартер JDBC, выбор пула и настройка DataSource.</li>
+      <li><a href="https://jdbc.postgresql.org/documentation/use/">pgJDBC: Initializing the Driver</a> — отдельные сетевые сроки connectTimeout и socketTimeout; H2-демо не моделирует их.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

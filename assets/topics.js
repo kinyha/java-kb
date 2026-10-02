@@ -541,7 +541,7 @@ window.KB_TREE = [
           scope: 'event loop Netty, блокирующий вызов и boundedElastic, Mono и Flux, подписка, publishOn и subscribeOn, Reactor Context вместо ThreadLocal, backpressure, WebFlux или виртуальные потоки' },
       ] },
       { id: 'data', title: 'Data', source: 'Spring Framework Reference: Data Access; Spring Start Here, гл. 12–14; Hibernate ORM User Guide', items: [
-        { id: 'jdbc', freq: 2, status: 'empty', title: 'JDBC & Connection Pools',
+        { id: 'jdbc', freq: 2, status: 'draft', title: 'JDBC & Connection Pools',
           scope: 'DataSource, HikariCP, PreparedStatement, JdbcTemplate, транзакции в JDBC' },
         { id: 'spring-tx', freq: 3, status: 'empty', title: 'Transactions',
           scope: '@Transactional через прокси, propagation, isolation, rollback rules, readOnly, self-invocation' },
