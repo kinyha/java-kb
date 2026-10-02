@@ -35,3 +35,36 @@ JdbcTemplate отображает строку в record, отсутствие �
 внешний платёж и не моделирует сетевой разрыв, изоляцию PostgreSQL или потерю
 ответа на commit. Привязка соединений Spring-транзакции — тема spring-tx;
 ручная JDBC-транзакция этого файла выполняет SQL напрямую через свой Connection.
+
+## Spring Transactions
+
+```bash
+./run.sh TxDemo proxy
+./run.sh TxDemo self
+./run.sh TxDemo checked
+./run.sh TxDemo checked-rollback
+./run.sh TxDemo swallowed
+./run.sh TxDemo required
+./run.sh TxDemo new
+./run.sh TxDemo nested
+./run.sh TxDemo nested-outer
+./run.sh TxDemo readonly
+./run.sh TxDemo thread
+./run.sh TxDemo template
+```
+
+TxDemo создаёт контекст Spring с JdbcTransactionManager, JdbcTemplate и прокси
+PaymentService. Каждый запуск начинает с новой H2: счёт содержит 100 учебных
+денежных единиц, платёж списывает 10. Эти суммы не используют данные JdbcDemo.
+
+proxy откатывает запись; self обходит прокси и сохраняет SQL через autoCommit.
+checked, checked-rollback и swallowed сравнивают правила отката. required даёт
+UnexpectedRollbackException после внутреннего rollback-only; new сохраняет
+независимый аудит; nested и nested-outer показывают разные исходы savepoint.
+readonly показывает запись H2 при JDBC readOnly hint. thread проверяет отсутствие
+транзакции в новом виртуальном потоке; ожидание ограничено 10s. template откатывает
+запись явно через TransactionTemplate. Ошибки перехватываются только драйвером
+опыта после выхода из прокси. Размер пула 4 позволяет получить второе соединение.
+
+Общая основа зависимостей также включает Hibernate 7.4.5.Final, JPA 3.2,
+Spring Data JPA/JDBC 4.1.1 и Caffeine JCache 3.2.4 для последующих демо Data.

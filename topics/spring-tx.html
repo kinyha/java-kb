@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Transactions · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-tx">
+<main class="page">
+  <header class="topic-head"><h1>Spring Transactions</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёж меняет несколько строк, а для клиента это одно действие. Spring открывает транзакцию перед вызовом сервиса и решает, сохранить ли изменения, когда вызов закончился. Сам метод выполняет обычный Java-код; границу вокруг него держит прокси. Чтобы объяснить неожиданный результат, проследи три вещи: через какой объект пришёл вызов, какую транзакцию получил метод и что увидел прокси на выходе.</p>
+    </div>
+
+    <section class="step" id="payment-boundary">
+      <h2>Платёж должен сохранить все изменения вместе</h2>
+      <p>У счёта было 100 учебных денежных единиц. Сервис списал 10 и записал платёж p-17, а затем проверка завершилась ошибкой. В auto-commit обе SQL-операции уже сохранены: клиент получил ошибку, но осталось 90. Не хватает общей границы, которая держит изменения до окончательного решения.</p>
+      <p>При commit транзакция сохраняет операции вместе, при rollback откатывает. Spring управляет механизмом JDBC или JPA и освобождает сервис от обвязки ресурсов. Границу ставь на целую операцию сервиса: «провести платёж», а не на каждый запрос репозитория.</p>
+      <p>Демо использует H2 и <code>JdbcTransactionManager</code>. Сервис, менеджер и <code>JdbcTemplate</code> — бины; менеджер и шаблон получают один <code>DataSource</code>. Полная обвязка — в <a href="../examples/data/TxDemo.java">TxDemo.java</a>.</p>
+      <pre><code class="language-java">@Configuration(proxyBeanMethods = false)
+@EnableTransactionManagement(proxyTargetClass = true)
+class Config {
+    @Bean
+    PlatformTransactionManager transactionManager(DataSource dataSource) {
+        return new JdbcTransactionManager(dataSource); // Управляет одним DataSource.
+    }
+    // JdbcTemplate и PaymentService тоже создаются как бины.
+}
+
+public class PaymentService {
+    private final JdbcTemplate jdbc;
+
+    void record() {
+        jdbc.update("update account set balance = balance - 10 where id = 1");
+        jdbc.update("insert into payment values ('p-17')");
+    }
+
+    @Transactional
+    public void fail() {
+        System.out.println("transaction active="
+                + TransactionSynchronizationManager.isActualTransactionActive());
+        record(); // Обе записи используют транзакционное подключение.
+        throw new IllegalStateException("bank rejected"); // Ошибка выйдет к прокси.
+    }
+}
+
+context.getBean(PaymentService.class).fail(); // Получили из Spring прокси сервиса.</code></pre>
+      <pre><code class="language-bash">cd examples/data
+./run.sh TxDemo proxy # Скрипт ловит ошибку снаружи и читает сохранённые строки.</code></pre>
+      <pre class="out">transaction active=true
+exception=IllegalStateException
+balance=100, payments=0, audit=0</pre>
+      <p>Прокси откатил списание и запись до возврата вызывающему. Обработка ошибки в <code>main</code> уже не меняет исход. Все варианты запущены на JDK 21, Spring 7.0.9; зависимости управляются BOM Boot 4.1.1 в <a href="../examples/data/pom.xml">pom.xml</a>.</p>
+      <div class="trap">
+        <p class="myth">Раз оба метода репозитория помечены @Transactional, платёж уже атомарен.</p>
+        <p class="fact">Без внешней транзакции каждый вызов может открыть и завершить свою. Списание сохранится раньше, чем начнётся запись платежа. Общая граница должна охватывать всю операцию, которая обязана завершиться целиком.</p>
+      </div>
+    </section>
+
+    <section class="step" id="proxy-and-resource">
+      <h2>Прокси открывает транзакцию только на пути вызова через него</h2>
+      <p>Перед сервисом стоит AOP-прокси с <code>TransactionInterceptor</code>. Он читает аннотацию, обращается к <code>PlatformTransactionManager</code> и вызывает настоящий объект. При нормальном возврате просит commit, при исключении выбирает действие по правилам отката. Ошибка возможна и во время commit.</p>
+      <p>Для новой транзакции менеджер JDBC выключает auto-commit и связывает подключение с потоком через <code>TransactionSynchronizationManager</code>. <code>JdbcTemplate</code> находит его через <code>DataSourceUtils</code>: разным репозиториям не нужно передавать <code>Connection</code>. При завершении этой транзакции менеджер убирает привязку, восстанавливает настройки и возвращает ресурс в пул.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 264" role="img" aria-label="Внешний fail идёт через прокси к сервису; менеджер связывает C1 с потоком, JdbcTemplate находит то же C1. Отдельный вариант selfInvocation вызывает this.fail прямо внутри сервиса и минует прокси: показанная обработка новой границы к этому переходу не применяется.">
+            <defs>
+              <marker id="txp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="txp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="txp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="36" width="112" height="46" rx="8" class="dg-box"/>
+            <rect x="188" y="26" width="224" height="70" rx="8" class="dg-box"/>
+            <rect x="478" y="26" width="220" height="112" rx="8" class="dg-box"/>
+            <rect x="188" y="160" width="224" height="52" rx="8" class="dg-box"/>
+            <rect x="478" y="174" width="220" height="66" rx="8" class="dg-cell hit"/>
+            <path d="M132 59 L184 59" class="dg-line" marker-end="url(#txp-n)"/>
+            <path d="M412 59 L474 59" class="dg-line" marker-end="url(#txp-n)"/>
+            <path d="M300 96 L300 156" class="dg-line ok" marker-end="url(#txp-ok)"/>
+            <path d="M412 186 L474 186" class="dg-line ok" marker-end="url(#txp-ok)"/>
+            <path d="M588 138 L588 170" class="dg-line ok" marker-end="url(#txp-ok)"/>
+            <path d="M652 96 C686 96, 686 122, 652 122" class="dg-line bad" marker-end="url(#txp-bad)"/>
+            <text x="76" y="64" class="dg-t" text-anchor="middle">контроллер</text>
+            <text x="200" y="49" class="dg-t">прокси</text>
+            <text x="200" y="72" class="dg-in">TransactionInterceptor</text>
+            <text x="490" y="49" class="dg-t">PaymentService</text>
+            <text x="490" y="75" class="dg-in">fail()</text>
+            <text x="490" y="98" class="dg-in">selfInvocation()</text>
+            <text x="490" y="126" class="dg-in">this.fail()</text>
+            <text x="200" y="182" class="dg-t">менеджер JDBC</text>
+            <text x="200" y="201" class="dg-s">begin / commit / rollback</text>
+            <text x="490" y="198" class="dg-in">поток http-1 → C1</text>
+            <text x="490" y="221" class="dg-s">JdbcTemplate берёт C1</text>
+            <text x="314" y="128" class="dg-s" text-anchor="start">начало / вход</text>
+            <text x="604" y="161" class="dg-n" text-anchor="start">SQL</text>
+            <text x="20" y="254" class="dg-bad">this.fail() не возвращается к перехватчику</text>
+          </svg>
+        </div>
+        <figcaption>Путь через менеджер относится к внешнему fail. Красная дуга показывает отдельный вариант selfInvocation: его внутренний переход не открывает транзакцию.</figcaption>
+      </figure>
+      <p>Внешний метод без аннотации вызывает <code>fail()</code> на том же объекте. Прокси пропускает внешний вызов без транзакции. Дальше <code>this.fail()</code> идёт к реализации напрямую: перехватчик этого перехода не видит.</p>
+      <pre><code class="language-java">public void selfInvocation() {
+    fail(); // То же, что this.fail(): вызов внутри настоящего объекта.
+}
+
+// fail() из прошлого шага по-прежнему содержит @Transactional и бросает ошибку.
+context.getBean(PaymentService.class).selfInvocation();</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo self</code></pre>
+      <pre class="out">transaction active=false
+exception=IllegalStateException
+balance=90, payments=1, audit=0</pre>
+      <p>Исключение прежнее, но SQL сохранился через auto-commit. Если внешний метод транзакционный, внутренний код участвует в его транзакции; собственные <code>REQUIRES_NEW</code> и правила внутреннего метода всё равно не применятся.</p>
+      <p>Вынеси отдельную операцию в другой бин либо задай участок через <code>TransactionTemplate</code>. Сервис, созданный через <code>new</code>, и вызов из <code>@PostConstruct</code> тоже не получают обычную обработку готового прокси.</p>
+      <details class="deep">
+        <summary>Под капотом: видимость метода и тип прокси</summary>
+        <p>JDK-прокси перехватывает публичные методы интерфейса. Прокси класса создаёт подкласс, поэтому <code>private/final</code> методы и <code>final</code> класс не подходят. С Spring 6.0 <code>protected</code> и package-visible поддерживаются по умолчанию для прокси класса. Требование внешнего вызова сохраняется.</p>
+        <p>Режим по умолчанию — <code>proxy</code>. AspectJ внедряет обработку в байткод и способен перехватить внутренний вызов, но требует weaving. Отдельный сервис чаще делает границу понятнее.</p>
+      </details>
+    </section>
+
+    <section class="step" id="rollback-rules">
+      <h2>Результат транзакции зависит от ошибки, которую увидела её граница</h2>
+      <p>По умолчанию Spring откатывает при <code>RuntimeException</code> и <code>Error</code>, а checked exception приводит к commit. Это правило Spring. Если <code>BankException extends Exception</code> означает неуспешный платёж, укажи <code>rollbackFor = BankException.class</code>.</p>
+      <pre><code class="language-java">static class BankException extends Exception {}
+
+@Transactional
+public void checkedFailure() throws BankException {
+    record();
+    throw new BankException(); // Checked exception: правило по умолчанию выберет commit.
+}
+
+@Transactional(rollbackFor = BankException.class)
+public void checkedRollback() throws BankException {
+    record();
+    throw new BankException(); // Теперь правило явно требует rollback.
+}
+
+@Transactional
+public void swallowed() {
+    record();
+    try { throw new IllegalStateException("bank rejected"); }
+    catch (IllegalStateException ignored) { /* До прокси ошибка не дошла. */ }
+}
+
+// Каждый вариант запускается в новой базе: исходный баланс снова 100.
+service.checkedFailure(); // checked
+service.checkedRollback(); // checked-rollback
+service.swallowed(); // swallowed</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo checked
+./run.sh TxDemo checked-rollback
+./run.sh TxDemo swallowed</code></pre>
+      <pre class="out"># checked
+exception=BankException
+balance=90, payments=1, audit=0
+# checked-rollback
+exception=BankException
+balance=100, payments=0, audit=0
+# swallowed
+balance=90, payments=1, audit=0</pre>
+      <p>Заголовки <code>#</code> добавлены к реальному stdout. <code>swallowed()</code> вернулся нормально и сохранил изменения. Возврат <code>false</code> или <code>FAILED</code> также не требует rollback: решение надо выразить явно.</p>
+      <p><code>noRollbackFor</code> разрешает commit для указанной ошибки. Более близкий тип исключения сильнее общего правила. Задавай классы: строковый <code>rollbackForClassName</code> совпадает по части имени и захватывает лишние типы. С Spring 6.2 можно выбрать общий <code>@EnableTransactionManagement(rollbackOn = ALL_EXCEPTIONS)</code>; здесь оставлены стандартные правила.</p>
+      <h3>Пойманная ошибка и rollback-only — разные ситуации</h3>
+      <p>Внешний платёж и отдельный бин аудита с <code>REQUIRED</code> имеют две логические границы, но одну транзакцию базы. Ошибка дошла до внутреннего прокси — тот пометил общую транзакцию <code>rollback-only</code>. Внешний код может поймать исключение, но отметка остаётся.</p>
+      <pre><code class="language-java">// Steps — другой бин, вызов проходит через его собственный прокси.
+@Transactional
+public void requiredFailure() {
+    jdbc.update("insert into audit values ('required')");
+    throw new IllegalStateException("audit rejected");
+}
+
+// Метод PaymentService.
+@Transactional
+public void required() {
+    record();
+    try { steps.requiredFailure(); } // REQUIRED присоединяется к транзакции платежа.
+    catch (IllegalStateException ignored) { /* В Java ошибка обработана. */ }
+    // Метод вернётся нормально, но общую транзакцию уже нельзя сохранить.
+}
+
+service.required(); // Исключение появится при выходе через внешний прокси.</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo required</code></pre>
+      <pre class="out">exception=UnexpectedRollbackException
+balance=100, payments=0, audit=0</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 258" role="img" aria-label="Две логические границы REQUIRED используют одну транзакцию C1. Внутренняя ошибка ставит rollback-only; внешний метод ловит исключение и возвращается, но его commit превращается в rollback и UnexpectedRollbackException.">
+            <defs>
+              <marker id="txr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="txr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="34" width="290" height="134" rx="10" class="dg-box"/>
+            <rect x="46" y="88" width="238" height="62" rx="8" class="dg-box"/>
+            <rect x="392" y="34" width="306" height="134" rx="10" class="dg-cell"/>
+            <text x="34" y="59" class="dg-t">PaymentService.required()</text>
+            <text x="58" y="109" class="dg-in">Steps.requiredFailure()</text>
+            <text x="58" y="132" class="dg-s">вторая логическая граница</text>
+            <text x="406" y="58" class="dg-t">одна транзакция БД, C1</text>
+            <path data-s="1-4" d="M310 68 L388 68" class="dg-line" marker-end="url(#txr-n)"/>
+            <path data-s="2-4" d="M284 119 L388 119" class="dg-line" marker-end="url(#txr-n)"/>
+            <g data-s="1"><text x="406" y="92" class="dg-in">payment: p-17</text><text x="406" y="135" class="dg-ok">rollback-only = false</text></g>
+            <g data-s="2"><text x="406" y="92" class="dg-in">payment + audit</text><text x="406" y="135" class="dg-ok">rollback-only = false</text></g>
+            <g data-s="3-4"><text x="406" y="92" class="dg-in">payment + audit</text><text x="406" y="135" class="dg-bad">rollback-only = true</text></g>
+            <g data-s="3"><path d="M392 144 L314 144" class="dg-line bad" marker-end="url(#txr-bad)"/><text x="24" y="207" class="dg-bad">внутренний прокси увидел ошибку</text></g>
+            <g data-s="4"><text x="24" y="207" class="dg-t">catch: внешний метод вернулся</text></g>
+            <g data-s="5"><rect x="392" y="34" width="306" height="134" rx="10" class="dg-cell miss"/><text x="406" y="58" class="dg-t">rollback C1</text><text x="406" y="92" class="dg-in">payment=0, audit=0</text><text x="24" y="207" class="dg-bad">UnexpectedRollbackException</text></g>
+            <g data-s="1"><text x="24" y="235" class="dg-s">внешняя граница открыла C1</text></g>
+            <g data-s="2"><text x="24" y="235" class="dg-s">внутренняя граница присоединилась к C1</text></g>
+            <g data-s="3"><text x="24" y="235" class="dg-s">отменить отметку обычным catch нельзя</text></g>
+            <g data-s="4"><text x="24" y="235" class="dg-s">нормальный возврат ещё не означает commit</text></g>
+            <g data-s="5"><text x="24" y="235" class="dg-s">вызывающий не получит ложный сигнал успеха</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Внешний прокси открыл транзакцию C1. Списание и платёж пока не зафиксированы.</li>
+          <li>Вызов отдельного бина с REQUIRED получил ту же C1. Аудит добавлен к незавершённым изменениям.</li>
+          <li>Из внутреннего метода вышла RuntimeException. Его прокси пометил общую транзакцию для отката.</li>
+          <li>Внешний метод поймал ошибку и вернулся нормально. Отметка rollback-only сохранилась.</li>
+          <li>Внешний прокси попытался завершить операцию. Он откатил C1 и сообщил UnexpectedRollbackException.</li>
+        </ol>
+        <figcaption>Логических границ две, подключение и окончательное решение базы — одни.</figcaption>
+      </figure>
+      <p>После SQL-ошибки база тоже может требовать откат: в PostgreSQL продолжить можно после rollback либо отката до savepoint. Catch сам по себе не чинит транзакцию. Частичный успех требует границы, которая соответствует допустимому бизнес-результату.</p>
+    </section>
+
+    <section class="step" id="propagation">
+      <h2>Propagation выбирает, делить ли с вызывающим одну транзакцию</h2>
+      <p>Аудит «попытка отклонена» должен пережить откат платежа. Необязательное дополнение к платежу, напротив, можно убрать при сбое и продолжить основную операцию. Одинаковый <code>try/catch</code> в Java не выражает эту разницу.</p>
+      <p><code>REQUIRED</code> использует текущую транзакцию либо открывает новую. <code>REQUIRES_NEW</code> приостанавливает внешнюю привязку и открывает независимую физическую транзакцию на другом подключении. Внешний ресурс остаётся занятым вместе со своими блокировками. После внутреннего commit менеджер восстанавливает внешнюю привязку.</p>
+      <p><code>NESTED</code> в JDBC использует savepoint на том же подключении. Вложенная ошибка откатывает изменения после точки сохранения. Отдельного commit нет: последующий внешний rollback отменит и успешную вложенную операцию. Все три случая ниже вызывают отдельный бин <code>Steps</code> через его прокси.</p>
+      <pre><code class="language-java">// Методы отдельного бина Steps.
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void independentAudit() {
+    jdbc.update("insert into audit values ('new')"); // Отдельный commit на C2.
+}
+@Transactional(propagation = Propagation.NESTED)
+public void nestedFailure() {
+    jdbc.update("insert into audit values ('nested')");
+    throw new IllegalStateException("audit rejected"); // Откат до savepoint.
+}
+@Transactional(propagation = Propagation.NESTED)
+public void nestedSuccess() {
+    jdbc.update("insert into audit values ('nested')"); // Пока только часть C1.
+}
+
+// Методы PaymentService.
+@Transactional
+public void requiresNew() {
+    record();
+    steps.independentAudit();
+    throw new IllegalStateException("payment rejected"); // C2 уже сохранена.
+}
+@Transactional
+public void nested() {
+    record();
+    try { steps.nestedFailure(); }
+    catch (IllegalStateException ignored) { /* C1 остаётся пригодной к commit. */ }
+}
+@Transactional
+public void nestedOuterFailure() {
+    record();
+    steps.nestedSuccess();
+    throw new IllegalStateException("payment rejected"); // Отдельного commit аудита не было.
+}
+
+service.requiresNew(); // new
+service.nested(); // nested
+service.nestedOuterFailure(); // nested-outer</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo new
+./run.sh TxDemo nested
+./run.sh TxDemo nested-outer</code></pre>
+      <pre class="out"># new
+exception=IllegalStateException
+balance=100, payments=0, audit=1
+# nested
+balance=90, payments=1, audit=0
+# nested-outer
+exception=IllegalStateException
+balance=100, payments=0, audit=0</pre>
+      <p>Остальные значения задают требования к готовой транзакции на входе.</p>
+      <table class="mx">
+        <thead><tr><th>Propagation</th><th>Если транзакция уже есть</th><th>Если её нет</th></tr></thead>
+        <tbody>
+          <tr><td><code>REQUIRED</code></td><td>Присоединиться</td><td>Открыть</td></tr>
+          <tr><td><code>REQUIRES_NEW</code></td><td>Приостановить и открыть новую</td><td>Открыть</td></tr>
+          <tr><td><code>NESTED</code></td><td>Savepoint, если менеджер поддерживает</td><td>Открыть, как REQUIRED</td></tr>
+          <tr><td><code>SUPPORTS</code></td><td>Присоединиться</td><td>Работать без физической транзакции</td></tr>
+          <tr><td><code>MANDATORY</code></td><td>Присоединиться</td><td>Ошибка</td></tr>
+          <tr><td><code>NOT_SUPPORTED</code></td><td>Приостановить и работать без неё</td><td>Работать без неё</td></tr>
+          <tr><td><code>NEVER</code></td><td>Ошибка</td><td>Работать без неё</td></tr>
+        </tbody>
+      </table>
+      <div class="note warn">
+        <p>Если все потоки держат внешнее подключение и ждут второе для REQUIRES_NEW, пул исчерпан. Внутренний запрос также способен ждать строку, которую заблокировал его же внешний вызов. Сначала реши, нужен ли отдельный commit, затем считай запас пула и проверяй порядок доступа к данным.</p>
+      </div>
+      <p>Поддержка <code>NESTED</code> зависит от менеджера и драйвера. JDBC-откат до savepoint не возвращает Java-объекты persistence context в прежнее состояние. Поэтому этот пример нельзя автоматически перенести на JPA; изменения entity и flush разобраны в <a href="jpa.html">JPA Basics</a>.</p>
+    </section>
+
+    <section class="step" id="isolation-readonly">
+      <h2>Настройки влияют на новую транзакцию и зависят от её менеджера</h2>
+      <p>Атомарность объединяет commit, изоляция управляет видимостью конкурентных изменений. Два запроса прочитали баланс 100 и разрешили списать по 80. Каждый платёж может завершиться целиком, а правило «не уйти в минус» всё равно нарушится.</p>
+      <p><code>isolation = DEFAULT</code> оставляет уровень подключения и СУБД. Это стандарт Spring, а не универсальный READ_COMMITTED. При присоединении через <code>REQUIRED</code> метод получает изоляцию и срок уже начатой транзакции. Посередине они не меняются.</p>
+      <table class="mx">
+        <thead><tr><th>Уровень</th><th>Что исключает модель SQL</th><th>Что ещё нужно учитывать</th></tr></thead>
+        <tbody>
+          <tr><td><code>READ_UNCOMMITTED</code></td><td>Почти ничего: допустимо чтение незавершённых изменений</td><td>СУБД может повысить уровень до поддерживаемого</td></tr>
+          <tr><td><code>READ_COMMITTED</code></td><td>Грязное чтение</td><td>Повторный SELECT способен увидеть новое сохранённое значение</td></tr>
+          <tr><td><code>REPEATABLE_READ</code></td><td>Грязное и неповторяемое чтение</td><td>Правила фантомов и конкурентной записи уточняй у СУБД</td></tr>
+          <tr><td><code>SERIALIZABLE</code></td><td>Результат должен соответствовать некоторому последовательному порядку транзакций</td><td>Конкуренция приводит к ожиданию или ошибке сериализации; нужен повтор всей операции</td></tr>
+        </tbody>
+      </table>
+      <p>Для баланса часто яснее условный <code>UPDATE ... WHERE balance &gt;= amount</code> с проверкой числа строк или блокировка счёта. Для entity полезен <code>@Version</code>. Подробности — в <a href="jpa-locking.html">Locking &amp; Caching</a>, устройство MVCC — в темах базы.</p>
+      <h3>readOnly передаёт намерение, а не универсальный запрет записи</h3>
+      <p><code>readOnly</code> по умолчанию равен <code>false</code>. JDBC-менеджер передаёт hint через <code>Connection.setReadOnly(true)</code>. Менеджер JPA с Hibernate способен изменить flush и загрузку объектов, уменьшая dirty checking. Результат зависит от менеджера и драйвера.</p>
+      <pre><code class="language-java">@Transactional(readOnly = true)
+public void readOnlyWrite() {
+    System.out.println("readOnly flag="
+            + TransactionSynchronizationManager.isCurrentTransactionReadOnly());
+    record(); // H2 принимает запись: setReadOnly(true) не запрещает этот SQL.
+}
+
+service.readOnlyWrite();</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo readonly</code></pre>
+      <pre class="out">readOnly flag=true
+balance=90, payments=1, audit=0</pre>
+      <p>Для строгого запрета нужны права базы либо её режим read-only transaction. JDBC-менеджер с <code>setEnforceReadOnly(true)</code> выполняет явный <code>SET TRANSACTION READ ONLY</code> на поддерживающей его СУБД. Это проверяют на целевом драйвере.</p>
+      <p>Внутренний <code>readOnly = true</code> не переделывает внешнюю read-write транзакцию. <code>setValidateExistingTransaction(true)</code> у менеджера помогает обнаружить несовместимую изоляцию и присоединение метода <code>readOnly=false</code> к готовой read-only транзакции. Это проверка настроек границы, а не анализ выполняемого SQL.</p>
+      <h3>Срок транзакции не отменяет произвольный Java-код</h3>
+      <p><code>timeout</code> задаётся в секундах; по умолчанию используется срок менеджера. JDBC-менеджер применяет оставшийся срок к выражениям через <code>JdbcTemplate</code> и поддержку Spring. Произвольный HTTP-вызов или <code>sleep()</code> он не прерывает. Срок банка, ожидание пула и SQL настраиваются отдельно.</p>
+      <div class="trap">
+        <p class="myth">Внутренний метод поставит SERIALIZABLE, readOnly и timeout, даже когда REQUIRED получил готовую транзакцию.</p>
+        <p class="fact">Физическая транзакция уже начата. При обычном присоединении действуют её настройки; новая аннотация не создаёт второй BEGIN. Проверь внешнюю границу, а для отдельной транзакции осознанно выбери REQUIRES_NEW.</p>
+      </div>
+    </section>
+
+    <section class="step" id="production-boundary">
+      <h2>Граница базы не охватывает другой поток и удалённый банк</h2>
+      <p>Императивная транзакция привязана к потоку. Новый поток, в том числе виртуальный, не наследует подключение внешней операции. Его вызов транзакционного прокси способен открыть собственную, отдельную транзакцию.</p>
+      <pre><code class="language-java">@Transactional
+public void otherThread() throws Exception {
+    System.out.println("caller transaction="
+            + TransactionSynchronizationManager.isActualTransactionActive());
+    var result = new CompletableFuture&lt;Boolean&gt;();
+    Thread.ofVirtual().start(() -&gt; result.complete(
+            TransactionSynchronizationManager.isActualTransactionActive()));
+    System.out.println("worker transaction=" + result.get(10, TimeUnit.SECONDS));
+    // Передали результат вычисления. Ресурсы транзакции потоку не передавались.
+}
+
+service.otherThread();</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo thread</code></pre>
+      <pre class="out">caller transaction=true
+worker transaction=false
+balance=100, payments=0, audit=0</pre>
+      <p>Ошибка async-задачи после завершения сервиса не откатит его данные. Реактивная транзакция использует <code>ReactiveTransactionManager</code> и Reactor Context вместо этой модели ThreadLocal.</p>
+      <p>JDBC rollback не отменяет HTTP-списание в банке. Транзакция вокруг сети лишь дольше держит подключение и блокировки. Надёжный вариант — сохранить платёж и outbox вместе, затем вызвать банк отдельно с ключом идемпотентности. После таймаута выясняй результат по тому же ключу.</p>
+      <p><code>@TransactionalEventListener(phase = AFTER_COMMIT)</code> задаёт порядок обработчика, но не сохраняет задание: процесс может упасть между commit и обработкой. Новая запись из такого обработчика требует новой транзакции. Для события, которое нельзя потерять, нужен outbox.</p>
+      <h3>Небольшую границу можно задать прямо в коде</h3>
+      <p><code>TransactionTemplate</code> позволяет выделить короткий участок SQL отдельно от сетевой работы. Он использует тот же менеджер и propagation, но граница задана прямо в коде.</p>
+      <pre><code class="language-java">var template = new TransactionTemplate(transactionManager);
+template.executeWithoutResult(status -&gt; {
+    jdbc.update("insert into payment values ('p-17')");
+    status.setRollbackOnly(); // Бизнес решил отменить запись без исключения.
+});
+// Управление вернулось нормально. Запись не сохранена.</code></pre>
+      <pre><code class="language-bash">./run.sh TxDemo template</code></pre>
+      <pre class="out">balance=100, payments=0, audit=0</pre>
+      <p>Диагностику начинай с пути вызова и выбранного менеджера. DEBUG/TRACE для <code>org.springframework.transaction</code> и <code>org.springframework.jdbc.datasource</code> показывает открытие, присоединение и завершение. SQL-лог не доказывает commit: читай сохранённый результат после выхода из сервиса.</p>
+      <p>В проде сопоставляй длительность операции, занятость пула и ожидание блокировок. Ошибка связи при commit оставляет неопределённость результата: повтор должен быть безопасен по ключу платежа. Несколько локальных менеджеров не дают общей атомарности; для неё нужен XA/JTA либо протокол согласования бизнес-состояний.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Поставь границу вокруг целой операции сервиса. Отдельные транзакции репозиториев не склеивают платёж в одно действие.</li>
+        <li>В режиме proxy аннотация работает на внешнем вызове через прокси. Внутренний this-вызов получает лишь уже существующую транзакцию.</li>
+        <li>Прокси принимает решение по результату своего вызова. Checked exception, пойманная ошибка и rollback-only дают разные исходы.</li>
+        <li>REQUIRES_NEW фиксируется отдельно и занимает ещё одно подключение. NESTED использует savepoint и остаётся частью внешней транзакции.</li>
+        <li>Настройки присоединённого метода не переделывают начатую транзакцию. readOnly и timeout надо понимать через менеджер и целевую базу.</li>
+        <li>Локальный rollback не отменяет банк и фоновую задачу. Короткие транзакции, идемпотентность и outbox закрывают эти границы.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="tx-how-it-works" data-freq="3">
+      <h3>Как работает @Transactional и почему self-invocation её ломает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Вызов Spring-бина проходит через AOP-прокси. Перехватчик читает аннотацию, через менеджер открывает транзакцию или присоединяется к готовой, затем вызывает сервис. На выходе выбирает commit или rollback. Внутренний this-вызов идёт к настоящему объекту, поэтому новая аннотация не применяется. Я выношу отдельную операцию в другой бин либо использую TransactionTemplate.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JDK-прокси перехватывает публичные методы интерфейса. Прокси класса не перехватит private/final; protected и package-visible поддерживаются с Spring 6.0.</li>
+            <li>JdbcTemplate находит ресурс через DataSourceUtils. Прямой DataSource.getConnection() способен вернуть другое подключение.</li>
+            <li>Ошибка возможна во время commit после нормального возврата тела метода. Повтор ставлю снаружи всей границы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tx-rollback" data-freq="3">
+      <h3>Когда происходит rollback и откуда берётся UnexpectedRollbackException?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По умолчанию Spring откатывает при RuntimeException и Error; checked exception требует rollbackFor. Ошибка, пойманная внутри метода, до его прокси не дойдёт. Но отдельный внутренний бин с REQUIRED уже мог поставить rollback-only своим прокси. Тогда внешний catch не поможет: при попытке commit произойдёт откат и UnexpectedRollbackException. Вызывающий узнает, что операция не сохранилась.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С Spring 6.2 общий rollbackOn=ALL_EXCEPTIONS включает checked exceptions. Правила операции уточняют этот стандарт.</li>
+            <li>Более близкий тип исключения сильнее общего правила. Строковый шаблон способен захватить лишние имена.</li>
+            <li>После SQL-ошибки сама база может требовать rollback. Catch не заменяет откат до savepoint.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tx-propagation" data-freq="3">
+      <h3>Чем REQUIRED, REQUIRES_NEW и NESTED отличаются на практике?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>REQUIRED делит текущую транзакцию с вызывающим либо открывает новую. REQUIRES_NEW приостанавливает внешнюю и фиксируется независимо: аудит переживёт откат платежа. NESTED использует JDBC savepoint в той же физической транзакции. Вложенную ошибку можно убрать, а внешний платёж продолжить; внешний rollback всё равно отменит и успешную вложенную запись. Я выбираю по тому, какой частичный результат бизнес допускает сохранить.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>REQUIRES_NEW требует запас пула. Внутренний запрос способен ждать блокировку своего внешнего вызова.</li>
+            <li>NESTED зависит от менеджера. JDBC savepoint не восстанавливает поля объектов persistence context JPA.</li>
+            <li>MANDATORY требует готовую транзакцию. NOT_SUPPORTED убирает её из текущего выполнения, но внешние ресурсы остаются заняты.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Аудит успешного платежа пишется через REQUIRES_NEW. Где ошибка?</summary>
+          <p>Сначала уточню смысл аудита. Если он утверждает «платёж успешно проведён», отдельный ранний commit способен сохранить ложную запись перед откатом платежа. Такую запись сохраняю вместе с платежом или формирую из надёжного события после commit. REQUIRES_NEW уместен для факта попытки, который обязан пережить ошибку самой операции.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="tx-settings" data-freq="3">
+      <h3>Что дают isolation, readOnly и timeout? Какие у них ограничения?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Isolation управляет видимостью конкурентных изменений; DEFAULT оставляет уровень базы. readOnly передаёт намерение менеджеру и драйверу, но не запрещает INSERT универсально. Timeout действует там, где менеджер применяет срок, например к JDBC-выражениям. Если REQUIRED получил готовую транзакцию, он получил её настройки. Внутренняя аннотация не повышает изоляцию посередине и не прерывает HTTP-вызов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>validateExistingTransaction выявляет несовместимую изоляцию и присоединение read-write метода к готовой read-only транзакции. Проверяется настройка метода, а не факт SQL-записи.</li>
+            <li>Ошибка сериализации требует повторить всю короткую транзакцию с новым чтением.</li>
+            <li>Финансовый инвариант часто яснее выражают условный UPDATE, уникальность и блокировка строки.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tx-production" data-freq="2">
+      <h3>Можно ли транзакцией защитить вызов банка и работу в другом потоке?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Локальный rollback не отменяет HTTP-списание. Транзакция вокруг сети дольше держит подключение и блокировки, но не даёт общей атомарности. Я сохраняю платёж и outbox вместе, затем вызываю банк по ключу идемпотентности. Новый поток не наследует императивную транзакцию; его транзакционный вызов откроет отдельную границу. Ошибка после внешнего commit уже не откатит платёж.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>AFTER_COMMIT задаёт порядок, но не долговечность задания. Окно падения закрывает outbox.</li>
+            <li>Ошибка связи при commit оставляет неизвестный результат. Уникальный ключ позволяет безопасно выяснить состояние.</li>
+            <li>Для атомарности нескольких ресурсов нужен XA/JTA либо согласование бизнес-состояний.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/transaction.html">Spring Framework Reference: Transaction Management</a> — основа урока: декларативная граница, работа менеджера и выбор между аннотацией и TransactionTemplate.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html">Using @Transactional</a> и <a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/rolling-back.html">Rolling Back</a> — значения по умолчанию, видимость методов, правила отката и rollbackOn.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html">Transaction Propagation</a> — логическая и физическая транзакции, REQUIRED, REQUIRES_NEW и NESTED.</li>
+      <li><a href="https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/jdbc/datasource/DataSourceTransactionManager.html">DataSourceTransactionManager, Spring 7.0.9</a> — привязка Connection, поддержка savepoint, JDBC timeout и enforceReadOnly.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/data-access/transaction/event.html">Transaction-bound Events</a> — фазы обработчика и ограничения работы после commit.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

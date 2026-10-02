@@ -545,7 +545,7 @@ window.KB_TREE = [
       { id: 'data', title: 'Data', source: 'Spring Framework Reference: Data Access; Spring Start Here, гл. 12–14; Hibernate ORM User Guide', items: [
         { id: 'jdbc', freq: 2, status: 'draft', title: 'JDBC & Connection Pools',
           scope: 'DataSource, HikariCP, PreparedStatement, JdbcTemplate, транзакции в JDBC' },
-        { id: 'spring-tx', freq: 3, status: 'empty', title: 'Transactions',
+        { id: 'spring-tx', freq: 3, status: 'draft', title: 'Transactions',
           scope: '@Transactional через прокси, propagation, isolation, rollback rules, readOnly, self-invocation' },
         { id: 'jpa', freq: 3, status: 'empty', title: 'JPA Basics',
           scope: 'entity, persistence context, состояния entity, dirty checking, flush' },
