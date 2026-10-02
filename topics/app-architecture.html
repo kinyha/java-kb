@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Design: Clean &amp; Hexagonal Architecture · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="app-architecture">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Design: Clean &amp; Hexagonal Architecture</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Clean Architecture и гексагональная архитектура говорят одно: бизнес-правила — центр приложения, а база, веб, банк и фреймворк — детали на краях. Зависимости в исходном коде направлены только внутрь, к правилам. Ядро описывает, что ему нужно от мира, интерфейсами-портами, а адаптеры на краях реализуют их для конкретной базы или банка. Тогда правило оплаты проверяется тестом за миллисекунды без Spring и PostgreSQL, а смена банка не трогает ядро. Цена — лишние интерфейсы и перекладывание данных между моделями, и для простого CRUD она не окупается.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Правило оплаты размазано по контроллеру, JPA-сущности и клиенту банка</h2>
+      <p>Правило «платёж выше 10 000 ₽ требует подтверждения» живёт в трёх местах: часть проверки в контроллере, часть в сервисе, а лимит берётся из поля JPA-сущности, которое заполняет Hibernate. Чтобы проверить правило тестом, нужно поднять Spring, базу и заглушку банка: тест идёт десять секунд и падает, когда меняется схема таблицы. Когда банк сменил SDK, правка дошла до сервиса платежей, потому что тот принимал и возвращал классы SDK.</p>
+      <p>Роберт Мартин в «Чистой архитектуре» называет это смешением <b>политики</b> и <b>деталей</b>. Политика — то, ради чего существует система: правила оплаты, лимиты, статусы. Детали — то, как она общается с миром: HTTP, JSON, PostgreSQL, Hibernate, API банка. Детали меняются часто и по внешним причинам, политика — по решениям бизнеса. Архитектура должна позволять менять одно, не трогая другое.</p>
+      <p>Демо <a href="../examples/design/HexagonalDemo.java">HexagonalDemo.java</a> собирает одно и то же ядро с разными адаптерами и проверяет правило зависимостей: <code>java HexagonalDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="layered">
+      <h2>Слоистая архитектура направляет все зависимости к базе</h2>
+      <p>Привычная схема Spring-приложения — три слоя: контроллер вызывает сервис, сервис вызывает репозиторий, репозиторий работает с базой. Каждый слой знает о нижнем. Для большинства CRUD-сервисов это хорошая схема: понятная, с минимумом кода.</p>
+      <p>Проблема в направлении. Сервис, где живут правила, зависит от слоя доступа к данным, а значит, от JPA-сущностей, аннотаций Hibernate и формы таблиц. Модель предметной области становится моделью таблиц: поле добавляют потому, что появилась колонка, а связь делают ленивой потому, что так быстрее грузится. Проектирование начинается со схемы базы, и бизнес-правила подстраиваются под неё.</p>
+      <p>Вторая проблема — утечки. Сервис возвращает контроллеру JPA-сущность, контроллер отдаёт её Jackson, и ленивая связь падает с LazyInitializationException при сериализации. Сервис принимает DTO запроса с аннотациями валидации и JSON. Границы между слоями есть на диаграмме, но классы ходят сквозь них.</p>
+    </section>
+
+    <section class="step" id="dependency-rule">
+      <h2>Правило зависимостей: стрелки в коде направлены только внутрь, к политике</h2>
+      <p>Clean Architecture рисует приложение кругами. В центре — сущности предметной области и их правила, которые верны независимо от приложения: деньги не бывают отрицательными, платёж переходит между статусами по таблице. Вокруг — сценарии использования (use cases): правила этого приложения, например «провести оплату: проверить сумму, списать в банке, сохранить». Дальше — адаптеры интерфейсов, которые переводят данные между сценариями и внешним миром. Снаружи — фреймворки и драйверы: Spring MVC, Hibernate, PostgreSQL, SDK банка.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 300" role="img" aria-label="Четыре вложенных области. В центре сущности: Money, Payment, Status. Вокруг них сценарии: PayService и порты PaymentStore и Bank. Дальше адаптеры: HTTP-контроллер, JPA-адаптер хранилища, адаптер банка. Снаружи фреймворки и драйверы: Spring MVC, Hibernate, PostgreSQL, API банка. Стрелки зависимостей идут только внутрь.">
+            <defs>
+              <marker id="dr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="14" width="680" height="276" rx="26" class="dg-sep" fill="none"/>
+            <rect x="110" y="48" width="500" height="208" rx="22" class="dg-box"/>
+            <rect x="200" y="82" width="320" height="140" rx="18" class="dg-cell"/>
+            <rect x="280" y="116" width="160" height="72" rx="14" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="360" y="146" class="dg-in">сущности</text>
+              <text x="360" y="166" class="dg-n">Money, Payment, Status</text>
+              <text x="360" y="102" class="dg-in">сценарии</text>
+              <text x="240" y="160" class="dg-n">PayService</text>
+              <text x="482" y="152" class="dg-n">порты:</text>
+              <text x="482" y="168" class="dg-n">Store, Bank</text>
+              <text x="360" y="70" class="dg-in">адаптеры</text>
+              <text x="155" y="160" class="dg-n">HTTP</text>
+              <text x="565" y="146" class="dg-n">JPA</text>
+              <text x="565" y="174" class="dg-n">банк</text>
+              <text x="360" y="36" class="dg-in">фреймворки и драйверы</text>
+              <text x="65" y="160" class="dg-n">Spring MVC</text>
+              <text x="655" y="132" class="dg-n">Hibernate,</text>
+              <text x="655" y="148" class="dg-n">PostgreSQL</text>
+              <text x="655" y="180" class="dg-n">SDK банка</text>
+            </g>
+            <!-- зависимости внутрь -->
+            <path d="M360 262 L 360 228" class="dg-line ok" marker-end="url(#dr-ok)"/>
+            <path d="M360 236 L 360 192" class="dg-line ok" marker-end="url(#dr-ok)"/>
+            <text x="370" y="250" class="dg-ok">import только внутрь</text>
+            <text x="34" y="280" class="dg-s">Внутренний круг не знает имён из внешнего: ни классов, ни аннотаций, ни форматов.</text>
+          </svg>
+        </div>
+        <figcaption>Направление зависимостей не совпадает с направлением вызова: сценарий вызывает банк, но не импортирует ни одного класса банка. Это DIP из SOLID, применённый к целому приложению.</figcaption>
+      </figure>
+      <p>Главное правило одно: зависимости в исходном коде направлены только внутрь. Ничто во внутреннем круге не упоминает имён из внешнего — классов, функций, аннотаций, форматов данных. Как же сценарий вызывает банк, если не знает о нём? Через интерфейс, который объявлен во внутреннем круге, а реализован во внешнем. Это инверсия зависимостей из <a href="design-principles.html">SOLID</a>: вызов идёт наружу, импорт — внутрь.</p>
+      <p>Данные через границу передают простыми структурами, удобными внутреннему кругу. Сценарий не принимает HTTP-запрос и не возвращает JPA-сущность: контроллер переводит JSON в команду сценария, а адаптер хранилища переводит Payment в строку таблицы. Мартин отдельно подчёркивает: количество кругов не догма, важно только направление.</p>
+    </section>
+
+    <section class="step" id="ports-adapters">
+      <h2>Порты и адаптеры: ядро объявляет интерфейсы, края их реализуют</h2>
+      <p>Гексагональная архитектура Алистера Кокберна раньше сформулировала ту же идею другими словами. У ядра есть <b>порты</b> — интерфейсы, через которые оно общается с миром. Входящие (driving) порты описывают, что приложение умеет: <code>PayUseCase</code>. Исходящие (driven) порты описывают, что ему нужно: <code>PaymentStore</code>, <code>Bank</code>. <b>Адаптеры</b> подключают к портам конкретные технологии: REST-контроллер к входящему порту, JPA и SDK банка к исходящим.</p>
+      <pre><code class="language-java">// ЯДРО: модель, сценарий и порты. Ни одного импорта Spring, JPA или SDK.
+record Money(long cents) {
+    Money { if (cents &lt;= 0) throw new IllegalArgumentException("amount must be positive"); }
+}
+interface PayUseCase { Payment pay(String id, long cents); }      // Входящий порт.
+interface PaymentStore { void save(Payment p); }                   // Исходящие порты:
+interface Bank { boolean charge(String id, Money amount); }        // владелец — ядро.
+
+final class PayService implements PayUseCase {
+    PayService(Bank bank, PaymentStore store) { … }
+    public Payment pay(String id, long cents) {
+        Money amount = new Money(cents);                           // Правило: сумма &gt; 0.
+        Status status = bank.charge(id, amount) ? APPROVED : DECLINED;
+        Payment p = new Payment(id, amount, status);
+        store.save(p);
+        return p;
+    }
+}
+
+// АДАПТЕРЫ: переводят мир в порты и обратно.
+final class PaymentHttpAdapter { /* JSON → pay(id, cents) → JSON, 400 при ошибке */ }
+final class LimitBank implements Bank { /* тестовый банк: отказ выше 10 000 ₽ */ }</code></pre>
+      <pre class="out">== same core, test adapters
+201 {"id":"p-1","status":"APPROVED"}
+201 {"id":"p-2","status":"DECLINED"}
+400 {"error":"amount must be positive"}
+stored: [p-1=APPROVED, p-2=DECLINED]
+== same core, another bank adapter
+APPROVED, bank saw {p-4=25000}</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Ядро в центре с тремя портами. Слева входящие адаптеры: HTTP-контроллер и тест вызывают входящий порт PayUseCase. Справа исходящие порты PaymentStore и Bank, к ним подключены JPA-адаптер или память, адаптер Тинькофф или тестовый банк. Стрелки реализации идут от адаптеров к портам, внутрь.">
+            <defs>
+              <marker id="hx-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="hx-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- шестиугольник ядра -->
+            <path d="M260 30 L 460 30 L 520 135 L 460 240 L 260 240 L 200 135 Z" class="dg-cell hit"/>
+            <!-- порты -->
+            <rect x="210" y="115" width="110" height="40" rx="6" class="dg-box"/>
+            <rect x="400" y="70" width="110" height="40" rx="6" class="dg-box"/>
+            <rect x="400" y="160" width="110" height="40" rx="6" class="dg-box"/>
+            <!-- адаптеры -->
+            <rect x="20" y="70" width="140" height="40" rx="7" class="dg-cell"/>
+            <rect x="20" y="160" width="140" height="40" rx="7" class="dg-cell"/>
+            <rect x="560" y="40" width="140" height="34" rx="7" class="dg-cell"/>
+            <rect x="560" y="82" width="140" height="34" rx="7" class="dg-cell"/>
+            <rect x="560" y="150" width="140" height="34" rx="7" class="dg-cell"/>
+            <rect x="560" y="192" width="140" height="34" rx="7" class="dg-cell"/>
+            <path d="M160 90 C 185 90, 185 128, 206 128" class="dg-line" marker-end="url(#hx-n)"/>
+            <path d="M160 180 C 185 180, 185 142, 206 142" class="dg-line" marker-end="url(#hx-n)"/>
+            <path d="M560 57 C 535 57, 535 84, 514 84" class="dg-line ok" marker-end="url(#hx-ok)"/>
+            <path d="M560 99 C 540 99, 535 96, 514 96" class="dg-line ok" marker-end="url(#hx-ok)"/>
+            <path d="M560 167 C 540 167, 535 174, 514 174" class="dg-line ok" marker-end="url(#hx-ok)"/>
+            <path d="M560 209 C 535 209, 535 186, 514 186" class="dg-line ok" marker-end="url(#hx-ok)"/>
+            <g text-anchor="middle">
+              <text x="360" y="58" class="dg-cap">ЯДРО</text>
+              <text x="360" y="215" class="dg-n">PayService, Money, Payment</text>
+              <text x="265" y="140" class="dg-in">PayUseCase</text>
+              <text x="455" y="95" class="dg-in">PaymentStore</text>
+              <text x="455" y="185" class="dg-in">Bank</text>
+              <text x="90" y="95" class="dg-in">HTTP-контроллер</text>
+              <text x="90" y="185" class="dg-in">тест</text>
+              <text x="630" y="62" class="dg-n">JPA + PostgreSQL</text>
+              <text x="630" y="104" class="dg-n">память для теста</text>
+              <text x="630" y="172" class="dg-n">адаптер Тинькофф</text>
+              <text x="630" y="214" class="dg-n">LimitBank для теста</text>
+            </g>
+            <text x="20" y="40" class="dg-cap">ВЫЗЫВАЮТ ЯДРО</text>
+            <text x="560" y="26" class="dg-cap">ВЫЗЫВАЕТ ЯДРО</text>
+            <text x="20" y="260" class="dg-s">Каждый порт — точка подключения: прод-адаптер и тестовый взаимозаменяемы.</text>
+          </svg>
+        </div>
+        <figcaption>Слева адаптеры вызывают ядро, справа ядро вызывает адаптеры. Но в обоих случаях адаптер зависит от порта, а не наоборот.</figcaption>
+      </figure>
+      <p>Тест в демо собрал ядро с хранилищем в памяти и банком-заглушкой и проверил три случая за доли миллисекунды: одобрение, отказ банка выше лимита и отказ по правилу суммы. Второй запуск подключил другой банк — и тот же сценарий одобрил платёж на 25 000 ₽, потому что лимит — свойство тестового адаптера, а не ядра. Ядро ни разу не изменилось. Так же в проде меняется Тинькофф на Сбер: новый адаптер, новый бин в конфигурации.</p>
+      <p>В Spring-проекте структура обычно выглядит так: <code>payments.domain</code> для сущностей, <code>payments.application</code> для сценариев и портов, <code>payments.adapter.in.web</code>, <code>payments.adapter.out.persistence</code>, <code>payments.adapter.out.bank</code> для адаптеров. Пакеты верхнего уровня называются по предметной области, а не по технологиям. Мартин называет это <b>кричащей архитектурой</b>: по структуре папок видно, что это платёжная система, а не «приложение на Spring».</p>
+    </section>
+
+    <section class="step" id="enforce">
+      <h2>Правило зависимостей нарушают незаметно, поэтому его проверяют автоматически</h2>
+      <p>Интерфейсы и пакеты ничего не гарантируют сами. Достаточно одного импорта: кто-то пишет в ядре отчёт и берёт хранилище напрямую, потому что так быстрее. Демо проверяет правило рефлексией: для каждого класса ядра смотрит типы полей и параметров методов и ищет среди них адаптеры. В демо заранее подложено нарушение:</p>
+      <pre><code class="language-java">// Класс ядра, который знает конкретное хранилище.
+static final class DailyReport implements Core {
+    private final InMemoryStore store; // Ссылка из ядра на адаптер.
+    long total() { return store.all().stream().mapToLong(p -&gt; p.amount().cents()).sum(); }
+}</code></pre>
+      <pre class="out">== dependency rule check
+violations: [DailyReport -&gt; InMemoryStore]</pre>
+      <p>Код компилируется и работает, тесты зелёные. Нарушение видно только проверкой структуры. В реальных проектах её делают ArchUnit — правилами вроде «классы в <code>..domain..</code> не зависят от <code>..adapter..</code> и <code>org.springframework..</code>», которые запускаются как обычные тесты, — или Spring Modulith для границ между модулями. Эти инструменты разобраны в <a href="components.html">Components &amp; Modules</a>.</p>
+      <p>Кто тогда собирает всё вместе? Мартин называет это <b>главным компонентом</b> (Main): самое «грязное» место, которое знает обо всех адаптерах и связывает их с портами. В Spring это классы <code>@Configuration</code> и сам контейнер. Им разрешено зависеть от всего, и именно поэтому туда не кладут бизнес-логику.</p>
+    </section>
+
+    <section class="step" id="cost">
+      <h2>Каждая граница стоит маппинга, и для простого CRUD она не окупается</h2>
+      <p>Чистое ядро означает несколько моделей одного платежа: DTO запроса в контроллере, доменный Payment в ядре, JPA-сущность в адаптере хранилища. Между ними — перекладывание полей туда и обратно. Новое поле в API требует правки трёх классов и двух мапперов. Это реальная цена, и её стоит называть на собеседовании.</p>
+      <table class="mx">
+        <thead><tr><th>Стратегия</th><th>Как устроено</th><th>Когда уместно</th></tr></thead>
+        <tbody>
+          <tr><td>Одна модель</td><td>JPA-сущность — она же доменная модель и ответ API</td><td>CRUD, прототип; правил почти нет</td></tr>
+          <tr><td>Модель + DTO</td><td>Сущность общая для ядра и базы, на вход и выход — DTO</td><td>Типичный сервис; API отделён от схемы</td></tr>
+          <tr><td>Полный маппинг</td><td>Свои модели у API, ядра и хранилища</td><td>Сложные правила, долгоживущее ядро, несколько каналов</td></tr>
+        </tbody>
+      </table>
+      <p>Компромисс, который часто выбирают в Spring-проектах: доменная модель — JPA-сущность с аннотациями, но её поведение написано как доменное (методы <code>authorize</code>, <code>capture</code> вместо сеттеров), а наружу она не выходит — API получает DTO. Аннотации Hibernate в ядре — нарушение чистоты, но они не меняют поведения правил, а маппинг из-за них не нужен. Такое решение должно быть осознанным, а не случайным.</p>
+      <p>Вторая цена — интерфейсы. Порт оправдан, когда за ним реально бывают разные реализации или тест без него невозможен: банк, внешние API, очереди. Интерфейс <code>PaymentStore</code> с единственной реализацией на Spring Data — спорный случай: Spring Data и так даёт интерфейс репозитория. Мартин сам описывает <b>частичные границы</b>: подготовить место для разделения, не платя за полное, и разделить, когда это понадобится.</p>
+      <p>Решение принимают по сложности правил, а не по моде. Сервис справочника валют с тремя эндпоинтами — слоистый, и это правильно. Платёжное ядро с лимитами, статусами, несколькими банками и каналами — кандидат на порты и адаптеры. Модели предметной области внутри ядра посвящена тема <a href="ddd.html">DDD</a>.</p>
+      <div class="trap">
+        <p class="myth">Clean Architecture значит, что в доменном коде не может быть ни одной аннотации Spring или JPA.</p>
+        <p class="fact">Правило — про направление зависимостей и про то, чтобы детали не управляли политикой. Многие команды осознанно оставляют JPA-аннотации на сущностях ради отказа от маппинга. Ошибка не в аннотации, а в том, что форма таблицы или HTTP-запроса начинает диктовать бизнес-правила.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Политика — правила бизнеса, детали — база, веб, банк, фреймворк; они меняются по разным причинам.</li>
+        <li>Правило зависимостей: импорт только внутрь, к политике. Вызов наружу идёт через интерфейс, которым владеет ядро.</li>
+        <li>Порты описывают, что ядро умеет и что ему нужно; адаптеры подключают к ним технологии и тестовые заглушки.</li>
+        <li>Нарушения незаметны в работе и ловятся только проверкой структуры: ArchUnit, Spring Modulith.</li>
+        <li>Граница стоит маппинга и интерфейсов; для CRUD слоистой архитектуры достаточно.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="arch-clean" data-freq="3">
+      <h3>Что такое Clean Architecture и правило зависимостей?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это способ организовать приложение так, чтобы бизнес-правила не зависели от деталей: базы, веба, фреймворка, внешних API. В центре сущности и сценарии использования, снаружи адаптеры и фреймворки. Главное правило — зависимости в исходном коде направлены только внутрь: внутренний круг не знает имён из внешнего.</p>
+          <p>Когда сценарий должен вызвать банк, он объявляет интерфейс у себя, а адаптер банка снаружи его реализует. Вызов идёт наружу, импорт — внутрь. Это DIP, применённый к целому приложению.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Число кругов не догма; важно только направление зависимостей.</li>
+            <li>Через границу передают простые структуры, удобные внутреннему кругу, а не HTTP-запросы и JPA-сущности.</li>
+            <li>Main — конфигурация Spring — зависит от всего и связывает адаптеры с портами; логики в нём нет.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="arch-hexagonal" data-freq="2">
+      <h3>Что такое порты и адаптеры?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Гексагональная архитектура: у ядра приложения есть порты — интерфейсы общения с миром. Входящие порты описывают, что приложение умеет, их вызывают REST-контроллер, обработчик очереди, тест. Исходящие описывают, что ядру нужно: хранилище, банк, отправка уведомлений, их реализуют адаптеры на JPA, SDK банка, Kafka.</p>
+          <p>Польза — ядро тестируется без инфраструктуры, а смена технологии меняет только адаптер. В демо один и тот же сценарий работал с тестовым банком и с другим банком без изменений.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>И входящие, и исходящие адаптеры зависят от портов; различается только направление вызова.</li>
+            <li>Пакеты называют по предметной области — «кричащая архитектура» — а не по слоям.</li>
+            <li>Порт без второй реализации и без нужды в тесте — кандидат на частичную границу.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="arch-layered" data-freq="2">
+      <h3>Чем Clean Architecture отличается от обычной трёхслойной?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В трёхслойной контроллер зависит от сервиса, сервис — от репозитория и базы. Бизнес-логика зависит от слоя данных, и модель часто становится копией таблиц. В Clean Architecture направление развёрнуто: слой данных зависит от интерфейсов, которые объявило ядро, и бизнес-логика ни от чего внешнего не зависит.</p>
+          <p>Для CRUD-сервиса трёхслойной хватает, и она проще. Чистое ядро окупается, когда правил много, они долго живут и к ним подключается несколько каналов и внешних систем.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Типичная утечка слоистой схемы — JPA-сущность в ответе API и LazyInitializationException при сериализации.</li>
+            <li>Цена чистой схемы — маппинг между моделями и лишние интерфейсы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="arch-jpa-domain" data-freq="2">
+      <h3>Нужно ли отделять JPA-сущность от доменной модели?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Зависит от сложности. Отдельная доменная модель защищает правила от формы таблиц и аннотаций, но требует маппинга в обе стороны на каждое поле. Многие команды осознанно используют JPA-сущность как доменную модель: с доменными методами вместо сеттеров и с DTO на входе и выходе API.</p>
+          <p>Главное — чтобы схема базы не диктовала бизнес-правила, а сущность не выходила наружу в ответы API.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Признак, что пора разделять: правила начинают обходить ограничения Hibernate — ленивые связи, прокси, требования к конструктору.</li>
+            <li>Агрегаты из DDD хорошо ложатся на Spring Data JDBC, где маппинг проще и нет контекста персистентности.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что нарушено в этом сценарии?</summary>
+          <pre><code class="language-java">package com.acme.payments.application;
+
+public class PayUseCase {
+    private final PaymentJpaRepository repository; // Spring Data JPA
+    private final TinkoffClient bank;              // SDK банка
+
+    public PaymentEntity pay(PaymentRequestDto request) { … } // DTO из web-слоя
+}</code></pre>
+          <p>Сценарий зависит от трёх деталей сразу: от Spring Data, от SDK банка и от DTO HTTP-запроса. Его нельзя проверить без JPA и SDK, смена банка правит сценарий, а изменение формата API — тоже. Нужны порты в пакете application (PaymentStore, Bank), команда сценария вместо DTO и доменный результат вместо JPA-сущности; адаптеры переводят одно в другое.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Роберт Мартин, «Чистая архитектура», часть V, главы 15–28 — основа урока: политика и детали, правило зависимостей, кричащая архитектура, частичные границы, Main.</li>
+      <li><a href="https://alistair.cockburn.us/hexagonal-architecture/">Alistair Cockburn, Hexagonal Architecture</a> — исходная формулировка портов и адаптеров.</li>
+      <li>Tom Hombergs, Get Your Hands Dirty on Clean Architecture, 2-е изд. — реализация портов и адаптеров на Spring Boot, стратегии маппинга.</li>
+      <li><a href="https://www.archunit.org/userguide/html/000_Index.html">ArchUnit User Guide</a> — проверка правила зависимостей тестами.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

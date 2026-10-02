@@ -8,4 +8,5 @@ java SolidDemo.java
 java CreationalDemo.java
 java StructuralDemo.java
 java BehavioralDemo.java
+java HexagonalDemo.java
 ```
