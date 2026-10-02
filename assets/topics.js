@@ -317,7 +317,7 @@ window.KB_TREE = [
           scope: 'выбор лидера, Raft, split brain, часы и порядок событий' },
       ] },
       { id: 'reliability', title: 'Reliability', source: 'Azure Cloud Design Patterns: Resiliency, Performance Antipatterns; Release It!', items: [
-        { id: 'resilience', freq: 3, status: 'empty', title: 'Resilience Patterns',
+        { id: 'resilience', freq: 3, status: 'draft', title: 'Resilience Patterns',
           scope: 'таймауты, retry с backoff и jitter, circuit breaker, bulkhead, fallback' },
         { id: 'overload', freq: 1, status: 'empty', title: 'Overload',
           scope: 'backpressure, throttling, load shedding, graceful degradation, retry storm' },

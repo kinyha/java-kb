@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Resilience Patterns · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="resilience">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Resilience Patterns</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Отказ одной зависимости не должен ронять весь сервис. Таймаут ограничивает ожидание каждого вызова. Bulkhead выделяет зависимости отдельный ограниченный ресурс, чтобы зависший банк не занял все потоки и не остановил остальные запросы. Повтор лечит кратковременные сбои, но только для идемпотентных операций, только на одном уровне и с экспоненциальной паузой со случайным разбросом, иначе повторы множатся и бьют упавший сервис синхронными волнами. Circuit breaker перестаёт вызывать зависимость, у которой много ошибок, и пробует снова через паузу. Fallback решает, что отвечать, когда зависимость недоступна.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Банк-партнёр завис, и через минуту перестал отвечать весь платёжный сервис</h2>
+      <p>Платёжный сервис вызывает банк для списаний, а кроме этого отдаёт статусы платежей и историю. Банк начал отвечать через 30 секунд вместо 300 мс. Через минуту сервис перестал отвечать на всё, включая статусы, которым банк не нужен: все потоки обработки ждали банк. Когда банк ожил, его тут же положила волна повторов от всех клиентов, которые повторяли запросы одновременно.</p>
+      <p>Тема разбирает механику каскадных отказов и паттерны устойчивости независимо от фреймворка. Таймауты HTTP-клиента в Spring — в <a href="spring-clients.html">HTTP Clients</a>, circuit breaker в Spring Cloud — в <a href="spring-cloud.html">Spring Cloud</a>, безопасность повторов — в <a href="idempotency.html">Idempotency</a>, перегрузка всей системы — в <a href="overload.html">Overload</a>. Демо <a href="../examples/resilience/ResilienceDemo.java">ResilienceDemo.java</a> использует Resilience4j 2.4 на JDK 21; «банк» — функция, которая спит или бросает исключение.</p>
+    </section>
+
+    <section class="step" id="bulkhead">
+      <h2>Зависшая зависимость занимает общий пул, и страдают запросы, которым она не нужна</h2>
+      <pre><code class="language-java">ExecutorService tomcat = Executors.newFixedThreadPool(10);      // 10 потоков обработки запросов
+Bulkhead bh = Bulkhead.of("bank", BulkheadConfig.custom().maxConcurrentCalls(4).maxWaitDuration(Duration.ZERO).build());
+// 20 вызовов банка, который спит 2 с, затем быстрый запрос статуса</code></pre>
+      <pre class="out">== 20 calls to a hung bank, no bulkhead: status request waited 3907 ms, bank calls rejected fast: 0
+== 20 calls to a hung bank, bulkhead 4: status request waited 0 ms, bank calls rejected fast: 16</pre>
+      <p>Без защиты двадцать вызовов зависшего банка заняли все десять потоков, и запрос статуса — которому банк не нужен — простоял в очереди почти четыре секунды. Это и есть каскадный отказ: медленная зависимость превращается в недоступность всего сервиса, а потом и сервисов, которые вызывают его. Bulkhead — переборка, как в корабле, — разрешает банку не больше четырёх одновременных вызовов: остальные шестнадцать сразу получили отказ, а статус ответил мгновенно, потому что шесть потоков остались свободны.</p>
+      <p>Bulkhead бывает семафором, как здесь, или отдельным пулом потоков на зависимость. Первая защита всё равно таймаут: вызов без таймаута держит поток столько, сколько захочет зависимость, а с таймаутом в 1 с — не больше секунды. Таймаут выбирают по реальным задержкам зависимости (p99 плюс запас) и согласуют с таймаутом вызывающего: нет смысла ждать банк 30 секунд, если клиент сдаётся через 5. Оставшееся время передают дальше как срок, как в <a href="api-styles.html">gRPC</a>.</p>
+    </section>
+
+    <section class="step" id="retry">
+      <h2>Повторы на каждом уровне перемножаются, а без jitter приходят одной волной</h2>
+      <pre class="out">== one user request, 3 attempts at each of 3 layers: bank received 27 calls
+== 1000 clients, backoff without jitter   peak 1000 retries per 100 ms, busy 100-ms windows: 4
+== 1000 clients, backoff with full jitter peak  164 retries per 100 ms, busy 100-ms windows: 135</pre>
+      <p>Повтор лечит кратковременный сбой — потерянный пакет, перезапуск экземпляра, — но у него две ловушки. Первая — умножение: шлюз, сервис заказов и платёжный сервис повторяют по три попытки, и один запрос пользователя превращается в 3 × 3 × 3 = 27 вызовов банка именно тогда, когда банку и так плохо. Повторяют на одном уровне — обычно ближайшем к зависимости, — а остальные пробрасывают ошибку. Помогает и бюджет повторов: повторять не больше, скажем, 10 % от числа запросов.</p>
+      <p>Вторая — синхронность. Банк упал в момент 0, и тысяча клиентов повторяет через 1, 2, 4 и 8 секунд: каждая волна — тысяча запросов в одни и те же 100 мс, и банк, едва поднявшись, получает удар. Случайная доля паузы (full jitter: случайно от нуля до текущей паузы) размазывает те же повторы на 135 окон с пиком в шесть раз ниже. Повторяют только временные ошибки — таймауты, 503, обрыв соединения — и только идемпотентные операции или запросы с ключом идемпотентности; ошибки 4xx не повторяют никогда.</p>
+    </section>
+
+    <section class="step" id="circuit-breaker">
+      <h2>Circuit breaker перестаёт вызывать сломанную зависимость и проверяет её через паузу</h2>
+      <pre><code class="language-java">CircuitBreaker cb = CircuitBreaker.of("bank", CircuitBreakerConfig.custom()
+        .slidingWindowSize(10).minimumNumberOfCalls(10).failureRateThreshold(50)
+        .waitDurationInOpenState(Duration.ofSeconds(1)).permittedNumberOfCallsInHalfOpenState(3).build());</code></pre>
+      <pre class="out">== 30 calls to a failing bank: bank got 10, rejected without calling 20, took 2085 ms, state OPEN
+   bank recovered, 3 trial calls -&gt; state CLOSED; transitions [State transition from CLOSED to OPEN, State transition from OPEN to HALF_OPEN, State transition from HALF_OPEN to CLOSED]</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 216" role="img" aria-label="Состояния circuit breaker. CLOSED: вызовы идут в банк, ошибки считаются в окне. При доле ошибок выше 50 процентов — OPEN: вызовы отклоняются сразу, банк не вызывается. Через паузу — HALF_OPEN: пропускается несколько пробных вызовов. Если они успешны — снова CLOSED, если нет — OPEN.">
+            <defs><marker id="cb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="60" width="170" height="64" rx="9" class="dg-box"/>
+            <rect data-s="1" x="20" y="60" width="170" height="64" rx="9" class="dg-cell hit"/>
+            <rect data-s="4" x="20" y="60" width="170" height="64" rx="9" class="dg-cell hit"/>
+            <text x="105" y="88" class="dg-in" text-anchor="middle">CLOSED</text>
+            <text x="105" y="108" class="dg-n" text-anchor="middle">вызовы идут в банк</text>
+            <rect x="275" y="60" width="170" height="64" rx="9" class="dg-box"/>
+            <rect data-s="2" x="275" y="60" width="170" height="64" rx="9" class="dg-cell miss"/>
+            <text x="360" y="88" class="dg-in" text-anchor="middle">OPEN</text>
+            <text x="360" y="108" class="dg-n" text-anchor="middle">отказ без вызова</text>
+            <rect x="530" y="60" width="170" height="64" rx="9" class="dg-box"/>
+            <rect data-s="3" x="530" y="60" width="170" height="64" rx="9" class="dg-cell"/>
+            <text x="615" y="88" class="dg-in" text-anchor="middle">HALF_OPEN</text>
+            <text x="615" y="108" class="dg-n" text-anchor="middle">3 пробных вызова</text>
+            <path d="M190 80 L 271 80" class="dg-line bad" marker-end="url(#cb-n)"/>
+            <text x="196" y="52" class="dg-bad">ошибок ≥ 50%</text>
+            <path d="M445 80 L 526 80" class="dg-line" marker-end="url(#cb-n)"/>
+            <text x="452" y="72" class="dg-n">через 1 с</text>
+            <path d="M615 124 C 615 170, 105 170, 105 128" class="dg-line ok" marker-end="url(#cb-n)"/>
+            <text x="330" y="186" class="dg-ok">пробы успешны</text>
+            <path d="M560 60 C 520 30, 420 30, 380 56" class="dg-line bad" marker-end="url(#cb-n)"/>
+            <text x="420" y="26" class="dg-bad">проба неудачна</text>
+            <text data-s="1" x="20" y="210" class="dg-t">10 вызовов, все с ошибкой по 200 мс: окно заполнено.</text>
+            <text data-s="2" x="20" y="210" class="dg-bad">Открыт: 20 вызовов отклонены сразу, банк не нагружается.</text>
+            <text data-s="3" x="20" y="210" class="dg-t">Пауза прошла: пропускаем 3 пробных вызова.</text>
+            <text data-s="4" x="20" y="210" class="dg-ok">Банк ожил, пробы успешны: снова закрыт.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Предохранитель закрыт: вызовы идут в банк, результаты считаются в окне из 10 вызовов. Все десять упали по 200 мс каждый.</li>
+          <li>Доля ошибок 100 % больше порога 50 %: предохранитель открыт. Следующие 20 вызовов отклонены мгновенно исключением CallNotPermittedException — банк их не получил, потоки не ждали.</li>
+          <li>Через секунду предохранитель переходит в полуоткрытое состояние и пропускает три пробных вызова.</li>
+          <li>Банк ожил, пробы успешны — предохранитель снова закрыт. Если бы пробы упали, он вернулся бы в открытое состояние.</li>
+        </ol>
+      </figure>
+      <p>Тридцать вызовов заняли две секунды вместо шести: только первые десять ждали ошибку, остальные двадцать получили отказ мгновенно. Банк в это время не получал нагрузку и мог восстановиться, а вызывающий освободил потоки. Предохранитель защищает обе стороны: сервис — от ожидания безнадёжных вызовов, зависимость — от добивания. Порог считают по доле ошибок и медленных вызовов (<code>slowCallRateThreshold</code>) в скользящем окне, а минимальное число вызовов не даёт открыться на двух случайных ошибках.</p>
+    </section>
+
+    <section class="step" id="fallback">
+      <h2>Fallback решает, что ответить, а порядок обёрток решает, что считать</h2>
+      <p>Когда предохранитель открыт или bulkhead полон, нужно что-то ответить. Fallback — заранее продуманный ответ: последний известный курс валют из кеша, «платёж принят, статус придёт позже» с постановкой в очередь, отключение необязательной функции вроде рекомендаций. Для списания денег честный fallback — понятная ошибка «попробуйте позже», а не выдуманный успех. Деградация должна быть решением продукта, а не случайностью.</p>
+      <table class="mx">
+        <thead><tr><th>Слой (снаружи внутрь)</th><th>Задача</th></tr></thead>
+        <tbody>
+          <tr><td>Fallback</td><td>Ответ, когда всё внутри отказало</td></tr>
+          <tr><td>Retry</td><td>Повторить временную ошибку целиком, с backoff и jitter</td></tr>
+          <tr><td>Circuit breaker</td><td>Считать ошибки каждой попытки и отказывать сразу, если зависимость сломана</td></tr>
+          <tr><td>Timeout</td><td>Ограничить ожидание одной попытки, включая очередь bulkhead</td></tr>
+          <tr><td>Bulkhead</td><td>Ограничить одновременные вызовы зависимости</td></tr>
+        </tbody>
+      </table>
+      <p>Порядок важен. Повтор снаружи предохранителя не будет долбить открытый предохранитель вечно, а предохранитель видит результат каждой попытки; таймаут внутри предохранителя — чтобы тот считал зависания ошибками. В Resilience4j для аннотаций Spring порядок по умолчанию такой же: Retry, CircuitBreaker, RateLimiter, TimeLimiter, Bulkhead. Все параметры — таймауты, пороги, размеры — подбирают по метрикам реальных задержек и выносят в конфигурацию, а состояние предохранителей выводят в мониторинг: открытый предохранитель — сигнал инцидента у зависимости.</p>
+      <div class="trap">
+        <p class="myth">Повторы повышают надёжность, поэтому их стоит включить везде.</p>
+        <p class="fact">Повторы на нескольких уровнях перемножаются — в демо 27 вызовов банка на один запрос, — а без jitter приходят синхронными волнами по 1000 запросов. Повторяют только временные ошибки идемпотентных операций, на одном уровне, с backoff, jitter и бюджетом, а предохранитель останавливает повторы к сломанной зависимости.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Зависший банк занял общий пул: статус ждал 3,9 с; bulkhead на 4 вызова — статус мгновенно, 16 быстрых отказов.</li>
+        <li>Таймаут на каждый вызов по реальным задержкам; оставшийся срок передают дальше.</li>
+        <li>Повторы перемножаются по уровням (27 вызовов) и без jitter бьют волнами (1000 в 100 мс); с full jitter пик 164.</li>
+        <li>Circuit breaker: 10 неудач — открыт, 20 отказов без вызова, через паузу пробы, затем закрыт.</li>
+        <li>Fallback — продуктовое решение; порядок: retry снаружи, breaker, bulkhead, timeout внутри.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="res-cb" data-freq="3">
+      <h3>Как работает circuit breaker?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обёртка вокруг вызова зависимости с тремя состояниями. CLOSED — вызовы проходят, ошибки и медленные вызовы считаются в скользящем окне. Если их доля превысила порог — OPEN: вызовы отклоняются сразу, без обращения к зависимости. Через паузу — HALF_OPEN: пропускается несколько пробных вызовов; успех закрывает предохранитель, неудача снова открывает.</p>
+          <p>Он защищает сервис от ожидания безнадёжных вызовов, а зависимость — от нагрузки, пока она восстанавливается.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Минимальное число вызовов в окне не даёт открыться на случайных ошибках.</li>
+            <li>slowCallRateThreshold считает медленные вызовы отказами — важно для зависаний.</li>
+            <li>Предохранитель на весь сервис-сосед отсекает и здоровые экземпляры; иногда его ставят на экземпляр.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="res-retry" data-freq="3">
+      <h3>Как правильно настроить повторы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Повторять только временные ошибки — таймауты, 503, обрыв соединения — и только идемпотентные операции или запросы с ключом идемпотентности. Паузы растут экспоненциально и со случайным разбросом (jitter), чтобы клиенты не повторяли синхронно. Число попыток ограничено, а повторы делают на одном уровне цепочки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Повторы на нескольких уровнях перемножаются: 3 × 3 × 3 = 27.</li>
+            <li>Бюджет повторов ограничивает их долю от общего трафика.</li>
+            <li>Retry снаружи circuit breaker, чтобы открытый предохранитель останавливал повторы.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой конфигурацией?</summary>
+          <pre><code class="language-yaml">resilience4j.retry.instances.bank:
+  max-attempts: 5
+  wait-duration: 500ms          # фиксированная пауза
+  retry-exceptions: [java.lang.Exception]
+# вызов bank.charge(...) без ключа идемпотентности, HTTP-клиент без таймаута
+# gateway и checkout-service тоже повторяют по 3 раза</code></pre>
+          <p>Повторяются все исключения, включая 4xx и ошибки валидации. Списание без ключа идемпотентности при повторе после таймаута спишет дважды. Фиксированная пауза без jitter синхронизирует повторы всех клиентов. Вместе с повторами шлюза и checkout один запрос даёт до 45 вызовов банка. Нет таймаута — попытка может висеть бесконечно. Нужны: повтор только временных ошибок, ключ идемпотентности, экспоненциальная пауза с jitter, повторы на одном уровне и таймаут на попытку.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="res-bulkhead" data-freq="2">
+      <h3>Что такое bulkhead и зачем он нужен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Изоляция ресурсов по зависимостям: каждой выделяется ограниченное число одновременных вызовов — семафором или отдельным пулом потоков. Тогда зависшая зависимость занимает только свою часть, а остальные запросы обслуживаются. Без него медленный банк занимает все потоки сервиса, и падает даже то, что банк не использует.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Отдельные пулы соединений HTTP-клиента на каждого партнёра — тоже bulkhead.</li>
+            <li>С виртуальными потоками потоков не жалко, но ограничивать параллелизм к зависимости по-прежнему нужно.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Michael Nygard, «Release It!» — основа урока: каскадные отказы, таймауты, предохранители, переборки.</li>
+      <li><a href="https://resilience4j.readme.io/docs">Resilience4j documentation</a> — CircuitBreaker, Bulkhead, Retry и порядок аспектов.</li>
+      <li><a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/">AWS Builders' Library: Timeouts, retries, and backoff with jitter</a>.</li>
+      <li><a href="https://sre.google/sre-book/addressing-cascading-failures/">Google SRE Book: Addressing Cascading Failures</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
