@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Security: Authentication · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-authn">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Security: Authentication</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Фильтр входа только достаёт из запроса то, что прислал клиент: логин и пароль, API-ключ, токен. Он заворачивает это в неаутентифицированный объект Authentication и отдаёт AuthenticationManager. Менеджер находит провайдер, который умеет проверять такой тип, и получает обратно аутентифицированный Authentication с правами. Пароль при этом сравнивается с медленным солёным хешем. Результат кладётся в SecurityContext и, если есть сессия, переживает запрос.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Платёжный сервис впускает людей по паролю, а партнёров по ключу</h2>
+      <p>У платёжного сервиса два вида клиентов. Сотрудники поддержки входят в админку логином и паролем. Партнёры-магазины вызывают API с ключом <code>X-Api-Key</code>. Через полгода добавится вход по корпоративному SSO. Если каждый способ проверять прямо в своём фильтре, получатся три копии одной логики: найти пользователя, проверить секрет, выдать права, записать результат.</p>
+      <p>Spring Security разделяет эту работу. Фильтр отвечает за транспорт: где в запросе лежат данные. <b>AuthenticationManager</b> отвечает за проверку. Между ними путешествует один тип — <code>Authentication</code>. До проверки в нём лежат присланные данные, после — пользователь, его права и флаг <code>isAuthenticated() == true</code>.</p>
+      <p>Тема разбирает, что происходит внутри менеджера, как хранить пароли и как результат входа доживает до следующего запроса. Путь запроса через фильтры разобран в <a href="spring-security.html">Architecture</a>, права и роли — в <a href="spring-authz.html">Authorization</a>, токены JWT и OAuth2 — в <a href="spring-oauth2.html">OAuth2 &amp; JWT</a>.</p>
+      <p>Демо <a href="../examples/security/AuthnDemo.java">AuthnDemo.java</a> состоит из трёх частей: пароли, менеджер без веб-сервера и настоящий вход через форму. Стек: JDK 21, Spring Boot 4.1.1, Spring Security 7.1.</p>
+      <pre><code class="language-bash">cd examples/security
+./run.sh AuthnDemo</code></pre>
+    </section>
+
+    <section class="step" id="manager">
+      <h2>ProviderManager отдаёт токен первому провайдеру, который понимает его тип</h2>
+      <p>Главная реализация менеджера — <code>ProviderManager</code>. В нём список <code>AuthenticationProvider</code>. На каждый токен он спрашивает провайдеры по очереди: <code>supports(Class)</code> — умеешь проверять такой тип? Первый согласившийся вызывает <code>authenticate</code>. Если провайдер вернул результат, перебор заканчивается. Если бросил исключение, менеджер запоминает его и пробует следующий подходящий.</p>
+      <p>Поэтому новый способ входа — это новый тип токена и новый провайдер, а не правка существующих. Для партнёров достаточно своего токена и провайдера, который знает только про него:</p>
+      <pre><code class="language-java">class ApiKeyProvider implements AuthenticationProvider {
+    public Authentication authenticate(Authentication a) {
+        if (!"pk_live_42".equals(a.getCredentials())) throw new BadCredentialsException("bad key");
+        // Фабрика authenticated(...) даёт токен с isAuthenticated() == true.
+        return UsernamePasswordAuthenticationToken.authenticated("partner-42", null,
+                AuthorityUtils.createAuthorityList("ROLE_PARTNER"));
+    }
+
+    public boolean supports(Class&lt;?&gt; type) { // Остальные токены не трогаем.
+        return ApiKeyToken.class.isAssignableFrom(type);
+    }
+}
+
+var manager = new ProviderManager(daoProvider, new ApiKeyProvider()); // Порядок важен.</code></pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 282" role="img" aria-label="Два входящих токена: логин и пароль alice и API-ключ партнёра. ProviderManager отдаёт первый DaoAuthenticationProvider, который ищет пользователя через UserDetailsService и сверяет пароль через PasswordEncoder. Второй уходит в ApiKeyProvider. Оба возвращают аутентифицированный Authentication без пароля, который ложится в SecurityContext.">
+            <defs>
+              <marker id="an-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="an-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- входящие токены -->
+            <rect x="20" y="44" width="196" height="54" rx="8" class="dg-cell"/>
+            <rect x="20" y="140" width="196" height="54" rx="8" class="dg-cell"/>
+            <!-- менеджер -->
+            <rect x="262" y="88" width="146" height="60" rx="9" class="dg-box"/>
+            <!-- провайдеры -->
+            <rect x="452" y="28" width="248" height="92" rx="9" class="dg-box"/>
+            <rect x="452" y="140" width="248" height="54" rx="9" class="dg-box"/>
+            <!-- результат -->
+            <rect x="262" y="222" width="438" height="42" rx="8" class="dg-cell hit"/>
+            <path d="M216 71 C 240 71, 240 106, 258 106" class="dg-line" marker-end="url(#an-n)"/>
+            <path d="M216 167 C 240 167, 240 132, 258 132" class="dg-line" marker-end="url(#an-n)"/>
+            <path d="M408 106 C 428 106, 428 74, 448 74" class="dg-line" marker-end="url(#an-n)"/>
+            <path d="M408 130 C 428 130, 428 167, 448 167" class="dg-line" marker-end="url(#an-n)"/>
+            <path d="M335 148 L 335 218" class="dg-line ok" marker-end="url(#an-ok)"/>
+            <text x="20" y="30" class="dg-cap">ОТ ФИЛЬТРОВ</text>
+            <text x="452" y="18" class="dg-cap">PROVIDERS</text>
+            <g text-anchor="middle">
+              <text x="118" y="67" class="dg-in">UsernamePassword</text>
+              <text x="118" y="86" class="dg-n">alice : secret</text>
+              <text x="118" y="163" class="dg-in">ApiKeyToken</text>
+              <text x="118" y="182" class="dg-n">pk_live_42</text>
+              <text x="335" y="114" class="dg-in">Provider</text>
+              <text x="335" y="132" class="dg-in">Manager</text>
+            </g>
+            <text x="464" y="50" class="dg-in">DaoAuthenticationProvider</text>
+            <text x="464" y="72" class="dg-n">1. UserDetailsService: найти alice</text>
+            <text x="464" y="88" class="dg-n">2. PasswordEncoder.matches</text>
+            <text x="464" y="104" class="dg-n">3. проверить locked, disabled</text>
+            <text x="464" y="163" class="dg-in">ApiKeyProvider</text>
+            <text x="464" y="182" class="dg-n">supports: только ApiKeyToken</text>
+            <text x="350" y="78" class="dg-n">supports?</text>
+            <text x="343" y="196" class="dg-n">результат</text>
+            <text x="276" y="248" class="dg-in">isAuthenticated=true · credentials=null</text>
+          </svg>
+        </div>
+        <figcaption>Менеджер не знает, как проверять пароль или ключ: он только находит провайдер по типу токена и возвращает его результат.</figcaption>
+      </figure>
+      <p>Менеджер из демо собран вручную из двух провайдеров. Четыре попытки входа:</p>
+      <pre><code class="language-java">tryAuth(manager, UsernamePasswordAuthenticationToken.unauthenticated("alice", "secret"));
+tryAuth(manager, UsernamePasswordAuthenticationToken.unauthenticated("alice", "wrong"));
+tryAuth(manager, UsernamePasswordAuthenticationToken.unauthenticated("nobody", "secret"));
+tryAuth(manager, new ApiKeyToken("pk_live_42"));
+// tryAuth печатает имя, права и credentials результата или класс исключения.</code></pre>
+      <pre class="out">alice/secret   -> OK alice [ROLE_USER, FactorGrantedAuthority [authority=FACTOR_PASSWORD, issuedAt=2026-10-02T09:30:26.063042Z]] credentials=null
+alice/wrong    -> BadCredentialsException: Bad credentials
+nobody/secret  -> BadCredentialsException: Bad credentials
+api key        -> OK partner-42 [ROLE_PARTNER] credentials=null</pre>
+      <p>В выводе три неочевидные вещи. Первая: <code>credentials=null</code>. После успешного входа ProviderManager вызывает <code>eraseCredentials</code>, чтобы пароль не лежал в SecurityContext, сессии и логах. Вторая: несуществующий пользователь получает тот же <code>BadCredentialsException</code>, что и неверный пароль. Об этом следующий шаг.</p>
+      <p>Третья — право <code>FACTOR_PASSWORD</code> рядом с ролью. Это новинка Spring Security 7: каждый пройденный способ входа добавляет право-фактор с моментом выдачи. На нём строится многофакторная аутентификация: правило может требовать, чтобы у пользователя были и пароль, и одноразовый код, и чтобы фактор был свежим. Код, который сравнивает список прав целиком, после обновления до Security 7 может неожиданно сломаться.</p>
+      <p>У ProviderManager может быть родительский менеджер. Если ни один провайдер не согласился проверить токен, запрос уходит родителю. Так в Boot несколько цепочек делят общий набор пользователей, а у отдельной цепочки бывают свои провайдеры. Если не справился никто, получится <code>ProviderNotFoundException</code>.</p>
+    </section>
+
+    <section class="step" id="dao">
+      <h2>Ошибка входа не говорит, существует ли логин, и занимает столько же времени</h2>
+      <p>Логин и пароль проверяет <code>DaoAuthenticationProvider</code>. Сам он не знает, где лежат пользователи. Он просит <code>UserDetailsService.loadUserByUsername</code> найти запись, затем сравнивает пароль через <code>PasswordEncoder</code>, затем проверяет флаги учётной записи: заблокирована, выключена, истёк ли срок. Источник пользователей — твоя реализация UserDetailsService: таблица, LDAP, другой сервис.</p>
+      <p>Если пользователя нет, UserDetailsService бросает <code>UsernameNotFoundException</code>. Провайдер по умолчанию превращает его в <code>BadCredentialsException</code> (флаг <code>hideUserNotFoundExceptions</code>). Иначе форма входа выдавала бы по разным сообщениям, какие логины существуют, и атакующий собирал бы список клиентов перебором.</p>
+      <p>Сообщения мало: различие видно и по времени. Проверка bcrypt длится десятки миллисекунд, а «пользователя нет» без хеширования отвечала бы мгновенно. Поэтому для несуществующего пользователя провайдер всё равно сверяет пароль с заранее подготовленным фиктивным хешем. Демо замеряет обе ошибки:</p>
+      <pre><code class="language-java">// Средняя длительность пяти попыток; пароль "x" неверный в обоих случаях.
+timeMs(() -&gt; tryAuth(manager, unauthenticated("alice", "x")), 5);  // логин есть
+timeMs(() -&gt; tryAuth(manager, unauthenticated("nobody", "x")), 5); // логина нет</code></pre>
+      <pre class="out">time wrong password: 50 ms
+time unknown user:   50 ms</pre>
+      <p>Числа измерены на Apple M5 Pro; на другой машине они будут другими, но останутся равными между собой. Своя реализация входа, которая делает <code>if (user == null) return error</code> до проверки пароля, ломает обе защиты сразу.</p>
+      <div class="trap">
+        <p class="myth">Если UserDetailsService не нашёл пользователя, клиент получит UsernameNotFoundException и сообщение «пользователь не найден».</p>
+        <p class="fact">DaoAuthenticationProvider по умолчанию прячет это исключение за BadCredentialsException и тратит на ответ столько же времени, сколько на неверный пароль. Отличить «нет логина» от «неверный пароль» снаружи нельзя, и это сделано специально.</p>
+      </div>
+      <p>Блокировки после неудачных попыток Spring Security сам не ведёт. Флаг <code>isAccountNonLocked</code> он проверяет, а считать ошибки и ставить флаг — задача приложения: слушатель <code>AuthenticationFailureBadCredentialsEvent</code> увеличивает счётчик, а ограничение частоты на входе защищает от массового перебора.</p>
+    </section>
+
+    <section class="step" id="passwords">
+      <h2>Пароль хранят медленным хешем с солью и пометкой алгоритма</h2>
+      <p>База пользователей однажды утечёт: через бэкап, логи или SQL-инъекцию. Хранение должно сделать утёкшие записи бесполезными. Обычный SHA-256 для этого не подходит: видеокарта считает миллиарды таких хешей в секунду, и популярные пароли находятся за минуты. Нужна функция, которая специально медленная и с солью: bcrypt, scrypt, Argon2 или PBKDF2.</p>
+      <p>Boot по умолчанию создаёт <code>DelegatingPasswordEncoder</code>. Он кодирует новые пароли через bcrypt и ставит перед хешем префикс алгоритма. При проверке он читает префикс и отдаёт сравнение нужному кодировщику:</p>
+      <pre><code class="language-java">PasswordEncoder enc = PasswordEncoderFactories.createDelegatingPasswordEncoder();
+String h1 = enc.encode("secret"), h2 = enc.encode("secret");
+System.out.println(h1);
+System.out.println(h2); // Тот же пароль, другая соль — другой хеш.
+System.out.println("matches=" + enc.matches("secret", h1)
+        + ", noop matches=" + enc.matches("secret", "{noop}secret"));
+System.out.println("upgrade {noop}=" + enc.upgradeEncoding("{noop}secret")
+        + ", upgrade bcrypt=" + enc.upgradeEncoding(h1));</code></pre>
+      <pre class="out">{bcrypt}$2a$10$j1ceA9d.Npfx5zhK.TW5POEFk.JVXrFTcNgEciOLdCJ4T9wI4k6tW
+{bcrypt}$2a$10$qpfFQ8NNSJrmFpn3tgQVMebpbvSGBZkQpnWbEIsGc3hjqwvxtEHTC
+matches=true, noop matches=true
+upgrade {noop}=true, upgrade bcrypt=false</pre>
+      <p>Строку хеша стоит уметь читать. <code>{bcrypt}</code> — префикс делегирующего кодировщика. <code>$2a$</code> — версия bcrypt. <code>10</code> — стоимость: 2<sup>10</sup> раундов. Следующие 22 символа — соль, остальное — сам хеш. Соль хранится внутри строки, поэтому отдельная колонка для неё не нужна, а одинаковые пароли двух клиентов дают разные записи.</p>
+      <p>Префикс решает задачу миграции. Старые записи <code>{noop}</code> или <code>{sha256}</code> продолжают проверяться. <code>upgradeEncoding</code> говорит, что запись устарела. Если UserDetailsService реализует ещё и <code>UserDetailsPasswordService</code>, провайдер сам перекодирует пароль в bcrypt при ближайшем успешном входе: только в этот момент приложение знает пароль в открытом виде.</p>
+      <h3>Стоимость выбирают по времени одной проверки</h3>
+      <p>Каждая единица стоимости удваивает работу и для атакующего, и для твоего сервера. Демо меряет одну проверку пароля на трёх значениях:</p>
+      <pre class="out">bcrypt cost 10: 52 ms per check
+bcrypt cost 12: 203 ms per check
+bcrypt cost 14: 811 ms per check</pre>
+      <p>Миллисекунды меняются от запуска к запуску и от машины к машине, а соотношение остаётся: плюс два к стоимости — вчетверо дольше.</p>
+      <p>Ориентир — сотни миллисекунд на вход, на железе прода. При стоимости 14 сотня одновременных входов займёт все ядра на секунды. Поэтому для API, где клиент присылает пароль в каждом запросе через Basic, bcrypt становится узким местом: такие клиенты получают токен один раз и дальше ходят с ним.</p>
+      <div class="note warn">
+        <p>bcrypt учитывает только первые 72 байта пароля. В Spring Security 7.1 <code>encode</code> отклоняет более длинный пароль: <code>IllegalArgumentException: password cannot be more than 72 bytes</code>. А <code>matches</code> по-прежнему сравнивает только первые 72 байта: проверка демо показала <code>true</code> для пароля из 72 байт с тремя лишними символами в конце. Длину пароля ограничивай при регистрации и помни про кириллицу: один символ — два байта UTF-8, предел наступает уже на 37 символах.</p>
+      </div>
+    </section>
+
+    <section class="step" id="session">
+      <h2>После входа сессия получает новый id, и дальше пользователь живёт в ней</h2>
+      <p>Проверка пароля дорогая, поэтому браузер не присылает его на каждом запросе. После входа формой Spring Security сохраняет SecurityContext в HTTP-сессии через <code>HttpSessionSecurityContextRepository</code>, а браузер хранит только cookie <code>JSESSIONID</code>. На следующем запросе SecurityContextHolderFilter достаёт контекст из сессии по этой cookie.</p>
+      <p>В момент входа есть ловушка. Сессия часто создаётся до логина: например, для CSRF-токена формы. Если атакующий заранее подсунет жертве свой id сессии, а сервер после входа оставит этот id, атакующий окажется залогинен как жертва. Это <b>session fixation</b>. Защита — сменить id сессии в момент успешного входа.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Браузер получает страницу входа и сессию A с CSRF-токеном. Отправляет логин и пароль с cookie A. Сервер аутентифицирует alice, меняет id сессии на B и кладёт туда SecurityContext. Ответ 302 ставит cookie B. Следующий запрос с B восстанавливает alice; старый id A больше не работает.">
+            <defs>
+              <marker id="as-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="as-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">БРАУЗЕР</text>
+            <text x="452" y="22" class="dg-cap">СЕРВЕР: СЕССИИ</text>
+            <rect x="20" y="34" width="200" height="176" rx="10" class="dg-box"/>
+            <rect x="452" y="34" width="248" height="176" rx="10" class="dg-box"/>
+            <!-- сессия A -->
+            <rect data-s="1-2" x="466" y="58" width="220" height="40" rx="7" class="dg-cell"/>
+            <rect data-s="3-" x="466" y="58" width="220" height="40" rx="7" class="dg-cell miss"/>
+            <!-- сессия B -->
+            <rect data-s="3-" x="466" y="116" width="220" height="40" rx="7" class="dg-cell hit"/>
+            <!-- запросы и ответы -->
+            <path data-s="1" d="M220 80 L 448 80" class="dg-line" marker-end="url(#as-n)"/>
+            <path data-s="2" d="M220 80 L 448 80" class="dg-line" marker-end="url(#as-n)"/>
+            <path data-s="4" d="M452 136 L 224 136" class="dg-line ok" marker-end="url(#as-ok)"/>
+            <path data-s="5" d="M220 150 L 448 150" class="dg-line ok" marker-end="url(#as-ok)"/>
+            <text data-s="1" x="236" y="72" class="dg-n">GET /login</text>
+            <text data-s="2" x="236" y="72" class="dg-n">POST /login: A, alice, _csrf</text>
+            <text data-s="4" x="236" y="128" class="dg-n">302 /, Set-Cookie: B</text>
+            <text data-s="5" x="236" y="142" class="dg-n">GET /me, cookie B</text>
+            <text data-s="5" x="236" y="172" class="dg-ok">alice [ROLE_USER]</text>
+            <!-- cookie браузера -->
+            <text x="34" y="60" class="dg-n">cookie</text>
+            <text data-s="1-3" x="34" y="84" class="dg-in">JSESSIONID=A</text>
+            <text data-s="4-" x="34" y="84" class="dg-ok">JSESSIONID=B</text>
+            <!-- содержимое сессий -->
+            <text data-s="1-2" x="478" y="83" class="dg-in">A: CSRF-токен</text>
+            <text data-s="3-" x="478" y="83" class="dg-bad">A: id больше не действует</text>
+            <text data-s="2" x="478" y="128" class="dg-n">пароль верный: alice</text>
+            <text data-s="3-" x="478" y="141" class="dg-in">B: SecurityContext alice</text>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="246" class="dg-t">Сессия создана до входа, ради CSRF-токена.</text>
+            <text data-s="2" x="20" y="246" class="dg-t">Пароль проверен, пользователь известен.</text>
+            <text data-s="3" x="20" y="246" class="dg-ok">changeSessionId: данные те же, id новый.</text>
+            <text data-s="4" x="20" y="246" class="dg-ok">Браузер получил новый id.</text>
+            <text data-s="5" x="20" y="246" class="dg-ok">Пароль больше не нужен: хватает cookie.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Браузер открывает страницу входа. Серверу нужно где-то хранить CSRF-токен формы, и он создаёт сессию A. Браузер получает cookie JSESSIONID=A.</li>
+          <li>Форма уходит с логином, паролем, токеном и cookie A. UsernamePasswordAuthenticationFilter передаёт логин и пароль в AuthenticationManager, и тот подтверждает alice.</li>
+          <li>Стратегия session fixation по умолчанию вызывает changeSessionId: содержимое сессии остаётся, а id меняется на B. В сессию сохраняется SecurityContext с alice. Тот, кто знал id A, остаётся ни с чем.</li>
+          <li>Ответ 302 отправляет на главную и ставит cookie с новым id B.</li>
+          <li>Следующий запрос несёт только cookie B. SecurityContextHolderFilter достаёт контекст из сессии, и контроллер получает alice без проверки пароля.</li>
+        </ol>
+      </figure>
+      <p>Третья часть демо проходит этот путь настоящими HTTP-запросами с хранилищем cookie. Программа читает CSRF-токен со страницы входа, отправляет форму и сравнивает id сессии до и после. Идентификаторы обрезаны до восьми символов:</p>
+      <pre class="out">POST /login -> 302 Location: /
+session before login: 958B9BF0…
+session after login:  D6110E1D… (changed)
+GET /me -> alice [ROLE_USER, FactorGrantedAuthority [authority=FACTOR_PASSWORD, issuedAt=2026-10-02T09:30:27.577Z]]</pre>
+      <p>Сессия даёт удобство и ограничения. Она хранится в памяти конкретного экземпляра, поэтому при нескольких pod-ах нужен общий стор вроде Spring Session с Redis или привязка клиента к pod-у. <code>sessionManagement().maximumSessions(1)</code> ограничивает одновременные входы одного пользователя. Выход через <code>/logout</code> инвалидирует сессию и очищает контекст.</p>
+      <p>API для мобильных и партнёрских клиентов обычно работает без сессии: <code>SessionCreationPolicy.STATELESS</code>. Клиент присылает доказательство в каждом запросе. Пароль для этого слишком дорог и опасен, поэтому присылают ключ или токен, который проверяется быстро. Токены с подписью разобраны в <a href="spring-oauth2.html">OAuth2 &amp; JWT</a>.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Свой способ входа добавляют провайдером, а не обходом менеджера</h2>
+      <p>Самая частая ошибка при своём входе — фильтр, который сам проверяет ключ и сам кладёт пользователя в SecurityContextHolder. Такой код пропускает события аутентификации, стирание секретов, родительский менеджер и общую обработку ошибок. Правильная форма: фильтр извлекает данные в свой тип токена и вызывает AuthenticationManager, а проверку делает провайдер. Готовый каркас для этого — <code>AuthenticationFilter</code> с <code>AuthenticationConverter</code>.</p>
+      <p>Если свой фильтр всё-таки сохраняет контекст сам, с Spring Security 6 он обязан вызвать <code>SecurityContextRepository.saveContext</code>. Иначе вход работает ровно один запрос: на следующем пользователь снова анонимный. Раньше это делал общий фильтр автоматически, и старые примеры из интернета эту строку не содержат.</p>
+      <p>Многофакторный вход в Security 7 строится на тех же провайдерах и правах-факторах из второго шага. Пароль даёт FACTOR_PASSWORD, одноразовый код — свой фактор, а правило доступа требует нужный набор. Внешние системы входа — Keycloak, Google, корпоративный SSO — обычно подключают через OAuth2 и OpenID Connect, а не через свою реализацию UserDetailsService.</p>
+      <p>Механизм аутентификации отвечает только на вопрос «кто ты». Что этому пользователю можно — следующий шаг, его делает AuthorizationFilter и method security. Смешивать их опасно: проверка прав внутри провайдера даст отказ в 401 вместо 403 и спрячет причину.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Фильтр достаёт данные в неаутентифицированный Authentication, AuthenticationManager возвращает аутентифицированный с правами.</li>
+        <li>ProviderManager выбирает провайдер по типу токена через supports и стирает credentials после успеха.</li>
+        <li>Неизвестный логин и неверный пароль дают одинаковое BadCredentialsException за одинаковое время.</li>
+        <li>Пароли хранят bcrypt или Argon2 с солью; префикс DelegatingPasswordEncoder позволяет мигрировать без сброса паролей.</li>
+        <li>После входа формой id сессии меняется против session fixation; stateless API присылает токен в каждом запросе.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="authn-flow" data-freq="3">
+      <h3>Как устроена аутентификация в Spring Security?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Фильтр, например UsernamePasswordAuthenticationFilter или BasicAuthenticationFilter, достаёт из запроса логин и пароль и создаёт неаутентифицированный токен. Он передаёт его в AuthenticationManager. Основная реализация, ProviderManager, перебирает AuthenticationProvider и отдаёт токен тому, кто поддерживает его тип.</p>
+          <p>Для логина и пароля это DaoAuthenticationProvider: он загружает пользователя через UserDetailsService, сверяет пароль через PasswordEncoder и проверяет статус учётной записи. Результат — аутентифицированный Authentication с правами, который фильтр кладёт в SecurityContext.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Свой способ входа — свой тип токена и свой провайдер; фильтр не должен сам проверять секрет и класть пользователя в контекст.</li>
+            <li>ProviderManager стирает credentials после успеха и может делегировать родительскому менеджеру, если ни один провайдер не подошёл.</li>
+            <li>С Security 6 сохранение контекста в репозиторий явное: свой фильтр входа вызывает saveContext, иначе вход живёт один запрос.</li>
+            <li>В Security 7 успешный вход добавляет права-факторы вроде FACTOR_PASSWORD, на которых строится MFA.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="authn-passwords" data-freq="3">
+      <h3>Как правильно хранить пароли и что делает DelegatingPasswordEncoder?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Пароли хранят медленной функцией с солью: bcrypt, Argon2, scrypt или PBKDF2. Быстрый SHA-256 не подходит: на видеокарте перебор идёт миллиардами в секунду. Соль делает хеши одинаковых паролей разными, и заранее посчитанные таблицы не помогают.</p>
+          <p>DelegatingPasswordEncoder пишет перед хешем префикс алгоритма, например {bcrypt}. При проверке он выбирает кодировщик по префиксу. Это позволяет менять алгоритм постепенно: старые записи проверяются старым способом и перекодируются при следующем входе.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стоимость bcrypt подбирают так, чтобы одна проверка шла сотни миллисекунд на прод-железе; каждая единица удваивает время.</li>
+            <li>Автоматическая перекодировка работает, если UserDetailsService реализует UserDetailsPasswordService; пароль в открытом виде есть только в момент входа.</li>
+            <li>bcrypt учитывает 72 байта: encode отклоняет более длинный пароль, а matches сравнивает только начало, поэтому длину ограничивают при регистрации.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим хранением пароля?</summary>
+          <pre><code class="language-java">String hash = HexFormat.of().formatHex(
+        MessageDigest.getInstance("SHA-256").digest((login + password).getBytes()));
+userRepository.save(new UserRow(login, hash));</code></pre>
+          <p>SHA-256 быстрый: видеокарта проверяет миллиарды вариантов в секунду, и словарные пароли из утёкшей базы находятся сразу. Логин в роли соли не случайный, и одинаковые пароли у одного логина в разных системах дают одинаковый хеш. Нет префикса алгоритма, поэтому миграция потребует сброса паролей. Исправление: PasswordEncoder из Spring Security, encode при регистрации и matches при входе.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="authn-session-fixation" data-freq="2">
+      <h3>Что такое session fixation и как Spring Security от неё защищает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Атакующий заранее получает id сессии и подсовывает его жертве. Если после входа сервер оставит тот же id, атакующий с этим id окажется залогинен как жертва. Spring Security по умолчанию меняет id сессии в момент успешной аутентификации через changeSessionId: данные сессии сохраняются, старый id перестаёт работать.</p>
+          <p>Это особенно важно, потому что сессия часто создаётся до входа, например чтобы хранить CSRF-токен формы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стратегии: changeSessionId по умолчанию, newSession с копированием атрибутов, migrateSession, none.</li>
+            <li>Сессия живёт в памяти экземпляра; при нескольких pod-ах нужен Spring Session с общим стором или привязка клиента.</li>
+            <li>maximumSessions ограничивает одновременные входы и требует слушателя HttpSessionEventPublisher, чтобы узнавать об истёкших сессиях.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="authn-user-not-found" data-freq="2">
+      <h3>Почему для несуществующего пользователя приходит BadCredentialsException?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Чтобы снаружи нельзя было узнать, какие логины существуют. DaoAuthenticationProvider по умолчанию прячет UsernameNotFoundException за BadCredentialsException, и неверный пароль и неизвестный логин выглядят одинаково.</p>
+          <p>Кроме сообщения выравнивается время: для неизвестного пользователя провайдер всё равно сверяет пароль с фиктивным хешем, иначе быстрый ответ выдал бы отсутствие логина.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Своя логика «если пользователя нет — сразу ошибка» до проверки пароля ломает защиту по времени.</li>
+            <li>Счётчик неудачных попыток и блокировку ведёт приложение, например по событию AuthenticationFailureBadCredentialsEvent; Security только проверяет флаг locked.</li>
+            <li>Форма регистрации и восстановление пароля тоже не должны раскрывать существование адреса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html">Spring Security Reference: Authentication Architecture</a> — основа урока: Authentication, AuthenticationManager, ProviderManager, AuthenticationProvider.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/features/authentication/password-storage.html">Password Storage</a> — DelegatingPasswordEncoder, формат хеша, выбор стоимости и миграция.</li>
+      <li><a href="https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html">Session Management</a> — сохранение контекста, session fixation и ограничение сессий.</li>
+      <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html">OWASP Password Storage Cheat Sheet</a> — какие алгоритмы и параметры считаются безопасными.</li>
+      <li>Laurențiu Spilcă, Spring Security in Action, 2-е изд., главы 3–6 — пользователи, пароли и свои провайдеры на примерах.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

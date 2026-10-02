@@ -557,7 +557,7 @@ window.KB_TREE = [
       { id: 'security', title: 'Security', source: 'Spring Security Reference: Architecture, Authentication, Authorization, OAuth2', items: [
         { id: 'spring-security', freq: 3, status: 'draft', title: 'Architecture',
           scope: 'DelegatingFilterProxy, SecurityFilterChain, SecurityContext, путь запроса через фильтры, CSRF и CORS в Spring' },
-        { id: 'spring-authn', freq: 2, status: 'empty', title: 'Authentication',
+        { id: 'spring-authn', freq: 2, status: 'draft', title: 'Authentication',
           scope: 'AuthenticationManager, UserDetailsService, PasswordEncoder, сессии и stateless' },
         { id: 'spring-authz', freq: 2, status: 'empty', title: 'Authorization',
           scope: 'правила по URL, @PreAuthorize и method security, роли и authorities' },
