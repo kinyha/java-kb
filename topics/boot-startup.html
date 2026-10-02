@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Boot: Startup &amp; Packaging · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="boot-startup">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Boot: Startup &amp; Packaging</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>При запуске Boot сначала готовит окружение и собирает контекст, затем завершает подготовку приложения. Встроенный сервер успевает открыть порт раньше, чем закончится твой прогрев банка. При остановке происходит обратный переход: сервис перестаёт получать новый трафик и даёт начатым запросам время закончиться. Упаковка определяет, как JVM найдёт код и библиотеки, а AOT позволяет подготовить часть работы заранее. Для платёжного сервиса важно различать работающий процесс, открытый порт и готовность проводить платежи.</p>
+    </div>
+
+    <section class="step" id="early-request">
+      <h2>Открытый порт ещё не означает, что сервис готов принимать платежи</h2>
+      <p>После деплоя сервис загружает справочник банка и проверяет локальный кеш маршрутов платежей. На это уходит несколько секунд. Команда ждёт сообщения о запуске Tomcat и отправляет первые запросы. Контроллер уже работает, но нужный справочник ещё не загружен.</p>
+      <p>Встроенный Tomcat запускается во время <code>refresh</code> контекста. Пользовательские <code>ApplicationRunner</code> выполняются позже. Поэтому запрос, отправленный напрямую в открытый порт, способен пройти до <code>ApplicationReadyEvent</code>. Состояние readiness сообщает платформе о готовности; оно само по себе не ставит запрет перед каждым контроллером.</p>
+      <p>Проверим это на небольшом сервисе. Прогрев удерживается защёлкой, а отдельный поток отправляет запрос. Контроллер просто показывает, завершён ли прогрев. Никакой временной гонки с <code>sleep</code> здесь нет: запрос приходит после входа в runner, а runner продолжится только после нашего разрешения.</p>
+      <pre><code class="language-java">static final CountDownLatch runnerEntered = new CountDownLatch(1);
+static final CountDownLatch releaseRunner = new CountDownLatch(1);
+static final AtomicBoolean warmed = new AtomicBoolean();
+
+@RestController
+class PaymentController {
+    @GetMapping("/pay")
+    String pay() { return "warm=" + warmed.get(); } // Readiness не блокирует этот маршрут.
+}
+
+@Bean
+ApplicationRunner warmup() {
+    return args -&gt; {
+        runnerEntered.countDown(); // Контекст готов, сервер уже запущен.
+        releaseRunner.await(); // Изображает незаконченный прогрев банка.
+        warmed.set(true);
+    };
+}
+
+// app.run выполняется в отдельном потоке; здесь драйвер опыта.
+runnerEntered.await();
+var early = get(client, port, "/pay"); // Настоящий HTTP-запрос к Tomcat.
+System.out.println("before Ready: HTTP " + early.statusCode() + ", " + early.body());
+System.out.println("before readiness=" + availability.getReadinessState());
+releaseRunner.countDown(); // Только теперь разрешаем закончить запуск.</code></pre>
+      <pre class="out">before Ready: HTTP 200, warm=false
+before readiness=REFUSING_TRAFFIC</pre>
+      <p>Это фрагмент настоящего вывода <a href="../examples/boot/StartupDemo.java">StartupDemo.java</a>. Демо работает на JDK 21, Boot 4.1.1, Framework 7.0.9 и управляемом Boot Tomcat 11.0.24. В полном файле ожидания ограничены сроком, сервер использует случайный свободный порт, а драйвер сам закрывает контекст.</p>
+      <p>Платформа должна отправлять обычный трафик только после успешной readiness-проверки. При прямом обращении к порту эта защита обходится. Если маршрут должен сам отказывать до готовности своей зависимости, вырази это явно в приложении. Подробные probes и endpoints разобраны в <a href="actuator.html">Actuator</a>.</p>
+    </section>
+
+    <section class="step" id="run-phases">
+      <h2>SpringApplication готовит окружение до сборки контекста</h2>
+      <p><code>SpringApplication.run</code> связывает несколько этапов. Сначала определяет вид приложения и готовит Environment: аргументы, профили и Config Data. После этого создаёт подходящий контекст и передаёт ему окружение. Настройки сервера и условия конфигурации должны быть известны раньше, чем контейнер начнёт создавать инфраструктуру.</p>
+      <p>Обычное MVC-приложение использует servlet-контекст с поддержкой встроенного сервера. Для WebFlux без MVC выбирается reactive-контекст, для приложения без веб-инфраструктуры — обычный. Если MVC и WebFlux подключены вместе, по умолчанию выбирается MVC. Тип можно задать явно через <code>WebApplicationType</code>, например <code>NONE</code> для фонового приложения.</p>
+      <p>Перед загрузкой пользовательских источников выполняются <code>ApplicationContextInitializer</code>. Затем Boot загружает главную конфигурацию и начинает <code>refresh</code>. Внутри него Spring разбирает конфигурации, регистрирует бины, выполняет обработчики и создаёт singleton-объекты. Servlet-контекст Boot также получает <code>ServletWebServerFactory</code>; автоконфигурация для обычного MVC-приложения даёт фабрику Tomcat.</p>
+      <p>Фабрика создаёт сервер внутри процесса JVM. Boot связывает его с контекстом и регистрирует servlet-инфраструктуру, включая <code>DispatcherServlet</code>. Создание объекта сервера и начало приёма соединений — разные моменты. Порт открывается при запуске серверного жизненного цикла до завершения <code>refresh</code>. Это и делает ранний запрос из первого шага возможным.</p>
+      <table class="mx">
+        <thead><tr><th>Событие или этап</th><th>Что уже произошло</th><th>Чего ещё нет</th></tr></thead>
+        <tbody>
+          <tr><td><code>ApplicationStartingEvent</code></td><td>Начался run, доступны заранее зарегистрированные слушатели</td><td>Окружение и контекст ещё не подготовлены</td></tr>
+          <tr><td><code>ApplicationEnvironmentPreparedEvent</code></td><td>Подготовлено окружение</td><td>Контекст ещё не создан</td></tr>
+          <tr><td><code>ApplicationContextInitializedEvent</code></td><td>Контекст создан, initializers выполнены</td><td>Пользовательские источники бинов ещё не загружены</td></tr>
+          <tr><td><code>ApplicationPreparedEvent</code></td><td>Главные источники загружены</td><td>refresh ещё не начался; полный разбор конфигураций впереди</td></tr>
+          <tr><td><code>WebServerInitializedEvent</code>, <code>ContextRefreshedEvent</code></td><td>Сервер запущен, refresh завершается</td><td>Runners ещё не выполнены</td></tr>
+          <tr><td><code>ApplicationStartedEvent</code></td><td>refresh завершён</td><td>После события обновится liveness, затем начнутся runners</td></tr>
+          <tr><td><code>ApplicationReadyEvent</code></td><td>Все runners завершились</td><td>Сразу после события readiness перейдёт в ACCEPTING_TRAFFIC</td></tr>
+          <tr><td><code>ApplicationFailedEvent</code></td><td>Запуск сорвался на одном из этапов</td><td>Успешная готовность не объявляется</td></tr>
+        </tbody>
+      </table>
+      <p>Ранние события нельзя надёжно ловить обычным слушателем-бином: он ещё не создан. Для них слушателя добавляют через <code>SpringApplication.addListeners</code> до вызова run. Тяжёлую подготовку также не стоит прятать в синхронном слушателе события: он задерживает поток публикации. Для подготовки после сборки контекста есть runners.</p>
+      <p>Если startup падает, Boot публикует событие ошибки и закрывает уже созданный контекст. <code>FailureAnalyzer</code> превращает известные ошибки, например занятый порт, в понятное объяснение. При неизвестной причине смотри исходное исключение и этап: сбой чтения настроек, создания бина и пользовательского прогрева требуют разных исправлений.</p>
+    </section>
+
+    <section class="step" id="runners">
+      <h2>Runners завершают подготовку после запуска сервера</h2>
+      <p><code>ApplicationRunner</code> и <code>CommandLineRunner</code> — бины, которые Boot вызывает после успешного refresh и перед объявлением готовности. Первый получает разобранные <code>ApplicationArguments</code>, второй — исходный массив строк. Оба подходят для подготовки, которой уже нужны готовые зависимости контейнера.</p>
+      <p>Если runners несколько, Boot объединяет их в упорядоченный набор. Порядок задают через <code>@Order</code> или <code>Ordered</code>. Когда подготовка банка закончена, следом может прогреться зависящий от неё кеш. <code>@Order</code> здесь определяет порядок вызова runners; это не универсальный способ упорядочить создание всех бинов.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 328" role="img" aria-label="Дорожки времени показывают refresh, работающий Tomcat, ранний HTTP-запрос и runner. Порт открывается до прогрева. Ранний запрос получает 200 warm=false, хотя readiness отказывает в трафике. Только после runner появляется Ready и готовность принимать трафик.">
+            <defs>
+              <marker id="st-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- Горизонтальное положение означает время; разные дорожки могут работать одновременно. -->
+            <path d="M146 57 L700 57" class="dg-sep"/>
+            <path d="M146 125 L700 125" class="dg-sep"/>
+            <path d="M146 201 L700 201" class="dg-sep"/>
+            <path d="M146 257 L700 257" class="dg-sep"/>
+            <rect x="150" y="40" width="170" height="34" rx="6" class="dg-cell"/>
+            <rect data-s="2-" x="330" y="108" width="370" height="34" rx="6" class="dg-cell hit"/>
+            <rect data-s="3-" x="360" y="240" width="240" height="34" rx="6" class="dg-cell"/>
+            <rect data-s="5" x="360" y="240" width="240" height="34" rx="6" class="dg-cell hit"/>
+            <rect data-s="4-" x="438" y="184" width="148" height="34" rx="6" class="dg-cell"/>
+            <path data-s="4-" d="M470 180 L470 146" class="dg-line" marker-end="url(#st-n)"/>
+            <path data-s="4-" d="M486 146 L486 180" class="dg-line" marker-end="url(#st-n)"/>
+            <path data-s="5" d="M620 92 L620 279" class="dg-line ok"/>
+            <text x="20" y="62" class="dg-t">контекст</text>
+            <text x="20" y="130" class="dg-t">Tomcat</text>
+            <text x="20" y="206" class="dg-t">запрос</text>
+            <text x="20" y="262" class="dg-t">runner</text>
+            <g text-anchor="middle">
+              <text x="235" y="62" class="dg-in">refresh()</text>
+              <text data-s="2-" x="515" y="130" class="dg-in">порт открыт, контроллер доступен</text>
+              <text data-s="3-4" x="480" y="262" class="dg-in">прогрев удерживается</text>
+              <text data-s="5" x="480" y="262" class="dg-in">прогрев завершён</text>
+              <text data-s="4-" x="512" y="206" class="dg-in">200: warm=false</text>
+            </g>
+            <text data-s="4-" x="399" y="165" class="dg-n">GET /pay</text>
+            <text data-s="5" x="628" y="90" class="dg-ok">Ready</text>
+            <text data-s="1" x="20" y="310" class="dg-t">Сервисы создаются. Порт пока закрыт.</text>
+            <text data-s="2" x="20" y="310" class="dg-t">Порт открыт. Пользовательская подготовка ещё впереди.</text>
+            <text data-s="3" x="20" y="310" class="dg-t">Started уже был. Readiness: REFUSING_TRAFFIC.</text>
+            <text data-s="4" x="20" y="310" class="dg-t">Прямой запрос вернул 200 до завершения прогрева.</text>
+            <text data-s="5" x="20" y="310" class="dg-ok">После runner: Ready, затем ACCEPTING_TRAFFIC.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Spring собирает контекст. Прогрев, которому нужны готовые зависимости, ещё не начался.</li>
+          <li>Tomcat открывает порт в ходе завершения refresh. Контроллер уже способен ответить прямому клиенту.</li>
+          <li>После refresh Boot публикует Started, объявляет liveness CORRECT и вызывает runner. Прогрев удерживается, readiness остаётся REFUSING_TRAFFIC.</li>
+          <li>Драйвер отправляет прямой GET /pay и получает 200 с warm=false. Readiness сообщает о неготовности, но сетевой маршрут сам по себе открыт.</li>
+          <li>Драйвер отпускает runner. Прогрев заканчивается; Boot публикует Ready и затем меняет readiness на ACCEPTING_TRAFFIC. Ранний ответ остаётся на дорожке как уже случившееся событие.</li>
+        </ol>
+      </figure>
+      <pre><code class="language-bash">cd examples/boot
+./run.sh StartupDemo # Драйвер сам отправляет два запроса и останавливает сервис.</code></pre>
+      <pre class="out">loader=jdk.internal.loader.ClassLoaders$AppClassLoader
+server initialized
+Started
+runner entered
+before Ready: HTTP 200, warm=false
+before readiness=REFUSING_TRAFFIC
+runner finished
+Ready
+after Ready: HTTP 200, warm=true
+after readiness=ACCEPTING_TRAFFIC</pre>
+      <p><code>SpringApplication.run</code> возвращает контекст после успешной подготовки и объявления готовности. Обычно завершение <code>main</code> не завершает веб-приложение: серверные потоки продолжают работать. В нашем опыте контекст запускается в отдельном потоке, чтобы проверить состояние во время runner; драйвер потом закрывает его явно.</p>
+      <p>Если runner выбрасывает исключение, Boot считает запуск неуспешным. Ready не публикуется, контекст закрывается. В полном демо есть режим, в котором после отпускания защёлки прогрев банка выбрасывает <code>IllegalStateException</code>. Последняя строка вывода этого режима:</p>
+      <pre><code class="language-bash">./run.sh StartupDemo --fail-warmup # Runner падает после раннего запроса.</code></pre>
+      <pre class="out">startup failed, Ready=false</pre>
+      <p>Учебный драйвер перехватывает ожидаемый сбой и завершает опыт с кодом 0. Сам сервис успешный запуск не завершил.</p>
+      <div class="trap">
+        <p class="myth">Можно запустить прогрев через CompletableFuture внутри runner и сразу вернуть управление: Boot дождётся работы.</p>
+        <p class="fact">Boot ждёт завершения метода runner. Фоновая работа, которую тот только отправил в пул, в это ожидание не входит. Runner должен дождаться обязательной подготовки и передать ошибку наружу. Иначе готовность будет объявлена раньше нужного состояния.</p>
+      </div>
+      <p>Длинная подготовка требует собственного срока и понятного поведения при недоступном банке. Можно сорвать запуск, если без справочника сервис бесполезен. Можно запустить приложение в ограниченном режиме и управлять readiness отдельно. Не превращай внешний сбой банка в причину бесконечно перезапускать здоровый процесс.</p>
+    </section>
+
+    <section class="step" id="executable-jar">
+      <h2>Исполняемый jar запускает приложение через загрузчик Boot</h2>
+      <p>Обычный jar с классами сервиса ещё не содержит весь путь запуска. JVM должна найти Spring, Tomcat и остальные зависимости. При запуске из IDE это делает подготовленный classpath. Для доставки одним файлом Maven-плагин Boot выполняет <code>repackage</code>: складывает код приложения и jar-зависимости в архив и добавляет загрузчик.</p>
+      <p>В таком архиве JVM сначала вызывает загрузчик Boot. Он создаёт загрузчик классов для вложенных библиотек, находит главный класс приложения и вызывает его <code>main</code>. Поэтому в манифесте два имени: <code>Main-Class</code> — вход для JVM, <code>Start-Class</code> — вход для приложения. Вот строки из собранного демо:</p>
+      <pre class="out">Main-Class: org.springframework.boot.loader.launch.JarLauncher
+Start-Class: kb.boot.StartupDemo</pre>
+      <p>Начиная с Boot 3.2 <code>JarLauncher</code> находится в пакете <code>org.springframework.boot.loader.launch</code>. Имя <code>org.springframework.boot.loader.JarLauncher</code> относится к прежнему загрузчику. При переносе старого Dockerfile, где загрузчик вызван вручную, это различие становится причиной ошибки запуска.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 334" role="img" aria-label="В корне исполняемого jar лежит загрузчик JarLauncher, внутри BOOT-INF/classes — код приложения, внутри BOOT-INF/lib — отдельные jar библиотек. Системный загрузчик JVM видит JarLauncher. Тот создаёт LaunchedClassLoader, который читает обе вложенные области и запускает Start-Class.">
+            <defs>
+              <marker id="jar-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- Вложенность — физическое расположение в архиве; стрелки — загрузка и создание. -->
+            <rect x="20" y="16" width="402" height="278" rx="10" class="dg-sep" fill="none"/>
+            <rect x="36" y="50" width="370" height="44" rx="7" class="dg-box"/>
+            <rect x="36" y="124" width="370" height="68" rx="7" class="dg-cell hit"/>
+            <rect x="36" y="212" width="370" height="62" rx="7" class="dg-cell"/>
+            <rect x="478" y="50" width="222" height="44" rx="7" class="dg-box"/>
+            <rect x="478" y="146" width="222" height="80" rx="7" class="dg-cell hit"/>
+            <path d="M478 64 L410 64" class="dg-line" marker-end="url(#jar-n)"/>
+            <path d="M406 84 L448 84 L448 164 L474 164" class="dg-line" marker-end="url(#jar-n)"/>
+            <path d="M478 187 L438 187 L438 158 L410 158" class="dg-line" marker-end="url(#jar-n)"/>
+            <path d="M478 211 L458 211 L458 243 L410 243" class="dg-line" marker-end="url(#jar-n)"/>
+            <text x="36" y="37" class="dg-cap">STARTUP-DEMO-1.0.JAR</text>
+            <text x="428" y="51" class="dg-n">1</text>
+            <text x="454" y="128" class="dg-n">2</text>
+            <text x="428" y="146" class="dg-n">3</text>
+            <g text-anchor="middle">
+              <text x="221" y="77" class="dg-in">JarLauncher в корне архива</text>
+              <text x="221" y="147" class="dg-in">BOOT-INF/classes/</text>
+              <text x="221" y="175" class="dg-in">kb/boot/StartupDemo.class</text>
+              <text x="221" y="237" class="dg-in">BOOT-INF/lib/</text>
+              <text x="221" y="260" class="dg-n">spring-*.jar, tomcat-*.jar, …</text>
+              <text x="589" y="77" class="dg-in">системный загрузчик JVM</text>
+              <text x="589" y="177" class="dg-in">LaunchedClassLoader</text>
+              <text x="589" y="204" class="dg-in">загрузчик приложения</text>
+            </g>
+            <text x="20" y="320" class="dg-t">1: загрузить launcher → 2: создать загрузчик → 3: найти Start-Class и библиотеки.</text>
+          </svg>
+        </div>
+        <figcaption>Почему JVM видит загрузчик в корне, а платёжный код — через BOOT-INF? Обычный classpath JVM не раскрывает вложенные jar. Загрузчик Boot соединяет обе области с приложением.</figcaption>
+      </figure>
+      <p>Это <b>вложенные jar</b>, а не объединение всех файлов библиотек в один плоский архив. Библиотеки сохраняют границы; классы приложения лежат отдельно. <code>BOOT-INF/classpath.idx</code> может задавать порядок вложенных библиотек. <code>BOOT-INF/layers.idx</code> описывает слои для извлечения при сборке образа: стабильные зависимости отдельно от часто меняющегося кода. Слои помогают кешу Docker и не создают отдельные контейнеры Spring.</p>
+      <p>В <a href="../examples/boot/packaging/pom.xml">packaging/pom.xml</a> используется родитель Boot 4.1.1, который связывает repackage с упаковкой, и плагин с явным главным классом. Фрагмент конфигурации:</p>
+      <pre><code class="language-xml">&lt;plugin&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-maven-plugin&lt;/artifactId&gt;
+  &lt;configuration&gt;
+    &lt;mainClass&gt;kb.boot.StartupDemo&lt;/mainClass&gt; &lt;!-- Попадёт в Start-Class. --&gt;
+  &lt;/configuration&gt;
+&lt;/plugin&gt;</code></pre>
+      <pre><code class="language-bash">cd examples/boot/packaging
+mvn -q package # Собирает StartupDemo и упаковывает вместе с зависимостями.
+java -jar target/startup-demo-1.0.jar # Тот же опыт, теперь из одного архива.</code></pre>
+      <pre class="out">loader=org.springframework.boot.loader.launch.LaunchedClassLoader</pre>
+      <p>Показана первая строка запуска. Остальные строки опыта совпадают с запуском через classpath из шага 3. Проверены и содержимое архива, и настоящий запуск: сервер отвечает внутри JVM, библиотеки доступны из <code>BOOT-INF/lib</code>.</p>
+      <details class="deep">
+        <summary>Почему код из IDE работает, а из jar не находит ресурс</summary>
+        <p>В исполняемом jar системный загрузчик видит загрузчик Boot, а ресурсы приложения доступны загрузчику приложения. Библиотеки часто ищут их через <code>Thread.currentThread().getContextClassLoader()</code>. Поток с неверным context class loader способен потерять ресурсы, хотя класс вызывающего кода уже загружен.</p>
+        <p>В демо запуск вынесен в отдельный поток. Перед его стартом явно задан загрузчик <code>StartupDemo.class.getClassLoader()</code>. Это важно при исполнении из jar: рабочий поток общего <code>ForkJoinPool</code> использует системный загрузчик и не подходит для такого запуска без настройки. Для библиотечного кода предпочитай штатный поиск ресурсов через загрузчик нужного класса или корректный загрузчик потока.</p>
+      </details>
+      <p>Boot также умеет упаковать WAR для внешнего servlet-контейнера. Тогда сервером управляет среда размещения, а приложение подключает контекст через <code>SpringBootServletInitializer</code>. Исполняемый jar нужен там, где сервис доставляет и запускает свой сервер сам.</p>
+    </section>
+
+    <section class="step" id="shutdown">
+      <h2>Graceful shutdown даёт начатому платежу закончиться в пределах срока</h2>
+      <p>Платёж уже ушёл в банк, когда платформа присылает процессу SIGTERM. Мгновенная остановка оборвёт ожидание клиента. При штатном завершении JVM вызывает зарегистрированный Boot shutdown hook, который закрывает контекст. Сервер прекращает принимать новые запросы и даёт уже начатым время завершиться. В учебном драйвере hook выключен: мы вызываем <code>context.close()</code> сами и видим тот же путь закрытия контекста.</p>
+      <p>С Boot 3.4 <code>server.shutdown=graceful</code> включён по умолчанию. Стандартный срок <code>spring.lifecycle.timeout-per-shutdown-phase</code> — 30 секунд. Демо задаёт пять секунд явно, чтобы результат не зависел от внешней конфигурации.</p>
+      <pre><code class="language-properties">server.shutdown=graceful
+spring.lifecycle.timeout-per-shutdown-phase=5s
+# Это предел ожидания каждой фазы закрытия, а не всего процесса.</code></pre>
+      <p>В <a href="../examples/boot/ShutdownDemo.java">ShutdownDemo.java</a> контроллер удерживает начатый запрос, пока драйвер не разрешит ответ банка. Закрытие запускается параллельно. Вот существенный фрагмент; в полном файле каждый срок ожидания ограничен:</p>
+      <pre><code class="language-java">@GetMapping("/pay")
+String pay() throws Exception {
+    paymentEntered.countDown(); // Запрос уже выполняется внутри контроллера.
+    releaseBank.await(); // Банк пока не ответил.
+    paymentFinished.set(true);
+    return "paid";
+}
+
+// Драйвер дождался входа запроса в контроллер.
+var closing = CompletableFuture.runAsync(context::close);
+try {
+    closing.get(100, TimeUnit.MILLISECONDS); // Закрытие пока не должно закончиться.
+    throw new IllegalStateException("close returned while payment blocked");
+} catch (TimeoutException expected) {
+    System.out.println("close waits for payment=true");
+}
+releaseBank.countDown(); // Разрешаем ответ в пределах пятисекундной фазы.</code></pre>
+      <pre><code class="language-bash">cd examples/boot
+./run.sh ShutdownDemo # Запрос начался до close и успевает закончиться.</code></pre>
+      <pre class="out">payment entered
+readiness=REFUSING_TRAFFIC
+close waits for payment=true
+payment: HTTP 200, paid
+context closed, paymentFinished=true</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 330" role="img" aria-label="Начатый запрос клиента находится в платёжном сервисе и ждёт банк. При close readiness отказывает в трафике и новые соединения прекращаются, но начатый запрос остаётся. Банк отвечает в срок, клиент получает 200, затем контекст закрывается.">
+            <defs>
+              <marker id="stop-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="stop-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="48" width="170" height="50" rx="8" class="dg-box"/>
+            <rect x="250" y="24" width="230" height="248" rx="10" class="dg-sep" fill="none"/>
+            <rect x="268" y="60" width="194" height="78" rx="8" class="dg-cell"/>
+            <rect data-s="3" x="268" y="60" width="194" height="78" rx="8" class="dg-cell hit"/>
+            <rect data-s="4" x="268" y="60" width="194" height="78" rx="8" class="dg-cell"/>
+            <rect x="550" y="48" width="150" height="50" rx="8" class="dg-box"/>
+            <rect data-s="2-4" x="20" y="210" width="170" height="50" rx="8" class="dg-box"/>
+            <path data-s="1-2" d="M190 73 L264 73" class="dg-line" marker-end="url(#stop-n)"/>
+            <path data-s="1-2" d="M462 73 L546 73" class="dg-line" marker-end="url(#stop-n)"/>
+            <path data-s="2-4" d="M190 235 L238 235" class="dg-line"/>
+            <path data-s="2-4" d="M231 226 L247 244 M247 226 L231 244" class="dg-line bad"/>
+            <path data-s="3" d="M550 88 L514 88 L514 168 L366 168 L366 142" class="dg-line ok" marker-end="url(#stop-ok)"/>
+            <path data-s="3" d="M268 119 L220 119 L220 160 L105 160 L105 102" class="dg-line ok" marker-end="url(#stop-ok)"/>
+            <g text-anchor="middle">
+              <text x="105" y="79" class="dg-in">первый клиент</text>
+              <text x="365" y="48" class="dg-cap">ПЛАТЁЖНЫЙ СЕРВИС</text>
+              <text data-s="1-2" x="365" y="91" class="dg-in">запрос выполняется</text>
+              <text data-s="1-2" x="365" y="118" class="dg-n">ждёт банк</text>
+              <text data-s="3" x="365" y="101" class="dg-ok">paid, HTTP 200</text>
+              <text data-s="4" x="365" y="101" class="dg-n">контекст закрыт</text>
+              <text x="625" y="79" class="dg-in">банк</text>
+              <text data-s="2-4" x="105" y="241" class="dg-in">новый клиент</text>
+              <text data-s="1" x="365" y="225" class="dg-n">readiness: готов</text>
+              <text data-s="2-4" x="365" y="213" class="dg-n">readiness: отказ</text>
+              <text data-s="2-3" x="365" y="247" class="dg-in">ждём в пределах фазы</text>
+              <text data-s="4" x="365" y="247" class="dg-n">ожидание закончено</text>
+            </g>
+            <text data-s="1-2" x="202" y="60" class="dg-n">/pay</text>
+            <text data-s="1-2" x="487" y="60" class="dg-n">платёж</text>
+            <text data-s="3" x="525" y="151" class="dg-ok">ответ</text>
+            <text data-s="3" x="35" y="184" class="dg-ok">200 по прежнему соединению</text>
+            <text data-s="1" x="20" y="310" class="dg-t">Платёж начался до остановки. Запрос уже у сервера.</text>
+            <text data-s="2" x="20" y="310" class="dg-t">close: новый трафик прекращается, старый запрос остаётся.</text>
+            <text data-s="3" x="20" y="310" class="dg-ok">Банк ответил в срок. Первый клиент получил результат.</text>
+            <text data-s="4" x="20" y="310" class="dg-t">Запрос завершён. Контекст освобождает ресурсы.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Сервис работает. Первый запрос вошёл в контроллер и ждёт ответ банка; это уже выполняющийся запрос.</li>
+          <li>Началось закрытие. Readiness сообщает об отказе, Tomcat прекращает приём нового трафика. Начатый запрос продолжает ждать внутри фазы graceful shutdown.</li>
+          <li>Драйвер разрешает ответ банка до истечения срока. Контроллер возвращает paid, первый клиент получает 200 по существовавшему соединению.</li>
+          <li>Ожидавший close продолжает закрытие и освобождает ресурсы контекста. Успешное ожидание запроса завершено.</li>
+        </ol>
+      </figure>
+      <p>Теперь сократим срок фазы до 200 миллисекунд и оставим банк ждать. Драйвер отпустит защёлку только после закрытия контекста. Это второй режим того же файла:</p>
+      <pre><code class="language-bash">./run.sh ShutdownDemo expire # Банк не успевает до предела фазы.</code></pre>
+      <pre class="out">payment entered
+readiness=REFUSING_TRAFFIC
+context closed, paymentFinished=false</pre>
+      <p>Graceful означает ограниченное ожидание. По достижении срока контекст продолжает закрытие, хотя наш платёж ещё не закончен. Срок задаётся <b>на фазу</b> жизненного цикла, поэтому несколько фаз и последующее уничтожение бинов могут занять больше времени. <code>SmartLifecycle</code> позволяет компонентам остановить приём работы и сообщить о завершении; компоненты с более высокой фазой останавливаются раньше. После остановки жизненного цикла контейнер уничтожает singleton-бины и вызывает их методы освобождения ресурсов.</p>
+      <p>Поведение нового клиента зависит от сервера и соединения. Tomcat прекращает приём на сетевом уровне; обещать каждому новому запросу HTTP 503 нельзя. Существующее постоянное соединение тоже требует учёта правил конкретного сервера. Важен результат для маршрутизации: новые платежи должны уходить на работающие экземпляры.</p>
+      <p>В проде согласуй срок удаления экземпляра из маршрутизации, время ожидания банка, сроки фаз Spring и предел между SIGTERM и принудительным SIGKILL у платформы. <code>kill -9</code> обходит shutdown hook. Собственные очереди и фоновые задания требуют своего завершения: ожидание HTTP-запросов не учитывает работу, которую контроллер отправил в отдельный пул и уже покинул.</p>
+      <div class="note warn">
+        <p>Даже правильная остановка не доказывает, что клиент узнал результат платежа. Банк может списать деньги, а соединение оборвётся до ответа. Идемпотентный ключ, сохранённое состояние операции и сверка результата защищают повтор; увеличение graceful-срока решает лишь часть проблемы.</p>
+      </div>
+    </section>
+
+    <section class="step" id="aot-native">
+      <h2>AOT переносит подготовку структуры приложения в сборку</h2>
+      <p>Когда важны быстрый старт и память большого числа экземпляров, часть подготовки можно выполнить до запуска. Spring AOT анализирует конфигурацию приложения при сборке и генерирует код создания и регистрации бинов, а также подсказки для рефлексии, ресурсов и прокси. При запуске приложение использует подготовленный путь вместо повторного полного исследования структуры.</p>
+      <p>Этот путь полезен и на JVM: подготовленное приложение запускают с <code>-Dspring.aot.enabled=true</code>. GraalVM Native Image идёт дальше: собирает платформенный исполняемый файл из достижимого кода. Для него особенно важны сведения о действиях, которые статический анализ не видит: имени класса из строки, рефлексивном конструкторе, ресурсе по динамическому пути.</p>
+      <p>Например, платёжный адаптер читает шаблон из classpath по имени банка. В обычном запуске ресурс лежит в jar. Для native нужно обеспечить включение этого ресурса в образ. Если библиотека не предоставляет подходящие hints, их добавляют через <code>RuntimeHintsRegistrar</code> и подключают через <code>@ImportRuntimeHints</code>. Проверять нужно настоящий путь работы, включая редкий обработчик ошибки, а не только успешный старт.</p>
+      <p>После AOT набор бинов зафиксирован. Профиль или условие, меняющее состав контекста, должно быть учтено при подготовке. Переключить такой состав произвольным аргументом запуска уже не получится. Адрес банка и срок ожидания могут оставаться настройками времени запуска, если они меняют значения внутри готовой структуры, а не выбор бинов.</p>
+      <h3>CDS и кеш JDK ускоряют старт без native image</h3>
+      <p>У JVM есть отдельная возможность сохранить результат подготовки классов. На JDK 21 доступен CDS; на JDK 25 и новее Boot документирует AOT cache JDK из проекта Leyden. Эти механизмы работают с подготовкой JVM и не заменяют Spring AOT. Boot предлагает обучающий запуск извлечённого приложения с <code>-Dspring.context.exit=onRefresh</code>: контекст завершает refresh и закрывается, runners не выполняются.</p>
+      <pre><code class="language-bash"># Схема из Boot Reference для CDS на JDK 21; имя jar подставь своё.
+java -Djarmode=tools -jar payment.jar extract --destination application
+cd application # Извлечение даёт подходящую для кеша форму classpath.
+java -XX:ArchiveClassesAtExit=payment.jsa -Dspring.context.exit=onRefresh -jar payment.jar
+java -XX:SharedArchiveFile=payment.jsa -jar payment.jar # Рабочий запуск с архивом классов.</code></pre>
+      <p>Для JDK 25+ соответствующая пара — обучающий запуск с <code>-XX:AOTCacheOutput=payment.aot</code> и рабочий с <code>-XX:AOTCache=payment.aot</code>. Кеш готовят для нужной сборки приложения и JDK. После изменения их состава его пересоздают. Это документированные команды, а не измерение ускорения нашего демо; CDS, AOT cache и native-сборка здесь не запускались.</p>
+      <p>Стоимость переносится в сборку и обучение: нужны подходящее окружение, воспроизводимые настройки и проверки ресурсных путей. Конструктор бина, который сразу проводит внешний платёж, опасен и при обычном старте, и при подготовке приложения. Внешние действия должны иметь явно выбранный этап и условия выполнения.</p>
+      <p>Выбор делают по измерениям: длительность старта, память, размер поставки, время сборки и скорость типичной нагрузки. Ленивое создание бинов сокращает видимую работу при старте, но переносит задержку и часть ошибок на первый запрос. Для платёжного сервиса это может ухудшить именно тот момент, ради которого ускоряли запуск.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Environment готовится до refresh. Встроенный сервер открывает порт во время сборки контекста, runners завершаются позже.</li>
+        <li>Ready следует за runners. Readiness помогает маршрутизации; прямой запрос способен получить HTTP 200 ещё до готовности.</li>
+        <li>В исполняемом jar Main-Class запускает загрузчик Boot, Start-Class — приложение. Код и вложенные библиотеки находятся в BOOT-INF.</li>
+        <li>Graceful shutdown ждёт начатые запросы в пределах срока фазы. Сохранение результата платежа и безопасный повтор требуют отдельного механизма.</li>
+        <li>Spring AOT фиксирует структуру приложения при сборке. Native image и кеши JVM дают разные способы перенести подготовку до рабочего запуска.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="startup-run" data-freq="3">
+      <h3>Что происходит внутри SpringApplication.run?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала Boot готовит окружение: аргументы, профили и файлы настроек. Затем создаёт подходящий контекст, применяет initializers, загружает главную конфигурацию и выполняет refresh. Во время refresh Spring собирает бины, а веб-контекст создаёт и запускает встроенный сервер.</p>
+          <p>После refresh Boot публикует Started, вызывает runners и объявляет Ready. Только после успешной подготовки run возвращает контекст. Если один из этапов падает, запуск считается неуспешным, уже созданный контекст закрывается.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>ApplicationPreparedEvent ещё не означает, что все конфигурации разобраны: полный разбор и обработка бинов происходят внутри refresh.</li>
+            <li>Ранние события ловлю слушателем, добавленным к SpringApplication до run. Слушатель-бин на этом этапе может ещё не существовать.</li>
+            <li>Если одновременно подключены MVC и WebFlux, по умолчанию Boot выбирает MVC. Для фонового запуска могу явно задать WebApplicationType.NONE.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="startup-ready" data-freq="3">
+      <h3>Порт открыт. Значит ли это, что приложение уже готово? Где делать прогрев?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Открытый порт говорит о работающем сервере. Подготовка сервиса ещё может идти: ApplicationRunner и CommandLineRunner выполняются после refresh, но перед Ready. В демо прямой запрос получил HTTP 200 с warm=false, пока runner ждал справочник банка.</p>
+          <p>Обязательный прогрев, которому нужны готовые бины, делаю в runner и дожидаюсь результата. ApplicationRunner даёт разобранные аргументы, CommandLineRunner — исходные строки. Платформе передаю readiness, чтобы она направляла обычный трафик только после готовности.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Boot ждёт возврата из runner. Отправка работы в пул без ожидания позволяет объявить Ready раньше завершения подготовки; ошибка фоновой работы тоже уже не срывает этот startup.</li>
+            <li>Runners разных типов упорядочиваются вместе через Ordered или Order. Этот порядок относится к их вызову и не задаёт порядок создания всех бинов.</li>
+            <li>Readiness становится ACCEPTING_TRAFFIC сразу после ApplicationReadyEvent. Синхронный слушатель самого Ready ещё может видеть прежнее состояние.</li>
+            <li>При недоступном банке выбираю осмысленную политику готовности. Перезапуск здоровой JVM не восстановит внешнюю зависимость; срок подготовки и ограниченный режим задаю отдельно.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Runner запустил прогрев в CompletableFuture и вернул управление. Нужно остановить поступление платежей до конца прогрева. Что поменяешь?</summary>
+          <p>Если подготовка обязательна для успешного старта, runner должен дождаться её с ограниченным сроком и передать ошибку наружу. Если сервис запускается в ограниченном режиме, готовность управляется отдельно до завершения прогрева. Сам факт существования future Boot не удерживает. Прямой платёжный маршрут при необходимости также проверяет своё состояние готовности.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="startup-jar" data-freq="2">
+      <h3>Как работает исполняемый jar Spring Boot и зачем ему JarLauncher?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Плагин Boot упаковывает приложение в BOOT-INF/classes, зависимости — отдельными jar в BOOT-INF/lib, а в корень кладёт загрузчик. JVM вызывает Main-Class из манифеста, то есть JarLauncher. Он создаёт загрузчик для вложенных областей и вызывает main класса из Start-Class.</p>
+          <p>Поэтому файл запускается через java -jar без отдельно собранного classpath. Это упаковка вместе с зависимостями, при которой библиотеки сохраняются отдельными архивами. Встроенный Tomcat остаётся библиотекой внутри процесса приложения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С Boot 3.2 полный путь загрузчика — org.springframework.boot.loader.launch.JarLauncher. Проверяю явные команды запуска в старых Dockerfile при обновлении Boot.</li>
+            <li>Системный загрузчик не раскрывает BOOT-INF/lib. Если библиотека ищет ресурс через context class loader потока, неверный загрузчик может объяснить сбой только в упакованном приложении.</li>
+            <li>layers.idx помогает разнести стабильные зависимости и код по слоям образа. Это влияет на повторное использование слоёв при сборке, а не на число контекстов приложения.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="startup-shutdown" data-freq="3">
+      <h3>Как останавливать платёжный сервис без обрыва начатых запросов?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При штатном сигнале завершения JVM запускает hook Boot и закрывает контекст. Graceful shutdown прекращает новый трафик и ждёт начатые запросы в пределах срока фазы. Затем освобождаются ресурсы. С Boot 3.4 graceful включён по умолчанию; стандартный срок фазы — 30 секунд.</p>
+          <p>Согласую это ожидание со сроком ответа банка и временем, которое платформа даёт процессу до SIGKILL. В демо ответ банка успел — клиент получил 200 и close завершился после запроса. Во втором режиме срок вышел, и контекст закрылся при ещё незавершённом платеже.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>timeout-per-shutdown-phase ограничивает каждую фазу. Сумма нескольких фаз и уничтожение бинов могут превысить это число; это не общий предел завершения JVM.</li>
+            <li>SmartLifecycle останавливается в порядке убывания фаз. Фоновому обработчику и его ресурсам задаю согласованный порядок и собственное завершение, особенно если HTTP-метод уже вернул ответ.</li>
+            <li>Новый клиент не обязательно получит 503: Tomcat прекращает приём на сетевом уровне. Проверяю поведение конкретного сервера и маршрутизации, включая постоянные соединения.</li>
+            <li>Если банк уже списал деньги, потеря ответа оставляет исход неизвестным клиенту. Идемпотентность и сверка операции нужны даже при корректном graceful shutdown.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="разбор">
+          <summary>Срок фазы выставлен в 30 секунд, а платформа присылает SIGKILL через 10 секунд после SIGTERM. Какой срок реально доступен запросу?</summary>
+          <p>Не больше оставшегося времени до принудительного завершения процесса, причём часть этих десяти секунд уже уйдёт на остальные действия. Настройка Spring не задерживает SIGKILL платформы. Нужно согласовать оба бюджета и прекращение нового трафика; одним увеличением числа в приложении проблему не решить.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="startup-aot" data-freq="2">
+      <h3>Как ускорить старт: Spring AOT, native image или кеш JVM?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала измерю, что занимает старт и какую цель мы хотим улучшить. Spring AOT готовит структуру бинов и генерирует код при сборке; его результат можно использовать на JVM. Native Image создаёт отдельный исполняемый файл и требует заранее знать достижимый код и динамические обращения.</p>
+          <p>Без native можно подготовить архив классов CDS на JDK 21 или AOT cache JDK на JDK 25+. Boot поддерживает обучающий запуск с spring.context.exit=onRefresh: контекст подготовлен, но runners ещё не выполнялись. Выбор проверю на реальном сервисе по старту, памяти, сборке и рабочей нагрузке.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>AOT фиксирует состав контекста. Условия и профили, меняющие бины, учитываю при подготовке; обычное значение адреса банка может оставаться параметром запуска.</li>
+            <li>Для native отдельно проверяю рефлексию, ресурсы и прокси, включая редко исполняемые пути. Недостающие сведения добавляю hints; успешный старт ещё не доказывает работу обработки ошибки банка.</li>
+            <li>Кеш JVM привязан к подходящей сборке и JDK. Обучение с onRefresh не покрывает код runners, а внешние действия в создании бина всё ещё могут выполниться.</li>
+            <li>Ленивое создание переносит подготовку и ошибки на первый запрос. Сокращение времени старта за счёт задержки первого платежа может ухудшить нужный показатель.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/spring-application.html">Spring Boot Reference: SpringApplication</a> — этапы запуска, события, runners и состояния доступности.</li>
+      <li><a href="https://docs.spring.io/spring-boot/specification/executable-jar/launching.html">Launching Executable Jars</a> и <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.2-Release-Notes">Boot 3.2 Release Notes</a> — структура архива, загрузчик и смена пакета JarLauncher.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html">Graceful Shutdown</a>, <a href="https://docs.spring.io/spring-boot/appendix/application-properties/index.html">Application Properties</a> и <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.4-Release-Notes">Boot 3.4 Release Notes</a> — срок фазы и включение graceful по умолчанию.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/packaging/aot.html">Ahead-of-Time Processing on the JVM</a> и <a href="https://docs.spring.io/spring-boot/reference/packaging/native-image/introducing-graalvm-native-images.html">Introducing GraalVM Native Images</a> — подготовка приложения, фиксированный состав контекста и hints.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/packaging/aot-cache.html">Ahead-of-Time Cache</a> — CDS на JDK 21, кеш JDK 25+ и обучающий запуск с onRefresh.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

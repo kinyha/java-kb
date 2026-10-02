@@ -10,8 +10,9 @@ cd examples/boot
 ./run.sh AutoConfigDemo report
 ```
 
-`run.sh` компилирует один файл с `--release 21 -parameters`, копирует `resources/`
-в classpath и запускает класс из пакета `kb.boot`. Внешние сервисы не нужны.
+`run.sh` компилирует выбранное демо с `--release 21 -parameters`, копирует `resources/`
+в classpath для AutoConfigDemo и ConfigDemo и запускает класс из пакета `kb.boot`.
+Внешние сервисы не нужны. Для ShutdownDemo также компилируется общий StartupDemo.
 
 `AutoConfigDemo` загружает `BankAutoConfiguration` из настоящего
 `AutoConfiguration.imports`. Первый запуск сравнивает стандартный шлюз,
@@ -61,3 +62,42 @@ Environment читает новое значение, record сохраняет 
 пишет диагностику в stderr; на странице приведён фрагмент собственного stdout.
 YAML и Bean Validation обеспечивают SnakeYAML, Hibernate Validator и реализация
 EL из Tomcat. Их версии заданы BOM Spring Boot 4.1.1.
+
+## Startup & Packaging
+
+```bash
+./run.sh StartupDemo
+./run.sh StartupDemo --fail-warmup
+./run.sh ShutdownDemo
+./run.sh ShutdownDemo expire
+cd packaging
+mvn -q package
+java -jar target/startup-demo-1.0.jar
+```
+
+StartupDemo запускает встроенный Tomcat на свободном порту. ApplicationRunner
+удерживается защёлкой. Драйвер посылает настоящий HTTP-запрос до Ready и получает
+200 с warm=false при readiness REFUSING_TRAFFIC. После отпускания runner тот же
+контроллер отвечает warm=true, readiness становится ACCEPTING_TRAFFIC. В режиме
+fail-warmup runner падает: Ready не публикуется, контекст закрывается.
+
+ShutdownDemo удерживает начатый запрос внутри контроллера и закрывает контекст
+параллельно. В обычном режиме банк отпускается в пределах пятисекундной фазы,
+клиент получает 200, затем close завершается. В режиме expire срок фазы равен
+200ms, запрос удерживается до окончания close: paymentFinished остаётся false.
+После опыта защёлки освобождаются, драйвер завершает свои потоки и клиент.
+
+Веб-демо не копируют общий AutoConfiguration.imports: соседняя учебная
+BankAutoConfiguration не участвует в запуске. Компоненты зарегистрированы явно.
+Shutdown hook выключен только в обвязке: драйвер закрывает контекст сам.
+Логирование сервера выключено для читаемого вывода. Все ожидания имеют предел.
+
+packaging/pom.xml использует родитель и Maven-плагин Boot 4.1.1. Компилируется
+только StartupDemo, затем repackage создаёт executable jar с BOOT-INF и
+Main-Class org.springframework.boot.loader.launch.JarLauncher. В начале опыта
+напечатан загрузчик класса: AppClassLoader при classpath и LaunchedClassLoader
+при java -jar. Потоку запуска явно передан загрузчик приложения, чтобы поиск
+ресурсов работал и из вложенных jar.
+
+Документированные команды CDS, AOT cache JDK и native-подготовка разобраны на
+странице, но этим демо не собираются и не измеряются.

@@ -8,6 +8,10 @@ fi
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
 demo="$1"; shift
 mkdir -p "target/$demo"
-cp -R resources/. "target/$demo/"
-javac --release 21 -parameters -cp "$(cat target/classpath.txt)" -d "target/$demo" "$demo.java"
+if [[ "$demo" == AutoConfigDemo || "$demo" == ConfigDemo ]]; then
+  cp -R resources/. "target/$demo/"
+fi
+sources=("$demo.java")
+if [[ "$demo" == ShutdownDemo ]]; then sources+=(StartupDemo.java); fi
+javac --release 21 -parameters -cp "$(cat target/classpath.txt)" -d "target/$demo" "${sources[@]}"
 exec java --class-path "target/$demo:$(cat target/classpath.txt)" "kb.boot.$demo" "$@"
