@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RabbitMQ · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="rabbitmq">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>RabbitMQ</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>RabbitMQ — брокер, который сам раздаёт сообщения консьюмерам и удаляет их после подтверждения. Exchange раскладывает сообщения по очередям, а очередь отправляет их подписчикам, не дожидаясь запроса. Сколько неподтверждённых сообщений держит один консьюмер, задаёт prefetch: без него медленный обработчик забирает половину очереди и держит её у себя. Для надёжности используют quorum-очереди — реплицированные по Raft, с лимитом доставок. Возврат сообщения в очередь ломает порядок, а nack с requeue крутит ядовитое сообщение бесконечно: лимит его не считает.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Очередь задач платёжного сервиса тормозит из-за одного воркера, а одно сообщение грузит процессор</h2>
+      <p>Платёжный сервис ставит в RabbitMQ задачи на отправку чеков, сверку с банком и уведомления. Однажды на графике видно: в очереди тысяча задач, пять воркеров, четыре простаивают, а очередь не уменьшается. В другой день брокер грузит процессор на 100 %, хотя новых сообщений нет: одно сообщение с битым JSON доставляется тысячи раз в секунду. После деплоя события одного платежа обработались в обратном порядке, и сверка увидела возврат раньше списания.</p>
+      <p>Это не баги кода, а свойства брокера, которые нужно знать. Сообщение публикуется в <b>exchange</b>, тот по правилам <b>binding</b> копирует его в <b>очереди</b>, а очередь отправляет сообщения подписанным консьюмерам и ждёт подтверждения <b>ack</b>. Маршрутизация, publisher confirms, обработка ошибок в листенере и DLX со стороны Spring разобраны в <a href="spring-amqp.html">RabbitMQ in Spring</a>; здесь — поведение самого брокера. Демо <a href="../examples/rabbit-broker/BrokerDemo.java">BrokerDemo.java</a> работает с настоящим RabbitMQ 4.3.6 в Docker через Java-клиент 5.37.</p>
+    </section>
+
+    <section class="step" id="prefetch">
+      <h2>Без prefetch брокер раздаёт сообщения поровну, и медленный консьюмер держит свою половину</h2>
+      <p>RabbitMQ отправляет сообщения консьюмерам сам, по кругу, сразу как они появились, — он не знает, кто сколько обрабатывает. Prefetch (<code>basicQos</code>) ограничивает число отправленных, но не подтверждённых сообщений на одного консьюмера. Демо подписывает быстрого (5 мс на задачу) и медленного (300 мс) воркеров на одну очередь и публикует 20 задач:</p>
+      <pre><code class="language-java">if (prefetch &gt; 0) ch.basicQos(prefetch);
+ch.basicConsume(q, false, consumer);   // autoAck=false: ack после обработки.</code></pre>
+      <pre class="out">== prefetch unlimited: fast=10 slow=10, all done in ~3100 ms
+== prefetch 1: fast=19 slow=1, all done in ~300 ms</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Без prefetch брокер отдал каждому консьюмеру по 10 задач. Быстрый закончил за 50 миллисекунд и простаивает, медленный держит 10 задач и обрабатывает их 3 секунды. С prefetch 1 медленный держит одну задачу, а остальные 19 забирает быстрый.">
+            <text x="20" y="22" class="dg-cap bad">БЕЗ PREFETCH</text>
+            <text x="20" y="52" class="dg-n">быстрый</text>
+            <text x="20" y="82" class="dg-n">медленный</text>
+            <text x="380" y="22" class="dg-cap">PREFETCH = 1</text>
+            <text x="380" y="52" class="dg-n">быстрый</text>
+            <text x="380" y="82" class="dg-n">медленный</text>
+            <rect x="110" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="122" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="134" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="146" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="158" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="170" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="182" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="194" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="206" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="218" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="110" y="69" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="122" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="134" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="146" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="158" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="170" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="182" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="194" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="206" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="218" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <rect x="470" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="482" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="494" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="506" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="518" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="530" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="542" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="554" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="566" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="578" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="590" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="602" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="614" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="626" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="638" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="650" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="662" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="674" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="686" y="39" width="10" height="18" rx="2" class="dg-cell hit"/>
+            <rect x="470" y="69" width="10" height="18" rx="2" class="dg-cell miss"/>
+            <text x="20" y="128" class="dg-bad">быстрый простаивает,</text>
+            <text x="20" y="146" class="dg-bad">9 задач ждут у медленного: 3,1 с</text>
+            <text x="380" y="128" class="dg-ok">медленный держит одну,</text>
+            <text x="380" y="146" class="dg-ok">остальное у быстрого: 0,3 с</text>
+            <text x="20" y="188" class="dg-s">Клетка — задача, отправленная консьюмеру; закрашенная — уже подтверждённая.</text>
+          </svg>
+        </div>
+        <figcaption>Без prefetch очередь в брокере пустая, и мониторинг показывает, что всё разобрано, хотя 9 задач ещё лежат в памяти медленного воркера.</figcaption>
+      </figure>
+      <p>Без ограничения брокер отдал каждому по 10 задач сразу. Быстрый закончил свои за 50 мс и простаивал, а медленный обрабатывал свою десятку 3 секунды. С prefetch 1 брокер даёт следующую задачу только после подтверждения предыдущей, и быстрый забрал 19 из 20. Маленький prefetch даёт справедливое распределение, но каждое сообщение ждёт круга по сети; большой повышает пропускную способность для быстрых однородных задач. Обычно выбирают 10–300; в Spring AMQP по умолчанию 250. Неподтверждённые сообщения брокер вернёт в очередь, только когда канал консьюмера закроется, а если консьюмер жив, но завис, — после <code>consumer_timeout</code>, по умолчанию 30 минут.</p>
+    </section>
+
+    <section class="step" id="queue-types">
+      <h2>Quorum-очередь реплицирована по Raft, а stream хранит журнал для повторного чтения</h2>
+      <table class="mx">
+        <thead><tr><th></th><th>Classic</th><th>Quorum</th><th>Stream</th></tr></thead>
+        <tbody>
+          <tr><td>Копии</td><td>Одна, на одном узле</td><td>На нескольких узлах, запись подтверждает большинство</td><td>На нескольких узлах</td></tr>
+          <tr><td>После ack</td><td>Удаляется</td><td>Удаляется</td><td>Остаётся до срока хранения</td></tr>
+          <tr><td>Повторное чтение</td><td>Нет</td><td>Нет</td><td>С любого смещения</td></tr>
+          <tr><td>Ядовитые сообщения</td><td>Своя логика</td><td>Лимит доставок, по умолчанию 20</td><td>Своя логика</td></tr>
+          <tr><td>Где нужна</td><td>Временные очереди, ответы</td><td>Надёжные рабочие очереди</td><td>Журнал, много читателей, replay</td></tr>
+        </tbody>
+      </table>
+      <p>Classic-очередь живёт на одном узле: если он упал, очередь недоступна, а если пропал диск — сообщения потеряны. Зеркалирование classic-очередей удалено в RabbitMQ 4.0. Quorum-очередь хранит копии на нескольких узлах и подтверждает публикацию, когда запись приняло большинство, как в <a href="consensus.html">Consensus &amp; Time</a>. Кластер из трёх узлов переживает потерю одного. Цена — больше дисковых операций и памяти, поэтому quorum-очереди не используют для временных очередей ответов.</p>
+      <p>Stream — журнал в духе Kafka внутри RabbitMQ: сообщения не удаляются после чтения, и каждый читатель хранит своё смещение. Это закрывает частую причину выбирать Kafka — повторное чтение событий, — но с меньшей пропускной способностью и экосистемой.</p>
+    </section>
+
+    <section class="step" id="poison">
+      <h2>Nack с возвратом в очередь крутит ядовитое сообщение бесконечно: лимит доставок его не считает</h2>
+      <p>Сообщение с битым JSON падает при каждой обработке. Типичный код ловит исключение и делает <code>basicNack(tag, false, true)</code> — вернуть в очередь, может, в следующий раз получится. Так же по умолчанию поступает Spring AMQP. У quorum-очереди есть лимит доставок, и кажется, что он остановит цикл:</p>
+      <pre><code class="language-java">// Очередь: quorum, DLX настроен, delivery-limit по умолчанию.
+getChannel().basicNack(env.getDeliveryTag(), false, true);   // requeue=true
+
+// Второй вариант: консьюмер падает, не подтвердив.
+var got = c.basicGet("payments", false);
+c.close();                                                    // Без ack.</code></pre>
+      <pre class="out">== poison + nack(requeue): 1678 deliveries in 1 s, x-delivery-count [null, null, null]
+== poison + consumer crash: 20 deliveries, then DLQ reason=delivery_limit</pre>
+      <p>За секунду одно сообщение доставлено 1678 раз, и счётчик доставок не появился вовсе. В RabbitMQ 4 явный возврат через nack или reject с <code>requeue=true</code> не считается неудачной доставкой, и лимит его не останавливает: брокер и консьюмер крутят сообщение, пока кто-то не вмешается. А когда консьюмер падает, не подтвердив сообщение, — процесс умер, канал закрылся, — счётчик растёт, и после 20 таких доставок сообщение уходит в dead letter exchange с причиной <code>delivery_limit</code>.</p>
+      <p>Отсюда правило. Ошибку, которая не исправится повтором — битые данные, нарушение бизнес-правила, — отклоняют с <code>requeue=false</code>, и сообщение сразу уходит в DLX. Временную ошибку — недоступен банк — повторяют с паузой: в приложении или через очередь задержки с TTL, а после N попыток отправляют в DLX. Лимит доставок quorum-очереди — страховка от консьюмеров, которые падают на сообщении целиком, а не замена обработке ошибок. В Spring для этого есть <code>AmqpRejectAndDontRequeueException</code> и <code>defaultRequeueRejected=false</code>.</p>
+    </section>
+
+    <section class="step" id="ordering">
+      <h2>Порядок держится только в одной очереди с одним консьюмером и без возвратов</h2>
+      <p>Очередь — FIFO, но порядок обработки ломается тремя способами. Возврат в очередь: первое событие платежа упало, вернулось, а следующие уже обработаны:</p>
+      <pre class="out">== requeue order, classic queue: [p-1:CAPTURED, p-1:REFUNDED, p-1:AUTHORIZED]
+== requeue order, quorum queue: [p-1:CAPTURED, p-1:REFUNDED, p-1:AUTHORIZED]</pre>
+      <p>Второй способ — несколько консьюмеров: события одного платежа уходят разным воркерам и обрабатываются параллельно. Третий — prefetch больше единицы и параллельная обработка внутри одного консьюмера. Если порядок важен, есть три приёма. <b>Single active consumer</b>: на очередь подписаны несколько консьюмеров, но сообщения получает только один, а остальные ждут его ухода:</p>
+      <pre class="out">== single active consumer: [A:e1, A:e2, A:e3, B:e4, B:e5, B:e6]</pre>
+      <p>Консьюмер A получил первые три события, затем ушёл, и B продолжил с четвёртого — без параллелизма, но с запасным консьюмером. Чтобы масштабироваться, события разбивают по ключу на несколько очередей, каждая со своим single active consumer, — consistent hash exchange делает это по хешу ключа, как партиции в <a href="kafka-basics.html">Kafka</a>. И третий приём, самый надёжный: обработчик сам защищён от неправильного порядка — хранит версию или статус и игнорирует устаревшие события, как идемпотентный консьюмер из <a href="messaging.html">Brokers &amp; Guarantees</a>.</p>
+    </section>
+
+    <section class="step" id="production">
+      <h2>Длинная очередь — авария, а не буфер: брокер начинает тормозить издателей</h2>
+      <p>RabbitMQ рассчитан на то, что очереди почти пустые: сообщения приходят и быстро уходят. Миллионы сообщений в очереди — это память, диск и медленные операции. Когда память узла превышает порог (<code>vm_memory_high_watermark</code>, по умолчанию 60 % ОЗУ) или свободного диска меньше порога, срабатывает alarm, и брокер блокирует все публикующие соединения кластера. Сервис платежей, который публикует события, начинает зависать на <code>basicPublish</code> из-за отставших консьюмеров совсем другой очереди.</p>
+      <p>Поэтому длину очередей и возраст самого старого сообщения мониторят и алертят, а для очередей, которые могут расти, задают лимиты: <code>x-max-length</code> с политикой переполнения <code>reject-publish</code>, чтобы издатель получил отказ сразу, а не блокировку всего узла. Публикацию подтверждают publisher confirms, а соединения и каналы переиспользуют: открывать соединение на каждое сообщение — частая причина перегрузки брокера.</p>
+      <div class="trap">
+        <p class="myth">В quorum-очереди ядовитое сообщение само уйдёт в DLQ после лимита доставок.</p>
+        <p class="fact">Лимит считает только доставки, после которых консьюмер не ответил: падение процесса, закрытие канала. Явный nack или reject с requeue=true в RabbitMQ 4 счётчик не увеличивает, и в демо сообщение прошло 1678 доставок за секунду. Ошибки, которые не исправятся повтором, отклоняют с requeue=false.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Брокер сам раздаёт сообщения; prefetch ограничивает неподтверждённые. Без него: 10/10 и 3,1 с, с prefetch 1: 19/1 и 0,3 с.</li>
+        <li>Quorum-очереди реплицированы по Raft и выбираются по умолчанию для надёжных задач; stream — журнал с повторным чтением.</li>
+        <li>Nack с requeue не считается в лимит доставок: ядовитое сообщение крутится бесконечно. Неисправимое — requeue=false в DLX.</li>
+        <li>Возврат, несколько консьюмеров и параллельный prefetch ломают порядок; single active consumer, разбиение по ключу, версии в обработчике.</li>
+        <li>Длинные очереди включают memory и disk alarm и блокируют издателей; лимиты длины и мониторинг возраста сообщений.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="rabbit-prefetch" data-freq="2">
+      <h3>Что такое prefetch и как его выбрать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Prefetch — максимум отправленных, но не подтверждённых сообщений на консьюмера. RabbitMQ сам раздаёт сообщения по кругу; без ограничения он отдаст медленному консьюмеру столько же, сколько быстрому, и тот будет держать их у себя. Маленький prefetch даёт справедливое распределение, большой — пропускную способность для быстрых однородных задач.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>При autoAck prefetch не работает: сообщение считается подтверждённым при отправке и теряется при падении.</li>
+            <li>Неподтверждённые возвращаются при закрытии канала или по consumer_timeout, 30 минут по умолчанию.</li>
+            <li>Prefetch больше единицы с параллельной обработкой ломает порядок.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rabbit-poison" data-freq="2">
+      <h3>Что делать с сообщением, которое всегда падает при обработке?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Не возвращать его в очередь бесконечно: отклонить с requeue=false, чтобы оно ушло в dead letter exchange, и разбирать DLQ отдельно. Временные ошибки повторять с паузой ограниченное число раз — в приложении или через очередь задержки с TTL — и после этого тоже отправлять в DLX.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>У quorum-очередей лимит доставок по умолчанию 20, но nack и reject с requeue=true его не увеличивают; он срабатывает на падениях консьюмера.</li>
+            <li>Spring AMQP по умолчанию возвращает сообщение при исключении; нужны AmqpRejectAndDontRequeueException или defaultRequeueRejected=false.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что случится с этим консьюмером на битом сообщении?</summary>
+          <pre><code class="language-java">ch.basicConsume("payments", false, (tag, d) -&gt; {
+    try {
+        handle(json.readValue(d.getBody(), PaymentEvent.class));
+        ch.basicAck(d.getEnvelope().getDeliveryTag(), false);
+    } catch (Exception e) {
+        log.warn("retry later", e);
+        ch.basicNack(d.getEnvelope().getDeliveryTag(), false, true);
+    }
+}, tag -&gt; {});</code></pre>
+          <p>Ошибка разбора JSON не исправится повтором, а nack с requeue вернёт сообщение в очередь, и оно придёт снова через миллисекунды: процессор и логи загружены, лимит доставок quorum-очереди такой возврат не считает. Нужно отделять неисправимые ошибки и отклонять их с requeue=false в DLX, а временные повторять с паузой и счётчиком попыток.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rabbit-vs-kafka" data-freq="3">
+      <h3>Чем RabbitMQ отличается от Kafka?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>RabbitMQ — брокер очередей: гибкая маршрутизация через exchange, сообщения раздаются консьюмерам и удаляются после ack, есть приоритеты, TTL, DLX. Хорош для задач и команд. Kafka — распределённый журнал: сообщения хранятся по сроку, консьюмеры читают по смещению и могут перечитать, порядок гарантирован в партиции. Хорош для потоков событий, многих независимых читателей и высокой пропускной способности.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В RabbitMQ брокер отвечает за раздачу и подтверждения каждого сообщения; в Kafka консьюмер хранит смещение.</li>
+            <li>Streams в RabbitMQ дают журнал с повторным чтением, quorum-очереди — репликацию по Raft.</li>
+            <li>Порядок в RabbitMQ ломают возвраты и несколько консьюмеров; решение — single active consumer и разбиение по ключу.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.rabbitmq.com/docs/quorum-queues">RabbitMQ: Quorum Queues</a> — основа урока: репликация, лимит доставок и поведение возвратов.</li>
+      <li><a href="https://www.rabbitmq.com/docs/consumer-prefetch">RabbitMQ: Consumer Prefetch</a> и <a href="https://www.rabbitmq.com/docs/confirms">Consumer Acknowledgements and Publisher Confirms</a>.</li>
+      <li><a href="https://www.rabbitmq.com/docs/consumers#single-active-consumer">RabbitMQ: Single Active Consumer</a> и <a href="https://www.rabbitmq.com/docs/streams">Streams</a>.</li>
+      <li><a href="https://www.rabbitmq.com/docs/alarms">RabbitMQ: Memory and Disk Alarms</a> — блокировка издателей.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

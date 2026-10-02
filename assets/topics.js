@@ -181,7 +181,7 @@ window.KB_TREE = [
         ] },
         { id: 'outbox', freq: 3, status: 'empty', title: 'Transactional Outbox',
           scope: 'двойная запись, таблица outbox, поллинг и CDC, Debezium, дубли и порядок' },
-        { id: 'rabbitmq', freq: 2, status: 'empty', title: 'RabbitMQ',
+        { id: 'rabbitmq', freq: 2, status: 'draft', title: 'RabbitMQ',
           scope: 'exchange и очереди, routing key, ack, prefetch, DLX, отличия от Kafka' },
       ] },
       { id: 'design', title: 'Code Design', source: 'GoF; Clean Architecture (Martin); Learning Domain-Driven Design (Khononov)', items: [
