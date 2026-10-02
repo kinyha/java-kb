@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SQL: Joins · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sql-joins">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>SQL: Joins</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>JOIN строит строки из подходящих пар. У платежа две заявки на возврат — в результате появятся две строки с тем же платежом. Чтобы отчёт был правильным, сначала реши, что обозначает одна его строка: платёж, заявка или их пара. Затем выбери, нужны ли сами совпадения, сохранение строк без совпадений или только проверка существования.</p>
+    </div>
+
+    <section class="step" id="fanout">
+      <h2>После соединения сумма платежей выросла без новых платежей</h2>
+      <p>В отчёте нужно показать платежи вместе с заявками на возврат. Платежей четыре, их суммы 100, 100, 300 и 400 копеек. У первого платежа две заявки, у третьего одна. Ещё одна заявка пришла от провайдера без сопоставленного платежа: её <code>payment_id</code> пока <code>NULL</code>.</p>
+      <p>Эти данные используются во всём уроке. <code>settled</code> означает проведённый возврат, <code>pending</code> — ожидающий. <code>refunds.id</code> всегда заполнен, а <code>payment_id</code> допускает <code>NULL</code>; это различие пригодится при поиске отсутствующих совпадений.</p>
+      <pre><code class="language-sql">CREATE TABLE payments (
+    id integer PRIMARY KEY,
+    customer_id integer,
+    amount integer NOT NULL CHECK (amount &gt; 0)
+);
+CREATE TABLE refunds (
+    id integer PRIMARY KEY,
+    payment_id integer REFERENCES payments(id), -- NULL: ещё не сопоставлена с платежом.
+    amount integer NOT NULL CHECK (amount &gt; 0),
+    state text NOT NULL CHECK (state IN (&#x27;settled&#x27;, &#x27;pending&#x27;))
+);
+INSERT INTO payments VALUES (1, 10, 100), (2, 10, 100), (3, 20, 300), (4, NULL, 400);
+INSERT INTO refunds VALUES (101, 1, 20, &#x27;settled&#x27;), (102, 1, 10, &#x27;pending&#x27;),
+                           (103, 3, 50, &#x27;pending&#x27;), (104, NULL, 7, &#x27;settled&#x27;);</code></pre>
+      <p>Запрос ниже суммирует <code>p.amount</code> после <code>LEFT JOIN</code>. Кажется, что сохранение всех платежей должно сохранить и общую сумму. Но сохранение строки не означает, что она встретится ровно один раз.</p>
+      <pre><code class="language-sql">SELECT count(*) AS result_rows, sum(p.amount) AS wrong_total,
+       sum(DISTINCT p.amount) AS distinct_total -- Две законные сотни тоже сольются.
+FROM payments p
+LEFT JOIN refunds r ON r.payment_id = p.id;
+SELECT sum(amount) AS actual_total FROM payments; -- Сумма до размножения строк.</code></pre>
+      <pre class="out"> result_rows | wrong_total | distinct_total
+-------------+-------------+----------------
+           5 |        1000 |            800
+(1 row)
+
+ actual_total
+--------------
+          900
+(1 row)</pre>
+      <p>Первый платёж вошёл дважды, поэтому сумма стала 1000 вместо 900. <code>SUM(DISTINCT p.amount)</code> убрал повтор значения 100, но вместе с ним исчез вклад второго законного платежа: получилось 800. Отчёт потерял исходную единицу строки — один платёж — ещё до агрегирования.</p>
+      <p>Все запросы и показанные результаты проверены на PostgreSQL <b>17.11</b>. <a href="../examples/sql-joins/demo.sql">demo.sql</a> содержит весь опыт, <a href="../examples/sql-joins/run.sh">run.sh</a> запускает отдельный <code>postgres:17.11-alpine</code> без опубликованных портов и постоянных volume, а затем удаляет контейнер. Нужен работающий Docker; <code>psql</code> берётся из самого образа.</p>
+      <pre><code class="language-bash"># Из корня базы; существующие контейнеры и базы не используются.
+bash examples/sql-joins/run.sh</code></pre>
+    </section>
+
+    <section class="step" id="pairs">
+      <h2>INNER выбирает пары, CROSS оставляет все пары</h2>
+      <p>Мысленно поставь каждую левую строку рядом с каждой правой. Четыре платежа и четыре заявки дают 16 возможных пар — результат <code>CROSS JOIN</code>. У <code>INNER JOIN</code> остаются только пары, для которых <code>ON</code> дал <code>TRUE</code>. Предикат может быть равенством, диапазоном или сочетанием условий.</p>
+      <p>У платежа 1 ключ совпал с заявками 101 и 102: обе пары остаются. У платежей 2 и 4 совпадений нет: они исчезают. Для заявки 104 условие <code>p.id = r.payment_id</code> даёт <code>UNKNOWN</code>: её ключ отсутствует, поэтому подходящей пары нет. <code>FALSE</code> и <code>UNKNOWN</code> одинаково не проходят <code>ON</code>, хотя означают разные вещи.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 284" role="img" aria-label="Матрица всех 16 пар четырёх платежей и четырёх заявок. Для платежа 1 подходят заявки 101 и 102, для платежа 3 — заявка 103. Столбец заявки 104 с NULL payment_id даёт UNKNOWN для каждой пары. INNER выдаёт три пары, CROSS — все шестнадцать.">
+            <text x="20" y="24" class="dg-cap">ON: p.id = r.payment_id</text>
+            <text x="20" y="53" class="dg-n">платёж</text>
+            <!-- Столбец — конкретная правая строка; ряд — конкретная левая. -->
+            <g text-anchor="middle" class="dg-n">
+              <text x="203" y="48">r101 → 1</text><text x="283" y="48">r102 → 1</text>
+              <text x="363" y="48">r103 → 3</text><text x="443" y="48">r104 → NULL</text>
+            </g>
+            <g class="dg-in">
+              <text x="20" y="83">p1: 100</text><text x="20" y="125">p2: 100</text>
+              <text x="20" y="167">p3: 300</text><text x="20" y="209">p4: 400</text>
+            </g>
+            <g>
+              <rect x="166" y="62" width="74" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="246" y="62" width="74" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="326" y="62" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="406" y="62" width="74" height="32" rx="5" class="dg-cell miss"/>
+              <rect x="166" y="104" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="246" y="104" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="326" y="104" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="406" y="104" width="74" height="32" rx="5" class="dg-cell miss"/>
+              <rect x="166" y="146" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="246" y="146" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="326" y="146" width="74" height="32" rx="5" class="dg-cell hit"/>
+              <rect x="406" y="146" width="74" height="32" rx="5" class="dg-cell miss"/>
+              <rect x="166" y="188" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="246" y="188" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="326" y="188" width="74" height="32" rx="5" class="dg-cell"/>
+              <rect x="406" y="188" width="74" height="32" rx="5" class="dg-cell miss"/>
+            </g>
+            <g text-anchor="middle" class="dg-in">
+              <text x="203" y="83">TRUE</text><text x="283" y="83">TRUE</text>
+              <text x="363" y="83">FALSE</text><text x="443" y="83">?</text>
+              <text x="203" y="125">FALSE</text><text x="283" y="125">FALSE</text>
+              <text x="363" y="125">FALSE</text><text x="443" y="125">?</text>
+              <text x="203" y="167">FALSE</text><text x="283" y="167">FALSE</text>
+              <text x="363" y="167">TRUE</text><text x="443" y="167">?</text>
+              <text x="203" y="209">FALSE</text><text x="283" y="209">FALSE</text>
+              <text x="363" y="209">FALSE</text><text x="443" y="209">?</text>
+            </g>
+            <text x="534" y="53" class="dg-cap">INNER</text>
+            <rect x="534" y="62" width="166" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="534" y="104" width="166" height="32" rx="5" class="dg-cell hit"/>
+            <rect x="534" y="146" width="166" height="32" rx="5" class="dg-cell hit"/>
+            <g class="dg-in">
+              <text x="546" y="83">p1 + r101</text><text x="546" y="125">p1 + r102</text>
+              <text x="546" y="167">p3 + r103</text>
+            </g>
+            <text x="20" y="247" class="dg-s">3 TRUE + 9 FALSE + 4 UNKNOWN = 16 возможных пар</text>
+            <text x="20" y="268" class="dg-n">? — UNKNOWN; CROSS сохраняет все клетки, INNER только TRUE</text>
+          </svg>
+        </div>
+        <figcaption>Повтор платежа 1 возникает из двух разных пар. Его первичный ключ не запрещает две заявки на этот платёж.</figcaption>
+      </figure>
+      <pre><code class="language-sql">SELECT p.id AS payment, p.amount, r.id AS refund
+FROM payments p
+INNER JOIN refunds r ON r.payment_id = p.id -- По одной строке на каждую подходящую пару.
+ORDER BY p.id, r.id;
+SELECT count(*) AS cross_rows
+FROM payments p CROSS JOIN refunds r; -- 4 × 4, условия связи нет.</code></pre>
+      <pre class="out"> payment | amount | refund
+---------+--------+--------
+       1 |    100 |    101
+       1 |    100 |    102
+       3 |    300 |    103
+(3 rows)
+
+ cross_rows
+------------
+         16
+(1 row)</pre>
+      <p>Это модель результата, а не требование физически перебрать 16 пар. PostgreSQL выбирает алгоритм соединения отдельно; hash join, merge join и nested loop разбираются в <a href="query-tuning.html">Query Plans</a>. При любом алгоритме набор подходящих пар и их кратность должны остаться теми же.</p>
+      <p><code>CROSS JOIN</code> полезен для намеренной сетки: например, все сочетания каналов оплаты и дней для отчёта с нулевыми значениями. Его размер равен <code>N × M</code>, если один вход пуст — результат пуст. При обычной связи таблиц явно пиши <code>ON</code>: внешний ключ проверяет данные, но сам не добавляет условие в запрос.</p>
+      <details class="deep">
+        <summary>Под капотом: USING задаёт условие, NATURAL зависит от схемы</summary>
+        <p><code>USING (payment_id)</code> — краткая запись равенства одноимённых столбцов; в результате остаётся один общий столбец этого имени. В нашем примере имена <code>p.id</code> и <code>r.payment_id</code> разные, поэтому нужен <code>ON</code>. <code>NATURAL JOIN</code> выбирает все общие имена автоматически: добавление одноимённого поля меняет смысл запроса. Явное условие легче проверить при изменении схемы.</p>
+      </details>
+    </section>
+
+    <section class="step" id="outer-filter">
+      <h2>LEFT сохраняет отсутствие совпадений, WHERE может убрать его</h2>
+      <p><code>LEFT JOIN</code> сначала даёт подходящие пары, как <code>INNER</code>. Если у левой строки нет ни одной пары с <code>TRUE</code>, он добавляет ровно одну строку с <code>NULL</code> во всех правых столбцах. При <code>k</code> совпадениях получится <code>max(1, k)</code> строк на одну левую. Условие «все платежи» соблюдено; условие «один раз каждый» — только при не более чем одном совпадении.</p>
+      <p>Нужны все платежи и только проведённые возвраты рядом. Поставим <code>r.state = 'settled'</code> в <code>ON</code>: pending-заявки не образуют подходящих пар. У платежа 3 заявка существует, но для этого соединения совпадений нет, поэтому справа появляется <code>NULL</code>.</p>
+      <pre><code class="language-sql">SELECT p.id AS payment, r.id AS refund, r.state
+FROM payments p
+LEFT JOIN refunds r ON r.payment_id = p.id AND r.state = &#x27;settled&#x27; -- Отбираем совпадения.
+ORDER BY p.id, r.id;</code></pre>
+      <pre class="out"> payment | refund |  state
+---------+--------+---------
+       1 |    101 | settled
+       2 |   NULL | NULL
+       3 |   NULL | NULL
+       4 |   NULL | NULL
+(4 rows)</pre>
+      <p>Теперь перенесём проверку состояния в <code>WHERE</code>. Сначала платёж 3 соединится с pending-заявкой, а затем готовая строка не пройдёт фильтр. Строки с добавленными <code>NULL</code> тоже исчезнут: <code>NULL = 'settled'</code> даёт <code>UNKNOWN</code>, а <code>WHERE</code> сохраняет только <code>TRUE</code>.</p>
+      <pre><code class="language-sql">SELECT p.id AS payment, r.id AS refund, r.state
+FROM payments p
+LEFT JOIN refunds r ON r.payment_id = p.id
+WHERE r.state = &#x27;settled&#x27; -- Отбираем готовые строки: NULL тоже не проходит.
+ORDER BY p.id, r.id;</code></pre>
+      <pre class="out"> payment | refund |  state
+---------+--------+---------
+       1 |    101 | settled
+(1 row)</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 324" role="img" aria-label="Две ветки для платежа 3 и pending-заявки 103. При фильтре settled в ON кандидат не совпадает, LEFT добавляет платёж с NULL. При фильтре в WHERE пара сначала подходит по ключу, затем WHERE удаляет её. Результат слева — одна строка, справа — ноль.">
+            <defs>
+              <marker id="jo-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="24" class="dg-cap">ОДНА ПАРА, РАЗНЫЙ МОМЕНТ ФИЛЬТРАЦИИ</text>
+            <rect x="200" y="44" width="320" height="50" rx="8" class="dg-box"/>
+            <text x="360" y="65" class="dg-in" text-anchor="middle">p3 + r103 (pending)</text>
+            <text x="360" y="84" class="dg-n" text-anchor="middle">3 = 3 → TRUE</text>
+            <path d="M320 94 C 270 120, 170 130, 170 172" class="dg-line" marker-end="url(#jo-n)"/>
+            <path d="M400 94 C 450 120, 550 130, 550 172" class="dg-line" marker-end="url(#jo-n)"/>
+            <text x="30" y="151" class="dg-s" text-anchor="start">ON: key + state</text>
+            <text x="430" y="151" class="dg-s" text-anchor="start">ON: key</text>
+            <line x1="360" y1="128" x2="360" y2="254" class="dg-sep"/>
+            <g data-s="1">
+              <rect x="30" y="176" width="280" height="56" rx="7" class="dg-cell"/>
+              <text x="170" y="209" class="dg-in" text-anchor="middle">кандидат p3/r103</text>
+            </g>
+            <g data-s="2">
+              <rect x="30" y="176" width="280" height="56" rx="7" class="dg-cell miss"/>
+              <text x="170" y="199" class="dg-bad" text-anchor="middle">state: FALSE</text>
+              <text x="170" y="218" class="dg-n" text-anchor="middle">совпадений: 0</text>
+            </g>
+            <g data-s="3-">
+              <rect x="30" y="176" width="280" height="56" rx="7" class="dg-cell hit"/>
+              <text x="170" y="199" class="dg-in" text-anchor="middle">p3 + NULL</text>
+              <text x="170" y="218" class="dg-n" text-anchor="middle">LEFT сохранил платёж</text>
+            </g>
+            <g data-s="1-3">
+              <rect x="410" y="176" width="280" height="56" rx="7" class="dg-cell"/>
+              <text x="550" y="199" class="dg-in" text-anchor="middle">p3 + r103</text>
+              <text x="550" y="218" class="dg-n" text-anchor="middle">state = pending</text>
+            </g>
+            <g data-s="4">
+              <rect x="410" y="176" width="280" height="56" rx="7" class="dg-cell miss"/>
+              <text x="550" y="199" class="dg-bad" text-anchor="middle">WHERE: FALSE</text>
+              <text x="550" y="218" class="dg-n" text-anchor="middle">строка удалена</text>
+            </g>
+            <g text-anchor="middle">
+              <text data-s="1" x="360" y="282" class="dg-s">Ключ совпал; условие state слева ещё не применено</text>
+              <text data-s="2" x="360" y="282" class="dg-s">Слева кандидат отброшен; справа пара подходит</text>
+              <text data-s="3" x="360" y="282" class="dg-s">LEFT слева добавил NULL; справа ещё pending</text>
+              <text data-s="4" x="360" y="282" class="dg-ok">1 строка слева; 0 строк справа после WHERE</text>
+            </g>
+            <text x="20" y="307" class="dg-n">Схема логического результата; физический план может устроить работу иначе</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Ключи платежа 3 и заявки 103 совпали. Это кандидат на соединение; справа его состояние pending.</li>
+          <li>В левой ветке дополнительное условие ON отвергает pending. В правой ветке ON проверяет только ключ, поэтому пара подходит.</li>
+          <li>В левой ветке других совпадений нет: LEFT добавляет p3 с NULL справа. В правой ветке пара p3/r103 остаётся перед WHERE.</li>
+          <li>WHERE в правой ветке отвергает pending и удаляет строку. Он не запускает LEFT повторно: новый ряд p3/NULL уже не создаётся.</li>
+        </ol>
+        <figcaption>Отсутствие подходящей пары и удаление готовой пары — разные события. Именно поэтому ON и WHERE дают разный отчёт.</figcaption>
+      </figure>
+      <p><code>FULL JOIN</code> сохраняет несопоставленные строки с обеих сторон. Для сверки с провайдером это позволяет увидеть и платежи без заявок, и заявку 104 без платежа. <code>NULL</code> в её ключе не совпадает с другим <code>NULL</code> по обычному <code>=</code>; сохранение строки обеспечивает тип соединения.</p>
+      <pre><code class="language-sql">SELECT p.id AS payment, r.id AS refund, r.payment_id
+FROM payments p
+FULL JOIN refunds r ON r.payment_id = p.id -- Сохраняем несопоставленные строки с обеих сторон.
+ORDER BY p.id NULLS LAST, r.id NULLS LAST;</code></pre>
+      <pre class="out"> payment | refund | payment_id
+---------+--------+------------
+       1 |    101 |          1
+       1 |    102 |          1
+       2 |   NULL |       NULL
+       3 |    103 |          3
+       4 |   NULL |       NULL
+    NULL |    104 |       NULL
+(6 rows)</pre>
+      <p>Добавленный NULL-ряд всё равно является строкой. Поэтому <code>COUNT(*)</code> считает его, а <code>COUNT(r.id)</code> — нет. Для отчёта «число проведённых возвратов каждого платежа» считаем правый первичный ключ, а не число строк после соединения.</p>
+      <pre><code class="language-sql">SELECT p.id AS payment, count(*) AS rows_after_join, count(r.id) AS settled_refunds
+FROM payments p
+LEFT JOIN refunds r ON r.payment_id = p.id AND r.state = &#x27;settled&#x27;
+GROUP BY p.id
+ORDER BY p.id;</code></pre>
+      <pre class="out"> payment | rows_after_join | settled_refunds
+---------+-----------------+-----------------
+       1 |               1 |               1
+       2 |               1 |               0
+       3 |               1 |               0
+       4 |               1 |               0
+(4 rows)</pre>
+    </section>
+
+    <section class="step" id="existence">
+      <h2>Semi и anti выбирают платежи по существованию пары</h2>
+      <p>Если нужен список платежей, у которых есть хотя бы одна заявка, поля заявки и число совпадений не нужны. <code>INNER JOIN</code> создаст две строки платежа 1, а проверка <code>EXISTS</code> оставит его один раз. Это <b>semi join</b>: для каждой левой строки ответить «совпадение есть?» и сохранить её, если да.</p>
+      <pre><code class="language-sql">SELECT p.id, p.amount
+FROM payments p
+WHERE EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id) -- Нужен факт, а не пары.
+ORDER BY p.id;</code></pre>
+      <pre class="out"> id | amount
+----+--------
+  1 |    100
+  3 |    300
+(2 rows)</pre>
+      <p>Обратная задача — платежи без заявок. <code>NOT EXISTS</code> сохраняет левую строку, когда подходящих правых строк ноль: это <b>anti join</b>. Оба выражения возвращают <code>TRUE</code> или <code>FALSE</code> по наличию строк, поэтому неизвестный ключ заявки 104 не делает результат неизвестным.</p>
+      <pre><code class="language-sql">SELECT p.id, p.amount
+FROM payments p
+WHERE NOT EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id) -- Ни одной заявки.
+ORDER BY p.id;</code></pre>
+      <pre class="out"> id | amount
+----+--------
+  2 |    100
+  4 |    400
+(2 rows)</pre>
+      <p>В PostgreSQL нет отдельного синтаксиса <code>SEMI JOIN</code> или <code>ANTI JOIN</code> для такого SELECT: смысл выражают через <code>EXISTS</code> и <code>NOT EXISTS</code>. <code>SELECT 1</code> — соглашение: значение не используется, важен сам факт строки. Не нужно ни считать все заявки, ни устранять размножение через <code>DISTINCT</code>.</p>
+      <p>Условие внутри проверки задаёт, <em>каких</em> совпадений нет. Добавишь <code>r.state = 'settled'</code> — получишь платежи без проведённых возвратов, включая платёж 3 с pending-заявкой. «Нет проведённого возврата» и «нет никаких заявок» — разные бизнес-вопросы.</p>
+      <div class="note tip">
+        <p>Anti join можно выразить как <code>LEFT JOIN … WHERE r.id IS NULL</code>, если <code>r.id</code> не бывает NULL у настоящей правой строки. Проверка nullable-поля заявки способна принять существующую строку за отсутствие. Первичный ключ <code>refunds.id</code> в нашем демо даёт надёжный признак.</p>
+      </div>
+    </section>
+
+    <section class="step" id="not-in-null">
+      <h2>NOT IN с NULL отвечает «неизвестно», а не «совпадения нет»</h2>
+      <p>Попробуем найти платежи без заявок через <code>NOT IN</code>. Справа получится список <code>1, 1, 3, NULL</code>. Для платежа 2 выражение означает <code>2 &lt;&gt; 1 AND 2 &lt;&gt; 1 AND 2 &lt;&gt; 3 AND 2 &lt;&gt; NULL</code>. Первые сравнения истинны, последнее неизвестно; всё выражение равно <code>UNKNOWN</code>.</p>
+      <p>У платежей 1 и 3 есть равный элемент, поэтому результат <code>FALSE</code>. У 2 и 4 равного элемента нет, но NULL справа не позволяет доказать, что все элементы различны. <code>WHERE</code> не сохраняет ни FALSE, ни UNKNOWN: ошибочный anti-запрос вернёт ноль строк.</p>
+      <pre><code class="language-sql">SELECT p.id,
+       p.id NOT IN (SELECT r.payment_id FROM refunds r) AS not_in,
+       NOT EXISTS (SELECT 1 FROM refunds r WHERE r.payment_id = p.id) AS not_exists
+FROM payments p
+ORDER BY p.id;
+SELECT count(*) AS rows_kept
+FROM payments p
+WHERE p.id NOT IN (SELECT r.payment_id FROM refunds r); -- NULL справа лишает TRUE все несовпадения.</code></pre>
+      <pre class="out"> id | not_in | not_exists
+----+--------+------------
+  1 | f      | f
+  2 | NULL   | t
+  3 | f      | f
+  4 | NULL   | t
+(4 rows)
+
+ rows_kept
+-----------
+         0
+(1 row)</pre>
+      <p>В этом опыте <code>p.id</code> не бывает NULL. Фильтр <code>WHERE r.payment_id IS NOT NULL</code> внутри списка исправит запрос для этих ключей, но выражать отсутствие пары через <code>NOT EXISTS</code> проще и устойчивее к изменению nullable-полей. Его NULL-безопасность не означает «NULL равен NULL»: равенство в корреляции всё ещё проверяется обычным <code>=</code>.</p>
+      <p>Если левая сторона сама nullable, определись, что означает отсутствие значения. При непустом правом наборе <code>NULL NOT IN (…)</code> неизвестно. В <code>NOT EXISTS</code> сравнение с NULL не находит равных строк, поэтому левая строка остаётся. Если бизнес требует связывать отсутствующие значения друг с другом, это другой предикат: <code>IS NOT DISTINCT FROM</code>; его нужно выбрать явно.</p>
+      <div class="trap">
+        <p class="myth">NOT IN и NOT EXISTS — взаимозаменяемые записи одного anti join.</p>
+        <p class="fact">NOT IN проверяет, что значение отличается от всех правых значений. NOT EXISTS проверяет, что нет строки с TRUE в заданном условии. При NULL эти вопросы дают разные ответы; замена требует доказать подходящие ограничения данных.</p>
+      </div>
+    </section>
+
+    <section class="step" id="grain-and-self">
+      <h2>Выбор JOIN начинается с того, что означает одна строка</h2>
+      <p>Self join — обычное соединение, где одна таблица играет две роли. Например, ищем разные платежи одного клиента на одну сумму. Alias <code>a</code> обозначает первый платёж пары, <code>b</code> — второй. Условие <code>a.id &lt; b.id</code> исключает сравнение строки с собой и оставляет одну ориентацию пары.</p>
+      <pre><code class="language-sql">SELECT a.id AS first_payment, b.id AS second_payment, a.amount
+FROM payments a
+JOIN payments b ON a.customer_id = b.customer_id AND a.amount = b.amount
+               AND a.id &lt; b.id -- Не соединяем строку с собой, оставляем одну ориентацию пары.
+ORDER BY a.id, b.id;</code></pre>
+      <pre class="out"> first_payment | second_payment | amount
+---------------+----------------+--------
+             1 |              2 |    100
+(1 row)</pre>
+      <p>Если оставить только равенство клиента и суммы, появятся и пары строки с собой, и зеркальные пары 1/2 и 2/1. Условие <code>a.id &lt;&gt; b.id</code> уберёт первые, но сохранит обе ориентации. Такой поиск отмечает кандидатов для проверки: одинаковые клиент и сумма сами по себе не доказывают повторное списание.</p>
+      <p>Вернёмся к отчёту из первого шага. Нужна одна строка на платёж и сумма проведённых возвратов рядом. Сначала сведём заявки к одной строке на <code>payment_id</code>, затем соединим этот результат с платежами. Это согласует единицы строк двух входов: платёж и итог по тому же платежу.</p>
+      <pre><code class="language-sql">SELECT p.id, p.amount, coalesce(r.total, 0) AS settled_refund_amount
+FROM payments p
+LEFT JOIN (
+    SELECT payment_id, sum(amount) AS total
+    FROM refunds
+    WHERE state = &#x27;settled&#x27;
+    GROUP BY payment_id -- Теперь не больше одной строки на ключ платежа.
+) r ON r.payment_id = p.id
+ORDER BY p.id;</code></pre>
+      <pre class="out"> id | amount | settled_refund_amount
+----+--------+-----------------------
+  1 |    100 |                    20
+  2 |    100 |                     0
+  3 |    300 |                     0
+  4 |    400 |                     0
+(4 rows)</pre>
+      <p>Теперь четыре строки действительно обозначают четыре платежа: сумма <code>p.amount</code> равна 900. <code>COALESCE</code> превращает отсутствие суммы проведённых возвратов в ноль по смыслу отчёта. Неизвестная заявка 104 остаётся отдельной задачей сверки и не приписывается произвольному платежу.</p>
+      <table class="mx">
+        <thead><tr><th>Нужный результат</th><th>Подходящая форма</th><th>Что проверить</th></tr></thead>
+        <tbody>
+          <tr><td>Каждая подходящая пара</td><td><code>INNER JOIN</code></td><td>Кратность справа и правильность полного ключа связи</td></tr>
+          <tr><td>Все левые строки, совпадения рядом</td><td><code>LEFT JOIN</code></td><td>Сколько правых строк допустимо на одну левую</td></tr>
+          <tr><td>Несопоставленные строки с обеих сторон</td><td><code>FULL JOIN</code></td><td>Фильтр WHERE не удаляет строки, ради которых выбрали FULL</td></tr>
+          <tr><td>Все сочетания</td><td><code>CROSS JOIN</code></td><td>Размер <code>N × M</code> намеренный</td></tr>
+          <tr><td>Левые строки с совпадением / без него</td><td><code>EXISTS</code> / <code>NOT EXISTS</code></td><td>Предикат описывает именно нужный вид совпадения</td></tr>
+          <tr><td>Одна строка на платёж и дочерний итог</td><td>Агрегировать дочерние строки до JOIN</td><td>Группировка создаёт не больше одной строки на ключ</td></tr>
+        </tbody>
+      </table>
+      <p>Уникальность правого ключа может гарантировать не больше одного совпадения. Сам внешний ключ такой гарантии для дочерних заявок не даёт: он разрешает многим заявкам ссылаться на один платёж. Для составной связи проверяй все части ключа. При неверной кратности индекс ускорит ошибочный отчёт, но не исправит его результат.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>JOIN создаёт пары: повтор левой строки при нескольких правых совпадениях — ожидаемый результат.</li>
+        <li>LEFT дополняет NULL только при отсутствии подходящих пар. WHERE фильтрует готовый результат и не создаёт дополнение заново.</li>
+        <li>Для проверки наличия и отсутствия пары используй semi/anti через EXISTS и NOT EXISTS.</li>
+        <li>NOT IN с NULL справа не подтверждает отсутствие значения. Ограничения nullable-полей меняют смысл запроса.</li>
+        <li>Перед агрегацией и пагинацией назови единицу строки. DISTINCT по сумме не восстанавливает идентичность платежа.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="join-types" data-freq="3">
+      <h3>Чем INNER, LEFT, FULL и CROSS JOIN отличаются по результату?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я представляю JOIN как выбор пар строк. INNER сохраняет пары с TRUE в условии, CROSS — все сочетания. LEFT дополнительно сохраняет каждую левую строку без совпадения с NULL справа, FULL делает это для обеих сторон. FALSE и UNKNOWN в ON не образуют совпадения.</p>
+          <p>При нескольких совпадениях строка повторится и в LEFT: он обещает присутствие, а не уникальность. Поэтому для сверки выбираю FULL, для списка всех платежей с необязательными данными — LEFT, а для отчёта заранее проверяю, сколько пар приходится на один платёж.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>SQL сохраняет кратность строк. Если одному ключу соответствуют m левых и n правых строк, равенство даёт m × n пар; картинка пересечения множеств эту кратность не показывает.</li>
+            <li>Модель всех пар не определяет физический алгоритм. Планировщик может не строить полный CROSS, но обязан сохранить семантику и количество результирующих строк.</li>
+            <li>Порядок строк не задан самим JOIN. Для воспроизводимого вывода и пагинации задаю явный ORDER BY с достаточным ключом порядка.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="on-vs-where" data-freq="3">
+      <h3>Почему условие правой таблицы в WHERE превращает LEFT JOIN в INNER?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я разделяю два момента: ON выбирает совпадения, WHERE отбирает готовые строки. У LEFT строка без подходящей пары дополняется NULL справа. Если WHERE требует <code>r.state = 'settled'</code>, такой ряд не проходит, потому что сравнение с NULL неизвестно.</p>
+          <p>Если нужны все платежи и проведённые возвраты рядом, условие состояния ставлю в ON. Тогда даже платёж только с pending-заявкой остаётся с NULL справа. Если нужны лишь платежи с проведённым возвратом, INNER с этим условием лучше выражает задачу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Не любой фильтр справа убирает дополненные строки: <code>r.id IS NULL</code>, напротив, выбирает их. Проверяю, даёт ли конкретный предикат TRUE на добавленном NULL-ряде.</li>
+            <li>После удаления совпавшей строки WHERE не возвращается к outer join. Поэтому добавление <code>OR r.id IS NULL</code> не эквивалентно переносу условия состояния в ON.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Вернёт ли OR r.id IS NULL все четыре платежа?</summary>
+      <pre><code class="language-sql">SELECT p.id AS payment, r.id AS refund
+FROM payments p
+LEFT JOIN refunds r ON r.payment_id = p.id
+WHERE r.state = &#x27;settled&#x27; OR r.id IS NULL
+ORDER BY p.id, r.id;</code></pre>
+      <pre class="out"> payment | refund
+---------+--------
+       1 |    101
+       2 |   NULL
+       4 |   NULL
+(3 rows)</pre>
+          <p>Нет, платёж 3 пропал. Его pending-заявка образовала настоящую пару, поэтому NULL-ряд не создавался. Затем оба условия WHERE оказались ложными. Нужно отбирать settled в ON, если цель — сохранить любой платёж.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="semi-anti" data-freq="3">
+      <h3>Что такое semi и anti join? Когда брать EXISTS вместо JOIN?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Semi join оставляет левые строки, для которых есть совпадение справа, anti join — строки без такого совпадения. В PostgreSQL я выражаю их через EXISTS и NOT EXISTS с условием связи. Правая сторона отвечает только на вопрос о наличии и не добавляет свои строки к результату.</p>
+          <p>Если нужны платежи с заявками на возврат, EXISTS сохраняет один исходный платёж даже при десяти заявках. Если нужны сами заявки рядом, беру JOIN и принимаю нужную кратность. NOT EXISTS удобен для поиска необработанных или несопоставленных сущностей.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>«Один раз» относится к каждой исходной левой строке. Если левый вход уже содержит повторы, EXISTS их не устраняет; это не DISTINCT по бизнес-ключу.</li>
+            <li>В варианте <code>LEFT JOIN … WHERE r.id IS NULL</code> проверяемое поле должно отличать отсутствие от настоящего совпадения. Nullable-описание заявки для этого не годится.</li>
+            <li>Anti с условием settled допускает наличие pending. Согласую предикат с бизнес-вопросом, прежде чем сравнивать способы записи.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="not-in-trap" data-freq="3">
+      <h3>Почему NOT IN неожиданно возвращает пустой результат при NULL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>NOT IN требует доказать, что значение отличается от каждого элемента справа. Если равный элемент не найден, но есть NULL, одно сравнение неизвестно и результат тоже UNKNOWN. WHERE его отбрасывает. В нашем примере платежи 2 и 4 существуют без заявок, но NOT IN не оставляет их.</p>
+          <p>Для поиска отсутствующей пары беру NOT EXISTS. Если сохраняю NOT IN, доказываю ограничения обеих сторон: правый набор не содержит NULL, а смысл nullable-значения слева определён. Удалить NULL только справа недостаточно для произвольного nullable-выражения слева.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>При найденном равном элементе NOT IN даёт FALSE даже при других NULL. UNKNOWN получается у несовпавших значений: формулировка «любой NULL делает всё UNKNOWN» неверна.</li>
+            <li>NOT EXISTS с обычным равенством оставляет nullable-левую строку, потому что сравнения не дают TRUE. Если NULL должен совпадать с NULL по контракту, выбираю IS NOT DISTINCT FROM.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Изменится ли NULL NOT IN, если правый набор пуст?</summary>
+      <pre><code class="language-sql">SELECT NULL::integer NOT IN (SELECT payment_id FROM refunds WHERE false) AS null_not_in_empty,
+       NULL::integer NOT IN (SELECT payment_id FROM refunds WHERE payment_id IS NOT NULL) AS null_not_in_nonempty;</code></pre>
+      <pre class="out"> null_not_in_empty | null_not_in_nonempty
+-------------------+----------------------
+ t                 | NULL
+(1 row)</pre>
+          <p>С пустым набором получается TRUE: нет значения, с которым нужно доказать неравенство. С непустым набором известные значения сравниваются с NULL и дают UNKNOWN. Поэтому ответ «NULL слева всегда делает NOT IN неизвестным» тоже требует этой границы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="duplicate-sums" data-freq="3">
+      <h3>После JOIN сумма выросла. Как найти причину и исправить отчёт?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я проверяю, что обозначает строка до и после JOIN, и вывожу ключи обеих сторон без агрегирования. Если платёж соединяется с несколькими заявками, его сумма повторяется в каждой паре. SUM(DISTINCT amount) не чинит связь: разные платежи могут иметь одинаковую сумму.</p>
+          <p>Дальше выбираю по задаче. Нужен факт заявки — EXISTS. Нужен дочерний итог — сначала группирую заявки по payment_id, затем соединяю. Нужны все пары — оставляю JOIN, но не считаю повторённую родительскую сумму как независимые платежи.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Две независимые связи «один ко многим» размножают друг друга: m заявок и n событий платежа дают m × n сочетаний. Предагрегирую обе стороны или вычисляю нужные итоги отдельно.</li>
+            <li>При обычном равенстве гарантию одного совпадения даёт уникальность полного правого ключа соединения. FOREIGN KEY дочерней таблицы обеспечивает существование родителя, но разрешает много дочерних строк.</li>
+            <li>LIMIT после размножающего JOIN ограничивает пары. Чтобы страница содержала заданное число платежей, выбираю родительские строки до раскрытия дочерних данных; порядок запросов — в <a href="sql.html">Queries</a>, варианты подзапросов — в <a href="sql-subqueries.html">Subqueries &amp; CTE</a>.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/queries-table-expressions.html#QUERIES-JOIN">PostgreSQL 17, §7.2.1.1: Joined Tables</a> — основа урока: пары строк, INNER/LEFT/FULL/CROSS, ON и WHERE, USING и NATURAL.</li>
+      <li><a href="https://www.postgresql.org/docs/17/tutorial-join.html">PostgreSQL Tutorial, §2.6: Joins Between Tables</a> — учебная модель сравнения пар, outer join, aliases и self join; физический план отличается от этой модели.</li>
+      <li><a href="https://www.postgresql.org/docs/17/functions-subquery.html">PostgreSQL 17, §9.24: Subquery Expressions</a> — EXISTS, IN, NOT IN, NULL и пустой правый набор.</li>
+      <li><a href="https://www.postgresql.org/docs/17/functions-comparison.html">§9.2: Comparison Functions</a> и <a href="https://www.postgresql.org/docs/17/functions-aggregate.html">§9.21: Aggregate Functions</a> — UNKNOWN, IS NOT DISTINCT FROM, COUNT(*) и COUNT(expression).</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

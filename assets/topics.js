@@ -215,7 +215,7 @@ window.KB_TREE = [
       { id: 'sql', title: 'SQL', source: 'roadmap.sh/sql', items: [
         { id: 'sql', freq: 3, status: 'draft', title: 'Queries',
           scope: 'порядок выполнения SELECT, WHERE и HAVING, GROUP BY, NULL и трёхзначная логика, DISTINCT' },
-        { id: 'sql-joins', freq: 3, status: 'empty', title: 'Joins',
+        { id: 'sql-joins', freq: 3, status: 'draft', title: 'Joins',
           scope: 'INNER, LEFT, FULL, CROSS, self join, semi и anti join, NOT IN и NULL' },
         { id: 'sql-subqueries', freq: 2, status: 'empty', title: 'Subqueries & CTE',
           scope: 'коррелированные подзапросы, EXISTS, CTE, рекурсивные CTE, LATERAL' },
