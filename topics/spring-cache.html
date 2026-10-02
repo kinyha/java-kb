@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring: Caching · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-cache">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring: Caching</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>@Cacheable превращает метод в «посмотри в кеш, а если нет — вызови и запомни». Делает это прокси вокруг бина, поэтому кеш работает только для вызовов снаружи. Ключ по умолчанию — аргументы метода, а хранилище выбирает CacheManager: карта в памяти, Caffeine или Redis. От хранилища зависит, получит ли вызывающий тот же объект или копию, есть ли срок жизни и видят ли кеш другие экземпляры сервиса. Самое трудное в кеше — не положить значение, а вовремя его убрать.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Тариф банка запрашивают на каждый платёж, хотя он меняется раз в день</h2>
+      <p>Перед списанием платёжный сервис узнаёт у банка тариф: комиссию и лимиты. Запрос идёт 200 мс, а тариф меняется раз в сутки. На тысяче платежей в минуту сервис тратит на одинаковые ответы больше времени, чем на сами платежи, а банк начинает ограничивать частоту запросов.</p>
+      <p>Решение — запомнить ответ и отдавать его из памяти. Писать это вручную в каждом методе однообразно: проверить карту, вызвать банк, положить, не забыть про конкурентный доступ. Spring выносит эту обвязку в аннотации: <code>@Cacheable</code>, <code>@CachePut</code>, <code>@CacheEvict</code>. Механизм тот же, что у <code>@Transactional</code>: прокси вокруг бина.</p>
+      <p>Демо <a href="../examples/integration/CacheDemo.java">CacheDemo.java</a> кеширует тариф банка. Метод сервиса спит 200 мс, изображая банк, и считает свои вызовы. Стек: JDK 21, Spring Boot 4.1.1, Caffeine 3.2.</p>
+      <pre><code class="language-bash">cd examples/integration
+./run.sh CacheDemo           # простой кеш в памяти
+./run.sh CacheDemo caffeine  # Caffeine со сроком жизни</code></pre>
+    </section>
+
+    <section class="step" id="proxy">
+      <h2>@Cacheable — прокси, который сначала смотрит в кеш</h2>
+      <pre><code class="language-java">@Configuration
+@EnableCaching // Без неё аннотации ниже ничего не делают.
+class App {}
+
+@Service
+class TariffService {
+    @Cacheable("tariffs") // Имя кеша; ключ — аргумент bank.
+    public Tariff tariff(String bank) {
+        calls.incrementAndGet();
+        sleep(200); // Медленный запрос к банку.
+        return new Tariff(bank);
+    }
+}</code></pre>
+      <p><code>@EnableCaching</code> регистрирует advisor, и контейнер оборачивает TariffService в CGLIB-прокси. Каждый вызов метода с аннотацией проходит <code>CacheInterceptor</code>: он вычисляет ключ, спрашивает кеш, и только при промахе вызывает настоящий метод.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Вызов tariff(sber) приходит в прокси. Прокси вычисляет ключ sber, кеш пуст, поэтому вызывается настоящий метод, который ходит в банк 200 мс. Результат кладётся в кеш под ключом sber и возвращается. Второй вызов находит значение в кеше и возвращает его, не вызывая метод.">
+            <defs>
+              <marker id="cp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="96" width="130" height="56" rx="9" class="dg-box"/>
+            <rect x="200" y="96" width="160" height="56" rx="9" class="dg-box"/>
+            <rect x="430" y="30" width="270" height="56" rx="9" class="dg-box"/>
+            <rect x="430" y="156" width="270" height="64" rx="9" class="dg-box"/>
+            <rect data-s="4-" x="444" y="182" width="242" height="30" rx="6" class="dg-cell hit"/>
+            <rect data-s="2" x="444" y="182" width="242" height="30" rx="6" class="dg-sep" fill="none"/>
+            <rect data-s="3" x="430" y="30" width="270" height="56" rx="9" class="dg-cell"/>
+            <rect data-s="5" x="430" y="30" width="270" height="56" rx="9" class="dg-sep" fill="none"/>
+            <!-- вызовы -->
+            <path data-s="1-4" d="M150 116 L 196 116" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="2" d="M360 136 C 400 136, 400 196, 426 196" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="3" d="M360 112 C 400 112, 400 58, 426 58" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="4" d="M360 140 C 400 140, 400 196, 426 196" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="4" d="M196 140 L 154 140" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="5" d="M150 116 L 196 116" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="5" d="M426 200 C 400 200, 400 140, 364 140" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="5" d="M196 140 L 154 140" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <g text-anchor="middle">
+              <text x="85" y="120" class="dg-in">вызывающий</text>
+              <text x="85" y="138" class="dg-n">контроллер</text>
+              <text x="280" y="120" class="dg-in">прокси</text>
+              <text x="280" y="138" class="dg-n">CacheInterceptor</text>
+              <text x="565" y="54" class="dg-in">TariffService.tariff</text>
+              <text x="565" y="72" class="dg-n">настоящий метод, 200 мс</text>
+              <text x="565" y="174" class="dg-in">кеш tariffs</text>
+            </g>
+            <text data-s="2" x="456" y="202" class="dg-bad">sber: нет</text>
+            <text data-s="4-" x="456" y="202" class="dg-in">sber → Tariff@1</text>
+            <text data-s="1" x="156" y="106" class="dg-n">tariff("sber")</text>
+            <text data-s="5" x="156" y="106" class="dg-n">tariff("sber")</text>
+            <text data-s="2" x="370" y="182" class="dg-n">get</text>
+            <text data-s="3" x="374" y="80" class="dg-n">промах</text>
+            <text data-s="4" x="370" y="182" class="dg-n">put</text>
+            <text data-s="5" x="456" y="106" class="dg-s">метод не вызывается</text>
+            <text data-s="1" x="20" y="242" class="dg-t">Прокси вычисляет ключ: "sber".</text>
+            <text data-s="2" x="20" y="242" class="dg-bad">Кеш пуст: промах.</text>
+            <text data-s="3" x="20" y="242" class="dg-t">Настоящий метод идёт в банк: 204 мс.</text>
+            <text data-s="4" x="20" y="242" class="dg-ok">Результат положен в кеш и возвращён. calls=1.</text>
+            <text data-s="5" x="20" y="242" class="dg-ok">Второй вызов: попадание, 0 мс, calls=1.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Контроллер вызывает tariff("sber") у прокси. CacheInterceptor вычисляет ключ: у метода один аргумент, ключом становится он сам.</li>
+          <li>Interceptor спрашивает кеш tariffs по ключу sber. Значения нет.</li>
+          <li>Промах: вызывается настоящий метод, и он 200 мс ждёт банк.</li>
+          <li>Результат кладётся в кеш под ключом sber и возвращается вызывающему.</li>
+          <li>Второй вызов с тем же ключом находит значение и возвращает его. Настоящий метод не вызывается, счётчик не растёт.</li>
+        </ol>
+      </figure>
+      <pre class="out">cache manager: ConcurrentMapCacheManager
+service class: TariffService$$SpringCGLIB$$0
+first read: 204 ms, second read: 0 ms, calls=1</pre>
+      <p>Раз кеш живёт в прокси, у него те же слепые зоны, что у транзакций. Метод <code>quote</code> без аннотации вызывает <code>tariff</code> через <code>this</code>, мимо прокси:</p>
+      <pre><code class="language-java">public Tariff quote(String bank) { return tariff(bank); } // this.tariff — без кеша.
+
+s.quote("tinkoff");
+s.quote("tinkoff");</code></pre>
+      <pre class="out">quote() twice via this: calls=3</pre>
+      <p>Счётчик вырос с 1 до 3: оба вызова дошли до банка. Так же кеш не работает на private методах, на final методах CGLIB-прокси и для объектов, созданных через <code>new</code>. Подробно о прокси и self-invocation — в <a href="spring-aop.html">AOP &amp; Proxies</a>.</p>
+      <div class="note warn">
+        <p>Демо наткнулось и на вторую особенность прокси. Первая версия читала счётчик полем: <code>s.calls.get()</code>. Через прокси это дало NullPointerException: CGLIB-прокси — подкласс, его собственные поля не инициализированы, а вызовы методов он передаёт настоящему объекту. Состояние бина читай через методы, а не через поля прокси.</p>
+      </div>
+    </section>
+
+    <section class="step" id="keys">
+      <h2>Ключ решает, какие вызовы считаются одинаковыми</h2>
+      <p>По умолчанию ключ строит <code>SimpleKeyGenerator</code>. Без аргументов — <code>SimpleKey.EMPTY</code>, с одним аргументом — сам аргумент, с несколькими — <code>SimpleKey</code> из всех аргументов. Ключ попадает в карту, поэтому его <code>equals</code> и <code>hashCode</code> должны сравнивать по значению. Объект без них даст новый ключ на каждый вызов и вечный промах.</p>
+      <p>Явный ключ задаётся выражением SpEL. Комиссия зависит только от банка, а сумма в ключ не входит:</p>
+      <pre><code class="language-java">@Cacheable(cacheNames = "fees", key = "#bank") // amount не участвует в ключе.
+public String fee(String bank, long amount) { return bank + " fee for " + amount; }
+
+s.fee("sber", 100);
+System.out.println(s.fee("sber", 500)); // Тот же ключ "sber".</code></pre>
+      <pre class="out">fee(sber, 500) -> sber fee for 100</pre>
+      <p>Вызов с суммой 500 получил ответ, посчитанный для суммы 100. Если результат зависит от аргумента, этот аргумент должен быть в ключе. Обратная ошибка — лишний аргумент в ключе, например timestamp или объект запроса целиком: кеш никогда не попадает.</p>
+      <p>Ещё одна ловушка — общий кеш для разных методов. Если <code>tariff(String bank)</code> и <code>limits(String bank)</code> кешируют в одно имя <code>"bank"</code>, ключ <code>sber</code> у них совпадает, и второй метод получит результат первого чужого типа. У каждого метода своё имя кеша или ключ с префиксом: <code>key = "'limits:' + #bank"</code>.</p>
+      <p>По умолчанию кешируется и <code>null</code>: «у банка нет лимита» тоже ответ. Если null значит «временно неизвестно», его не кладут через <code>unless</code>:</p>
+      <pre><code class="language-java">@Cacheable(cacheNames = "limits", unless = "#result == null") // null не кешируем.
+public String limit(String bank) { return bank.equals("unknown") ? null : bank + " limit 1000"; }</code></pre>
+      <pre class="out">null result twice: calls=6</pre>
+      <p>Оба вызова для unknown дошли до метода. <code>condition</code> проверяется до вызова и решает, использовать ли кеш вообще; <code>unless</code> проверяется после и видит <code>#result</code>. <code>Optional</code> Spring разворачивает: в кеш кладётся значение, а пустой Optional хранится как null.</p>
+    </section>
+
+    <section class="step" id="storage">
+      <h2>Кеш в памяти отдаёт тот же объект, Redis — новую копию</h2>
+      <p>Аннотации описывают, что кешировать. Где хранить, решает <code>CacheManager</code>. Boot выбирает его по classpath в порядке: свой бин, JCache, Hazelcast, Couchbase, Infinispan, Redis, Caffeine, Cache2k и в конце простой <code>ConcurrentMapCacheManager</code>. Демо явно просит простой кеш через <code>spring.cache.type=simple</code>: Caffeine уже лежит в classpath, и без этой строки Boot выбрал бы его.</p>
+      <p>В кеше в памяти лежит ссылка на объект, который вернул метод. Каждый вызывающий получает тот же экземпляр. Если кто-то его изменит, изменение увидят все:</p>
+      <pre><code class="language-java">Tariff mine = s.tariff("sber");
+mine.fees.add("promo -1%"); // Скидка только для одного клиента.
+System.out.println("another caller sees: " + s.tariff("sber"));
+System.out.println("same object: " + (mine == s.tariff("sber")));</code></pre>
+      <pre class="out">another caller sees: sber [1.5%, promo -1%]
+same object: true</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Слева кеш в памяти: два вызывающих получают ссылки на один и тот же объект Tariff в кеше, изменение одного видно другому. Справа Redis: в кеше лежат байты, каждый get десериализует новую копию, и изменения копии не влияют на кеш и других.">
+            <defs>
+              <marker id="cs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cs-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <path d="M360 24 L 360 216" class="dg-sep"/>
+            <!-- память: один объект на всех -->
+            <rect x="20" y="50" width="120" height="40" rx="7" class="dg-box"/>
+            <rect x="20" y="140" width="120" height="40" rx="7" class="dg-box"/>
+            <rect x="190" y="88" width="150" height="56" rx="8" class="dg-cell miss"/>
+            <path d="M140 70 C 165 70, 165 104, 186 104" class="dg-line bad" marker-end="url(#cs-bad)"/>
+            <path d="M140 160 C 165 160, 165 128, 186 128" class="dg-line bad" marker-end="url(#cs-bad)"/>
+            <!-- Redis: байты и копии -->
+            <rect x="380" y="50" width="120" height="40" rx="7" class="dg-box"/>
+            <rect x="380" y="140" width="120" height="40" rx="7" class="dg-box"/>
+            <rect x="590" y="94" width="110" height="44" rx="8" class="dg-cell hit"/>
+            <rect x="514" y="54" width="62" height="32" rx="6" class="dg-cell"/>
+            <rect x="514" y="144" width="62" height="32" rx="6" class="dg-cell"/>
+            <path d="M590 108 C 575 100, 585 72, 580 70" class="dg-line" marker-end="url(#cs-n)"/>
+            <path d="M590 124 C 575 132, 585 160, 580 160" class="dg-line" marker-end="url(#cs-n)"/>
+            <path d="M514 70 L 504 70" class="dg-line" marker-end="url(#cs-n)"/>
+            <path d="M514 160 L 504 160" class="dg-line" marker-end="url(#cs-n)"/>
+            <text x="20" y="20" class="dg-cap bad">В ПАМЯТИ: ССЫЛКА</text>
+            <text x="380" y="20" class="dg-cap">REDIS: КОПИЯ</text>
+            <g text-anchor="middle">
+              <text x="80" y="75" class="dg-in">клиент A</text>
+              <text x="80" y="165" class="dg-in">клиент B</text>
+              <text x="265" y="112" class="dg-in">Tariff@1</text>
+              <text x="265" y="130" class="dg-bad">+ promo от A</text>
+              <text x="440" y="75" class="dg-in">клиент A</text>
+              <text x="440" y="165" class="dg-in">клиент B</text>
+              <text x="545" y="75" class="dg-n">копия</text>
+              <text x="545" y="165" class="dg-n">копия</text>
+              <text x="645" y="113" class="dg-in">байты</text>
+              <text x="645" y="129" class="dg-n">sber</text>
+            </g>
+            <text x="20" y="206" class="dg-s">Изменение A видно B.</text>
+            <text x="380" y="206" class="dg-s">Каждый get — десериализация.</text>
+          </svg>
+        </div>
+        <figcaption>Код, который случайно меняет результат из кеша, в тестах с Redis работает, а на локальном кеше портит данные всем. Кешируй неизменяемые объекты: record и неизменяемые коллекции.</figcaption>
+      </figure>
+      <table class="mx">
+        <thead><tr><th>CacheManager</th><th>Срок жизни и размер</th><th>Общий для экземпляров</th><th>Что отдаёт</th></tr></thead>
+        <tbody>
+          <tr><td><code>ConcurrentMapCacheManager</code></td><td>Нет: растёт без предела</td><td>Нет</td><td>Ссылку</td></tr>
+          <tr><td>Caffeine</td><td><code>maximumSize</code>, <code>expireAfterWrite</code></td><td>Нет</td><td>Ссылку</td></tr>
+          <tr><td>Redis</td><td><code>spring.cache.redis.time-to-live</code></td><td>Да</td><td>Копию после десериализации</td></tr>
+        </tbody>
+      </table>
+      <p>Простой кеш не годится для прода: у него нет ни срока жизни, ни ограничения размера. Кеш по номеру платежа на нём медленно съест heap. Caffeine задаёт и то, и другое строкой настроек:</p>
+      <pre><code class="language-yaml">spring:
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=1000,expireAfterWrite=1s # 1 секунда только ради демо.</code></pre>
+      <pre class="out">calls after 2 reads: 1
+calls after TTL:     2</pre>
+      <p>Через секунду значение истекло, и третье чтение снова пошло в банк. Redis-кеш общий для всех экземпляров сервиса и переживает их перезапуск, но каждый доступ — сетевой вызов и сериализация. По умолчанию <code>RedisCacheManager</code> использует сериализацию JDK; в проде её заменяют на JSON, иначе любое изменение класса ломает чтение старых записей. Ключи в Redis выглядят как <code>tariffs::sber</code>. Сам Redis разобран в соседнем разделе о базах данных.</p>
+    </section>
+
+    <section class="step" id="invalidation">
+      <h2>Убрать значение вовремя сложнее, чем положить</h2>
+      <p>Банк прислал новый тариф. Кеш должен об этом узнать. Есть три инструмента. <code>@CacheEvict</code> удаляет запись, и следующий вызов пойдёт в банк. <code>@CachePut</code> всегда вызывает метод и кладёт результат в кеш — так обновляют значение сразу. Срок жизни ограничивает время, в течение которого кеш может врать, даже если инвалидацию забыли.</p>
+      <pre><code class="language-java">@CacheEvict(cacheNames = "tariffs", key = "#bank")
+public void evict(String bank) {}
+
+s.evict("sber");
+System.out.println("after evict: " + s.tariff("sber")); // Новый объект из банка.</code></pre>
+      <pre class="out">after evict: sber [1.5%]</pre>
+      <p>Скидка из прошлого шага пропала: метод создал новый Tariff. <code>@CacheEvict(allEntries = true)</code> очищает весь кеш. <code>beforeInvocation = true</code> удаляет до вызова метода, чтобы запись ушла, даже если метод упал.</p>
+      <h3>Инвалидация и транзакция</h3>
+      <p>Если тариф хранится в своей базе, обновление выглядит так: транзакция меняет строку, метод с <code>@CacheEvict</code> удаляет запись. Удаление срабатывает при выходе из метода, а коммит может случиться позже, во внешней транзакции. В этот промежуток другой поток получает промах, читает из базы <b>старый</b> тариф (новый ещё не закоммичен) и кладёт его в кеш. Коммит проходит, а в кеше до конца TTL лежит старое значение.</p>
+      <p>Защита — удалять после коммита. <code>TransactionAwareCacheManagerProxy</code> откладывает put и evict до коммита; у <code>RedisCacheManager</code> для этого есть <code>transactionAware()</code>. Другой вариант — <code>@TransactionalEventListener(phase = AFTER_COMMIT)</code>, который чистит кеш после события об изменении тарифа.</p>
+      <h3>Несколько экземпляров сервиса</h3>
+      <p>Локальный Caffeine живёт в каждом pod-е отдельно. <code>@CacheEvict</code> на pod-е, который принял обновление, очистит только его кеш, а два других будут отдавать старый тариф до истечения TTL. Варианты: общий Redis-кеш, рассылка события об инвалидации всем экземплярам через брокер или короткий TTL, если минута устаревших данных приемлема. Для тарифа, который меняется раз в день, обычно хватает TTL. Для остатка на счёте локальный кеш недопустим вовсе.</p>
+    </section>
+
+    <section class="step" id="stampede">
+      <h2>При одновременном промахе метод вызывают все, если не попросить sync</h2>
+      <p>Тариф истёк в 9:00, и в эту же секунду пришли десять платежей. Все десять видят промах, и все десять идут в банк. Это <b>cache stampede</b>: в момент истечения популярного ключа нагрузка на источник резко прыгает, а именно её кеш должен был снимать. Демо запускает десять потоков одновременно на пустой ключ:</p>
+      <pre><code class="language-java">@Cacheable(cacheNames = "tariffs-sync", sync = true) // Один считает, остальные ждут.
+public Tariff tariffSync(String bank) { /* те же 200 мс */ }
+
+// 10 потоков одновременно стартуют на пустом кеше.
+System.out.println("stampede, no sync: calls=" + stampede(s, false));
+System.out.println("stampede, sync=true: calls=" + stampede(s, true));</code></pre>
+      <pre class="out">stampede, no sync: calls=10
+stampede, sync=true: calls=1</pre>
+      <p>С <code>sync = true</code> кеш получает значение через <code>Cache.get(key, valueLoader)</code>. Первый поток вычисляет значение, остальные ждут его результата. У ConcurrentMapCacheManager и Caffeine это блокировка на ключ внутри JVM. Ограничения: <code>sync</code> нельзя сочетать с <code>unless</code> и с несколькими кешами на одном методе.</p>
+      <p>Синхронизация действует в пределах одного экземпляра. Десять pod-ов дадут десять вызовов банка даже с <code>sync</code>. Для общего кеша спасают другие приёмы: разброс TTL случайной добавкой, чтобы ключи не истекали одновременно, фоновое обновление до истечения (<code>refreshAfterWrite</code> в Caffeine) или распределённая блокировка.</p>
+      <p>Кеш — не источник правды. Его в любой момент можно очистить, и сервис должен работать, только медленнее. Если после перезапуска Redis сервис падает от нагрузки на банк, кеш стал частью ёмкости системы, и для этого нужен свой план: прогрев, ограничение частоты, деградация.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>@Cacheable работает через прокси: вызов через this, private и final методы идут мимо кеша.</li>
+        <li>Ключ по умолчанию — аргументы метода. Аргумент, от которого зависит результат, обязан входить в ключ.</li>
+        <li>Кеш в памяти отдаёт ссылку на общий объект, Redis — копию. Кешируй неизменяемые объекты.</li>
+        <li>Простой ConcurrentMap-кеш растёт без предела; в проде — Caffeine с размером и TTL или Redis.</li>
+        <li>Удаляй после коммита и помни, что локальный evict чистит только один экземпляр. sync=true защищает от одновременного промаха в пределах JVM.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="cache-how" data-freq="3">
+      <h3>Как работает @Cacheable и почему он иногда не кеширует?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@EnableCaching добавляет advisor, и Spring оборачивает бин в прокси. При вызове CacheInterceptor вычисляет ключ из аргументов, ищет значение в кеше и вызывает настоящий метод только при промахе, а результат кладёт в кеш.</p>
+          <p>Не работает, если вызов не проходит через прокси: из того же класса через this, на private или final методах, для объекта, созданного через new. И если забыли @EnableCaching — тогда аннотации просто игнорируются.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ключ по умолчанию строит SimpleKeyGenerator; у объекта-ключа должны быть equals и hashCode по значению.</li>
+            <li>condition проверяется до вызова, unless — после и видит #result; null кешируется по умолчанию.</li>
+            <li>Два метода с одним именем кеша и одинаковыми аргументами перетирают друг друга.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему кеш курсов валют почти никогда не попадает?</summary>
+          <pre><code class="language-java">@Cacheable("rates")
+public BigDecimal rate(String from, String to, Instant at) { /* запрос в ЦБ */ }
+
+// Вызывается так:
+rate("USD", "RUB", Instant.now());</code></pre>
+          <p>Instant.now() входит в ключ и каждый раз разный, поэтому каждый вызов — новый ключ. Кеш только растёт и никогда не попадает. Курс меняется раз в день: ключом должна быть дата, например key = "#from + #to + T(java.time.LocalDate).ofInstant(#at, T(java.time.ZoneOffset).UTC)", или метод должен принимать LocalDate.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cache-providers" data-freq="2">
+      <h3>Какой CacheManager выбрать и чем локальный кеш отличается от Redis?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Локальный кеш вроде Caffeine живёт в памяти экземпляра: он быстрый, умеет TTL и ограничение размера, но у каждого pod-а свой, и инвалидация на одном не видна другим. Redis общий для всех экземпляров и переживает их перезапуск, но каждое обращение — сеть и сериализация.</p>
+          <p>Простой ConcurrentMapCacheManager годится только для тестов: у него нет срока жизни и предела размера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Локальный кеш отдаёт ссылку на общий объект, Redis — копию; изменение результата из локального кеша портит данные всем.</li>
+            <li>Для Redis сериализацию JDK заменяют JSON, иначе изменение класса ломает чтение старых записей.</li>
+            <li>Двухуровневый кеш (Caffeine поверх Redis) ускоряет чтение, но удваивает проблему инвалидации.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cache-invalidation" data-freq="2">
+      <h3>Как правильно инвалидировать кеш при изменении данных?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>@CacheEvict удаляет запись, @CachePut обновляет её результатом метода, TTL ограничивает время устаревания, если инвалидацию пропустили. Обычно сочетаю явную инвалидацию с TTL как страховкой.</p>
+          <p>Важно удалять после коммита. Если evict случился до коммита, другой поток успеет прочитать старое значение из базы и положить обратно в кеш.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>TransactionAwareCacheManagerProxy или transactionAware() у RedisCacheManager откладывают put и evict до коммита.</li>
+            <li>С локальным кешем на нескольких экземплярах evict нужно разослать всем, например событием через брокер.</li>
+            <li>Для данных, где устаревание недопустимо, вроде остатка на счёте, кеш не используют или кешируют только неизменяемые части.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cache-stampede" data-freq="2">
+      <h3>Что такое cache stampede и как от него защищаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Популярный ключ истекает, и все одновременные запросы видят промах и идут в источник. Нагрузка на базу или внешний сервис резко прыгает именно тогда, когда кеш должен был её снимать.</p>
+          <p>В Spring помогает @Cacheable(sync = true): первый поток вычисляет значение, остальные ждут его. В демо десять потоков без sync вызвали метод десять раз, с sync — один.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>sync работает в пределах одной JVM; на нескольких экземплярах нужны разброс TTL, фоновое обновление или распределённая блокировка.</li>
+            <li>sync нельзя сочетать с unless и несколькими кешами на методе.</li>
+            <li>refreshAfterWrite в Caffeine обновляет значение фоном, отдавая старое, пока новое не готово.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/integration/cache.html">Spring Framework Reference: Cache Abstraction</a> — основа урока: аннотации, генерация ключей, sync, прокси.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/io/caching.html">Spring Boot Reference: Caching</a> — порядок выбора провайдера, настройки Caffeine и Redis.</li>
+      <li><a href="https://github.com/ben-manes/caffeine/wiki">Caffeine Wiki</a> — вытеснение, expireAfterWrite и refreshAfterWrite.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

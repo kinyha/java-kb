@@ -569,7 +569,7 @@ window.KB_TREE = [
           scope: 'KafkaTemplate, @KafkaListener, контейнеры и concurrency, повторы и DLT, транзакции' },
         { id: 'spring-amqp', freq: 1, status: 'empty', title: 'RabbitMQ in Spring',
           scope: 'RabbitTemplate, @RabbitListener, подтверждения, повторы и DLX' },
-        { id: 'spring-cache', freq: 2, status: 'empty', title: 'Caching',
+        { id: 'spring-cache', freq: 2, status: 'draft', title: 'Caching',
           scope: '@Cacheable, @CacheEvict, CacheManager, ловушки с прокси, Redis как кеш' },
         { id: 'spring-async', freq: 2, status: 'empty', title: 'Scheduling & Async',
           scope: '@Async и его пул, @Scheduled, TaskExecutor, ShedLock в кластере' },
