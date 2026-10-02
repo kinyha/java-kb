@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Boot: Auto-configuration · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-boot">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Boot: Auto-configuration</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёжному сервису нужен готовый шлюз банка. Boot находит конфигурацию из подключённой библиотеки и проверяет, подходит ли она этому приложению. Если ты уже описал свой шлюз, стандартный вариант уступает ему место. Решение принимается во время сборки контекста по классам, настройкам и описаниям бинов. Поэтому неожиданный выбор стоит разбирать от условия и доступного типа, а затем смотреть на созданный объект.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Каждый платёжный сервис повторяет одну и ту же сборку</h2>
+      <p>У команды есть три сервиса: списания, возвраты и сверка. Все ходят в один банк. В каждом приходится подключать SDK, создавать шлюз, передавать адрес и таймауты, подключать метрики. Через месяц один сервис уже отправляет запросы с новыми настройками, а второй всё ещё держит старую конфигурацию.</p>
+      <p>Spring умеет собрать граф объектов из <code>@Configuration</code>, <code>@Bean</code> и компонентов. Но решение «какие инфраструктурные бины добавить» остаётся за каждым приложением. Команда может вынести конфигурацию банка в общую библиотеку. Следующая задача — подключать её только там, где есть SDK и включена работа с банком, а также дать отдельному сервису заменить стандартный шлюз.</p>
+      <p><b>Автоконфигурация Boot — это такая общая конфигурация с условиями включения.</b> Она добавляет обычные описания бинов в тот же контейнер Spring. После этого зависимости разрешаются и объекты создаются по знакомым правилам. В готовых модулях Boot тем же способом собираются HTTP-инфраструктура, подключение к базе и другие стандартные части приложения.</p>
+      <p>Ниже мы сделаем небольшую автоконфигурацию банка. SDK изображает локальный класс, а списание — функция, возвращающая строку. Сеть здесь лишняя: опыт проверяет выбор объекта, который получит платёжный сервис. Демо запускается на JDK 21, Spring Boot 4.1.1 и Spring Framework 7.0.9.</p>
+      <pre><code class="language-java">interface BankGateway {
+    String charge(String paymentId);
+}
+
+class PaymentService {
+    private final ObjectProvider&lt;BankGateway&gt; gateway;
+
+    PaymentService(ObjectProvider&lt;BankGateway&gt; gateway) {
+        this.gateway = gateway; // Выбор отложен, чтобы увидеть и отсутствие шлюза.
+    }
+
+    String pay(String id) {
+        BankGateway selected = gateway.getIfAvailable(); // Два кандидата дадут ошибку.
+        return selected == null ? "unavailable:" + id : selected.charge(id);
+    }
+}</code></pre>
+      <p>В обязательном платёжном пути лучше требовать <code>BankGateway</code> прямо в конструкторе: отсутствие шлюза тогда сорвёт запуск сервиса. <code>ObjectProvider</code> в этом опыте позволяет сравнить три контекста одной программой. Он меняет момент выбора зависимости, а правила автоконфигурации остаются теми же.</p>
+    </section>
+
+    <section class="step" id="starter">
+      <h2>Стартер приносит зависимости, автоконфигурация — описания бинов</h2>
+      <p>Команда выпускает <code>bank-spring-boot-starter</code>. Его главная задача — собрать совместимые зависимости: SDK банка и модуль <code>bank-spring-boot</code> с конфигурацией. Maven или Gradle добавляет их в classpath. Стартер сам по себе ещё не доказывает, что шлюз появился в контексте: Boot должен найти конфигурацию, а её условия должны пройти.</p>
+      <p>Разделение на два модуля полезно, если SDK бывает нескольких видов. Модуль конфигурации умеет работать с доступным вариантом, стартер выбирает набор библиотек для обычного случая. Для маленькой интеграции оба можно объединить. Своему стартеру дают название организации или технологии; префикс <code>spring-boot-starter-</code> оставляют официальным стартерам Spring.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 272" role="img" aria-label="Стартер зависит от SDK и модуля конфигурации. В модуле лежат список imports и класс BankAutoConfiguration. После чтения списка и проверки условий Boot регистрирует описание BankGateway в контексте, а Spring создаёт объект по этому описанию.">
+            <defs>
+              <marker id="bs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- Зависимости сборки и содержимое JAR. -->
+            <rect x="20" y="56" width="174" height="48" rx="8" class="dg-box"/>
+            <rect x="20" y="164" width="174" height="48" rx="8" class="dg-box"/>
+            <rect x="238" y="28" width="226" height="202" rx="10" class="dg-sep" fill="none"/>
+            <rect x="250" y="56" width="202" height="44" rx="7" class="dg-cell"/>
+            <rect x="250" y="164" width="202" height="48" rx="7" class="dg-cell"/>
+            <!-- Описание и объект находятся в одном контексте, в разные моменты. -->
+            <rect x="510" y="28" width="190" height="202" rx="10" class="dg-box"/>
+            <rect x="522" y="56" width="166" height="44" rx="7" class="dg-cell"/>
+            <rect x="522" y="164" width="166" height="48" rx="7" class="dg-cell hit"/>
+            <path d="M194 80 L234 80" class="dg-line" marker-end="url(#bs-n)"/>
+            <path d="M107 104 L107 160" class="dg-line" marker-end="url(#bs-n)"/>
+            <path d="M351 100 L351 160" class="dg-line" marker-end="url(#bs-n)"/>
+            <path d="M194 188 L246 188" class="dg-line" marker-end="url(#bs-n)"/>
+            <path d="M452 184 C486 184, 486 78, 518 78" class="dg-line" marker-end="url(#bs-n)"/>
+            <path d="M605 100 L605 160" class="dg-line" marker-end="url(#bs-n)"/>
+            <text x="20" y="20" class="dg-cap">CLASSPATH</text>
+            <text x="250" y="46" class="dg-n">bank-spring-boot.jar</text>
+            <text x="522" y="46" class="dg-n">ApplicationContext</text>
+            <g text-anchor="middle">
+              <text x="107" y="77" class="dg-in">bank starter</text>
+              <text x="107" y="95" class="dg-n">две зависимости</text>
+              <text x="107" y="193" class="dg-in">BankSdk</text>
+              <text x="351" y="83" class="dg-in">*.imports</text>
+              <text x="359" y="135" class="dg-n" text-anchor="start">Boot читает список</text>
+              <text x="351" y="184" class="dg-in">BankAutoConfiguration</text>
+              <text x="351" y="202" class="dg-n">условия + @Bean</text>
+              <text x="605" y="75" class="dg-in">BeanDefinition</text>
+              <text x="605" y="92" class="dg-n">BankGateway</text>
+              <text x="613" y="135" class="dg-n" text-anchor="start">создаёт</text>
+              <text x="605" y="193" class="dg-in">объект шлюза</text>
+            </g>
+            <text x="20" y="254" class="dg-s">Зависимость даёт класс; прошедшее условие даёт описание бина.</text>
+          </svg>
+        </div>
+        <figcaption>В classpath лежат и включённые, и выключенные конфигурации. В контекст попадают только описания, для которых прошли условия.</figcaption>
+      </figure>
+      <p>Ещё одна часть сборки — управление версиями. <code>spring-boot-dependencies</code> задаёт согласованный набор версий через BOM. <code>spring-boot-starter-parent</code> добавляет к нему настройки Maven и плагинов. Если проект уже наследует корпоративный parent, BOM можно импортировать отдельно. BOM задаёт версии, но зависимости в проект добавляешь ты или стартер.</p>
+      <p>В Boot 4 инфраструктура и её автоконфигурации разделены по технологическим модулям. Для Spring MVC основной стартер — <code>spring-boot-starter-webmvc</code>. Поэтому при миграции проверяют и зависимости, и новые пакеты классов автоконфигурации. Механизм выбора по условиям остаётся прежним.</p>
+    </section>
+
+    <section class="step" id="conditions">
+      <h2>Boot находит конфигурации через imports и проверяет условия</h2>
+      <p>Обычное приложение начинается с <code>@SpringBootApplication</code>. Она объединяет <code>@SpringBootConfiguration</code>, <code>@EnableAutoConfiguration</code> и <code>@ComponentScan</code>. Первая делает класс конфигурацией приложения, вторая включает импорт автоконфигураций, третья ищет пользовательские компоненты. Главный класс ставят в корневой пакет приложения: тогда сканирование охватывает его подпакеты.</p>
+      <p>Поиск компонентов и поиск автоконфигураций идут разными путями. Для автоконфигураций Boot читает ресурсы <code>META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports</code> из classpath. В каждой строке — полное имя одного класса. Такой класс может находиться в пакете библиотеки, далеко за пределами сканирования приложения. Расширять <code>@ComponentScan</code> на все библиотеки ради этого не требуется.</p>
+      <p>В демо список содержит вложенный класс, поэтому его имя записано с <code>$</code>. Это полноценный ресурс, который находит Boot. В библиотеке верхний уровень чаще удобнее: <code>com.acme.bank.BankAutoConfiguration</code>. Здесь классы собраны в одном файле, чтобы опыт легко запускался.</p>
+      <pre><code class="language-text"># examples/boot/resources/META-INF/spring/
+# org.springframework.boot.autoconfigure.AutoConfiguration.imports
+kb.boot.AutoConfigDemo$BankAutoConfiguration</code></pre>
+      <p>Наш кандидат действует при двух условиях: доступен класс SDK и работа с банком включена. Сам шлюз добавляется, только если приложение ещё не описало другой <code>BankGateway</code>. Условия на классе закрывают всю конфигурацию, условие на методе — один конкретный бин.</p>
+      <pre><code class="language-java">@AutoConfiguration // Конфигурация с proxyBeanMethods=false, импортируемая Boot.
+@ConditionalOnClass(BankSdk.class) // Есть библиотека, с которой умеем работать.
+@ConditionalOnProperty(prefix = "payments.bank", name = "enabled",
+        havingValue = "true", matchIfMissing = true) // Без свойства включаем по умолчанию.
+class BankAutoConfiguration {
+    @Bean
+    @ConditionalOnMissingBean(BankGateway.class) // Проверяем доступные описания по типу.
+    BankGateway bankGateway() {
+        return id -&gt; "bank:" + id;
+    }
+}</code></pre>
+      <table class="mx">
+        <thead><tr><th>Условие</th><th>Что решает</th><th>Пограничный случай</th></tr></thead>
+        <tbody>
+          <tr><td><code>@ConditionalOnClass</code></td><td>Доступны ли нужные классы</td><td>Наличие SDK ещё не говорит, что банк доступен по сети</td></tr>
+          <tr><td><code>@ConditionalOnMissingBean</code></td><td>Есть ли уже подходящий бин по известным описаниям</td><td>Тип <code>Object</code> скрывает роль будущего объекта</td></tr>
+          <tr><td><code>@ConditionalOnBean</code></td><td>Есть ли зависимость, вокруг которой строится дополнительная инфраструктура</td><td>Её конфигурацию нужно обработать раньше</td></tr>
+          <tr><td><code>@ConditionalOnProperty</code></td><td>Подходит ли значение из <code>Environment</code></td><td>Без <code>havingValue</code> подходит любое присутствующее значение, кроме <code>false</code>; отсутствие регулирует <code>matchIfMissing</code></td></tr>
+          <tr><td><code>@ConditionalOnWebApplication</code></td><td>Подходит ли вид веб-приложения</td><td>Servlet и reactive требуют разной инфраструктуры</td></tr>
+        </tbody>
+      </table>
+      <p>Почему <code>@ConditionalOnClass(BankSdk.class)</code> вообще удаётся прочитать, если SDK отсутствует? Spring читает метаданные аннотации из байткода через ASM. Для этой проверки ему не требуется загрузить сам класс конфигурации и связать все её методы. Условие может отвергнуть кандидат до такого шага.</p>
+      <p>Эта защита должна охватывать класс, использующий необязательный тип. Если тип SDK фигурирует в сигнатуре <code>@Bean</code>, а проверка стоит только на этом методе, загрузка и анализ класса могут потребовать SDK раньше проверки. Такие методы выносят в отдельную конфигурацию с <code>@ConditionalOnClass</code> на классе. При собственной составной аннотации имя класса указывают через <code>name</code>.</p>
+      <div class="note exp">
+        <p>В старых примерах список автоконфигураций лежит под ключом <code>EnableAutoConfiguration</code> в <code>spring.factories</code>. Boot 2.7 ввёл <code>AutoConfiguration.imports</code> с поддержкой обоих вариантов; Boot 3.0 убрал регистрацию автоконфигураций через старый ключ. Остальные назначения <code>spring.factories</code> сохранились.</p>
+      </div>
+    </section>
+
+    <section class="step" id="backoff">
+      <h2>Свой бин занимает место стандартного до создания объектов</h2>
+      <p>Сервис возвратов получает особые условия банка. Ты добавляешь свой <code>@Bean BankGateway</code>. Почему он успевает повлиять на автоконфигурацию, хотя в контексте ещё нет готового шлюза? Потому что условие проверяет известные контейнеру описания и их типы. Вызывать пользовательскую фабрику для этого не требуется.</p>
+      <p><code>@EnableAutoConfiguration</code> подключает <code>AutoConfigurationImportSelector</code>. Он реализует <code>DeferredImportSelector</code>: импорт кандидатов отложен до обработки обычных пользовательских конфигураций. К моменту проверки <code>@ConditionalOnMissingBean</code> пользовательские описания уже доступны. Boot также удаляет исключённых кандидатов, отбрасывает неподходящие варианты и упорядочивает автоконфигурации.</p>
+      <p>Когда обнаружен пользовательский <code>BankGateway</code>, стандартный метод <code>bankGateway()</code> пропускается. Здесь нет двух готовых объектов, из которых Boot выбрал один. Для стандартного шлюза вообще не появляется описание, а значит, его фабрика не вызывается. Этот подход часто называют <b>отступлением автоконфигурации</b>, или back-off.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 284" role="img" aria-label="Пользовательская конфигурация передаёт описание customGateway в реестр. Boot после неё рассматривает фабрику bankGateway, проверяет уже известный тип и отвергает стандартное описание. Затем Spring создаёт один customGateway и сервис. При вызове pay сервис получает ссылку на этот шлюз.">
+            <defs>
+              <marker id="bb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="bb-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- Слева два источника описаний, справа отдельно реестр и объекты. -->
+            <rect x="20" y="40" width="190" height="50" rx="8" class="dg-box"/>
+            <rect x="20" y="144" width="190" height="50" rx="8" class="dg-box"/>
+            <rect x="274" y="28" width="220" height="184" rx="10" class="dg-sep" fill="none"/>
+            <rect x="538" y="28" width="162" height="184" rx="10" class="dg-sep" fill="none"/>
+            <g data-s="2-">
+              <rect x="286" y="52" width="196" height="46" rx="7" class="dg-cell hit"/>
+            </g>
+            <g data-s="3">
+              <rect x="286" y="146" width="196" height="46" rx="7" class="dg-sep" fill="none"/>
+            </g>
+            <g data-s="4-">
+              <rect x="286" y="146" width="196" height="46" rx="7" class="dg-cell miss"/>
+            </g>
+            <g data-s="5">
+              <rect x="550" y="52" width="138" height="46" rx="7" class="dg-cell hit"/>
+              <rect x="550" y="146" width="138" height="46" rx="7" class="dg-box"/>
+            </g>
+            <!-- На каждом шаге видна передаваемая сущность, а не просто подсветка. -->
+            <path data-s="2" d="M210 65 L282 75" class="dg-line ok" marker-end="url(#bb-ok)"/>
+            <path data-s="3" d="M210 169 L282 169" class="dg-line" marker-end="url(#bb-n)"/>
+            <path data-s="4" d="M384 146 L384 102" class="dg-line" marker-end="url(#bb-n)"/>
+            <path data-s="5" d="M482 75 L546 75" class="dg-line ok" marker-end="url(#bb-ok)"/>
+            <path data-s="5" d="M619 146 L619 102" class="dg-line ok" marker-end="url(#bb-ok)"/>
+            <g text-anchor="middle">
+              <text x="115" y="61" class="dg-in">ManualConfiguration</text>
+              <text x="115" y="80" class="dg-n">@Bean BankGateway</text>
+              <text x="115" y="165" class="dg-in">BankAutoConfiguration</text>
+              <text x="115" y="184" class="dg-n">условие по типу</text>
+              <text x="384" y="20" class="dg-cap">ОПИСАНИЯ</text>
+              <text x="619" y="20" class="dg-cap">ОБЪЕКТЫ</text>
+              <g data-s="2-"><text x="384" y="71" class="dg-in">customGateway</text><text x="384" y="89" class="dg-n">тип BankGateway</text></g>
+              <text data-s="3" x="384" y="174" class="dg-in">bankGateway?</text>
+              <text data-s="4-" x="384" y="174" class="dg-bad">bankGateway пропущен</text>
+              <text data-s="4" x="392" y="128" class="dg-n" text-anchor="start">тип уже есть</text>
+              <g data-s="5"><text x="619" y="78" class="dg-in">custom</text><text x="619" y="174" class="dg-in">PaymentService</text><text x="627" y="128" class="dg-n" text-anchor="start">ссылка</text></g>
+              <text data-s="1-4" x="619" y="122" class="dg-n">ещё не созданы</text>
+            </g>
+            <text data-s="1" x="20" y="248" class="dg-t">Описаний шлюза: 0. Объектов шлюза: 0.</text>
+            <text data-s="2" x="20" y="248" class="dg-t">Описаний шлюза: 1. Объектов шлюза: 0.</text>
+            <text data-s="3" x="20" y="248" class="dg-t">Стандартный вариант пока только кандидат.</text>
+            <text data-s="4" x="20" y="248" class="dg-t">MissingBean = false. Стандартной фабрики в реестре нет.</text>
+            <text data-s="5" x="20" y="248" class="dg-ok">Описаний шлюза: 1. Объектов шлюза: 1.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Spring начинает разбирать конфигурации. Пользовательский и стандартный шлюзы пока существуют как методы в классах; описаний шлюза в реестре ещё нет.</li>
+          <li>Пользовательская конфигурация добавляет описание customGateway с типом BankGateway. Создавать объект пока рано: контейнер продолжает собирать описания.</li>
+          <li>Отложенный импорт приводит к BankAutoConfiguration. Класс SDK доступен, настройка включает банк. Метод bankGateway становится кандидатом на регистрацию.</li>
+          <li>Условие MissingBean смотрит в реестр и находит customGateway. Кандидат отклонён. Стандартное описание не регистрируется, метод bankGateway не будет вызван.</li>
+          <li>Spring создаёт единственный шлюз и платёжный сервис. При вызове pay сервис получает ссылку на пользовательский объект. Выбор конфигурации к этому моменту уже закончен.</li>
+        </ol>
+      </figure>
+      <p>Теперь сравним три запуска. В первом добавляем только приложение и ресурс imports. Во втором дополнительно передаём пользовательскую конфигурацию. В третьем через аргумент запуска выключаем стандартную конфигурацию. Полный файл — <a href="../examples/boot/AutoConfigDemo.java">AutoConfigDemo.java</a>; фрагменты ниже взяты из него.</p>
+      <pre><code class="language-java">@Configuration(proxyBeanMethods = false)
+class ManualConfiguration {
+    @Bean
+    BankGateway customGateway() { // Имя отличается; для условия важен тип.
+        return id -&gt; "custom:" + id;
+    }
+}
+
+@SpringBootConfiguration(proxyBeanMethods = false)
+@EnableAutoConfiguration // Читает imports, конфигурацию банка сюда не импортируем вручную.
+@Import(PaymentService.class) // Компонент сервиса добавлен явно.
+class Application {}
+
+// start(extra, args) создаёт SpringApplication(Application.class),
+// добавляет extra в primary sources и запускает без веб-сервера.
+// Никакого component scan: соседние учебные варианты не попадут в контекст.
+scenario("default", null);
+scenario("manual", ManualConfiguration.class);
+scenario("disabled", null, "--payments.bank.enabled=false");
+
+// Внутри scenario после запуска контекста:
+System.out.println(name + " gateways="
+        + Arrays.toString(context.getBeanNamesForType(BankGateway.class)));
+System.out.println(name + " result=" + context.getBean(PaymentService.class).pay("p-17"));</code></pre>
+      <pre><code class="language-bash">cd examples/boot
+./run.sh AutoConfigDemo # JDK 21 и Maven; банк и база не нужны.</code></pre>
+      <pre class="out">default gateways=[bankGateway]
+default result=bank:p-17
+manual gateways=[customGateway]
+manual result=custom:p-17
+disabled gateways=[]
+disabled result=unavailable:p-17</pre>
+      <p>Пользовательский бин заменил стандартный по типу, хотя имена разные. При отключении свойства стандартного шлюза нет совсем. Если одновременно выключить стандартную конфигурацию и добавить свой бин, пользовательский бин останется: свойство стоит на конфигурации библиотеки и управляет только её участием.</p>
+      <div class="trap">
+        <p class="myth">Достаточно поставить @ConditionalOnMissingBean на любой @Bean, и пользовательская конфигурация всегда победит.</p>
+        <p class="fact">Условие видит только уже обработанные описания. В двух обычных пользовательских @Configuration оно зависит от порядка регистрации. Автоконфигурации специально импортируются после пользовательских; для двух собственных вариантов лучше выразить выбор через профили, свойства или явную конфигурацию.</p>
+      </div>
+    </section>
+
+    <section class="step" id="diagnostics">
+      <h2>Отчёт условий показывает, почему Boot выбрал этот вариант</h2>
+      <p>После добавления библиотеки сервис неожиданно получил другой клиент. Начни с отчёта условий: запусти приложение с <code>--debug</code> или настройкой <code>debug=true</code>. Отчёт показывает прошедшие и отклонённые условия, а также исключённые конфигурации. Это ответ на вопрос «почему добавлено это описание», а список бинов отвечает на следующий вопрос — «что в итоге есть в контейнере».</p>
+      <p>В отчёте ищи полное имя конфигурации и конкретного метода. Отрицательный результат для ненужной библиотеки нормален: Boot рассматривает много кандидатов. Проблема начинается там, где ты ожидал положительный результат. Условия на классе могут пройти, а условие одного метода внутри — нет.</p>
+      <p>Демо читает тот же <code>ConditionEvaluationReport</code> и печатает только запись о стандартном шлюзе. Ниже показан настоящий вывод запуска с пользовательским <code>BankGateway</code>; строка сообщения остаётся на языке самой библиотеки.</p>
+      <pre><code class="language-java">// Контекст запущен с ManualConfiguration; её @Bean возвращает BankGateway.
+var report = ConditionEvaluationReport.get(context.getBeanFactory());
+String source = BankAutoConfiguration.class.getName() + "#bankGateway";
+var outcomes = report.getConditionAndOutcomesBySource().get(source);
+System.out.println("bankGateway fullMatch=" + outcomes.isFullMatch());
+outcomes.forEach(outcome -&gt; System.out.println(outcome.getOutcome().getMessage()));</code></pre>
+      <pre><code class="language-bash">./run.sh AutoConfigDemo report # Отчёт одного условия, без остального лога.</code></pre>
+      <pre class="out">bankGateway fullMatch=false
+@ConditionalOnMissingBean (types: kb.boot.AutoConfigDemo$BankGateway; SearchStrategy: all) found beans of type 'kb.boot.AutoConfigDemo$BankGateway' customGateway</pre>
+      <h3>Слишком общий тип прячет пользовательский шлюз</h3>
+      <p>Теперь изменим только тип возврата пользовательской фабрики на <code>Object</code>. Внутри всё ещё создаётся <code>BankGateway</code>. Но при проверке условия контейнеру доступна сигнатура метода, а там роль шлюза потеряна. Стандартное описание тоже регистрируется. После создания singleton-бинов обнаруживаются уже два объекта нужного типа.</p>
+      <pre><code class="language-java">@Configuration(proxyBeanMethods = false)
+class OpaqueConfiguration {
+    @Bean
+    Object customGateway() { // При выборе конфигурации известен только Object.
+        return (BankGateway) id -&gt; "opaque:" + id;
+    }
+}
+
+// BankAutoConfiguration остаётся прежней: MissingBean(BankGateway.class).
+try (var context = start(OpaqueConfiguration.class)) {
+    System.out.println("opaque gateways="
+            + Arrays.toString(context.getBeanNamesForType(BankGateway.class)));
+    try {
+        System.out.println(context.getBean(PaymentService.class).pay("p-17"));
+    } catch (NoUniqueBeanDefinitionException ex) {
+        System.out.println("opaque result=" + ex.getClass().getSimpleName());
+    }
+}</code></pre>
+      <pre><code class="language-bash">./run.sh AutoConfigDemo opaque # Та же функция, другая сигнатура @Bean.</code></pre>
+      <pre class="out">opaque gateways=[customGateway, bankGateway]
+opaque result=NoUniqueBeanDefinitionException</pre>
+      <p>Исправление — вернуть <code>BankGateway</code>, как в предыдущем опыте. Если другие условия ищут конкретную реализацию, объяви и её конкретный тип. <code>@Primary</code> решил бы выбор зависимости между двумя кандидатами, но не отменил бы создание стандартного шлюза. Это разные задачи: один механизм регистрирует описания, другой выбирает из уже имеющихся кандидатов.</p>
+      <p>Между двумя автоконфигурациями порядок тоже имеет смысл. Если конфигурация аудита проверяет <code>@ConditionalOnBean(BankGateway.class)</code>, конфигурацию шлюза обрабатывают раньше: <code>@AutoConfiguration(after = BankAutoConfiguration.class)</code>. <code>before</code> и <code>after</code> упорядочивают регистрацию описаний. Объекты затем создаются по зависимостям; требование порядка инициализации задают зависимостью или <code>@DependsOn</code>.</p>
+      <details class="deep">
+        <summary>Под капотом: где искать решение о регистрации</summary>
+        <p><code>AutoConfigurationImportSelector</code> получает кандидатов через <code>ImportCandidates</code>, применяет исключения и фильтры. Группа отложенного импорта упорядочивает кандидатов. Условия могут проверяться на разных этапах разбора и регистрации; <code>OnBeanCondition</code> работает на этапе регистрации, когда уже накоплены описания. Это позволяет использовать сведения о пользовательских бинах без массового раннего создания объектов.</p>
+        <p>Предварительные метаданные помогают быстро отбросить явно неподходящие конфигурации. Окончательное решение отдельных методов всё равно зависит от их условий. Поэтому наличие имени в imports означает «рассмотреть кандидат», а положительное условие класса ещё не означает «зарегистрировать все его @Bean».</p>
+      </details>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Отключай конкретное решение и сохраняй явные границы</h2>
+      <p>Если нужно изменить адрес банка или таймаут, начни с свойства, которое предоставляет библиотека. Если нужен особый шлюз, добавь свой бин ожидаемого типа. Если всё решение библиотеки здесь лишнее, исключи класс автоконфигурации. Масштаб вмешательства должен соответствовать задаче: исключение убирает также остальные бины этого класса.</p>
+      <pre><code class="language-java">@SpringBootApplication(exclude = BankAutoConfiguration.class) // Убираем весь кандидат.
+class PaymentsApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(PaymentsApplication.class, args);
+    }
+}
+
+// Когда тип не должен фигурировать в исходниках, доступен строковый вариант:
+// @SpringBootApplication(excludeName = "com.acme.bank.BankAutoConfiguration")</code></pre>
+      <pre><code class="language-yaml">spring:
+  autoconfigure:
+    exclude: com.acme.bank.BankAutoConfiguration # То же решение через настройку.</code></pre>
+      <p>Исключение автоконфигурации не удаляет пользовательский бин и не отменяет обычный <code>@Import</code>. Если ты сам импортировал класс или включил его в component scan, он пришёл другим путём. Поэтому собственные автоконфигурации держат в отдельном пакете и подключают через imports; их внутренние части добавляют явно, без широкого сканирования.</p>
+      <p>Условия оцениваются при построении контекста. Изменение переменной окружения у уже работающего процесса само по себе не удалит шлюз и не пересоберёт граф объектов. Проверка класса SDK также не проверяет DNS, сертификат или работоспособность банка. Готовность инфраструктуры, здоровье приложения и восстановление после сетевой ошибки решаются отдельно.</p>
+      <p>Для библиотечного стартера важен небольшой, устойчивый договор: пространство свойств, типы точек расширения и правила отступления. Не привязывай бизнес-решение «списать повторно или вернуть ошибку» к незаметному появлению класса в classpath. Такое решение платёжный сервис должен выражать явно. При обновлении Boot сравнивай отчёт условий и состав зависимостей: новый модуль способен изменить выбранную инфраструктуру без изменения бизнес-кода.</p>
+      <p>Порядок источников настроек и <code>@ConfigurationProperties</code> разобраны в <a href="spring-config.html">Configuration &amp; Profiles</a>. Запуск контекста, сервер и упаковка — в <a href="boot-startup.html">Startup &amp; Packaging</a>. HTTP-отчёт <code>/actuator/conditions</code>, проверки готовности и метрики — в <a href="actuator.html">Actuator</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Стартер добавляет зависимости. Boot читает imports и условия, затем регистрирует обычные описания бинов Spring.</li>
+        <li>Отложенный импорт даёт пользовательским описаниям появиться раньше автоконфигураций. Отступление происходит до создания стандартного объекта.</li>
+        <li>Условие по типу опирается на известные типы описаний. Точный тип возврата @Bean — часть договора конфигурации.</li>
+        <li>Отчёт условий объясняет регистрацию. @Primary объясняет выбор зависимости. before/after объясняют порядок описаний.</li>
+        <li>Исключение убирает кандидата автоконфигурации. Доступность банка и изменение работающего графа объектов требуют отдельных решений.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="auto-mechanism" data-freq="3">
+      <h3>Как Boot понимает, что нужно настроить автоматически?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я включаю автоконфигурацию через @SpringBootApplication. Boot читает AutoConfiguration.imports из подключённых модулей и получает кандидатов. Для каждого проверяет условия: нужные классы, свойства, вид приложения и уже известные бины. Прошедшие варианты добавляют обычные BeanDefinition в контейнер Spring.</p>
+          <p>Например, модуль банка предлагает шлюз, если есть SDK и включена интеграция. Если я объявил свой BankGateway, условие MissingBean отклоняет стандартную фабрику. В итоге платёжный сервис получает мой шлюз через обычное внедрение зависимости.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>AutoConfigurationImportSelector реализует DeferredImportSelector. Поэтому условия по бинам видят пользовательские описания, обработанные раньше; готовые объекты для этого создавать не нужно.</li>
+            <li>Component scan ищет компоненты приложения по пакетам. Кандидаты из imports находятся независимо от этих пакетов. Расширение scan на библиотеки способно включить конфигурацию в обход задуманного порядка.</li>
+            <li>Условия класса и его методов проверяются отдельно. Положительный результат класса ещё не обещает каждый бин; для расследования нужен отчёт конкретного метода.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="boot-parts" data-freq="3">
+      <h3>Чем отличаются Spring, Spring Boot и стартер?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spring даёт контейнер, внедрение зависимостей, обработку конфигураций и другие механизмы. Boot собирает на их основе приложение с готовыми инфраструктурными решениями и удобным запуском. Стартер — зависимость, которая приносит нужный набор библиотек и модулей интеграции.</p>
+          <p>Я разделяю два события: библиотека появилась в classpath и бин появился в контексте. Между ними находится проверка условий. Даже с подключённым стартером конкретная автоконфигурация может отступить перед моей или быть выключена настройкой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>@SpringBootApplication объединяет @SpringBootConfiguration, @EnableAutoConfiguration и @ComponentScan. Эти части можно использовать отдельно, как в демо с явными источниками.</li>
+            <li>BOM согласует версии, а зависимости добавляют отдельно. Импорт spring-boot-dependencies не равен подключению всех стартеров; parent также добавляет настройки сборки.</li>
+            <li>В Boot 4 автоконфигурации распределены по технологическим модулям. Старые пакеты и набор зависимостей при миграции проверяют вместе.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="replace-disable" data-freq="3">
+      <h3>Как заменить стандартный бин или отключить автоконфигурацию?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если меняется параметр, сначала ищу свойство библиотеки. Если нужна другая реализация, объявляю свой бин того типа, который проверяет MissingBean. Тогда стандартный вариант отступает, и его объект вообще не создаётся.</p>
+          <p>Чтобы убрать автоконфигурацию целиком, использую exclude или excludeName у @SpringBootApplication либо spring.autoconfigure.exclude. Сначала смотрю, какие ещё бины она создаёт: исключение класса шире замены одной фабрики.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Имена бинов при проверке по типу могут различаться. Совпадение имени и разрешение перезаписи BeanDefinition — отдельный механизм, который маскирует ошибки конфигурации.</li>
+            <li>@Primary управляет внедрением при нескольких кандидатах. Он не убирает второй бин, его инициализацию, потоки или подключения.</li>
+            <li>Исключения действуют на путь автоконфигурации. Явный @Import и component scan могут снова привести тот же класс в контекст.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Выключили payments.bank.enabled, но шлюз банка остался. Это ошибка Boot?</summary>
+          <p>Сначала смотрю происхождение бина. В нашем примере свойство выключает только BankAutoConfiguration. Пользовательский @Bean из ManualConfiguration продолжает действовать. В отчёте будет отрицательное условие библиотеки, а у оставшегося бина — пользовательский метод-фабрика. Если флаг должен выключать и свой вариант, его условие нужно выразить в конфигурации этого варианта.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="custom-starter" data-freq="3">
+      <h3>Как бы ты написал свой стартер для подключения к банку?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я отделил бы автоконфигурацию от набора зависимостей, если интеграции нужны разные варианты SDK. Конфигурацию пометил бы @AutoConfiguration и записал в AutoConfiguration.imports. Условия проверяют наличие SDK, включённое свойство и отсутствие пользовательского шлюза. Стартер подключает этот модуль и обычный SDK.</p>
+          <p>У настроек будет свой префикс payments.bank, а правило включения задам явно: havingValue="true" и выбранное matchIfMissing. Для замены дам устойчивый тип BankGateway. Проверю основные комбинации: библиотека есть и отсутствует, свойство включено и выключено, пользовательский бин есть и отсутствует.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Необязательные типы из SDK изолирую в конфигурации с условием на классе. Метаданные читаются без его загрузки; сигнатура метода с отсутствующим типом иначе может потребовать SDK слишком рано.</li>
+            <li>Зависимость между автоконфигурациями выражаю через before/after у @AutoConfiguration. Это порядок описаний; инициализацию объектов задают связи между бинами.</li>
+            <li>Для проверки условий удобен ApplicationContextRunner, а отсутствие библиотеки моделирует FilteredClassLoader. Эти проверки ловят ошибку в договоре стартера до запуска полного сервиса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="wrong-choice" data-freq="3">
+      <h3>Я объявил свой бин, но Boot создал ещё и стандартный. Где искать причину?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я смотрю отчёт условий и точный тип, который проверяет автоконфигурация. Потом проверяю, зарегистрирована ли моя конфигурация и что возвращает её @Bean по сигнатуре. Если там Object, условие может не распознать будущий BankGateway и добавить стандартный вариант.</p>
+          <p>Ещё проверяю момент регистрации: MissingBean в обычной пользовательской конфигурации видит только уже обработанные описания. Полезно сначала понять, откуда взялись оба бина, затем исправить тип или порядок. Простое добавление @Primary уберёт неоднозначность внедрения, но оставит два объекта.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Условие может искать конкретную реализацию, имя, аннотацию или тип в иерархии контекстов. Проверяю критерий целиком, а не только похожее имя метода.</li>
+            <li>При двух кандидатах прямое внедрение обычно ломает запуск. ObjectProvider переносит эту ошибку на обращение к зависимости, как в нашем опыте.</li>
+            <li>После обновления зависимости сравниваю кандидатов из imports и отчёт условий. Новая библиотека может сделать положительным условие, которое раньше отсеивалось по classpath.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Поможет ли переименовать метод Object customGateway() в bankGateway()?</summary>
+          <p>Тип в описании останется Object. Условие по BankGateway от этого не начнёт видеть пользовательскую роль. Зато совпадение имени создаст конфликт регистрации описаний или сделает результат зависимым от разрешённой перезаписи. Исправление — точный тип возврата, а имя можно оставить customGateway.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/developing-auto-configuration.html">Spring Boot Reference: Creating Your Own Auto-configuration</a> — основа урока: imports, условия, порядок описаний, устройство стартера и проверка вариантов.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/using/auto-configuration.html">Spring Boot Reference: Auto-configuration</a> — отступление, отчёт через --debug и способы исключить конфигурацию.</li>
+      <li><a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/autoconfigure/condition/ConditionalOnMissingBean.html">ConditionalOnMissingBean</a> и <a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/autoconfigure/condition/ConditionalOnProperty.html">ConditionalOnProperty</a> — критерии поиска, доступные описания, havingValue и matchIfMissing.</li>
+      <li><a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-2.7-Release-Notes#auto-configuration-registration">Boot 2.7: регистрация</a>, <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.0-Migration-Guide#auto-configuration-files">Boot 3.0: imports</a> и <a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide">Boot 4.0: modularization</a> — границы версии для старых примеров и модулей.</li>
+      <li>Craig Walls, Spring in Action, 6-е изд., глава 1 — как готовая конфигурация снимает повторную сборку приложения; собственный пример здесь перенесён на платёжный сервис и Boot 4.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

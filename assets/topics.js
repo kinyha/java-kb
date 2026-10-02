@@ -519,7 +519,7 @@ window.KB_TREE = [
           scope: 'ApplicationEventPublisher и @EventListener, синхронные ошибки и порядок, @Async, @TransactionalEventListener и фазы, потери при сбое и outbox' },
       ] },
       { id: 'boot', title: 'Boot', source: 'Spring Boot Reference: Developing with Spring Boot, Core Features, Production-ready Features', items: [
-        { id: 'spring-boot', freq: 3, status: 'empty', title: 'Auto-configuration',
+        { id: 'spring-boot', freq: 3, status: 'draft', title: 'Auto-configuration',
           scope: '@SpringBootApplication, @Conditional, стартеры, AutoConfiguration.imports, как отключить автоконфигурацию' },
         { id: 'spring-config', freq: 2, status: 'empty', title: 'Configuration & Profiles',
           scope: 'порядок источников настроек, application.yml, @ConfigurationProperties и @Value, профили, секреты' },
