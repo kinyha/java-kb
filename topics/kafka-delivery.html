@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kafka: Delivery Semantics · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kafka-delivery">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Kafka: Delivery Semantics</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Exactly-once в Kafka — это транзакции. Транзакционный продюсер пишет в несколько партиций и топиков атомарно: либо все записи станут видимы, либо ни одна. Консьюмер с <code>isolation.level=read_committed</code> видит только закоммиченные транзакции; отменённые записи физически лежат в логе, но пропускаются. В цепочке «прочитать — преобразовать — записать» смещения входного топика коммитятся в той же транзакции, что и выходные записи, поэтому после падения повтор не даёт дублей. Стабильный <code>transactional.id</code> отсекает зомби — старый экземпляр не сможет закоммитить. Гарантия не распространяется за пределы Kafka: запись в базу или вызов банка нужно делать идемпотентными отдельно.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Сервис проводок записал списание в журнал дважды, а аналитика посчитала отменённые платежи</h2>
+      <p>Сервис проводок читает топик <code>charges</code> и для каждого списания пишет проводку в топик <code>ledger</code>. После падения пода часть проводок оказалась в журнале дважды: под успел записать проводки, но не успел закоммитить смещение, и новый экземпляр прочитал те же списания снова. В другом сервисе аналитика учла списания, которые продюсер отменил: события были отправлены, а затем транзакция в базе откатилась.</p>
+      <p>Обе проблемы решаются транзакциями Kafka, если вся цепочка остаётся внутри Kafka. Тема разбирает, как работают транзакции, что видит консьюмер, как защититься от зомби и где гарантии заканчиваются. Общая картина at-most-once и at-least-once — в <a href="messaging.html">Brokers &amp; Guarantees</a>, идемпотентный продюсер — в <a href="kafka-producer.html">Producer</a>, смещения групп — в <a href="kafka-consumer.html">Consumer Groups</a>. Демо <a href="../examples/kafka-cluster/DeliveryDemo.java">DeliveryDemo.java</a> работает с кластером из трёх брокеров Kafka 4.3 в Docker через kafka-clients 4.3.1.</p>
+    </section>
+
+    <section class="step" id="guarantees">
+      <h2>Гарантия собирается из настроек продюсера, брокера и консьюмера</h2>
+      <table class="mx">
+        <thead><tr><th>Гарантия</th><th>Продюсер</th><th>Консьюмер</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>At-most-once</td><td><code>acks=0</code> или без повторов</td><td>Коммит до обработки</td><td>Потери при сбоях</td></tr>
+          <tr><td>At-least-once</td><td><code>acks=all</code>, повторы, идемпотентность</td><td>Коммит после обработки</td><td>Повторы после падения консьюмера</td></tr>
+          <tr><td>Exactly-once внутри Kafka</td><td>Транзакции, <code>transactional.id</code></td><td><code>read_committed</code>, смещения в транзакции</td><td>Задержка, сложность, только Kafka→Kafka</td></tr>
+        </tbody>
+      </table>
+      <p>Идемпотентный продюсер, включённый по умолчанию, убирает дубли, которые продюсер создаёт сам повторами внутри одной сессии. Он не защищает от повторной отправки после перезапуска сервиса и не делает атомарной запись в несколько партиций. Это делают транзакции.</p>
+    </section>
+
+    <section class="step" id="isolation">
+      <h2>Отменённая транзакция остаётся в логе, но read_committed её не видит</h2>
+      <pre><code class="language-java">p.beginTransaction();
+p.send(new ProducerRecord&lt;&gt;("charges", "p-1", "charge p-1 500"));
+p.send(new ProducerRecord&lt;&gt;("charges", "p-2", "charge p-2 700"));
+p.flush();                 // Записи уже в логе брокера.
+p.abortTransaction();      // Например, база не сохранила заказ.
+
+p.beginTransaction();
+p.send(...p-3...); p.send(...p-4...);
+p.commitTransaction();</code></pre>
+      <pre class="out">== read_uncommitted sees: [charge p-1 500, charge p-2 700, charge p-3 900, charge p-4 300]
+== read_committed sees:   [charge p-3 900, charge p-4 300]</pre>
+      <p>Транзакция не держит записи у продюсера до коммита — они сразу пишутся в партиции. Коммит или отмену фиксирует координатор транзакций: он записывает решение в служебный топик <code>__transaction_state</code> и ставит в каждую затронутую партицию контрольную запись-маркер COMMIT или ABORT. Консьюмер с <code>read_uncommitted</code> — это умолчание — читает всё подряд, включая отменённые p-1 и p-2. Консьюмер с <code>read_committed</code> пропускает отменённые записи и не читает дальше LSO — последнего стабильного смещения, до которого все транзакции завершены.</p>
+      <p>Из этого следует неочевидная зависимость. Открытая транзакция задерживает всех <code>read_committed</code>-консьюмеров партиции: они не пойдут дальше её начала, пока она не завершится. Продюсер, который начал транзакцию и завис, остановит чтение до истечения <code>transaction.timeout.ms</code> (по умолчанию минута), после чего координатор отменит её сам. Поэтому транзакции держат короткими.</p>
+    </section>
+
+    <section class="step" id="ctp">
+      <h2>Смещения входного топика коммитятся в той же транзакции, что и выходные записи</h2>
+      <p>В цепочке «прочитать списания — записать проводки» обычный коммит смещения — отдельная операция, и падение между записью проводок и коммитом даёт дубли. Транзакционный продюсер умеет включить коммит смещений группы в свою транзакцию:</p>
+      <pre><code class="language-java">p.beginTransaction();
+for (var r : batch) {
+    p.send(new ProducerRecord&lt;&gt;("ledger", r.key(), "debit " + ...));
+    offsets.put(new TopicPartition(r.topic(), r.partition()), new OffsetAndMetadata(r.offset() + 1));
+}
+p.sendOffsetsToTransaction(offsets, c.groupMetadata());   // Смещения — часть той же транзакции.
+p.commitTransaction();                                     // В попытке 1 — abortTransaction(): падение.</code></pre>
+      <pre class="out">== attempt 1: read 2 charges, wrote ledger, crashed before commit
+== attempt 2: read 2 charges again, committed
+   ledger (read_committed):   [debit p-3 900, debit p-4 300]
+   ledger (read_uncommitted): [debit p-3 900, debit p-4 300, debit p-3 900, debit p-4 300]</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Первая попытка читает списания, пишет проводки и смещение в транзакцию и падает: транзакция отменена, смещение группы не сдвинулось. Вторая попытка читает те же списания и коммитит проводки вместе со смещением. read_committed видит одну пару проводок.">
+            <defs>
+              <marker id="ct-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="20" y="40" width="160" height="110" rx="9" class="dg-box"/>
+            <text x="100" y="62" class="dg-in" text-anchor="middle">charges</text>
+            <text x="34" y="90" class="dg-n">p-3, p-4</text>
+            <text data-s="1-2" x="34" y="130" class="dg-n">offset группы: нет</text>
+            <text data-s="3" x="34" y="130" class="dg-ok">offset группы: 5</text>
+            <rect x="280" y="60" width="160" height="70" rx="9" class="dg-box"/>
+            <text x="360" y="90" class="dg-in" text-anchor="middle">ledger-builder</text>
+            <text data-s="2" x="360" y="112" class="dg-bad" text-anchor="middle">упал</text>
+            <rect x="520" y="40" width="180" height="110" rx="9" class="dg-box"/>
+            <text x="610" y="62" class="dg-in" text-anchor="middle">ledger</text>
+            <rect data-s="1-" x="532" y="74" width="156" height="24" rx="4" class="dg-cell"/>
+            <text data-s="1" x="540" y="91" class="dg-n">tx 1: debit p-3, p-4</text>
+            <rect data-s="2-" x="532" y="74" width="156" height="24" rx="4" class="dg-cell miss"/>
+            <text data-s="2-" x="540" y="91" class="dg-bad">tx 1: ABORT</text>
+            <rect data-s="3" x="532" y="106" width="156" height="24" rx="4" class="dg-cell hit"/>
+            <text data-s="3" x="540" y="123" class="dg-ok">tx 2: debit p-3, p-4</text>
+            <path data-s="1" d="M180 95 L 276 95" class="dg-line" marker-end="url(#ct-n)"/>
+            <path data-s="3" d="M180 95 L 276 95" class="dg-line" marker-end="url(#ct-n)"/>
+            <path data-s="1" d="M440 86 L 528 86" class="dg-line" marker-end="url(#ct-n)"/>
+            <path data-s="3" d="M440 110 L 528 118" class="dg-line" marker-end="url(#ct-n)"/>
+            <text data-s="1" x="20" y="200" class="dg-t">Попытка 1: проводки и смещение в одной транзакции.</text>
+            <text data-s="2" x="20" y="200" class="dg-bad">Падение до коммита: проводки отменены, смещение не сдвинулось.</text>
+            <text data-s="3" x="20" y="200" class="dg-ok">Попытка 2: те же списания, проводки и смещение закоммичены вместе.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Обработчик прочитал два списания, записал две проводки и добавил в транзакцию новое смещение группы.</li>
+          <li>Он упал до коммита. Транзакция отменена целиком: и проводки, и сдвиг смещения. У группы по-прежнему нет закоммиченного смещения.</li>
+          <li>Новый экземпляр прочитал те же списания и закоммитил проводки вместе со смещением 5: p-4 лежит на смещении 4, а маркеры транзакций тоже занимают смещения в логе. Для read_committed в журнале ровно одна пара проводок.</li>
+        </ol>
+      </figure>
+      <p>Во второй попытке обработчик снова прочитал те же два списания: смещение из отменённой транзакции не сдвинулось. В логе <code>ledger</code> физически лежат обе пары проводок, но первая отмечена маркером ABORT, и <code>read_committed</code>-читатель видит ровно одну. Так работает exactly-once в Kafka Streams (<code>processing.guarantee=exactly_once_v2</code>) и в Spring Kafka с <code>KafkaTransactionManager</code>.</p>
+    </section>
+
+    <section class="step" id="fencing">
+      <h2>Стабильный transactional.id отсекает зомби-экземпляр</h2>
+      <p>Под завис на сборке мусора на минуту, оркестратор решил, что он мёртв, и запустил новый. Старый «проснулся» и продолжает свою транзакцию, ничего не зная о замене. Если оба закоммитят, проводки задвоятся. Защита — <code>transactional.id</code>: при <code>initTransactions()</code> координатор увеличивает эпоху продюсера с этим id, и всё, что приходит со старой эпохой, отклоняется:</p>
+      <pre class="out">== zombie commit -&gt; ProducerFencedException</pre>
+      <p>Старый продюсер получил <code>ProducerFencedException</code> и должен закрыться. Для этого <code>transactional.id</code> должен быть одинаковым у старого и нового экземпляра, отвечающего за ту же работу, — например, имя пода в StatefulSet. Случайный UUID на каждый запуск фенсинг отключает. С Kafka 2.5 (KIP-447) защита от зомби в цепочке «прочитать — записать» опирается ещё и на метаданные группы консьюмеров, поэтому один <code>transactional.id</code> на экземпляр достаточен, а не на каждую входную партицию.</p>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Транзакция Kafka не покрывает базу и внешние вызовы</h2>
+      <p>Если обработчик пишет не в Kafka, а в базу или вызывает банк, транзакция Kafka эти действия не откатит. Обработчик записал проводку в PostgreSQL, упал до коммита транзакции Kafka — смещение не сдвинулось, и после перезапуска проводка запишется второй раз. Spring позволяет вложить транзакцию базы в транзакцию Kafka, но это лишь синхронизация двух коммитов, а не атомарность: падение между ними даёт рассогласование.</p>
+      <p>Для внешних эффектов работают два приёма. Первый — хранить смещения в той же базе и в той же транзакции, что и результат, а при старте делать <code>seek()</code> на сохранённое смещение: тогда атомарность обеспечивает база. Второй — идемпотентный обработчик с ключом идемпотентности, как в <a href="messaging.html">Brokers &amp; Guarantees</a>. Для публикации событий из сервиса с базой транзакции Kafka тоже не нужны: надёжнее <a href="outbox.html">Transactional Outbox</a>.</p>
+      <div class="trap">
+        <p class="myth">С enable.idempotence=true и транзакциями Kafka обработка сообщений гарантированно однократная.</p>
+        <p class="fact">Однократна только запись в Kafka вместе с коммитом смещений. Любой эффект вне Kafka — строка в базе, письмо, вызов банка — повторится после падения, потому что транзакция Kafka его не откатывает. В демо отменённые проводки остались в логе и видны read_uncommitted-читателям.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Транзакция пишет записи сразу, а маркеры COMMIT и ABORT решают видимость; в демо read_uncommitted видел отменённые p-1 и p-2.</li>
+        <li>read_committed не идёт дальше LSO: зависшая транзакция задерживает чтение до transaction.timeout.ms.</li>
+        <li>sendOffsetsToTransaction коммитит смещения вместе с выходными записями: после падения ровно одна пара проводок.</li>
+        <li>Стабильный transactional.id и эпоха отсекают зомби: ProducerFencedException.</li>
+        <li>Базу и внешние вызовы транзакция не покрывает: смещения в базе или идемпотентный обработчик, outbox для публикации.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="delivery-eos" data-freq="3">
+      <h3>Как в Kafka работает exactly-once?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через идемпотентный продюсер и транзакции. Транзакционный продюсер атомарно пишет в несколько партиций и включает в транзакцию коммит смещений входного топика через sendOffsetsToTransaction. Консьюмеры с isolation.level=read_committed видят только закоммиченные транзакции. Если обработчик упал, транзакция отменяется целиком, смещение не сдвигается, и повтор не создаёт видимых дублей.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Координатор хранит состояние в __transaction_state и ставит маркеры COMMIT/ABORT в партиции; отменённые записи остаются в логе.</li>
+            <li>read_committed не читает дальше LSO, поэтому долгие транзакции задерживают консьюмеров.</li>
+            <li>Гарантия только для цепочки Kafka → Kafka; внешние эффекты требуют идемпотентности.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="delivery-fencing" data-freq="2">
+      <h3>Зачем нужен transactional.id?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Он связывает транзакции разных запусков одного экземпляра. При initTransactions координатор завершает незаконченные транзакции этого id и увеличивает эпоху, а старый продюсер с меньшей эпохой получает ProducerFencedException. Так зависший и уже заменённый экземпляр не может закоммитить свою транзакцию.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>id должен быть стабильным для одной роли, например имя пода в StatefulSet; случайный UUID отключает фенсинг.</li>
+            <li>С KIP-447 достаточно одного id на экземпляр, а не на входную партицию.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой настройкой?</summary>
+          <pre><code class="language-yaml">spring.kafka.producer.transaction-id-prefix: ledger-${random.uuid}-
+spring.kafka.consumer.isolation-level: read_uncommitted</code></pre>
+          <p>Случайный префикс даёт новый transactional.id при каждом запуске, и зависший старый экземпляр не будет отсечён. Консьюмеры с read_uncommitted видят записи отменённых транзакций, так что exactly-once для них не работает. Нужен стабильный префикс, привязанный к экземпляру, и read_committed у всех читателей.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="delivery-db" data-freq="2">
+      <h3>Как получить однократную обработку, если консьюмер пишет в базу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Транзакция Kafka базу не покрывает. Либо хранить смещения в той же базе и в той же транзакции, что и результат, и при старте делать seek на сохранённое смещение. Либо сделать обработку идемпотентной: таблица обработанных id или условный update, тогда повтор после падения ничего не изменит.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Вложенная транзакция базы внутри Kafka-транзакции в Spring — синхронизация двух коммитов, а не атомарность.</li>
+            <li>Для публикации событий из сервиса с базой надёжнее outbox, чем транзакционный продюсер.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging">KIP-98: Exactly Once Delivery and Transactional Messaging</a> — основа урока: координатор, маркеры, LSO, фенсинг.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-447%3A+Producer+scalability+for+exactly+once+semantics">KIP-447: Producer scalability for exactly once semantics</a> — фенсинг через метаданные группы.</li>
+      <li><a href="https://kafka.apache.org/documentation/#semantics">Apache Kafka: Message Delivery Semantics</a>.</li>
+      <li><a href="https://www.confluent.io/blog/transactions-apache-kafka/">Confluent: Transactions in Apache Kafka</a> — как транзакции работают внутри.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
