@@ -197,7 +197,7 @@ window.KB_TREE = [
           scope: 'связность компонентов REP, CCP и CRP, ацикличность зависимостей, стабильность и абстрактность, package by feature, проверка границ ArchUnit и Spring Modulith' },
         { id: 'app-architecture', freq: 2, status: 'draft', title: 'Clean & Hexagonal Architecture',
           scope: 'слоистая, гексагональная, clean architecture, направление зависимостей, где живёт бизнес-логика' },
-        { id: 'ddd', freq: 2, status: 'empty', title: 'DDD',
+        { id: 'ddd', freq: 2, status: 'draft', title: 'DDD',
           scope: 'ограниченный контекст, агрегат, сущность и value object, доменные события' },
       ] },
       { id: 'testing', title: 'Testing', items: [

@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DDD · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="ddd">
+<main class="page">
+  <header class="topic-head"><h1>DDD</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёж для банка и платёж для бухгалтерии означают разные вещи. DDD помогает договориться о смысле внутри каждой части бизнеса и выразить его в коде. Границу модели задаёт bounded context; внутри него агрегат удерживает связанные правила при изменении состояния. Между границами передают явные команды и факты. Хорошая модель позволяет прочитать метод возврата и понять, почему сервис не вернёт больше принятой суммы.</p>
+    </div>
+
+    <section class="step" id="business-language">
+      <h2>Один Payment начинает противоречить разным правилам бизнеса</h2>
+      <p>Банк прислал CAPTURED: списание подтверждено. Платёжный сервис поставил <code>status=PAID</code>, а бухгалтерский отчёт тут же показал проведённую операцию. Но проводка ещё не создана. Команды спорят, что означает PAID, и добавляют поля <code>reallyPaid</code>, <code>posted</code> и <code>settled</code> в один общий объект.</p>
+      <p>Проблема глубже enum. Обработка платежа отвечает за подтверждение банка и возможность возврата. Учёт отвечает за проводки, баланс книги и сверку. Название одно, но состояния и правила разные. Универсальная модель заставляет каждого читателя помнить чужие исключения: «PAID, но для отчёта ещё не оплачен».</p>
+      <table class="mx">
+        <thead><tr><th>Часть бизнеса</th><th>Что значит успех</th><th>Главное правило</th></tr></thead>
+        <tbody>
+          <tr><td>Обработка платежей</td><td>Банк подтвердил capture</td><td>Запросы возврата не превышают принятую сумму</td></tr>
+          <tr><td>Бухгалтерский учёт</td><td>Запись проведена в книге</td><td>Суммы дебета и кредита проводки согласованы</td></tr>
+          <tr><td>Сверка с банком</td><td>Внутренняя запись сопоставлена с отчётом</td><td>Расхождение имеет объяснение и путь исправления</td></tr>
+        </tbody>
+      </table>
+      <p>Начало DDD — разговор с людьми, которые знают эти правила. Разбери конкретные сценарии: частичный возврат, повтор команды, отмена, неизвестный результат банка. Запиши, кто принимает решение и какое состояние меняется. Из сценариев возникает <b>ubiquitous language</b>, единый язык внутри команды и её модели: «запросить возврат», «провести запись», «сопоставить отчёт». Те же слова появляются в методах, тестах и обсуждениях.</p>
+      <p>У Хононова сначала идут бизнес-области и язык, затем границы моделей и классы. Subdomain описывает задачу бизнеса, bounded context — границу модели решения. Одна задача может обслуживаться несколькими системами; одна система — охватывать несколько простых задач.</p>
+      <p>Core subdomain даёт бизнесу преимущество и заслуживает глубокой модели. Generic-задачи часто закрывает готовый продукт; supporting-часть нужна бизнесу, но обычно проще ядра. Приоритет выбирают по правилам и выгоде, а не по числу таблиц.</p>
+    </section>
+
+    <section class="step" id="bounded-context-map">
+      <h2>Контекст сохраняет свой смысл, а context map показывает отношения с соседями</h2>
+      <p>В контексте обработки <code>Payment</code> хранит принятую сумму и допустимые возвраты. В учёте ему соответствует <code>Posting</code> с проводками. Общего Java-класса для них нет: изменение формата отчёта не должно менять решение о возврате. Общий внешний идентификатор позволяет сопоставить записи, сохраняя две самостоятельные модели.</p>
+      <p>Контекст — граница смысла и ответственности за модель. Он может быть модулем монолита, отдельным приложением или частью большой системы. Один контекст не обязан равняться одной таблице, одному агрегату или одному микросервису. Физическое разделение выбирают после того, как понятны язык, владельцы и взаимодействие.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 244" role="img" aria-label="Банк передаёт свои коды внешнему слою перевода в контексте обработки платежей. Этот слой переводит CAPTURED в факт модели Payment. Контекст обработки передаёт факт PaymentCaptured в контекст учёта, где своя модель Posting создаёт проводку. Модели не делят общий класс Payment.">
+            <defs><marker id="dd-map" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="72" width="132" height="66" rx="8" class="dg-box"/>
+            <rect x="200" y="34" width="244" height="156" rx="10" class="dg-sep" fill="none"/>
+            <rect x="218" y="62" width="208" height="36" rx="7" class="dg-box"/>
+            <rect x="218" y="134" width="208" height="40" rx="7" class="dg-cell hit"/>
+            <rect x="504" y="34" width="196" height="156" rx="10" class="dg-sep" fill="none"/>
+            <rect x="520" y="78" width="164" height="68" rx="8" class="dg-cell"/>
+            <path d="M152 104 C178 104, 184 80, 214 80" class="dg-line" marker-end="url(#dd-map)"/>
+            <path d="M322 98 L322 130" class="dg-line" marker-end="url(#dd-map)"/>
+            <path d="M426 154 C470 154, 478 112, 516 112" class="dg-line" marker-end="url(#dd-map)"/>
+            <text x="20" y="25" class="dg-cap">ПРОВАЙДЕР</text>
+            <text x="212" y="25" class="dg-cap">ОБРАБОТКА</text>
+            <text x="516" y="25" class="dg-cap">УЧЁТ</text>
+            <text x="32" y="97" class="dg-t">банк</text><text x="32" y="122" class="dg-in">CAPTURED</text>
+            <text x="230" y="86" class="dg-in">ACL: перевод ответа</text>
+            <text x="230" y="160" class="dg-in">Payment: captured</text>
+            <text x="336" y="119" class="dg-n" text-anchor="start">код → факт</text>
+            <text x="532" y="102" class="dg-in">Posting</text><text x="532" y="126" class="dg-n">своя проводка</text>
+            <text x="454" y="178" class="dg-n">событие</text>
+            <text x="20" y="219" class="dg-s">Банк задаёт API; обработка защищает свою модель слоем ACL.</text>
+            <text x="20" y="238" class="dg-n">Стрелки показывают передачу данных. В map также отмечают владельцев и влияние команд.</text>
+          </svg>
+        </div>
+        <figcaption>Один факт получает разный смысл у получателя: подтверждение capture становится основанием для проводки, а не общей entity для двух контекстов.</figcaption>
+      </figure>
+      <p><b>Context map</b> дополняет границы отношениями. Кто задаёт формат интеграции? Кто может попросить его изменить? Кто приспосабливается к изменениям? Upstream влияет на потребителя, downstream от него зависит. Это направление влияния модели и API; сетевой запрос при этом может идти из downstream в upstream.</p>
+      <table class="mx">
+        <thead><tr><th>Отношение</th><th>Как работают команды</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>Partnership</td><td>Согласуют изменения двух моделей вместе</td><td>Совместное планирование и зависимость сроков</td></tr>
+          <tr><td>Customer–Supplier</td><td>Upstream учитывает потребности downstream</td><td>Нужен рабочий процесс обсуждения API и изменений</td></tr>
+          <tr><td>Conformist</td><td>Downstream принимает чужую модель</td><td>Быстрая интеграция, чужие понятия входят в свой код</td></tr>
+          <tr><td>Anti-corruption layer, ACL</td><td>Downstream переводит внешний смысл в свой</td><td>Дополнительный код перевода и ответственность за ошибки</td></tr>
+          <tr><td>Shared Kernel</td><td>Совместно владеют маленькой общей частью модели</td><td>Изменения ядра требуют согласования и совместной проверки</td></tr>
+          <tr><td>Separate Ways</td><td>Оставляют модели без интеграции там, где она не окупается</td><td>Допускают повторную реализацию нужной функции</td></tr>
+        </tbody>
+      </table>
+      <p>Open Host Service задаёт поддерживаемый API, Published Language — формат и смысл сообщений. Их можно сочетать с ACL. В нашем примере он переводит ответ банка в язык обработки: CAPTURED ещё не означает проводку. Общая библиотека всех entity вместо такого перевода связывает релизы контекстов.</p>
+    </section>
+
+    <section class="step" id="entity-value-object">
+      <h2>Сущность узнают по идентичности, значение — по содержимому</h2>
+      <p>Платёж p-17 остаётся тем же платежом после запроса возврата: состояние меняется, идентичность сохраняется. Это <b>entity</b>. Сумма 1000 RUB не имеет собственного жизненного цикла в нашем расчёте. Два равных значения можно заменить друг другом без изменения смысла. Это <b>value object</b>, объект-значение.</p>
+      <p>Value object удобен как неизменяемый тип с проверкой при создании. Метод получает Money, а не две независимые переменные, которые можно перепутать или сложить с другой валютой. Но record даёт равенство компонентов и final-поля, а правильную семантику компонентов ты выбираешь сам.</p>
+      <pre><code class="language-java">record Money(long minor, String currency) {
+    Money {
+        if (minor &lt; 0) throw new IllegalArgumentException("negative money");
+        currency = Objects.requireNonNull(currency).toUpperCase(Locale.ROOT);
+        Currency.getInstance(currency); // Проверяем код; в опытах RUB, суммы в копейках.
+    }
+    Money plus(Money other) {
+        sameCurrency(other); // RUB + USD — ошибка, а не новый Money.
+        return new Money(Math.addExact(minor, other.minor), currency); // Защита от переполнения.
+    }
+    Money minus(Money other) {
+        sameCurrency(other);
+        return new Money(Math.subtractExact(minor, other.minor), currency);
+    }
+    void sameCurrency(Money other) {
+        if (!currency.equals(other.currency)) throw new IllegalArgumentException("currency mismatch");
+    }
+}
+
+record RawMoney(BigDecimal amount, String currency) {} // Масштаб BigDecimal участвует в equals.
+var a = new RawMoney(new BigDecimal("10.0"), "RUB");
+var b = new RawMoney(new BigDecimal("10.00"), "RUB");
+System.out.println("raw decimal equality=" + a.equals(b));
+System.out.println("minor equality=" + new Money(1_000, "rub").equals(new Money(1_000, "RUB")));
+try { new Money(1_000, "RUB").plus(new Money(100, "USD")); }
+catch (IllegalArgumentException e) { System.out.println("mixed currencies=" + e.getMessage()); }
+
+record RawQuote(List&lt;Money&gt; fees) {} // final-ссылка не делает список неизменяемым.
+record Quote(List&lt;Money&gt; fees) {
+    Quote { fees = List.copyOf(fees); } // Копия контейнера; Money тоже неизменяем.
+}
+var source = new ArrayList&lt;&gt;(List.of(new Money(10, "RUB")));
+var raw = new RawQuote(source); var copied = new Quote(source);
+source.add(new Money(20, "RUB"));
+System.out.println("raw record fees=" + raw.fees().size() + ", copied fees=" + copied.fees().size());</code></pre>
+      <pre><code class="language-bash">cd examples/design
+java DddDemo.java values # JDK 21.0.11; внешние зависимости не нужны.</code></pre>
+      <pre class="out">raw decimal equality=false
+minor equality=true
+mixed currencies=currency mismatch
+raw record fees=2, copied fees=1</pre>
+      <p>Полный <a href="../examples/design/DddDemo.java">DddDemo.java</a> содержит четыре режима. Money хранит целое число минимальных единиц валюты: для RUB это копейки. Дробные расчёты требуют явной точности и округления. Нормализация валюты делает 1000 RUB равным 1000 rub.</p>
+      <p>PaymentId тоже подходит для record: это значение идентификатора. Два объекта Payment с тем же id представляют одну entity, хотя их ссылки и снимки различаются. Для изменяемой entity автоматическое сравнение всех полей record подменяет идентичность содержимым; стратегию equals/hashCode для ORM выбирают отдельно.</p>
+    </section>
+
+    <section class="step" id="aggregate-boundary">
+      <h2>Агрегат меняет связанное состояние через корень и сохраняет инвариант</h2>
+      <p>Платёж принял 1000 копеек. Первый запрос возврата резервирует 700. Второй просит 400. Если каждый Refund сохраняется своим сервисом без общей проверки платежа, оба запроса пройдут, и сервис пообещает вернуть 1100. Проверка суммы относится ко всему платежу: её нельзя доверить каждой строке возврата отдельно.</p>
+      <p><b>Aggregate</b> объединяет объекты, которые должны сохранять согласованное правило при изменении. Внешний код обращается к <b>aggregate root</b>, корню: <code>payment.requestRefund</code>. Корень проверяет команду и меняет связанные данные. Инвариант нашего примера: резерв под запросы возврата не превышает принятую сумму, а повтор той же команды не резервирует её дважды.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 278" role="img" aria-label="Граница агрегата Payment содержит корень p17, сумму captured 1000 RUB как value object и зависимый Refund r1 на 700 RUB. Корень хранит reserved 700. Внешний запрос r2 на 400 входит через корень и отвергается, потому что осталось 300; новый Refund внутри границы не появляется.">
+            <defs><marker id="dd-agg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker><marker id="dd-reject" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker></defs>
+            <rect x="20" y="38" width="400" height="212" rx="12" class="dg-sep" fill="none"/>
+            <rect x="40" y="70" width="360" height="72" rx="9" class="dg-box"/>
+            <rect x="40" y="184" width="174" height="44" rx="8" class="dg-cell"/>
+            <rect x="234" y="184" width="166" height="44" rx="8" class="dg-cell hit"/>
+            <rect x="520" y="80" width="180" height="62" rx="8" class="dg-cell miss"/>
+            <path d="M127 142 L127 180" class="dg-line" marker-end="url(#dd-agg)"/>
+            <path d="M317 142 L317 180" class="dg-line" marker-end="url(#dd-agg)"/>
+            <path d="M520 111 L404 111" class="dg-line bad" marker-end="url(#dd-reject)"/>
+            <text x="20" y="25" class="dg-cap">ГРАНИЦА АГРЕГАТА</text>
+            <text x="52" y="95" class="dg-t">Payment p-17 — корень</text>
+            <text x="52" y="121" class="dg-in">reserved=700; available=300</text>
+            <text x="52" y="202" class="dg-n">Money: значение</text><text x="52" y="220" class="dg-in">1000 RUB</text>
+            <text x="246" y="202" class="dg-n">Refund: entity</text><text x="246" y="220" class="dg-in">r-1: 700 RUB</text>
+            <text x="141" y="166" class="dg-n" text-anchor="start">captured</text>
+            <text x="331" y="166" class="dg-n" text-anchor="start">владеет</text>
+            <text x="532" y="104" class="dg-in">request r-2</text><text x="532" y="128" class="dg-in">400 RUB</text>
+            <text x="439" y="99" class="dg-n">команда</text>
+            <text x="442" y="159" class="dg-bad">400 &gt; 300: отказ</text>
+            <text x="442" y="220" class="dg-s">нового Refund нет</text>
+            <text x="20" y="270" class="dg-n">Ссылки внутри агрегата — владение; внешний код меняет его через Payment.</text>
+          </svg>
+        </div>
+        <figcaption>Граница выбирается по правилу согласованности. Коллекция Refund сама по себе не знает, сколько уже зарезервировал весь платёж.</figcaption>
+      </figure>
+      <pre><code class="language-java">static final class Payment {
+    final PaymentId id;
+    final Money captured;
+    private Money reserved;
+    private final LinkedHashMap&lt;String, Refund&gt; refunds = new LinkedHashMap&lt;&gt;();
+    private final List&lt;RefundRequested&gt; pending = new ArrayList&lt;&gt;();
+
+    Payment(PaymentId id, Money captured) {
+        this.id = Objects.requireNonNull(id); this.captured = Objects.requireNonNull(captured);
+        if (captured.minor() == 0) throw new IllegalArgumentException("empty capture");
+        reserved = new Money(0, captured.currency());
+    }
+    boolean requestRefund(String refundId, Money amount) {
+        if (refundId == null || refundId.isBlank()) throw new IllegalArgumentException("empty refund id");
+        Objects.requireNonNull(amount);
+        captured.sameCurrency(amount);
+        if (amount.minor() == 0) throw new IllegalArgumentException("empty refund");
+        var previous = refunds.get(refundId);
+        if (previous != null) {
+            if (!previous.amount.equals(amount)) throw new IllegalStateException("refund id reused");
+            return false; // Тот же id с тем же смыслом — уже принятая команда.
+        }
+        var next = reserved.plus(amount);
+        if (next.minor() &gt; captured.minor()) throw new IllegalStateException("refund exceeds capture");
+        // Проверки прошли до изменения полей; частично принятого запроса нет.
+        refunds.put(refundId, new Refund(refundId, amount));
+        reserved = next;
+        pending.add(new RefundRequested(id, refundId, amount));
+        return true;
+    }
+    Money available() { return captured.minus(reserved); }
+    List&lt;Refund&gt; refunds() { return List.copyOf(refunds.values()); }
+}
+
+var p = new Payment(new PaymentId("p-17"), new Money(1_000, "RUB"));
+System.out.println("first accepted=" + p.requestRefund("r-1", new Money(700, "RUB")));
+System.out.println("duplicate accepted=" + p.requestRefund("r-1", new Money(700, "RUB")));
+try { p.requestRefund("r-2", new Money(400, "RUB")); }
+catch (IllegalStateException e) { System.out.println("second request=" + e.getMessage()); }
+try { p.refunds().clear(); } // Внешний код не получает изменяемую коллекцию корня.
+catch (UnsupportedOperationException e) { System.out.println("collection change=" + e.getClass().getSimpleName()); }
+System.out.println("reserved=" + p.reserved.minor() + ", available=" + p.available().minor()
+    + ", refunds=" + p.refunds.size() + ", pending events=" + p.pending.size());</code></pre>
+      <pre><code class="language-bash">java DddDemo.java aggregate</code></pre>
+      <pre class="out">first accepted=true
+duplicate accepted=false
+second request=refund exceeds capture
+collection change=UnsupportedOperationException
+reserved=700, available=300, refunds=1, pending events=1</pre>
+      <p>Отказ не оставил второго Refund или события. В демо Refund неизменяем; для изменяемых дочерних объектов одной копии списка мало, наружу нужно безопасное представление. Резерв означает принятие запроса, а не выполненный возврат банка. Отказ банка и освобождение резерва — отдельные переходы. Репозиторий сохраняет корень, сохраняя это правило для всех способов записи.</p>
+      <h3>Правильный объект ещё не защищает от двух запросов</h3>
+      <p>Два обработчика могут загрузить два снимка p-17, каждый с reserved=0, и каждый успешно принять 700. Оба Java-объекта соблюдают инвариант. Поэтому граница агрегата также требует согласованного сохранения: проверки версии, блокировки либо условной записи в базе. Агрегат не является глобальной блокировкой сам по себе.</p>
+      <pre><code class="language-java">record Loaded(Payment payment, long version) {}
+var first = store.load(); var second = store.load(); // Два самостоятельных снимка version=0.
+first.payment().requestRefund("r-1", new Money(700, "RUB"));
+second.payment().requestRefund("r-2", new Money(700, "RUB"));
+System.out.println("local available=" + first.payment().available().minor()
+    + "," + second.payment().available().minor());
+System.out.println("first version=" + store.commit(first));
+try { store.commit(second); }
+catch (IllegalStateException e) { System.out.println("second commit=" + e.getMessage()); }
+
+// Внутри commit перед сохранением: if (loaded.version() != version) throw ... "version conflict".
+// Успешный commit увеличивает version. Полный метод показан в следующем шаге.
+var retry = store.load(); // Теперь в нём reserved=700 и новая версия.
+try { retry.payment().requestRefund("r-2", new Money(700, "RUB")); }
+catch (IllegalStateException e) { System.out.println("retry=" + e.getMessage()); }
+System.out.println("stored reserved=" + store.load().payment().reserved().minor());</code></pre>
+      <pre><code class="language-bash">java DddDemo.java race # Воспроизводим порядок двух запросов через два снимка.</code></pre>
+      <pre class="out">local available=300,300
+first version=1
+second commit=version conflict
+retry=refund exceeds capture
+stored reserved=700</pre>
+      <p>Store в демо хранит копии в памяти, а commit проверяет ожидаемую версию. Два снимка воспроизводят порядок двух запросов без потоков и базы. В рабочем репозитории проверку выполняет хранилище, например UPDATE по версии. Реальный JPA-опыт — в <a href="jpa-locking.html">Locking &amp; Caching</a>. После конфликта решение принимают по новой загрузке.</p>
+      <details class="deep">
+        <summary>Под капотом: когда маленькую границу надо пересмотреть</summary>
+        <p>Если два агрегата должны немедленно соблюдать общее правило, одного события между ними мало. Можно выделить общий объект-координатор, согласованный резерв или выбрать транзакционную защиту нескольких записей. Часть задач действительно требует другой границы. Правило «один агрегат на транзакцию» полезно как ориентир проектирования, а не как запрет думать об инварианте.</p>
+        <p>Обратная крайность — загрузить магазин со всеми платежами, чтобы каждый возврат прошёл через магазин. Операции разных платежей начинают конфликтовать, коллекция растёт без границы, а контекст держит ненужные данные. Размер агрегата проверяют по его реальным командам и частоте конкурентных изменений.</p>
+      </details>
+    </section>
+
+    <section class="step" id="domain-events">
+      <h2>Событие фиксирует факт модели, а доставку обеспечивает отдельный механизм</h2>
+      <p>Корень принял запрос возврата и создал <code>RefundRequested</code>. Это доменное событие: что произошло, с каким платежом и какой суммой. Оно описывает уже принятое решение. Команда <code>RequestRefund</code>, наоборот, выражает намерение: её ещё можно отклонить.</p>
+      <pre><code class="language-java">record RefundRequested(PaymentId paymentId, String refundId, Money amount) {}
+
+// Последние строки успешно принятой команды, после проверки инварианта:
+refunds.put(refundId, new Refund(refundId, amount));
+reserved = next;
+pending.add(new RefundRequested(id, refundId, amount)); // Пока событие только в памяти объекта.
+
+// Публикация здесь в брокер сделала бы внешний факт раньше успешного сохранения платежа.</code></pre>
+      <p>Если сразу отправить событие в Kafka, а сохранение платежа потом упадёт, соседний контекст увидит запрос, которого нет в базе. Если сначала сделать commit, а затем отдельно отправить, процесс может упасть между этими действиями. Бизнес-решение и обещание его доставить должны сохраняться вместе. Для этого используют outbox: запись агрегата и сообщение для последующей отправки входят в одну локальную транзакцию.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 278" role="img" aria-label="Слева локальный Payment и список pending. Справа зафиксированные состояние платежа и outbox в одной границе сохранения. Запрос 400 меняет локальный объект и создаёт pending 1. Неуспешный commit оставляет обе зафиксированные записи прежними. Новая попытка сохраняет reserved 400 и одну запись outbox вместе.">
+            <defs><marker id="dd-ev" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker><marker id="dd-ev-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker><marker id="dd-ev-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker></defs>
+            <rect x="20" y="44" width="260" height="180" rx="10" class="dg-sep" fill="none"/>
+            <rect x="366" y="44" width="334" height="180" rx="10" class="dg-sep" fill="none"/>
+            <rect x="40" y="76" width="220" height="48" rx="8" class="dg-box"/>
+            <rect x="40" y="146" width="220" height="48" rx="8" class="dg-cell"/>
+            <rect x="388" y="76" width="290" height="48" rx="8" class="dg-box"/>
+            <rect x="388" y="146" width="290" height="48" rx="8" class="dg-cell"/>
+            <g data-s="2"><path d="M150 124 L150 142" class="dg-line" marker-end="url(#dd-ev)"/></g>
+            <g data-s="3"><path d="M260 100 L384 100" class="dg-line bad" marker-end="url(#dd-ev-bad)"/></g>
+            <g data-s="4"><path d="M260 100 L384 100" class="dg-line ok" marker-end="url(#dd-ev-ok)"/><path d="M260 170 L384 170" class="dg-line ok" marker-end="url(#dd-ev-ok)"/></g>
+            <text x="20" y="25" class="dg-cap">ОБЪЕКТ В ПАМЯТИ</text>
+            <text x="378" y="25" class="dg-cap">ЗАФИКСИРОВАНО</text>
+            <text x="40" y="65" class="dg-n">текущая попытка</text>
+            <text x="388" y="65" class="dg-n">состояние и outbox меняются вместе</text>
+            <text data-s="1" x="52" y="105" class="dg-in">Payment: reserved=0</text>
+            <text data-s="2-4" x="52" y="105" class="dg-in">Payment: reserved=400</text>
+            <text data-s="1" x="52" y="176" class="dg-in">pending: 0</text>
+            <text data-s="2-4" x="52" y="176" class="dg-in">pending: 1</text>
+            <text data-s="1-3" x="400" y="105" class="dg-in">Payment: reserved=0</text>
+            <text data-s="4" x="400" y="105" class="dg-ok">Payment: reserved=400</text>
+            <text data-s="1-3" x="400" y="176" class="dg-in">outbox: 0</text>
+            <text data-s="4" x="400" y="176" class="dg-ok">outbox: 1, RefundRequested</text>
+            <text data-s="2" x="166" y="138" class="dg-n" text-anchor="start">создан факт</text>
+            <text data-s="3" x="288" y="90" class="dg-n">ошибка</text>
+            <text data-s="4" x="288" y="90" class="dg-n">сумма</text>
+            <text data-s="4" x="288" y="160" class="dg-n">событие</text>
+            <text data-s="1" x="20" y="262" class="dg-s">Новая загрузка: изменений и событий нет.</text>
+            <text data-s="2" x="20" y="262" class="dg-s">Команда изменила только локальное состояние.</text>
+            <text data-s="3" x="20" y="262" class="dg-bad">Commit не удался; старый Java-объект по-прежнему изменён.</text>
+            <text data-s="4" x="20" y="262" class="dg-ok">Новая попытка: состояние и запись outbox сохранены вместе.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Загружаем платёж. Локальный резерв и зафиксированный резерв равны нулю; события нет.</li>
+          <li>Команда резервирует 400 в объекте и добавляет RefundRequested. Зафиксированное состояние пока прежнее.</li>
+          <li>Сохранение завершилось ошибкой. Ни резерв 400, ни сообщение не приняли. Старый объект всё ещё хранит 400 и событие; его не переносят в новую попытку.</li>
+          <li>Заново загрузили платёж и применили команду. Успешное сохранение принимает резерв 400 и запись outbox вместе. Отдельный публикатор теперь может забрать сообщение.</li>
+        </ol>
+      </figure>
+      <p>Учебный Store ниже моделирует эти границы в памяти. Искусственная ошибка возникает до изменения двух сохранённых структур. Это доказательство порядка действий модели, а не настоящая транзакция базы, брокер или реализация восстановления после падения процесса.</p>
+      <pre><code class="language-java">// В Store: stored — сохранённая копия, version — её версия, outbox — отдельный список.
+synchronized long commit(Loaded loaded) {
+    if (loaded.version() != version) throw new IllegalStateException("version conflict");
+    if (failNextCommit) {
+        failNextCommit = false;
+        throw new IllegalStateException("commit failed"); // Две сохранённые структуры ещё не тронуты.
+    }
+    stored = loaded.payment().storedCopy(); // Копия хранит состояние без прежнего pending.
+    outbox.addAll(loaded.payment().events()); // Принято то же бизнес-решение.
+    return ++version;
+}
+
+var store = new Store();
+var loaded = store.load();
+loaded.payment().requestRefund("r-1", new Money(400, "RUB"));
+System.out.println("before commit: stored=" + store.load().payment().reserved().minor()
+    + ", outbox=" + store.outboxSize() + ", pending=" + loaded.payment().events().size());
+store.failNextCommit = true;
+try { store.commit(loaded); }
+catch (IllegalStateException e) { System.out.println(e.getMessage()); }
+System.out.println("after failure: stored=" + store.load().payment().reserved().minor()
+    + ", outbox=" + store.outboxSize() + ", old object=" + loaded.payment().reserved().minor());
+var retry = store.load(); // Новая загрузка вместо старого изменённого объекта.
+retry.payment().requestRefund("r-1", new Money(400, "RUB"));
+store.commit(retry);
+System.out.println("after retry: stored=" + store.load().payment().reserved().minor()
+    + ", outbox=" + store.outboxSize() + ", new load pending=" + store.load().payment().events().size());</code></pre>
+      <pre><code class="language-bash">java DddDemo.java events</code></pre>
+      <pre class="out">before commit: stored=0, outbox=0, pending=1
+commit failed
+after failure: stored=0, outbox=0, old object=400
+after retry: stored=400, outbox=1, new load pending=0</pre>
+      <p>Новая загрузка имеет пустой pending: чтение не создаёт бизнес-факт. После commit событие остаётся в outbox для публикатора. Старый объект в демо больше не используют; в рабочем unit of work события помечают сохранёнными после успеха. Очистка до сохранения способна их потерять.</p>
+      <p>Доменное событие и публичное сообщение — разные поверхности. Внешний формат получает версию, eventId и нужные потребителю данные. Не сериализуй целую entity с внутренними enum и ссылками. Потребитель переводит факт в свой язык и обрабатывает дубли: отправка может повториться после потери подтверждения.</p>
+      <p>Событие не объединяет контексты одной транзакцией. Учёт принимает факт позже; нужны промежуточное состояние, повтор и исправление ошибки. Немедленный общий инвариант требует другого протокола. Границы Spring разобраны в <a href="spring-tx.html">Transactions</a>, доставка — в <a href="spring-kafka.html">Kafka Integration</a> и <a href="spring-amqp.html">AMQP Integration</a>.</p>
+    </section>
+
+    <section class="step" id="ddd-boundaries">
+      <h2>Глубокая модель нужна сложным правилам, а простому CRUD хватает простого кода</h2>
+      <p>У формы справочника три поля и одна проверка обязательности. Пять интерфейсов, корень агрегата и три доменных события не сделают её полезнее. Transaction Script с ясной транзакцией и ограничениями базы справится дешевле. DDD начинается с понимания языка и границ; богатая объектная модель — один из вариантов реализации сложной части.</p>
+      <p>В нашей обработке возвратов модель оправдана: команды меняют связанные суммы, повтор имеет свой смысл, конкуренция опасна. Правило живёт в Payment, а приложение загружает его, вызывает команду и сохраняет в выбранной транзакционной границе. HTTP-контроллер разбирает запрос, репозиторий отвечает за сохранение, адаптер банка — за внешний API. Координатор сценария не должен заново считать допустимый возврат мимо корня.</p>
+      <table class="mx">
+        <thead><tr><th>Код</th><th>Что ему принадлежит</th><th>Что туда не переносить</th></tr></thead>
+        <tbody>
+          <tr><td>Агрегат</td><td>Переходы состояния и локальные инварианты</td><td>HTTP, отправку в брокер, управление JDBC</td></tr>
+          <tr><td>Доменный сервис</td><td>Бизнес-операция, которая естественно не принадлежит одной entity или value object</td><td>Набор всех setter вместо поведения модели</td></tr>
+          <tr><td>Сервис приложения</td><td>Порядок сценария, авторизацию, загрузку, границу сохранения</td><td>Дублирование правил допустимого состояния агрегата</td></tr>
+          <tr><td>Инфраструктура</td><td>Реальный протокол базы и банка, сериализацию, доставку</td><td>Выбор бизнес-смысла через случайные коды SDK</td></tr>
+        </tbody>
+      </table>
+      <p>DDD не требует микросервисов, CQRS или event sourcing. DTO-запрос может читать несколько агрегатов, сохраняя отдельные границы их изменения. Event sourcing делает историю событий источником состояния; outbox этого не делает. В демо источник — сохранённый Payment.</p>
+      <p>Открой сценарий с экспертом и проверь правило. Затем закрепи границы пакетов, чтобы чужая модель не входила через импорты: <a href="components.html">Components &amp; Modules</a>. Размещение портов и адаптеров — в <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a>.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Единый язык действует внутри выбранной модели. Один внешний платёж может иметь разные представления в обработке и учёте.</li>
+      <li>Bounded context удерживает смысл; context map описывает влияние, владение и перевод между моделями.</li>
+      <li>Entity сохраняет идентичность при изменении. Value object сравнивается по смыслу значений; record сам не выбирает этот смысл и не копирует вложенные коллекции.</li>
+      <li>Корень агрегата проверяет связанную команду. Версия или блокировка хранилища защищает её от конкурентных снимков.</li>
+      <li>Событие в памяти ещё не обещание доставки. Состояние и outbox сохраняются вместе; соседние контексты принимают факт отдельно.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="ddd-context" data-freq="2">
+      <h3>Что такое bounded context и чем он отличается от микросервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я ограничиваю место, где модель и её слова имеют один согласованный смысл. В обработке платежа успех — подтверждение capture, в учёте — проведённая запись. Поэтому оставляю две модели и явный перевод, вместо общего Payment со всеми чужими статусами.</p>
+          <p>Микросервис — физическая граница приложения и эксплуатации. Контекст может жить модулем монолита. Context map показывает, кто задаёт формат, кто зависит от него и как команды согласуют изменения.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Subdomain относится к задаче бизнеса, bounded context — к выбранной модели решения. Прямое равенство между ними не предполагаю.</li>
+          <li>Upstream/downstream обозначает влияние API и модели. Направление HTTP-вызова само по себе его не определяет.</li>
+          <li>Shared Kernel требует совместного владения маленькой общей частью. Общая библиотека всех entity создаёт связанность релизов.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="ddd-aggregate" data-freq="3">
+      <h3>Как выбрать границу агрегата и что гарантирует его корень?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я начинаю с инварианта и команды, а не с таблиц. Если запросы возврата должны укладываться в принятую сумму, Payment проверяет резерв и добавляет Refund вместе. Внешний код обращается к корню и не может переписать дочернюю сумму отдельно.</p>
+          <p>Два снимка корня всё ещё способны пройти локальную проверку одновременно. Поэтому репозиторий сохраняет с проверкой версии либо блокировкой. После конфликта новая попытка читает актуальные данные и заново принимает решение.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Большой граф владения увеличивает загрузку и число конфликтов. Другие агрегаты адресую по id и не включаю в корень только ради удобного getter.</li>
+          <li>Для общего немедленного правила нескольких агрегатов нужна точка координации. Одно сообщение между ними не даёт атомарности.</li>
+          <li>Отдельный DTO-запрос вправе читать несколько агрегатов. Граница изменения не запрещает удобную форму чтения.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью">
+        <summary>Лимит магазина хранится отдельно от двух платежей. Достаточно @Version на каждом Payment?</summary>
+        <p>Нет. Два запроса изменят разные строки и не столкнутся по их версиям, но вместе могут превысить лимит. Нужна согласованная запись резерва магазина, общий координатор, нужная блокировка либо другой протокол проверки общего инварианта. Выбор делаю по требуемой согласованности и нагрузке.</p>
+      </details></div>
+    </article>
+    <article class="q" id="ddd-entity-value" data-freq="2">
+      <h3>Чем entity отличается от value object? Подходит ли record?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Entity я узнаю по идентичности: p-17 остаётся тем же платежом после возврата. Value object определяется содержимым и заменяется равным значением: сумма 1000 RUB не требует отдельного жизненного цикла. Для значения удобен неизменяемый record с проверкой при создании.</p>
+          <p>Record сравнивает компоненты, поэтому их равенство должно соответствовать домену. В демо BigDecimal 10.0 и 10.00 дали false, а сумма в канонических минимальных единицах — true. Список внутри record нужно защищать отдельно.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>PaymentId как record — объект-значение идентификатора. Сам Payment сохраняет отдельную семантику идентичности.</li>
+          <li>Копия контейнера не делает изменяемые элементы неизменяемыми. Наружу отдаю безопасное представление, соответствующее границе модели.</li>
+          <li>Роль зависит от контекста: возврат с жизненным циклом — entity в обработке, но его поля могут быть строкой DTO в отчёте.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="ddd-events" data-freq="2">
+      <h3>Как надёжно передать доменное событие другому контексту?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Агрегат создаёт факт после успешной проверки команды. В брокер он сам не ходит. Для надёжной внешней отправки сохраняю состояние и запись outbox одной транзакцией; отдельный публикатор отправляет её после commit. Получатель обрабатывает повторы и переводит факт в свою модель.</p>
+          <p>Если сохранение платежа упало, отправлять соседу факт уже принятого возврата нельзя. Если процесс упал после commit, запись outbox позволяет продолжить отправку. Это отдельный механизм над моделью, с явно выбранными правилами повторов.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>После неуспешного сохранения Java-объект может остаться изменённым. Повтор начинаю с новой загрузки, а не старого графа и pending.</li>
+          <li>Доменное событие и публичное сообщение имеют разные цели. Внешнюю схему, eventId и совместимость проектирую отдельно.</li>
+          <li>Outbox не равен event sourcing: источник состояния может оставаться обычной записью агрегата. И событие не объединяет контексты в одну транзакцию.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://www.oreilly.com/library/view/learning-domain-driven-design/9781098100124/">Vlad Khononov, Learning Domain-Driven Design</a> — основа урока: главы 1–4 о бизнесе, языке и контекстах, главы 5–6 о простой и сложной логике, главы 9–10 о взаимодействии и выборе подхода.</li>
+    <li><a href="https://www.domainlanguage.com/wp-content/uploads/2016/05/DDD_Reference_2015-03.pdf">Eric Evans, DDD Reference</a> — роли entity/value object, корень агрегата, границы модели и отношения на context map.</li>
+    <li><a href="https://www.dddcommunity.org/wp-content/uploads/files/pdf_articles/Vernon_2011_1.pdf">Vaughn Vernon, Effective Aggregate Design, Part I</a> — граница согласованности, маленькие агрегаты и цена конкурентного изменения.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Record.html">JDK 21: Record</a> — неизменяемые ссылки на компоненты и равенство компонентов; проверка значения и защитные копии остаются у автора типа.</li>
+  </ul></div>
+</main>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
