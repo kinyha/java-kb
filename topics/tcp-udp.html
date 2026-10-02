@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Networking: TCP &amp; UDP · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="tcp-udp">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Networking: TCP &amp; UDP</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>TCP даёт приложению надёжный упорядоченный поток байтов поверх ненадёжной сети. За это он платит рукопожатием до первого байта, буферами и окнами на каждом конце, медленным стартом нового соединения и состоянием TIME_WAIT после закрытия. Поток не хранит границ сообщений: три записи могут прийти одним чтением. UDP ничего этого не делает — отправляет отдельные датаграммы без гарантий, — и потому подходит там, где порядок и повторы приложение решает само. Ошибки соединения различаются по смыслу: отказ, сброс и таймаут говорят о разном.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Вызов банка падает тремя разными ошибками, и каждая значит своё</h2>
+      <p>Платёжный сервис ходит в банк по HTTPS. В логах встречаются три ошибки: <code>Connection refused</code>, <code>Connection reset by peer</code> и <code>connect timed out</code>. Команда повторяет запрос при любой из них, и иногда платёж проходит дважды. Ещё одна странность: после ночного затишья первый запрос утром всегда падает с <code>reset</code>, а второй проходит.</p>
+      <p>Всё это объясняется устройством TCP: как открывается и закрывается соединение, что происходит, когда получатель не успевает читать, и как промежуточные узлы забывают тихие соединения. Демо <a href="../examples/net/TcpDemo.java">TcpDemo.java</a> воспроизводит эти ситуации на loopback: <code>java TcpDemo.java</code> на JDK 21. Числа сняты на macOS; на Linux часть поведения отличается, и это отмечено в тексте.</p>
+    </section>
+
+    <section class="step" id="handshake">
+      <h2>До первого байта данных TCP тратит круг на рукопожатие, и сбой на нём бывает трёх видов</h2>
+      <p>Клиент отправляет SYN с начальным номером последовательности. Сервер отвечает SYN-ACK, клиент — ACK. Только после этого полного круга (RTT) можно отправлять данные. Ядро сервера завершает рукопожатие само и кладёт готовое соединение в очередь, откуда его забирает вызов <code>accept()</code> приложения. Размер этой очереди — backlog.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 300" role="img" aria-label="Две вертикальные шкалы времени: клиент и сервер. Рукопожатие SYN, SYN-ACK, ACK занимает один круг до сервера. Затем запрос и ответ. Закрытие: клиент отправляет FIN, получает ACK и FIN сервера, отвечает ACK и остаётся в состоянии TIME_WAIT на 2 MSL, сервер закрывает соединение сразу.">
+            <defs>
+              <marker id="hs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="hs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="140" y="22" class="dg-cap" text-anchor="middle">КЛИЕНТ</text>
+            <text x="560" y="22" class="dg-cap" text-anchor="middle">СЕРВЕР</text>
+            <path d="M140 32 L 140 290" class="dg-sep"/>
+            <path d="M560 32 L 560 290" class="dg-sep"/>
+            <!-- рукопожатие -->
+            <path d="M140 44 L 556 62" class="dg-line" marker-end="url(#hs-n)"/>
+            <path d="M560 66 L 144 84" class="dg-line" marker-end="url(#hs-n)"/>
+            <path d="M140 88 L 556 106" class="dg-line" marker-end="url(#hs-n)"/>
+            <text x="300" y="46" class="dg-in">SYN</text>
+            <text x="300" y="66" class="dg-in">SYN-ACK</text>
+            <text x="300" y="112" class="dg-in">ACK</text>
+            <rect x="20" y="40" width="100" height="50" rx="6" class="dg-cell"/>
+            <text x="70" y="62" class="dg-n" text-anchor="middle">1 RTT</text>
+            <text x="70" y="78" class="dg-n" text-anchor="middle">без данных</text>
+            <rect x="580" y="66" width="120" height="40" rx="6" class="dg-cell"/>
+            <text x="640" y="84" class="dg-n" text-anchor="middle">очередь accept</text>
+            <text x="640" y="98" class="dg-n" text-anchor="middle">(backlog)</text>
+            <!-- данные -->
+            <path d="M140 124 L 556 142" class="dg-line ok" marker-end="url(#hs-ok)"/>
+            <path d="M560 148 L 144 166" class="dg-line ok" marker-end="url(#hs-ok)"/>
+            <text x="300" y="120" class="dg-ok">запрос</text>
+            <text x="300" y="180" class="dg-ok">ответ</text>
+            <!-- закрытие -->
+            <path d="M140 186 L 556 204" class="dg-line" marker-end="url(#hs-n)"/>
+            <path d="M560 208 L 144 226" class="dg-line" marker-end="url(#hs-n)"/>
+            <path d="M140 232 L 556 250" class="dg-line" marker-end="url(#hs-n)"/>
+            <text x="300" y="184" class="dg-in">FIN</text>
+            <text x="300" y="232" class="dg-in">ACK + FIN</text>
+            <text x="300" y="256" class="dg-in">ACK</text>
+            <rect x="20" y="236" width="110" height="52" rx="6" class="dg-cell miss"/>
+            <text x="75" y="258" class="dg-bad" text-anchor="middle">TIME_WAIT</text>
+            <text x="75" y="276" class="dg-n" text-anchor="middle">2 × MSL</text>
+            <text x="580" y="262" class="dg-ok">закрыто сразу</text>
+          </svg>
+        </div>
+        <figcaption>Новое соединение стоит круга до сервера ещё до запроса, а с TLS — ещё один-два. TIME_WAIT достаётся тому, кто закрыл первым.</figcaption>
+      </figure>
+      <p>Если на рукопожатии что-то не так, ошибка зависит от того, кто и как ответил:</p>
+      <pre><code class="language-java">// Порт был открыт и закрыт: на нём никто не слушает.
+s.connect(new InetSocketAddress(LO, closedPort), 2000);
+
+// Сервер слушает с backlog = 1, но accept() не вызывает.
+var server = new ServerSocket(0, 1, LO);
+for (int i = 0; i &lt; 10; i++) new Socket().connect(new InetSocketAddress(LO, server.getLocalPort()), 500);</code></pre>
+      <pre class="out">closed port: ConnectException 'Connection refused' after 0 ms
+full backlog (accept never called): connect #2: SocketException 'Connection reset by peer' after 0 ms</pre>
+      <p><b>Refused</b> — ядро сервера ответило RST на SYN: на порту никто не слушает. Это мгновенный и однозначный ответ: приложение не запущено или порт другой. <b>Таймаут connect</b> — на SYN не пришло ничего: машина выключена, файрвол молча отбрасывает пакеты или очередь переполнена на Linux, который по умолчанию отбрасывает лишние SYN и даёт клиенту повторять. macOS в той же ситуации отвечает сбросом, что демо и показало: второе соединение к переполненной очереди сразу получило <code>reset</code>. <b>Reset</b> посреди работы — другая сторона или узел по пути сбросил уже установленное соединение.</p>
+      <p>Для повторов это различие главное. Ошибка на этапе connect значит, что запрос точно не дошёл до приложения, и повторить его безопасно. Reset или таймаут чтения после отправки запроса значат, что банк мог успеть провести платёж. Такой повтор допустим только с ключом идемпотентности, как разобрано в <a href="spring-clients.html">HTTP Clients</a>.</p>
+    </section>
+
+    <section class="step" id="stream">
+      <h2>TCP — поток байтов: три записи могут прийти одним чтением</h2>
+      <p>TCP гарантирует, что байты придут в том порядке, в каком отправлены, без пропусков и дублей. Но он ничего не знает о сообщениях. Отправитель трижды записал по семь байтов, а получатель прочитал всё сразу:</p>
+      <pre><code class="language-java">for (String part : List.of("pay:17;", "pay:18;", "pay:19;")) out.write(part.getBytes(US_ASCII));
+int n = peer.getInputStream().read(buf); // Одно чтение.
+
+for (String part : List.of("pay:17;", "pay:18;", "pay:19;")) tx.send(new DatagramPacket(...)); // UDP</code></pre>
+      <pre class="out">tcp: 3 writes, first read got 21 bytes: pay:17;pay:18;pay:19;
+udp: 3 sends, 3 receives: [pay:17;, pay:18;, pay:19;]</pre>
+      <p>Бывает и наоборот: одна запись в 20 КБ приходит несколькими чтениями. Поэтому протокол поверх TCP обязан сам размечать сообщения. HTTP/1.1 делает это заголовком <code>Content-Length</code> или кусками chunked, Kafka — длиной перед каждым запросом, текстовые протоколы — разделителем строки. Код, который читает сокет одним <code>read</code> и считает это сообщением, работает в тестах на loopback и ломается в реальной сети. UDP границы хранит: одна отправка — одна датаграмма, она приходит целиком или не приходит вовсе.</p>
+    </section>
+
+    <section class="step" id="flow">
+      <h2>Медленный получатель останавливает отправителя: окно приёма и буферы</h2>
+      <p>У каждого соединения есть буфер отправки у отправителя и буфер приёма у получателя. <code>write</code> возвращается, когда данные легли в буфер отправки ядра, а не когда получатель их прочитал. Получатель сообщает размер свободного места в своём буфере — окно приёма. Когда оно ноль, отправитель ждёт. Это управление потоком: быстрый отправитель не может завалить медленного получателя.</p>
+      <pre><code class="language-java">// Писатель пишет без остановки, читатель ничего не читает.
+while (true) { out.write(new byte[8192]); written.addAndGet(8192); }</code></pre>
+      <pre class="out">buffers: send=146988, receive=408300
+writer blocked after 528 KB, still 528 KB a moment later, state=RUNNABLE
+after reading 256 KB the writer moved on: 800 KB</pre>
+      <p>Писатель записал 528 КБ и встал. Это почти точно сумма буферов: 146 988 байт отправки плюс 408 300 приёма — 542 КБ, остальное съела гранулярность записи по 8 КБ. Как только читатель забрал 256 КБ, окно открылось, и писатель продолжил; сколько он успеет записать за паузу, меняется от запуска к запуску.</p>
+      <p>Обратите внимание на <code>state=RUNNABLE</code>. Поток, заблокированный в системном вызове записи, Java показывает как RUNNABLE, а не BLOCKED или WAITING. В thread dump сервиса, который «завис на записи ответа медленному клиенту», такие потоки выглядят работающими. Узнать их можно по стеку: <code>SocketOutputStream.write</code> или <code>NioSocketImpl.write</code> наверху.</p>
+      <p>Управление перегрузкой — отдельный механизм, который защищает уже сеть, а не получателя. Новое соединение начинает с маленького окна перегрузки и удваивает его каждый круг (slow start), пока не случится потеря пакета; тогда окно уменьшается. Поэтому новое соединение передаёт большой ответ медленнее, чем прогретое. Алгоритмы CUBIC (по умолчанию в Linux) и BBR по-разному реагируют на потери и задержку. Для бэкенда вывод тот же, что и с рукопожатием: долгоживущие соединения из пула дешевле новых.</p>
+    </section>
+
+    <section class="step" id="close">
+      <h2>После закрытия порт ещё держится в TIME_WAIT, а тихое соединение может уже не существовать</h2>
+      <p>Сторона, которая закрыла соединение первой, после обмена FIN и ACK остаётся в состоянии TIME_WAIT на два максимальных времени жизни сегмента (2 × MSL). Это защищает новое соединение с той же четвёркой адресов от опоздавших пакетов старого. На macOS MSL — 15 секунд (<code>sysctl net.inet.tcp.msl</code>), TIME_WAIT — 30; в Linux он зашит как 60 секунд. Демо закрывает соединение со стороны клиента и сразу пытается открыть новое с того же локального порта к тому же серверу:</p>
+      <pre><code class="language-java">again.setReuseAddress(reuse);
+again.bind(new InetSocketAddress(LO, clientPort));                  // Тот же локальный порт...
+again.connect(new InetSocketAddress(LO, server.getLocalPort()));    // ...и тот же сервер.</code></pre>
+      <pre class="out">reuseAddress=false: bind failed: Address already in use
+reuseAddress=true: connect failed: Address already in use</pre>
+      <p>Без <code>SO_REUSEADDR</code> не удаётся даже занять порт. С ним bind проходит, но connect отказывает: четвёрка «тот же клиент — тот же сервер» ещё в TIME_WAIT. Ядро обычно выбирает другой эфемерный порт само, поэтому в нормальной работе это незаметно. Проблема появляется, когда клиент открывает и закрывает тысячи коротких соединений к одному адресу: эфемерные порты кончаются, потому что каждый держится десятки секунд. Лечится это не настройками ядра, а переиспользованием соединений: HTTP keep-alive и пул в клиенте. Старая настройка Linux <code>tcp_tw_recycle</code>, которой это «лечили», ломала клиентов за NAT и удалена из ядра.</p>
+      <h3>Соединение в пуле может быть мёртвым, хотя никто его не закрывал</h3>
+      <p>Теперь утренний <code>reset</code>. Пул HTTP-клиента держит соединение к банку открытым ночью. Но между сервисом и банком стоят NAT-шлюз, файрвол и балансировщик, и у каждого есть таймаут простоя: тихое соединение они через несколько минут забывают, не сообщая концам. Утром клиент берёт соединение из пула, отправляет запрос, а промежуточный узел отвечает RST или пакет просто пропадает.</p>
+      <p>Защит несколько. Время жизни простаивающего соединения в пуле делают меньше таймаута самого короткого узла по пути. Пул проверяет соединение перед выдачей или фоном. TCP keepalive — периодические пустые пакеты от ядра — тоже не даёт узлам забыть соединение, но по умолчанию первый пакет уходит через два часа, что больше любого таймаута простоя, поэтому интервал задают явно. Не путай его с HTTP keep-alive — переиспользованием одного соединения для нескольких запросов.</p>
+    </section>
+
+    <section class="step" id="udp">
+      <h2>UDP отправляет датаграммы без гарантий, и надёжность делает приложение</h2>
+      <p>UDP — тонкая обёртка над IP: порты, длина и контрольная сумма. Нет рукопожатия, нет подтверждений, нет повторов, нет порядка, нет управления перегрузкой. Датаграмма может потеряться, прийти дважды или раньше предыдущей, и никто об этом не сообщит. Взамен — нет задержки на соединение и нет блокировки всех данных из-за одного потерянного пакета.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>TCP</th><th>UDP</th></tr></thead>
+        <tbody>
+          <tr><td>Соединение</td><td>Рукопожатие, 1 RTT до данных</td><td>Нет, отправка сразу</td></tr>
+          <tr><td>Надёжность и порядок</td><td>Гарантированы ядром</td><td>Нет; решает приложение</td></tr>
+          <tr><td>Границы сообщений</td><td>Нет, поток байтов</td><td>Да, одна отправка — одна датаграмма</td></tr>
+          <tr><td>Потеря одного пакета</td><td>Задерживает всё, что после него</td><td>Теряется только он</td></tr>
+          <tr><td>Где используют</td><td>HTTP/1.1 и 2, базы, Kafka</td><td>DNS, QUIC и HTTP/3, метрики StatsD, видео и голос</td></tr>
+        </tbody>
+      </table>
+      <p>UDP выбирают, когда опоздавшие данные бесполезны (кадр видео, голос), когда запрос помещается в один пакет и проще повторить, чем устанавливать соединение (DNS), или когда нужен свой транспорт с другими свойствами. QUIC, на котором работает HTTP/3, реализует надёжность, порядок и шифрование поверх UDP, но с отдельным порядком для каждого потока, чтобы потеря одного пакета не задерживала остальные потоки. Это разобрано в <a href="http-versions.html">HTTP/2 &amp; HTTP/3</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Рукопожатие стоит RTT до первого байта. Refused и таймаут connect значат, что запрос не дошёл; reset и таймаут чтения — нет гарантии.</li>
+        <li>TCP — поток без границ сообщений; разметку делает протокол поверх: Content-Length, длина, разделитель.</li>
+        <li>Окно приёма останавливает отправителя; поток, заблокированный в записи, Java показывает как RUNNABLE.</li>
+        <li>TIME_WAIT держит четвёрку адресов у закрывшего первым; лечится переиспользованием соединений.</li>
+        <li>Промежуточные узлы забывают тихие соединения; срок жизни в пуле меньше их таймаута простоя.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="tcp-vs-udp" data-freq="3">
+      <h3>Чем TCP отличается от UDP и когда выбирать UDP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>TCP устанавливает соединение рукопожатием и даёт надёжный упорядоченный поток байтов: потери повторяются, порядок восстанавливается, отправитель подстраивается под получателя и под загрузку сети. UDP отправляет отдельные датаграммы без соединения и без гарантий: могут потеряться, задублироваться и перемешаться.</p>
+          <p>UDP выбирают, когда опоздавшие данные бесполезны — видео, голос, — когда запрос помещается в один пакет, как в DNS, или когда строят свой транспорт, как QUIC в HTTP/3.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>TCP не хранит границ сообщений; протокол поверх должен размечать их сам.</li>
+            <li>Потеря одного пакета в TCP задерживает все байты после него — head-of-line blocking на транспорте.</li>
+            <li>QUIC реализует надёжность поверх UDP отдельно для каждого потока и шифрует заголовки транспорта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tcp-handshake-close" data-freq="2">
+      <h3>Как TCP открывает и закрывает соединение и что такое TIME_WAIT?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Открытие — трёхстороннее рукопожатие SYN, SYN-ACK, ACK: стороны согласуют начальные номера последовательностей, и только после этого идут данные. Закрытие — обмен FIN и ACK с каждой стороны. Тот, кто закрыл первым, остаётся в TIME_WAIT на 2 × MSL, чтобы опоздавшие пакеты старого соединения не попали в новое с той же четвёркой адресов.</p>
+          <p>Если клиент открывает тысячи коротких соединений к одному серверу, эфемерные порты кончаются из-за TIME_WAIT. Решение — переиспользовать соединения через keep-alive и пул.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>SO_REUSEADDR позволяет занять порт, но не переиспользовать четвёрку в TIME_WAIT: в демо bind прошёл, а connect нет.</li>
+            <li>tcp_tw_recycle ломал клиентов за NAT и удалён из Linux; tcp_tw_reuse безопаснее и только для исходящих.</li>
+            <li>Backlog — очередь установленных соединений до accept; при переполнении Linux отбрасывает SYN, macOS отвечает RST.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tcp-errors" data-freq="2">
+      <h3>Чем отличаются connection refused, reset и timeout?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Refused — на SYN пришёл RST: на порту никто не слушает. Таймаут connect — на SYN никто не ответил: машина недоступна или файрвол молча отбрасывает пакеты. Reset — уже установленное соединение сброшено другой стороной или узлом по пути, например балансировщиком, забывшим тихое соединение.</p>
+          <p>Для повторов важно, где произошла ошибка. Ошибка connect значит, что запрос не ушёл, и повтор безопасен. Reset или таймаут чтения после отправки — запрос мог выполниться, и повторять можно только идемпотентно.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Reset на первом запросе после простоя — признак мёртвого соединения в пуле; срок простоя в пуле делают меньше таймаутов NAT и балансировщика.</li>
+            <li>TCP keepalive по умолчанию начинает через два часа, поэтому для борьбы с таймаутами простоя его интервал настраивают явно.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим чтением ответа банка?</summary>
+          <pre><code class="language-java">byte[] buf = new byte[4096];
+int n = socket.getInputStream().read(buf);     // Ответ банка — JSON до 3 КБ.
+BankResponse r = json.readValue(buf, 0, n, BankResponse.class);</code></pre>
+          <p>Один read возвращает столько байтов, сколько уже пришло, а не целое сообщение. На loopback ответ обычно приходит целиком, в реальной сети — кусками, и разбор упадёт на обрезанном JSON. Нужна разметка сообщения: читать до известной длины или разделителя. Проще всего не работать с сокетом напрямую, а взять HTTP-клиент, который сделает это по Content-Length.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>James Kurose, Keith Ross, Computer Networking: A Top-Down Approach, 8-е изд., глава 3 — основа урока: TCP, UDP, управление потоком и перегрузкой.</li>
+      <li>Ilya Grigorik, <a href="https://hpbn.co/building-blocks-of-tcp/">High Performance Browser Networking: Building Blocks of TCP</a> — рукопожатие, slow start, почему переиспользовать соединения.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9293">RFC 9293: Transmission Control Protocol</a> — состояния соединения и TIME_WAIT.</li>
+      <li><a href="https://vincent.bernat.ch/en/blog/2014-tcp-time-wait-state-linux">Vincent Bernat, Coping with the TCP TIME-WAIT state on busy Linux servers</a> — почему не трогать tcp_tw_recycle.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
