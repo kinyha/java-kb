@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Replication · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="replication">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Replication</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Реплика получает журнал WAL от primary и проигрывает его, становясь копией базы только для чтения. По умолчанию репликация асинхронная: primary подтверждает коммит, не дожидаясь реплики, поэтому чтение с реплики сразу после записи может вернуть старое значение, а при отказе primary подтверждённые, но не доехавшие транзакции теряются. Синхронный режим заставляет коммит ждать реплику — без потерь при failover, но с задержкой на каждый коммит и зависанием записи, если синхронная реплика недоступна. Чтение с реплик масштабирует чтение, но требует решить, где допустимо устаревание.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Клиент оплатил заказ и увидел «не оплачено», а после аварии пропали подтверждённые платежи</h2>
+      <p>Чтобы разгрузить основную базу, чтение статусов платежей перевели на реплику. Сразу пошли жалобы: клиент нажимает «Оплатить», получает подтверждение, обновляет страницу — и видит «Не оплачено». Через полгода основной сервер упал, автоматический failover повысил реплику, и сверка с банком нашла несколько платежей, которые клиенты успели получить как успешные, но которых нет в базе.</p>
+      <p>Тема разбирает физическую потоковую репликацию PostgreSQL: как она работает, откуда берутся отставание и потери и что дают режимы синхронности. Устройство WAL — в <a href="postgres.html">Architecture &amp; WAL</a>, репликация Kafka и Redis — в <a href="kafka-replication.html">Kafka: Replication</a> и <a href="redis-ops.html">Redis in Production</a>, распределение данных по серверам — в <a href="sharding.html">Sharding</a>. Демо <a href="../examples/pg-replication/ReplicationDemo.java">ReplicationDemo.java</a> поднимает primary и реплику PostgreSQL 17 в Docker скриптом <code>setup.sh</code>, разрывает сеть между ними, убивает primary и повышает реплику.</p>
+    </section>
+
+    <section class="step" id="how">
+      <h2>Реплика проигрывает WAL primary и доступна только для чтения</h2>
+      <pre><code class="language-bash">pg_basebackup -h pg-primary -U repl -D /var/lib/postgresql/data -R -X stream
+# -R: standby.signal и primary_conninfo — сервер стартует как реплика</code></pre>
+      <p>Реплику создают копией файлов primary, и дальше процесс walreceiver получает поток WAL, а startup-процесс проигрывает его — так же, как при восстановлении после сбоя, только непрерывно. Это физическая репликация: копия побайтная, со всеми базами и индексами, той же мажорной версии PostgreSQL. Реплика в режиме hot standby принимает чтения, но не запись:</p>
+      <pre class="out">== pg_stat_replication: replica1 sync, replay_lag 00:00:00.501145
+== write on replica: 25006 ERROR: cannot execute UPDATE in a read-only transaction</pre>
+      <p><code>pg_stat_replication</code> на primary показывает каждую реплику и её отставание по трём стадиям: записала WAL, сбросила на диск, применила. Здесь применение отстаёт на полсекунды — в демо реплике задана задержка <code>recovery_min_apply_delay = 500ms</code>, чтобы отставание было стабильным; в жизни оно зависит от нагрузки, сети и долгих запросов на реплике. Логическая репликация — другой механизм: она передаёт изменения строк выбранных таблиц и позволяет реплицировать между версиями и в другие системы, как CDC в <a href="outbox.html">Transactional Outbox</a>.</p>
+    </section>
+
+    <section class="step" id="lag">
+      <h2>Чтение с реплики сразу после записи возвращает старое значение</h2>
+      <pre><code class="language-java">exec(p, "set synchronous_commit = " + mode);
+exec(p, "update account set balance = balance - 30 where id = 'acc-1'");
+scalar(r, "select balance from account where id = 'acc-1'");   // сразу читаем с реплики</code></pre>
+      <pre class="out">== synchronous_commit=local        commit   3 ms; primary 70, replica right after 100
+== synchronous_commit=remote_apply commit 502 ms; primary 40, replica right after 40</pre>
+      <p>При обычном коммите primary ответил за 3 мс, и чтение с реплики сразу после этого вернуло старый баланс 100: изменение ещё не применено. Это нарушение read-your-writes — та самая «неоплаченная» оплата. С <code>synchronous_commit = remote_apply</code> коммит ждёт, пока реплика применит изменение, и чтение согласовано — но коммит занял 502 мс, ровно отставание реплики.</p>
+      <p>На практике <code>remote_apply</code> для всех коммитов слишком дорог, и read-your-writes решают в приложении. Читать с primary то, что пользователь только что изменил: например, первые секунды после записи или в рамках одного сценария. Привязать сессию к primary после записи. Запомнить LSN коммита (<code>pg_current_wal_lsn()</code>) и читать с реплики, только если она его уже применила (<code>pg_last_wal_replay_lsn()</code>). Чтение с реплики подходит для отчётов, каталогов и истории, где отставание в секунды допустимо.</p>
+    </section>
+
+    <section class="step" id="sync">
+      <h2>Синхронная репликация не теряет коммиты, но останавливает запись без реплики</h2>
+      <table class="mx">
+        <thead><tr><th><code>synchronous_commit</code></th><th>Коммит ждёт</th><th>Что теряется при отказе primary</th></tr></thead>
+        <tbody>
+          <tr><td><code>off</code></td><td>Ничего, даже свой диск</td><td>Последние коммиты даже без failover</td></tr>
+          <tr><td><code>local</code></td><td>Свой диск</td><td>Не доехавшие до реплики коммиты</td></tr>
+          <tr><td><code>remote_write</code></td><td>Реплика получила WAL в память ОС</td><td>Только при одновременном падении реплики</td></tr>
+          <tr><td><code>on</code></td><td>Реплика сбросила WAL на диск</td><td>Ничего</td></tr>
+          <tr><td><code>remote_apply</code></td><td>Реплика применила изменение</td><td>Ничего; чтения с реплики согласованы</td></tr>
+        </tbody>
+      </table>
+      <p>Синхронные уровни действуют только для реплик из <code>synchronous_standby_names</code>. И у них есть обратная сторона, которую демо показывает, разорвав сеть до единственной синхронной реплики:</p>
+      <pre class="out">-- docker network disconnect pg-repl pg-replica
+== synchronous_commit=on, replica unreachable: commit still waiting after 3 s: true
+   warning: canceling wait for synchronous replication due to user request
+   balance on primary after cancel: 10</pre>
+      <p>Коммит повис и ждал бы вечно: primary не подтвердит транзакцию, пока реплика не ответит. Вся запись в базу стоит. Отмена ожидания не откатывает транзакцию — предупреждение честно говорит, что она уже закоммичена локально: баланс 10 виден на primary, но реплика его не получила. Поэтому синхронную репликацию строят как минимум с двумя кандидатами: <code>synchronous_standby_names = 'ANY 1 (r1, r2)'</code> — коммит ждёт любую одну из двух, и отказ одной реплики запись не останавливает. Синхронный режим можно включать и точечно — <code>SET LOCAL synchronous_commit = on</code> для транзакций с деньгами.</p>
+    </section>
+
+    <section class="step" id="failover">
+      <h2>Failover на асинхронную реплику теряет подтверждённые транзакции</h2>
+      <pre class="out">== async commit while replica is cut off: primary balance 999
+-- docker kill pg-primary
+-- docker network connect pg-repl pg-replica
+== after promote, new primary balance: 40, in recovery: 0</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Primary и реплика синхронны на балансе 40. Сеть репликации рвётся, primary подтверждает клиенту коммиты 10 и 999. Primary падает. Реплику повышают до primary, у неё баланс 40: подтверждённые коммиты потеряны.">
+            <defs><marker id="fo-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="40" width="150" height="60" rx="9" class="dg-box"/>
+            <text x="95" y="66" class="dg-in" text-anchor="middle">клиент</text>
+            <rect x="280" y="40" width="170" height="60" rx="9" class="dg-box"/>
+            <text x="365" y="62" class="dg-in" text-anchor="middle">primary</text>
+            <text data-s="1" x="365" y="84" class="dg-n" text-anchor="middle">balance 40</text>
+            <text data-s="2" x="365" y="84" class="dg-n" text-anchor="middle">balance 999</text>
+            <text data-s="3-" x="365" y="84" class="dg-bad" text-anchor="middle">упал</text>
+            <rect x="540" y="40" width="160" height="60" rx="9" class="dg-box"/>
+            <text data-s="-3" x="620" y="62" class="dg-in" text-anchor="middle">реплика</text>
+            <text data-s="4" x="620" y="62" class="dg-ok" text-anchor="middle">новый primary</text>
+            <text x="620" y="84" class="dg-n" text-anchor="middle">balance 40</text>
+            <path data-s="1" d="M450 70 L 536 70" class="dg-line" marker-end="url(#fo-n)"/>
+            <text data-s="1" x="462" y="62" class="dg-n">WAL</text>
+            <text data-s="2-3" x="470" y="62" class="dg-bad">разрыв</text>
+            <path data-s="2" d="M170 70 L 276 70" class="dg-line" marker-end="url(#fo-n)"/>
+            <text data-s="2" x="180" y="62" class="dg-n">10, 999 → OK</text>
+            <rect data-s="4" x="20" y="124" width="680" height="34" rx="6" class="dg-cell miss"/>
+            <text data-s="4" x="32" y="146" class="dg-bad">клиенту подтвердили 999, а новый primary знает только 40</text>
+            <text data-s="1" x="20" y="188" class="dg-t">Primary и реплика согласованы.</text>
+            <text data-s="2" x="20" y="188" class="dg-t">Сеть репликации порвана, primary подтверждает коммиты сам.</text>
+            <text data-s="3" x="20" y="188" class="dg-bad">Primary упал с неотправленным WAL.</text>
+            <text data-s="4" x="20" y="188" class="dg-bad">Promote реплики: подтверждённые коммиты потеряны.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Primary и реплика согласованы, баланс 40.</li>
+          <li>Сеть между ними порвана. Primary подтверждает клиенту коммиты 10 (ожидание синхронной реплики отменили) и 999 (асинхронный).</li>
+          <li>Primary падает, и его WAL после разрыва никуда не ушёл.</li>
+          <li>Реплику повышают до primary через pg_promote. У неё баланс 40: оба подтверждённых изменения потеряны.</li>
+        </ol>
+      </figure>
+      <p>Новый primary знает только то, что успел получить: подтверждённые клиенту изменения пропали. Это и есть потерянные платежи из истории — RPO асинхронной репликации не ноль, а величина отставания. Автоматический failover делают инструменты вроде Patroni: они выбирают реплику с наибольшим LSN, повышают её и не дают старому primary вернуться как ведущему. Последнее критично: если старый primary оживёт и продолжит принимать запись, у кластера два primary — split brain, и данные разойдутся необратимо. Поэтому старый узел изолируют (fencing), а при возвращении он становится репликой после <code>pg_rewind</code>.</p>
+      <div class="trap">
+        <p class="myth">Реплика — это резервная копия: при отказе primary ничего не потеряется.</p>
+        <p class="fact">Асинхронная реплика отстаёт, и всё, что primary подтвердил, но не успел отправить, при failover пропадает: в демо новый primary вернулся к балансу 40 после подтверждённых 999. Реплика не защищает и от ошибочного DELETE — он реплицируется мгновенно. Нужны синхронный режим для критичных транзакций и отдельные бэкапы с PITR.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Физическая реплика проигрывает WAL primary и открыта только для чтения (25006 на запись).</li>
+        <li>Асинхронный коммит 3 мс, но реплика сразу после него вернула 100 вместо 70; remote_apply — согласованно, но 502 мс.</li>
+        <li>Read-your-writes — в приложении: читать с primary после записи или ждать LSN на реплике.</li>
+        <li>Синхронный коммит висит без реплики; отмена оставляет транзакцию закоммиченной локально. Минимум два кандидата: ANY 1 (r1, r2).</li>
+        <li>Failover на асинхронную реплику потерял подтверждённые 10 и 999; Patroni, fencing старого primary, бэкапы с PITR.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="repl-sync-async" data-freq="3">
+      <h3>Чем синхронная репликация отличается от асинхронной?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При асинхронной primary подтверждает коммит сразу, а реплика получает изменения позже: коммит быстрый, но реплика отстаёт, и при отказе primary недоставленные транзакции теряются. При синхронной коммит ждёт подтверждения от реплики: потерь нет, но каждый коммит дольше на время сети и реплики, а при недоступности синхронной реплики запись останавливается.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В PostgreSQL уровни synchronous_commit: off, local, remote_write, on, remote_apply.</li>
+            <li>Отказоустойчивая синхронная схема — ANY 1 из двух и более реплик.</li>
+            <li>Синхронность можно включать для отдельных транзакций через SET LOCAL.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="repl-ryw" data-freq="3">
+      <h3>Почему после записи пользователь может не увидеть свои данные и как это исправить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Если чтение идёт с асинхронной реплики, она может ещё не применить только что закоммиченное изменение — нарушение read-your-writes. Решения: читать с primary данные, которые пользователь только что изменил, или всю сессию в течение короткого времени после записи; запоминать LSN коммита и читать с реплики, только если она его применила; для критичных случаев — synchronous_commit = remote_apply.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Монотонность чтений тоже нарушается: два запроса к разным репликам могут вернуть «новое», потом «старое»; помогает привязка сессии к одной реплике.</li>
+            <li>Долгие запросы на реплике могут задерживать применение WAL или отменяться из-за конфликтов.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой маршрутизацией чтения?</summary>
+          <pre><code class="language-java">@Transactional
+public void pay(String orderId) { payments.markPaid(orderId); }          // primary
+
+@Transactional(readOnly = true)                                         // routing → replica
+public PaymentStatus status(String orderId) { return payments.status(orderId); }
+// фронт сразу после pay() вызывает status() и показывает результат</code></pre>
+          <p>Статус читается с асинхронной реплики сразу после записи на primary, и при любом отставании пользователь увидит «не оплачено». Для чтения сразу после собственной записи нужно идти на primary (например, по признаку недавней записи в сессии) или дождаться, пока реплика применит LSN коммита. Реплики оставить для отчётов и истории.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="repl-failover" data-freq="2">
+      <h3>Что происходит при failover и какие риски?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Реплику повышают до primary, и клиенты переключаются на неё. При асинхронной репликации теряются транзакции, которые старый primary подтвердил, но не отправил. Главный риск — split brain: если старый primary оживёт и продолжит принимать запись, данные разойдутся. Поэтому старый узел изолируют, а возвращают репликой через pg_rewind.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Patroni и подобные выбирают реплику с наибольшим LSN и держат лидерство через распределённое хранилище согласия.</li>
+            <li>RPO асинхронной схемы — величина отставания; RTO — время обнаружения и переключения.</li>
+            <li>Реплика не заменяет бэкап: ошибочный DELETE реплицируется.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/warm-standby.html">PostgreSQL 17: Log-Shipping Standby Servers</a> — основа урока: потоковая и синхронная репликация.</li>
+      <li><a href="https://www.postgresql.org/docs/17/runtime-config-wal.html#GUC-SYNCHRONOUS-COMMIT">synchronous_commit</a> и <a href="https://www.postgresql.org/docs/17/monitoring-stats.html#MONITORING-PG-STAT-REPLICATION-VIEW">pg_stat_replication</a>.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 5 — отставание реплик, read-your-writes, failover.</li>
+      <li><a href="https://patroni.readthedocs.io/">Patroni</a> — автоматический failover для PostgreSQL.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -257,7 +257,7 @@ window.KB_TREE = [
           scope: 'autovacuum, bloat, HOT-обновления, wraparound' },
       ] },
       { id: 'scale', title: 'Scaling', source: 'DDIA, гл. Replication и Partitioning', items: [
-        { id: 'replication', freq: 2, status: 'empty', title: 'Replication',
+        { id: 'replication', freq: 2, status: 'draft', title: 'Replication',
           scope: 'leader-follower, синхронная и асинхронная, лаг реплики, чтение с реплик, failover' },
         { id: 'partitioning', freq: 2, status: 'draft', title: 'Partitioning',
           scope: 'секционирование таблицы, range, list и hash, partition pruning, удаление старых данных партициями' },
