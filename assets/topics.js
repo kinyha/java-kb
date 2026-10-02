@@ -111,7 +111,7 @@ window.KB_TREE = [
           scope: 'keep-alive и head-of-line blocking в HTTP/1.1, мультиплексирование в HTTP/2, QUIC в HTTP/3' },
         { id: 'dns', freq: 2, status: 'draft', title: 'DNS',
           scope: 'резолв имени, рекурсивный и авторитативный сервер, записи A, CNAME, MX, TTL и кеш' },
-        { id: 'tls', freq: 2, status: 'empty', title: 'TLS & HTTPS',
+        { id: 'tls', freq: 2, status: 'draft', title: 'TLS & HTTPS',
           scope: 'TLS-рукопожатие, сертификаты и цепочка доверия, HTTPS, mTLS' },
       ] },
       { id: 'data', title: 'Data Representation', items: [

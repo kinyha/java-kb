@@ -8,4 +8,5 @@ java RequestPathDemo.java
 java TcpDemo.java
 java HttpDemo.java
 java DnsDemo.java   # нужен доступ к DNS
+java TlsDemo.java   # части 1–2 ходят в интернет (example.com, badssl.com)
 ```

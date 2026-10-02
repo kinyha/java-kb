@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Networking: TLS &amp; HTTPS · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="tls">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Networking: TLS &amp; HTTPS</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>TLS решает три задачи: никто по дороге не прочитает данные, не изменит их незаметно и не выдаст себя за сервер. Шифрование даёт общий ключ, который стороны вырабатывают в рукопожатии, не передавая его по сети. Подлинность даёт сертификат: сервер показывает цепочку подписей до корня, которому клиент доверяет заранее, и клиент проверяет, что имя в сертификате совпадает с адресом. В TLS 1.3 рукопожатие занимает один круг до сервера. Почти все ошибки TLS в проде — не про шифры, а про доверие: истёкший сертификат, сменённый центр сертификации, имя не то.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Банк сменил сертификат, и все платежи упали с PKIX path building failed</h2>
+      <p>В понедельник утром вызовы банка начали падать с <code>SSLHandshakeException: PKIX path building failed: unable to find valid certification path to requested target</code>. Код не менялся. Банк перевыпустил сертификат у другого центра сертификации, а платёжный сервис жил в контейнере с собственным truststore, куда когда-то вручную положили старый корневой сертификат. Через месяц другая авария: истёк сертификат внутреннего сервиса, и проверка здоровья проходила, потому что ходила по HTTP.</p>
+      <p>Чтобы разбираться в таких ошибках, нужно понимать, что и в какой момент проверяет TLS. Демо <a href="../examples/net/TlsDemo.java">TlsDemo.java</a> делает рукопожатие с реальным сервером, проверяет сертификаты на тестовых хостах badssl.com и поднимает на loopback сервер с взаимной аутентификацией: <code>java TlsDemo.java</code> на JDK 21. Первым двум частям нужен интернет; время рукопожатия снято на машине автора через VPN.</p>
+    </section>
+
+    <section class="step" id="handshake">
+      <h2>В рукопожатии стороны вырабатывают общий ключ, не передавая его, и TLS 1.3 делает это за один круг</h2>
+      <p>Данные шифруются симметричным алгоритмом вроде AES-GCM: он быстрый, но обеим сторонам нужен один и тот же ключ. Передать ключ открыто нельзя, поэтому стороны вырабатывают его обменом Диффи — Хеллмана на эллиптических кривых (ECDHE). Каждая сторона генерирует временную пару ключей и отправляет только открытую часть, а общий секрет вычисляет сама. Подслушавший видит обе открытые части, но вычислить секрет не может.</p>
+      <p>Ключи временные, на одно соединение. Если через год украдут закрытый ключ сертификата сервера, записанный трафик всё равно не расшифровать: сертификат только подписывал рукопожатие, а ключ шифрования из него не выводится. Это прямая секретность (forward secrecy). В TLS 1.3 обмен ключами без неё вообще убрали.</p>
+      <pre><code class="language-java">try (var tcp = new Socket("example.com", 443)) {      // TCP уже установлен.
+    var s = (SSLSocket) factory.createSocket(tcp, "example.com", 443, true);
+    s.setEnabledProtocols(new String[] {protocol});     // TLSv1.2 или TLSv1.3.
+    long t = System.nanoTime();
+    s.startHandshake();                                  // Меряем только TLS.
+}</code></pre>
+      <pre class="out">TLSv1.2 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 in 621 ms
+TLSv1.3 TLS_AES_256_GCM_SHA384 in 373 ms</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Слева TLS 1.2: клиент отправляет ClientHello, сервер отвечает ServerHello и сертификатом, клиент отправляет свою часть ключа, сервер подтверждает Finished — два круга до первых данных. Справа TLS 1.3: клиент сразу отправляет ClientHello вместе со своей частью ключа, сервер отвечает ServerHello, сертификатом и Finished — один круг, и следующим сообщением клиент уже отправляет зашифрованный запрос.">
+            <defs>
+              <marker id="tl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="tl-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <path d="M360 20 L 360 222" class="dg-sep"/>
+            <text x="20" y="18" class="dg-cap bad">TLS 1.2: 2 RTT, 621 МС</text>
+            <text x="374" y="18" class="dg-cap">TLS 1.3: 1 RTT, 373 МС</text>
+            <!-- 1.2 -->
+            <path d="M60 30 L 60 220" class="dg-sep"/>
+            <path d="M320 30 L 320 220" class="dg-sep"/>
+            <text x="50" y="40" class="dg-n" text-anchor="end">кл.</text>
+            <text x="330" y="40" class="dg-n">сер.</text>
+            <path d="M60 50 L 316 70" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M320 76 L 64 96" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M60 104 L 316 124" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M320 130 L 64 150" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M60 162 L 316 182" class="dg-line ok" marker-end="url(#tl-ok)"/>
+            <text x="120" y="46" class="dg-n">ClientHello</text>
+            <text x="120" y="74" class="dg-n">ServerHello, сертификат, ключ</text>
+            <text x="120" y="100" class="dg-n">ключ клиента, Finished</text>
+            <text x="120" y="128" class="dg-n">Finished</text>
+            <text x="120" y="158" class="dg-ok">запрос</text>
+            <!-- 1.3 -->
+            <path d="M414 30 L 414 220" class="dg-sep"/>
+            <path d="M680 30 L 680 220" class="dg-sep"/>
+            <text x="404" y="40" class="dg-n" text-anchor="end">кл.</text>
+            <text x="690" y="40" class="dg-n">сер.</text>
+            <path d="M414 50 L 676 70" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M680 76 L 418 96" class="dg-line" marker-end="url(#tl-n)"/>
+            <path d="M414 108 L 676 128" class="dg-line ok" marker-end="url(#tl-ok)"/>
+            <text x="440" y="44" class="dg-n">ClientHello + ключ клиента</text>
+            <text x="440" y="70" class="dg-n">ServerHello, сертификат, Finished</text>
+            <text x="440" y="102" class="dg-ok">Finished + запрос</text>
+            <text x="440" y="200" class="dg-s">Клиент сразу угадывает группу</text>
+            <text x="440" y="216" class="dg-s">ключа и экономит круг.</text>
+          </svg>
+        </div>
+        <figcaption>Разница в 250 мс почти точно равна одному кругу до сервера через VPN. На сети с RTT 20 мс разница тоже будет один круг — 20 мс, но на каждом новом соединении.</figcaption>
+      </figure>
+      <p>Рукопожатие несёт ещё две полезные вещи. SNI — имя сервера в ClientHello: на одном IP живут сотни сайтов, и сервер по SNI выбирает, какой сертификат показать. ALPN — договорённость о протоколе поверх TLS: здесь клиент и сервер решают, говорить ли HTTP/2, как разобрано в <a href="http-versions.html">HTTP/2 &amp; HTTP/3</a>. Возобновление сессии и 0-RTT сокращают повторные рукопожатия, но 0-RTT-данные можно перехватить и повторить, поэтому для POST платежа его не используют.</p>
+    </section>
+
+    <section class="step" id="chain">
+      <h2>Сертификат проверяется цепочкой подписей до корня, которому клиент доверяет заранее</h2>
+      <p>Шифрование без проверки собеседника бесполезно: можно зашифрованно поговорить с атакующим. Сертификат связывает открытый ключ с именем домена, и эту связь подписывает центр сертификации (CA). Сервер example.com показал цепочку из четырёх сертификатов:</p>
+      <pre class="out">  cert: CN=example.com &lt;- CN=Cloudflare TLS Issuing ECC CA 3
+  cert: CN=Cloudflare TLS Issuing ECC CA 3 &lt;- CN=SSL.com TLS Transit ECC CA R2
+  cert: CN=SSL.com TLS Transit ECC CA R2 &lt;- CN=SSL.com TLS ECC Root CA 2022
+  cert: CN=SSL.com TLS ECC Root CA 2022 &lt;- CN=AAA Certificate Services
+  SAN: [example.com, *.example.com], valid until 2026-12-25</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Сертификат example.com подписан промежуточным Cloudflare TLS Issuing ECC CA 3, тот — промежуточным SSL.com Transit, тот — корнем SSL.com Root 2022, который кросс-подписан старым корнем AAA Certificate Services. Truststore клиента содержит корни. Клиент поднимается по подписям, пока не встретит сертификат из своего truststore.">
+            <defs>
+              <marker id="ch-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ch-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">ЦЕПОЧКА ОТ СЕРВЕРА</text>
+            <rect x="20" y="34" width="250" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="20" y="80" width="250" height="34" rx="6" class="dg-cell"/>
+            <rect x="20" y="126" width="250" height="34" rx="6" class="dg-cell"/>
+            <rect x="20" y="172" width="250" height="34" rx="6" class="dg-cell"/>
+            <path d="M145 68 L 145 76" class="dg-line" marker-end="url(#ch-n)"/>
+            <path d="M145 114 L 145 122" class="dg-line" marker-end="url(#ch-n)"/>
+            <path d="M145 160 L 145 168" class="dg-line" marker-end="url(#ch-n)"/>
+            <text x="30" y="56" class="dg-in">example.com (лист)</text>
+            <text x="30" y="102" class="dg-in">Cloudflare Issuing CA 3</text>
+            <text x="30" y="148" class="dg-in">SSL.com Transit R2</text>
+            <text x="30" y="194" class="dg-in">SSL.com Root 2022</text>
+            <text x="290" y="56" class="dg-n">подписан следующим ↓</text>
+            <text x="470" y="22" class="dg-cap">TRUSTSTORE КЛИЕНТА</text>
+            <rect x="470" y="34" width="230" height="172" rx="9" class="dg-box"/>
+            <rect x="484" y="126" width="202" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="484" y="172" width="202" height="26" rx="6" class="dg-cell"/>
+            <text x="484" y="60" class="dg-n">cacerts JDK 21: 109 корней</text>
+            <text x="484" y="80" class="dg-n">или truststore образа</text>
+            <text x="494" y="148" class="dg-in">SSL.com Root 2022</text>
+            <text x="494" y="190" class="dg-n">AAA Certificate Services</text>
+            <path d="M270 189 C 380 189, 380 143, 480 143" class="dg-line ok" marker-end="url(#ch-ok)"/>
+            <text x="300" y="214" class="dg-ok">найден в доверенных</text>
+          </svg>
+        </div>
+        <figcaption>Клиент не верит серверу на слово: он проверяет каждую подпись вверх по цепочке, пока не дойдёт до корня, который уже лежит в его truststore. Сервер отправляет промежуточные сертификаты сам; корень клиент берёт из своего хранилища.</figcaption>
+      </figure>
+      <p>Последний сертификат цепочки подписан старым корнем AAA Certificate Services — это кросс-подпись. Новый корень SSL.com 2022 ещё есть не во всех старых хранилищах, и кросс-подпись позволяет старым клиентам дойти до известного им корня. В Java корни лежат в <code>$JAVA_HOME/lib/security/cacerts</code>. Если образ контейнера собран со своим урезанным truststore, смена банком центра сертификации ломает проверку — та самая авария из первого шага.</p>
+      <p>Имя проверяется по полю Subject Alternative Name, а не по CN: здесь это <code>example.com</code> и <code>*.example.com</code>. Звёздочка покрывает ровно один уровень: <code>api.example.com</code> подходит, <code>v1.api.example.com</code> — нет. Срок действия сертификатов сокращается: решение CA/Browser Forum 2025 года поэтапно уменьшает его с 398 дней до 47 к 2029 году, так что ручной перевыпуск раз в год перестаёт быть вариантом.</p>
+    </section>
+
+    <section class="step" id="checks">
+      <h2>Клиент проверяет срок, имя и путь к корню, и каждая ошибка значит своё</h2>
+      <p>Тестовые хосты badssl.com специально показывают сломанные сертификаты. Демо включает проверку имени так же, как это делает <code>HttpClient</code>:</p>
+      <pre><code class="language-java">var params = s.getSSLParameters();
+params.setEndpointIdentificationAlgorithm("HTTPS"); // Без этой строки SSLSocket имя не сверяет.
+s.setSSLParameters(params);
+s.startHandshake();</code></pre>
+      <pre class="out">expired.badssl.com: SSLHandshakeException: validity check failed
+wrong.host.badssl.com: SSLHandshakeException: (certificate_unknown) No subject alternative DNS name matching wrong.host.badssl.com found.
+self-signed.badssl.com: SSLHandshakeException: unable to find valid certification path to requested target</pre>
+      <p>Три разные причины: срок истёк; сертификат валиден, но выдан другому имени; цепочка не доходит ни до одного доверенного корня. Третья ошибка — та же, что в аварии с банком, только по другой причине. Её лечат добавлением нужного корня или промежуточного CA в truststore, а не отключением проверки.</p>
+      <div class="trap">
+        <p class="myth">PKIX path building failed чинится TrustManager, который доверяет всем сертификатам.</p>
+        <p class="fact">Такой TrustManager отключает проверку собеседника, и любой узел по пути может выдать себя за банк и читать платежи. Ещё обратите внимание на строку с setEndpointIdentificationAlgorithm: голый SSLSocket без неё проверяет цепочку, но не имя, и сертификат чужого сайта проходит. HttpClient и RestClient делают эту проверку сами. Правильное исправление — добавить нужный CA в truststore.</p>
+      </div>
+      <p>В Java различают keystore — свои ключи и сертификаты для представления себя — и truststore — чужие сертификаты, которым доверяешь. В Spring Boot с версии 3.1 оба удобно описываются через SSL bundles: <code>spring.ssl.bundle.jks.bank.truststore.location</code> и ссылка на bundle из настроек сервера или HTTP-клиента. С Boot 3.2 bundle можно перезагружать при обновлении файлов на диске без перезапуска (<code>reload-on-update</code>).</p>
+    </section>
+
+    <section class="step" id="mtls">
+      <h2>При mTLS сертификат показывает и клиент, и сервер решает, кого пускать</h2>
+      <p>Обычно сертификат показывает только сервер, а клиента опознают паролем или токеном. Банковские API и сервисы внутри кластера часто требуют взаимной аутентификации: клиент тоже показывает сертификат, подписанный CA, которому доверяет сервер. Демо генерирует утилитой keytool две пары ключей, раздаёт каждой стороне сертификат другой и поднимает сервер с <code>setNeedClientAuth(true)</code>:</p>
+      <pre><code class="language-java">server.setNeedClientAuth(true); // Без сертификата клиента — отказ в рукопожатии.
+SSLContext clientCtx = context(dir, withCert ? "client.p12" : null, "client-trust.p12");</code></pre>
+      <pre class="out">client cert=false: SSLHandshakeException: (certificate_required) Received fatal alert: certificate_required
+client cert=true: hello CN=client.payments.test</pre>
+      <p>Без сертификата клиент не прошёл рукопожатие: сервер ответил фатальным сигналом <code>certificate_required</code>, до HTTP дело не дошло. С сертификатом сервер знает клиента по имени из сертификата и может принимать решения по нему. В Spring Security это <code>x509()</code>, который превращает сертификат клиента в Authentication.</p>
+      <p>mTLS переносит сложность в управление сертификатами: кто их выпускает, как часто обновляет, как отзывает. Внутри кластера это обычно делает service mesh: Istio или Linkerd выдают каждому pod-у сертификат на часы и обновляют автоматически, а sidecar устанавливает mTLS вместо приложения. Для внешнего банка сертификат клиента выдаёт банк, и его срок — ещё одна дата, за которой нужно следить.</p>
+    </section>
+
+    <section class="step" id="operations">
+      <h2>В проде TLS ломается сроками, завершением на балансировщике и отзывом</h2>
+      <p>Самая частая авария с TLS — истёкший сертификат. Она неожиданна, потому что всё работало ровно до определённой секунды. Защита — автоматический выпуск и обновление (ACME, cert-manager в Kubernetes) и мониторинг срока каждого сертификата, в том числе клиентских и внутренних, с алертом за несколько недель.</p>
+      <p>TLS часто завершается на балансировщике: он расшифровывает трафик и передаёт его приложению по HTTP внутри сети. Это просто, но трафик внутри кластера идёт открыто, а приложение не знает исходного протокола — его передают заголовком <code>X-Forwarded-Proto</code>, как разобрано в <a href="network.html">How a Request Travels</a>. Для платёжных данных внутри сети используют повторное шифрование от балансировщика до pod-а или mTLS через mesh.</p>
+      <p>Отзыв сертификатов работает плохо. Списки отзыва большие, онлайн-проверка OCSP медленная и при недоступности обычно пропускается. Поэтому на практике полагаются на короткий срок действия: украденный ключ перестанет работать вместе с сертификатом. HSTS — заголовок <code>Strict-Transport-Security</code> — запрещает браузеру ходить на домен по HTTP, закрывая атаку с перехватом первого незашифрованного запроса.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>TLS даёт шифрование, целостность и подлинность; ключ шифрования вырабатывается ECDHE и не передаётся.</li>
+        <li>TLS 1.3 тратит на рукопожатие один круг вместо двух: в демо 373 мс против 621.</li>
+        <li>Клиент проверяет цепочку подписей до корня из своего truststore, срок и имя в SAN.</li>
+        <li>PKIX path building failed — нет пути к доверенному корню; лечится нужным CA в truststore, а не доверием ко всем.</li>
+        <li>mTLS требует сертификат клиента; главная работа — выпуск, обновление и мониторинг сроков.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="tls-handshake" data-freq="2">
+      <h3>Как работает TLS-рукопожатие?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В TLS 1.3 клиент отправляет ClientHello с поддерживаемыми шифрами и своей временной частью ключа ECDHE. Сервер отвечает ServerHello со своей частью, сертификатом, подписью рукопожатия и Finished. Обе стороны вычисляют общий секрет, из которого получают симметричные ключи, и дальше данные шифруются AES-GCM или ChaCha20. Это один круг до сервера; в TLS 1.2 — два.</p>
+          <p>Клиент проверяет сертификат сервера: цепочку до доверенного корня, срок и имя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Временные ключи дают прямую секретность: кража ключа сертификата не раскрывает записанный трафик.</li>
+            <li>SNI выбирает сертификат на общем IP, ALPN согласует HTTP/2.</li>
+            <li>0-RTT при возобновлении экономит круг, но данные можно повторить, поэтому только для идемпотентных запросов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tls-pkix" data-freq="2">
+      <h3>Что значит PKIX path building failed и как это исправить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Java не смогла построить цепочку подписей от сертификата сервера до корня из своего truststore. Причины: сервер не отправил промежуточный сертификат, сертификат подписан корпоративным или новым CA, которого нет в cacerts, или образ собран с урезанным truststore.</p>
+          <p>Исправление — добавить нужный корень или промежуточный CA в truststore приложения, например через SSL bundle в Spring Boot. Отключать проверку TrustManager-ом «доверять всем» нельзя: это открывает подмену сервера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Голый SSLSocket без EndpointIdentificationAlgorithm=HTTPS не проверяет имя; HttpClient проверяет.</li>
+            <li>Keystore — свои ключи, truststore — чужие сертификаты, которым доверяешь.</li>
+            <li>openssl s_client -showcerts показывает, какую цепочку реально отдаёт сервер.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tls-mtls" data-freq="2">
+      <h3>Что такое mTLS и где он используется?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Взаимная аутентификация: сертификат показывает не только сервер, но и клиент, а сервер проверяет его по своему truststore. Без сертификата клиент не проходит рукопожатие — в демо сервер ответил certificate_required. Используется в банковских API и между сервисами внутри кластера.</p>
+          <p>Внутри кластера mTLS обычно делает service mesh: выдаёт pod-ам короткоживущие сертификаты и устанавливает соединения в sidecar.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Главная сложность — жизненный цикл сертификатов: выпуск, обновление, мониторинг сроков.</li>
+            <li>Spring Security x509() превращает сертификат клиента в Authentication.</li>
+            <li>Отзыв работает плохо, поэтому полагаются на короткий срок действия.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что опасного в этом «исправлении» ошибки сертификата?</summary>
+          <pre><code class="language-java">TrustManager[] trustAll = { new X509TrustManager() {
+    public void checkClientTrusted(X509Certificate[] c, String a) {}
+    public void checkServerTrusted(X509Certificate[] c, String a) {} // Ничего не проверяем.
+    public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+}};
+SSLContext ctx = SSLContext.getInstance("TLS");
+ctx.init(null, trustAll, null);</code></pre>
+          <p>Клиент принимает любой сертификат, в том числе самоподписанный от атакующего. Шифрование остаётся, но собеседник не проверен: узел по пути выдаёт себя за банк и видит все платежи. Обычно такой код приходит из ответа на форуме «как исправить PKIX» и попадает в прод. Правильно — добавить сертификат CA банка в truststore этого клиента.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc8446">RFC 8446: TLS 1.3</a> — основа урока: рукопожатие, ключи, 0-RTT.</li>
+      <li>Ilya Grigorik, <a href="https://hpbn.co/transport-layer-security-tls/">High Performance Browser Networking: TLS</a> — цена рукопожатия, цепочка доверия, возобновление сессий.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/ssl.html">Spring Boot Reference: SSL bundles</a> — keystore, truststore и перезагрузка сертификатов.</li>
+      <li><a href="https://badssl.com/">badssl.com</a> — тестовые хосты с намеренно сломанными сертификатами.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
