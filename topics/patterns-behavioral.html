@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Design: Behavioral Patterns · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="patterns-behavioral">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Design: Behavioral Patterns</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Поведенческие паттерны распределяют решения и реакции между объектами. Strategy выносит вариант алгоритма в отдельный объект. Chain of responsibility передаёт запрос по цепочке, пока кто-то его не остановит, и порядок звеньев стоит денег. Template method фиксирует порядок шагов в родителе, а шаги отдаёт подклассам. Observer рассылает событие подписчикам, и один упавший подписчик может остановить остальных. Command делает действие объектом, который можно сохранить, повторить и отменить. State описывает, какие переходы допустимы, и запрещает остальные.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Метод оплаты оброс проверками, статусами и реакциями на каждый случай</h2>
+      <p>Метод <code>checkout</code> платёжного сервиса проверяет сумму, страну и антифрод, выбирает банк по способу оплаты, меняет статус платежа, а после успеха пишет проводку, шлёт SMS и событие в аналитику. Каждое новое требование добавляет ещё один <code>if</code>: новую проверку, новый статус, нового получателя уведомления. Через год в методе четыреста строк, и никто не знает, в каком порядке выполняются проверки и что произойдёт, если упадёт SMS.</p>
+      <p>Поведенческие паттерны разбирают такой метод на объекты, у каждого из которых одна роль: проверка, шаг интеграции, подписчик, операция, состояние. Порядок и связи между ними становятся явными. Демо <a href="../examples/design/BehavioralDemo.java">BehavioralDemo.java</a> запускается командой <code>java BehavioralDemo.java</code> на JDK 21. Strategy подробно разобран в <a href="design-principles.html">SOLID</a> на примере способов оплаты; здесь он появится как основа остальных.</p>
+    </section>
+
+    <section class="step" id="chain">
+      <h2>Chain of responsibility передаёт запрос по звеньям, и дешёвые ставят первыми</h2>
+      <p>Каждая проверка платежа — звено. Звено либо отклоняет платёж и останавливает цепочку, либо пропускает его дальше. Код оплаты не знает, сколько проверок и какие: он прогоняет платёж через список.</p>
+      <pre><code class="language-java">interface Check { Optional&lt;String&gt; reject(Payment p); } // empty — пропустить дальше.
+
+static Optional&lt;String&gt; runChain(List&lt;Check&gt; chain, Payment p) {
+    for (Check c : chain) {
+        var r = c.reject(p);
+        if (r.isPresent()) return r; // Первый отказ останавливает цепочку.
+    }
+    return Optional.empty();
+}
+
+var bad = new Payment("p-1", 500, "XX", "4111"); // Страна под санкциями.
+runChain(List.of(amount, country, fraud), bad);  // Дешёвые проверки первыми.
+runChain(List.of(fraud, amount, country), bad);  // Удалённый антифрод первым.</code></pre>
+      <pre class="out">  cheap first: sanctioned country, calls=[amount, country]
+  fraud first: sanctioned country, calls=[fraud(remote, 120 ms), amount, country]</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Две цепочки проверок для платежа из страны под санкциями. В первой проверка суммы пропускает, проверка страны отклоняет, антифрод и банк не вызываются. Во второй первым стоит удалённый антифрод на 120 мс, он пропускает, потом сумма пропускает, страна отклоняет: результат тот же, но потрачен лишний сетевой вызов.">
+            <defs>
+              <marker id="ch-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">ДЕШЁВЫЕ ПЕРВЫМИ: 2 ВЫЗОВА</text>
+            <rect x="20" y="34" width="150" height="40" rx="7" class="dg-cell hit"/>
+            <rect x="196" y="34" width="150" height="40" rx="7" class="dg-cell miss"/>
+            <rect x="372" y="34" width="170" height="40" rx="7" class="dg-sep" fill="none"/>
+            <rect x="568" y="34" width="132" height="40" rx="7" class="dg-sep" fill="none"/>
+            <path d="M170 54 L 192 54" class="dg-line" marker-end="url(#ch-n)"/>
+            <text x="20" y="122" class="dg-cap bad">АНТИФРОД ПЕРВЫМ: 3 ВЫЗОВА</text>
+            <rect x="20" y="134" width="170" height="40" rx="7" class="dg-cell hit"/>
+            <rect x="216" y="134" width="150" height="40" rx="7" class="dg-cell hit"/>
+            <rect x="392" y="134" width="150" height="40" rx="7" class="dg-cell miss"/>
+            <rect x="568" y="134" width="132" height="40" rx="7" class="dg-sep" fill="none"/>
+            <path d="M190 154 L 212 154" class="dg-line" marker-end="url(#ch-n)"/>
+            <path d="M366 154 L 388 154" class="dg-line" marker-end="url(#ch-n)"/>
+            <g text-anchor="middle">
+              <text x="95" y="59" class="dg-in">amount ok</text>
+              <text x="271" y="59" class="dg-bad">country: XX</text>
+              <text x="457" y="59" class="dg-n">fraud не вызван</text>
+              <text x="634" y="59" class="dg-n">банк не вызван</text>
+              <text x="105" y="152" class="dg-in">fraud ok</text>
+              <text x="105" y="166" class="dg-n">сеть, 120 мс</text>
+              <text x="291" y="159" class="dg-in">amount ok</text>
+              <text x="467" y="159" class="dg-bad">country: XX</text>
+              <text x="634" y="159" class="dg-n">банк не вызван</text>
+            </g>
+            <text x="20" y="200" class="dg-s">Результат один и тот же: отказ. Разница — в цене пути до него.</text>
+          </svg>
+        </div>
+        <figcaption>Цепочка останавливается на первом отказе, поэтому всё, что стоит после него, бесплатно. Дорогие и сетевые звенья ставят в конец.</figcaption>
+      </figure>
+      <p>Тот же паттерн устроен в цепочке фильтров сервлета и в <a href="spring-security.html">Spring Security</a>: каждый фильтр решает, вызвать ли <code>chain.doFilter</code> дальше или ответить сам. Там порядок определяет не только цену, но и смысл: CSRF-фильтр перед аутентификацией превращает 403 в 401. В Spring порядок звеньев задают <code>@Order</code> или явный список; полагаться на порядок обнаружения бинов нельзя.</p>
+    </section>
+
+    <section class="step" id="template">
+      <h2>Template method фиксирует порядок шагов в родителе, но родитель видит наследника недостроенным</h2>
+      <p>У интеграций с разными банками общий порядок: собрать запрос, подписать, отправить, разобрать ответ. Отличаются отдельные шаги: адрес, формат подписи. Template method держит порядок в <code>final</code>-методе родителя, а шаги объявляет абстрактными или переопределяемыми.</p>
+      <pre><code class="language-java">abstract class BankIntegration {
+    BankIntegration() {
+        System.out.println("constructor sees endpoint=" + endpoint()); // Переопределяемый метод.
+    }
+    final String charge(Payment p) {          // Шаблон: порядок шагов фиксирован.
+        return sign(endpoint() + "/charge?" + p.id());
+    }
+    abstract String endpoint();               // Шаг, который задаёт подкласс.
+    String sign(String request) { return request + "&amp;sig=sha256"; }
+}
+
+class TinkoffIntegration extends BankIntegration {
+    private final String endpoint;
+    TinkoffIntegration(String endpoint) {
+        super();                              // Сначала конструктор родителя...
+        this.endpoint = endpoint;             // ...и только потом присваивание.
+    }
+    String endpoint() { return endpoint; }
+}</code></pre>
+      <pre class="out">  constructor sees endpoint=null
+  https://securepay.tinkoff.ru/charge?p-2&amp;sig=sha256
+  constructor sees endpoint=https://securepay.tinkoff.ru</pre>
+      <p>Первая строка — классическая ловушка шаблонного метода. Конструктор родителя выполняется раньше, чем поля наследника получат значения, и переопределённый метод видит <code>null</code>. Если бы родитель в конструкторе строил URL или открывал соединение, он бы сделал это с пустым адресом. Правило из Effective Java: конструктор не вызывает переопределяемые методы.</p>
+      <p>Третья строка — сюрприз демо. У класса <code>ConstantIntegration</code> поле объявлено как <code>private final String endpoint = "https://…"</code>, и конструктор родителя видит правильный адрес. Это не значит, что поле уже присвоено: <code>final</code>-поле, инициализированное литералом, — константа времени компиляции, и компилятор подставил строку прямо в метод <code>endpoint()</code>. Стоит заменить литерал на значение из настроек, и ошибка вернётся. Такие «работает, пока не трогаешь» места опаснее явной ошибки.</p>
+      <p>Template method строит поведение наследованием, strategy — композицией: шаги передают объектами или лямбдами. Spring почти везде выбирает второе, хотя называет классы «шаблонами»: <code>JdbcTemplate.query(sql, rowMapper)</code> фиксирует порядок работы с ресурсами, а разбор строки получает как стратегию. Наследование с шаблонным методом в Spring осталось там, где расширяют сам фреймворк: <code>OncePerRequestFilter.doFilterInternal</code>, <code>AbstractRoutingDataSource.determineCurrentLookupKey</code>.</p>
+    </section>
+
+    <section class="step" id="observer">
+      <h2>Observer рассылает событие подписчикам, и один упавший подписчик останавливает остальных</h2>
+      <p>После оплаты три части системы должны отреагировать: бухгалтерия записывает проводку, SMS-шлюз уведомляет клиента, аналитика считает выручку. Observer отделяет источник события от получателей: сервис оплаты знает только список подписчиков и вызывает каждого.</p>
+      <pre><code class="language-java">List&lt;PaymentListener&gt; listeners = new ArrayList&lt;&gt;();
+listeners.add(p -&gt; System.out.println("ledger: recorded " + p.id()));
+listeners.add(p -&gt; { throw new IllegalStateException("sms gateway down"); });
+listeners.add(p -&gt; System.out.println("analytics: counted " + p.id()));
+
+for (var l : listeners) l.paid(payment); // Синхронная рассылка в одном потоке.</code></pre>
+      <pre class="out">  ledger: recorded p-3
+  publish failed: sms gateway down (analytics never ran)</pre>
+      <p>Подписчики не знают друг о друге, но выполняются в одном цикле. Исключение второго прервало рассылку, и аналитика не получила событие. Хуже того, исключение вылетело в сервис оплаты: упавший SMS-шлюз может откатить уже проведённый платёж. Слабая связь в коде не означает изоляции при выполнении.</p>
+      <p>Второй сюрприз — подписчик, который отписывается во время рассылки. Код отписки удаляет себя из того же <code>ArrayList</code>, по которому идёт цикл:</p>
+      <pre><code class="language-java">once.add(new PaymentListener() {
+    public void paid(Payment p) { once.remove(this); } // Отписаться после первого события.
+});
+once.add(p -&gt; System.out.println("second listener got " + p.id()));
+once.add(p -&gt; System.out.println("third listener got " + p.id()));</code></pre>
+      <pre class="out">  unsubscribe during publish: ConcurrentModificationException
+  second listener got p-5
+  third listener got p-5
+  CopyOnWriteArrayList: listeners left=2</pre>
+      <p>С тремя подписчиками итератор <code>ArrayList</code> бросил <code>ConcurrentModificationException</code>, и ни второй, ни третий событие не получили. В первой версии демо подписчиков было два, и исключения не было вовсе: после удаления первого элемента итератор решил, что список кончился, и второй подписчик молча пропустил событие. Поведение зависит от позиции и размера — это худший вид ошибки. <code>CopyOnWriteArrayList</code> итерирует снимок, сделанный в начале цикла, поэтому все подписчики получили событие, а отписка вступила в силу со следующей рассылки.</p>
+      <p>В Spring этот паттерн — <code>ApplicationEventPublisher</code> и <code>@EventListener</code>. Там те же вопросы решаются явно: по умолчанию рассылка синхронная и исключение доходит до публикующего кода, <code>@Async</code> уводит слушателя в пул, а <code>@TransactionalEventListener</code> привязывает его к коммиту. Всё это разобрано в <a href="spring-events.html">Application Events</a>.</p>
+    </section>
+
+    <section class="step" id="command">
+      <h2>Command делает действие объектом, который можно сохранить, повторить и отменить</h2>
+      <p>Обычный вызов метода исчезает, как только выполнился. Если действие оформить объектом с методом <code>execute</code>, его можно положить в очередь, записать в журнал, выполнить позже в другом потоке или отменить. В платёжном сервисе так устроены операции с балансом: списание и комиссия — команды, у каждой есть обратная.</p>
+      <pre><code class="language-java">interface Command { void execute(); void undo(); String name(); }
+
+Deque&lt;Command&gt; history = new ArrayDeque&lt;&gt;();
+for (var c : List.of(charge, fee)) { c.execute(); history.push(c); } // charge −300, fee −5.
+while (!history.isEmpty()) history.pop().undo();                    // Отмена в обратном порядке.</code></pre>
+      <pre class="out">  after commands: balance=695, log=[fee 5, charge 300]
+  after undo all: balance=1000</pre>
+      <p>Журнал команд показывает операции в порядке отмены: последней выполнили комиссию, первой её и отменяют. Отменять в другом порядке нельзя, если команды зависят друг от друга: комиссия считалась от суммы после списания.</p>
+      <p>В Java команда встречается постоянно, просто без этого имени. <code>Runnable</code> и <code>Callable</code>, отправленные в <code>ExecutorService</code>, — команды: действие отделено от того, кто и когда его выполнит. Запись в таблице outbox — команда «отправить событие», сохранённая вместе с транзакцией. Сообщение в очереди с типом операции — команда для другого сервиса.</p>
+      <p>Отмена в реальной системе редко бывает обратной операцией над памятью. Деньги, ушедшие в банк, возвращаются отдельной операцией возврата, которая сама может не пройти. Поэтому для распределённых процессов отмену проектируют как компенсацию — новую команду, которая исправляет последствия, а не стирает их. Это основа саг.</p>
+    </section>
+
+    <section class="step" id="state">
+      <h2>State описывает допустимые переходы и запрещает остальные</h2>
+      <p>Платёж проходит через статусы: создан, авторизован (деньги заблокированы), списан, возвращён или отменён. Не каждый переход возможен: списанный платёж нельзя отменить, его можно только вернуть. Если статус — строка, а проверки разбросаны по сервисам, рано или поздно кто-то отменит списанный платёж, и деньги клиента зависнут.</p>
+      <pre><code class="language-java">enum Status {
+    NEW, AUTHORIZED, CAPTURED, REFUNDED, CANCELLED;
+
+    static final Map&lt;Status, List&lt;Status&gt;&gt; NEXT = Map.of(
+            NEW, List.of(AUTHORIZED, CANCELLED),
+            AUTHORIZED, List.of(CAPTURED, CANCELLED),
+            CAPTURED, List.of(REFUNDED),
+            REFUNDED, List.of(),
+            CANCELLED, List.of());
+
+    Status to(Status next) {        // Единственный способ сменить статус.
+        if (!NEXT.get(this).contains(next)) {
+            throw new IllegalStateException(this + " -&gt; " + next + " is not allowed");
+        }
+        return next;
+    }
+}
+
+Status s = Status.NEW.to(Status.AUTHORIZED).to(Status.CAPTURED);
+s.to(Status.CANCELLED);</code></pre>
+      <pre class="out">  CAPTURED
+  CAPTURED -&gt; CANCELLED is not allowed</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Состояния платежа. NEW переходит в AUTHORIZED или CANCELLED. AUTHORIZED переходит в CAPTURED или CANCELLED. CAPTURED переходит только в REFUNDED. Переход CAPTURED в CANCELLED запрещён. REFUNDED и CANCELLED — конечные состояния.">
+            <defs>
+              <marker id="st-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="st-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="60" width="110" height="40" rx="20" class="dg-box"/>
+            <rect x="190" y="60" width="140" height="40" rx="20" class="dg-box"/>
+            <rect x="390" y="60" width="130" height="40" rx="20" class="dg-cell hit"/>
+            <rect x="580" y="60" width="120" height="40" rx="20" class="dg-cell"/>
+            <rect x="260" y="170" width="140" height="40" rx="20" class="dg-cell"/>
+            <path d="M130 80 L 186 80" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M330 80 L 386 80" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M520 80 L 576 80" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M75 100 C 75 190, 200 190, 256 190" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M260 100 L 300 166" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M455 100 C 455 160, 430 185, 404 188" class="dg-line bad" marker-end="url(#st-bad)"/>
+            <g text-anchor="middle">
+              <text x="75" y="85" class="dg-in">NEW</text>
+              <text x="260" y="85" class="dg-in">AUTHORIZED</text>
+              <text x="455" y="85" class="dg-in">CAPTURED</text>
+              <text x="640" y="85" class="dg-in">REFUNDED</text>
+              <text x="330" y="195" class="dg-in">CANCELLED</text>
+            </g>
+            <text x="136" y="70" class="dg-n">authorize</text>
+            <text x="336" y="70" class="dg-n">capture</text>
+            <text x="526" y="70" class="dg-n">refund</text>
+            <text x="30" y="150" class="dg-n">cancel</text>
+            <text x="286" y="128" class="dg-n">void</text>
+            <text x="466" y="150" class="dg-bad">нельзя: только refund</text>
+            <text x="20" y="30" class="dg-s">REFUNDED и CANCELLED — конечные: из них переходов нет.</text>
+          </svg>
+        </div>
+        <figcaption>Таблица переходов — это схема на языке кода. Её можно напечатать, проверить тестом на все пары и показать аналитику.</figcaption>
+      </figure>
+      <p>Классический State из GoF выносит поведение каждого состояния в свой класс: <code>CapturedState.cancel()</code> бросает исключение, <code>AuthorizedState.cancel()</code> снимает блокировку. Это оправдано, когда у состояний много разного поведения. Когда различаются только допустимые переходы, таблица в enum проще и нагляднее. Для сложных процессов с таймерами и параллельными ветками есть Spring Statemachine, но для платежа из пяти статусов он избыточен.</p>
+      <p>Проверка в памяти не защищает от гонки. Два обработчика одновременно читают AUTHORIZED, один списывает, другой отменяет, и оба переходы допустимы с их точки зрения. Переход должен быть атомарным в базе: <code>UPDATE payment SET status = 'CAPTURED' WHERE id = ? AND status = 'AUTHORIZED'</code> с проверкой числа изменённых строк или версия сущности из <a href="jpa-locking.html">Locking &amp; Caching</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Chain of responsibility останавливается на первом отказе: дешёвые звенья первыми, порядок задают явно.</li>
+        <li>Template method держит порядок шагов в родителе; конструктор родителя видит поля наследника пустыми.</li>
+        <li>Observer слабо связывает код, но синхронная рассылка падает целиком; отписка во время рассылки ломает ArrayList.</li>
+        <li>Command превращает действие в объект для очереди, журнала и отмены; в распределённой системе отмена — компенсация.</li>
+        <li>State задаёт допустимые переходы; атомарность перехода обеспечивает база, а не проверка в памяти.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="behavioral-strategy-template" data-freq="3">
+      <h3>Чем strategy отличается от template method?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Оба позволяют менять часть алгоритма. Template method делает это наследованием: родитель фиксирует порядок шагов в final-методе, подкласс переопределяет шаги. Strategy — композицией: изменяемая часть передаётся объектом или лямбдой, и её можно подменить во время работы.</p>
+          <p>Я обычно выбираю strategy: она не привязывает к иерархии, легче тестируется и комбинируется. Spring делает так же — JdbcTemplate фиксирует работу с ресурсами, а разбор строки получает как RowMapper.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ловушка шаблонного метода: конструктор родителя, вызвавший переопределяемый метод, видит поля наследника пустыми.</li>
+            <li>Литерал в final-поле — константа компиляции, и эта ошибка прячется, пока значение не придёт из настроек.</li>
+            <li>Template method остаётся там, где расширяют фреймворк: OncePerRequestFilter, AbstractRoutingDataSource.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="behavioral-observer" data-freq="2">
+      <h3>Какие проблемы бывают у observer и как их решает Spring?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Синхронная рассылка выполняет подписчиков в одном потоке: исключение одного прерывает остальных и уходит в код, который опубликовал событие. Медленный подписчик тормозит всех. Отписка во время рассылки по ArrayList даёт ConcurrentModificationException или молча пропускает подписчика.</p>
+          <p>В Spring слушатели по умолчанию тоже синхронные; @Async уводит их в пул, а @TransactionalEventListener выполняет после коммита. Для списка подписчиков, который меняется во время рассылки, подходит CopyOnWriteArrayList.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Событие в памяти теряется при падении процесса; если реакция обязательна, нужен outbox или брокер.</li>
+            <li>Порядок слушателей задают @Order, иначе на него нельзя рассчитывать.</li>
+            <li>Подписчик, державший ссылку на большой объект, удерживает его от GC — классическая утечка в UI и кешах.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему отписка во время рассылки иногда не бросает исключение?</summary>
+          <p>Итератор ArrayList проверяет изменения в next, а hasNext сравнивает только позицию с размером. С двумя подписчиками после удаления первого размер стал 1, позиция тоже 1, и цикл просто закончился — второй подписчик не получил событие без всякой ошибки. С тремя next вызвался ещё раз и бросил ConcurrentModificationException.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="behavioral-chain" data-freq="2">
+      <h3>Где в Spring встречается chain of responsibility?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Цепочка фильтров сервлета и Spring Security: каждый фильтр решает, передать запрос дальше через chain.doFilter или ответить сам. HandlerInterceptor в Spring MVC, цепочки advice в AOP, обработчики ошибок — тоже цепочки.</p>
+          <p>Главное в цепочке — порядок. Он определяет и смысл, и цену: дорогие сетевые проверки ставят после дешёвых, чтобы платёж с неверной суммой не ходил в антифрод.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Порядок задают @Order или явный список; порядок обнаружения бинов не гарантирован.</li>
+            <li>Звено, забывшее вызвать следующее, молча обрывает цепочку — частая ошибка в собственных фильтрах.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="behavioral-state" data-freq="2">
+      <h3>Как моделировать статусы платежа?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Как конечный автомат: enum статусов и таблица допустимых переходов, единственный метод смены статуса проверяет переход и бросает исключение для запрещённых. Списанный платёж нельзя отменить, только вернуть. Таблицу легко проверить тестом и показать аналитику.</p>
+          <p>Переход должен быть атомарным в базе: UPDATE с условием на текущий статус и проверкой числа строк или оптимистичная блокировка, иначе два обработчика выполнят несовместимые переходы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Классы на каждое состояние из GoF оправданы, когда у состояний разное поведение, а не только разные переходы.</li>
+            <li>История переходов в отдельной таблице нужна для аудита и разбора спорных платежей.</li>
+            <li>Spring Statemachine полезен для процессов с таймерами и параллельными ветками, для пяти статусов он избыточен.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди гонку в отмене платежа</summary>
+          <pre><code class="language-java">@Transactional
+public void cancel(long id) {
+    Payment p = repository.findById(id).orElseThrow();
+    if (p.getStatus() != Status.AUTHORIZED) throw new IllegalStateException();
+    bank.voidAuthorization(p);
+    p.setStatus(Status.CANCELLED);
+}</code></pre>
+          <p>Между чтением статуса и записью другой поток может списать этот же платёж: оба прочитали AUTHORIZED. Отмена снимет блокировку в банке и запишет CANCELLED поверх CAPTURED, хотя деньги уже списаны. Нужна атомарная проверка: @Version на сущности, SELECT ... FOR UPDATE или UPDATE ... WHERE status = 'AUTHORIZED' с проверкой числа строк, а вызов банка — после фиксации перехода.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Gamma, Helm, Johnson, Vlissides, Design Patterns, глава 5 — основа урока: strategy, template method, observer, chain of responsibility, command, state.</li>
+      <li>Joshua Bloch, Effective Java, 3-е изд., пункт 19 — почему конструктор не должен вызывать переопределяемые методы.</li>
+      <li><a href="https://refactoring.guru/design-patterns/behavioral-patterns">Refactoring.Guru: Behavioral Patterns</a> — схемы и сравнения паттернов.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/ArrayList.html">ArrayList javadoc</a> — fail-fast итераторы и почему на ConcurrentModificationException нельзя полагаться.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

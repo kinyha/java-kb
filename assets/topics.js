@@ -191,7 +191,7 @@ window.KB_TREE = [
           scope: 'singleton, factory method, abstract factory, builder, prototype, где они в JDK и Spring' },
         { id: 'patterns-structural', freq: 2, status: 'draft', title: 'Structural Patterns',
           scope: 'adapter, decorator, proxy, facade, composite, чем декоратор отличается от прокси' },
-        { id: 'patterns-behavioral', freq: 2, status: 'empty', title: 'Behavioral Patterns',
+        { id: 'patterns-behavioral', freq: 2, status: 'draft', title: 'Behavioral Patterns',
           scope: 'strategy, template method, observer, chain of responsibility, command, state' },
         { id: 'components', freq: 2, status: 'empty', title: 'Components & Modules',
           scope: 'связность компонентов REP, CCP и CRP, ацикличность зависимостей, стабильность и абстрактность, package by feature, проверка границ ArchUnit и Spring Modulith' },
