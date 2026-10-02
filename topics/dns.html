@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Networking: DNS · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="dns">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Networking: DNS</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>DNS превращает имя в адрес через иерархию: резолвер спрашивает корневые серверы, те отсылают к серверам зоны com, те — к авторитативным серверам домена, и только они знают ответ. Чтобы не ходить по цепочке каждый раз, ответ кешируется на срок TTL — в резолвере, в ОС и в самой JVM. Кеши делают DNS быстрым и устойчивым, но из-за них изменение записи доходит до клиентов не сразу, а соединения в пуле вообще не узнают о новом адресе. Отрицательный ответ «такого имени нет» тоже кешируется.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Банк переключился на резервный адрес, а сервис полчаса ходил на старый</h2>
+      <p>Ночью основной дата-центр банка упал, и банк переключил DNS-запись своего API на резервный адрес. Половина платёжных сервисов продолжила стучаться на старый адрес и получать таймауты, хотя DNS уже отдавал новый. Другая ситуация того же рода: опечатка в имени сервиса при деплое, исправленная через минуту, а сервис ещё десять секунд падает с <code>UnknownHostException</code>.</p>
+      <p>Обе истории — про кеширование имён. Чтобы понимать, сколько и где живёт ответ DNS, нужно знать, как он вообще получается. Опыты ниже сняты утилитой <code>dig</code> и демо <a href="../examples/net/DnsDemo.java">DnsDemo.java</a> (<code>java DnsDemo.java</code> на JDK 21) на машине автора. TTL и порядок адресов в выводе меняются от запуска к запуску.</p>
+    </section>
+
+    <section class="step" id="resolution">
+      <h2>Имя разрешается по иерархии: корень, зона верхнего уровня, сервер домена</h2>
+      <p>Приложение спрашивает не весь интернет, а <b>рекурсивный резолвер</b>: провайдера, корпоративный, облачный или публичный вроде 1.1.1.1. Если ответа нет в кеше, резолвер сам проходит иерархию. Корневые серверы знают, кто отвечает за зону <code>com</code>. Серверы <code>com</code> знают, какие <b>авторитативные</b> серверы обслуживают <code>example.com</code>. И только авторитативный сервер знает адрес. <code>dig +trace</code> проходит этот путь сам и показывает каждый шаг:</p>
+      <pre><code class="language-bash">dig +trace +nodnssec example.com A # Каждый «Received» — ответ очередного уровня.</code></pre>
+      <pre class="out">.			515028	IN	NS	a.root-servers.net.
+;; Received 239 bytes from 1.1.1.1#53(1.1.1.1) in 336 ms
+;; Received 836 bytes from 192.36.148.17#53(i.root-servers.net) in 396 ms
+;; Received 359 bytes from 192.12.94.30#53(e.gtld-servers.net) in 395 ms
+example.com.		300	IN	A	104.20.23.154
+example.com.		300	IN	A	172.66.147.243
+;; Received 72 bytes from 162.159.44.228#53(elliott.ns.cloudflare.com) in 305 ms</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Резолвер получает вопрос про example.com. Корневой сервер i.root отсылает к серверам зоны com. Сервер e.gtld-servers отсылает к серверам Cloudflare, авторитативным для example.com. Сервер elliott.ns.cloudflare.com отвечает двумя адресами с TTL 300. Резолвер кладёт ответ в кеш и отдаёт клиенту.">
+            <defs>
+              <marker id="dn-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="dn-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="100" width="120" height="50" rx="8" class="dg-box"/>
+            <rect x="190" y="100" width="150" height="50" rx="8" class="dg-box"/>
+            <rect x="420" y="20" width="280" height="44" rx="8" class="dg-cell"/>
+            <rect x="420" y="102" width="280" height="44" rx="8" class="dg-cell"/>
+            <rect x="420" y="184" width="280" height="44" rx="8" class="dg-cell"/>
+            <rect data-s="4-" x="420" y="184" width="280" height="44" rx="8" class="dg-cell hit"/>
+            <rect data-s="5" x="202" y="128" width="126" height="16" rx="3" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="80" y="122" class="dg-in">сервис</text>
+              <text x="80" y="140" class="dg-n">getByName</text>
+              <text x="265" y="120" class="dg-in">резолвер</text>
+            </g>
+            <text x="432" y="40" class="dg-in">i.root-servers.net</text>
+            <text x="432" y="56" class="dg-n">корень: знает зоны верхнего уровня</text>
+            <text x="432" y="122" class="dg-in">e.gtld-servers.net</text>
+            <text x="432" y="138" class="dg-n">зона com: знает серверы доменов</text>
+            <text x="432" y="204" class="dg-in">elliott.ns.cloudflare.com</text>
+            <text x="432" y="220" class="dg-n">авторитативный для example.com</text>
+            <path data-s="1" d="M140 125 L 186 125" class="dg-line" marker-end="url(#dn-n)"/>
+            <path data-s="2" d="M340 112 C 380 112, 380 42, 416 42" class="dg-line" marker-end="url(#dn-n)"/>
+            <text data-s="2" x="350" y="80" class="dg-n">NS com?</text>
+            <path data-s="3" d="M340 125 L 416 124" class="dg-line" marker-end="url(#dn-n)"/>
+            <text data-s="3" x="344" y="118" class="dg-n">NS?</text>
+            <path data-s="4" d="M420 206 C 380 206, 380 138, 344 138" class="dg-line ok" marker-end="url(#dn-ok)"/>
+            <text data-s="4" x="344" y="190" class="dg-ok">A, TTL 300</text>
+            <text data-s="5" x="208" y="140" class="dg-n">кеш: 2 адреса</text>
+            <path data-s="5" d="M186 125 L 144 125" class="dg-line ok" marker-end="url(#dn-ok)"/>
+            <text data-s="1" x="20" y="200" class="dg-t">Вопрос: A example.com?</text>
+            <text data-s="2" x="20" y="200" class="dg-t">Корень: спроси com.</text>
+            <text data-s="3" x="20" y="200" class="dg-t">com: спроси Cloudflare.</text>
+            <text data-s="4" x="20" y="200" class="dg-ok">Ответ и TTL 300 с.</text>
+            <text data-s="5" x="20" y="200" class="dg-ok">Следующие 300 с — из кеша.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Сервис спрашивает резолвер, какой адрес у example.com. Сам он по иерархии не ходит.</li>
+          <li>Резолвер спрашивает корневой сервер. Тот не знает адреса, но отвечает, какие серверы обслуживают зону com.</li>
+          <li>Сервер зоны com тоже не знает адреса, зато знает, что домен обслуживают серверы Cloudflare.</li>
+          <li>Авторитативный сервер Cloudflare отвечает двумя адресами и сроком жизни ответа — 300 секунд.</li>
+          <li>Резолвер кладёт ответ в кеш и отдаёт сервису. Следующие пять минут любой клиент этого резолвера получит ответ без обхода.</li>
+        </ol>
+      </figure>
+      <p>Полный обход занял четыре сетевых обмена по 300–400 мс каждый через VPN машины автора. Поэтому резолверы кешируют не только итоговые ответы, но и промежуточные: адреса серверов зоны com живут в кеше двое суток, корневые — неделю. На практике полный обход случается редко, а обычный запрос к резолверу с кешем занимает единицы миллисекунд. Запросы DNS идут по UDP на порт 53; большие ответы, не влезающие в пакет, повторяются по TCP.</p>
+    </section>
+
+    <section class="step" id="records">
+      <h2>Записи разных типов отвечают на разные вопросы о домене</h2>
+      <pre><code class="language-bash">dig +noall +answer www.github.com A
+dig +noall +answer gmail.com MX</code></pre>
+      <pre class="out">www.github.com.		3582	IN	CNAME	github.com.
+github.com.		42	IN	A	4.225.11.194
+gmail.com.		1827	IN	MX	10 alt1.gmail-smtp-in.l.google.com.
+gmail.com.		1827	IN	MX	30 alt3.gmail-smtp-in.l.google.com.</pre>
+      <table class="mx">
+        <thead><tr><th>Запись</th><th>Что хранит</th><th>Где встречается</th></tr></thead>
+        <tbody>
+          <tr><td><code>A</code>, <code>AAAA</code></td><td>Адрес IPv4, IPv6</td><td>Любое имя, к которому подключаются</td></tr>
+          <tr><td><code>CNAME</code></td><td>Псевдоним другого имени</td><td>www → домен, свой домен → балансировщик облака</td></tr>
+          <tr><td><code>MX</code></td><td>Почтовые серверы с приоритетом, меньше — важнее</td><td>Почта домена</td></tr>
+          <tr><td><code>TXT</code></td><td>Произвольный текст</td><td>SPF и DKIM для почты, подтверждение владения доменом</td></tr>
+          <tr><td><code>NS</code>, <code>SOA</code></td><td>Серверы зоны и её параметры</td><td>Делегирование, отрицательный кеш</td></tr>
+          <tr><td><code>SRV</code></td><td>Хост и порт сервиса</td><td>Kubernetes, SIP, обнаружение сервисов</td></tr>
+          <tr><td><code>HTTPS</code></td><td>Параметры подключения, в том числе поддержка HTTP/3</td><td>Браузеры перед первым запросом</td></tr>
+        </tbody>
+      </table>
+      <p>CNAME указывает на другое имя, и резолвер продолжает поиск с него: <code>www.github.com</code> ведёт на <code>github.com</code>, а уже у того есть адрес. У каждого звена своя TTL: псевдоним живёт час, адрес — минуту. CNAME нельзя поставить на сам домен (apex) рядом с MX и NS, поэтому провайдеры придумали нестандартные ALIAS или «CNAME flattening», которые отвечают адресом, сами разрешив цель.</p>
+    </section>
+
+    <section class="step" id="ttl">
+      <h2>TTL отсчитывается в каждом кеше, и ответ «имени нет» тоже кешируется</h2>
+      <p>Авторитативный сервер выдал запись с TTL 300. Резолвер хранит её и, отдавая из кеша, уменьшает TTL на прошедшее время. Два одинаковых запроса к резолверу машины автора с паузой:</p>
+      <pre class="out">example.com.		296	IN	A	172.66.147.243
+example.com.		296	IN	A	104.20.23.154
+example.com.		226	IN	A	172.66.147.243
+example.com.		226	IN	A	104.20.23.154</pre>
+      <p>Каждый уровень кеширования — резолвер провайдера, кеш ОС, кеш JVM, балансировщик — держит запись до своего истечения. Поэтому изменение записи доходит до всех клиентов не за TTL, а за сумму задержек по цепочке, и некоторые резолверы ещё и не уважают короткие TTL. Перед миграцией TTL снижают заранее, хотя бы за один старый TTL: если запись жила сутки, то за сутки до переключения.</p>
+      <p>Отрицательный ответ тоже кешируется. Для несуществующего имени сервер отвечает NXDOMAIN и прикладывает запись SOA своей зоны:</p>
+      <pre class="out">;; -&gt;&gt;HEADER&lt;&lt;- opcode: QUERY, status: NXDOMAIN, id: 29094
+com.			900	IN	SOA	a.gtld-servers.net. nstld.verisign-grs.com. 1790938499 1800 900 604800 900</pre>
+      <p>Срок отрицательного кеширования — меньшее из TTL записи SOA и её последнего поля, здесь 900 секунд. Если сервис запросил имя до того, как его создали, резолвер четверть часа будет отвечать, что имени нет, даже когда запись уже появилась. Типичная ловушка при выкладке нового сервиса: проверка здоровья по имени до создания записи.</p>
+    </section>
+
+    <section class="step" id="jvm">
+      <h2>JVM кеширует адреса сама, а пул соединений вообще не смотрит в DNS</h2>
+      <p>У Java свой кеш поверх кеша ОС. Демо дважды ищет существующее и несуществующее имя:</p>
+      <pre><code class="language-java">Security.getProperty("networkaddress.cache.ttl");          // Срок положительного кеша.
+Security.getProperty("networkaddress.cache.negative.ttl"); // Срок кеша «имени нет».
+InetAddress.getAllByName("example.com");                   // Дважды подряд.
+InetAddress.getByName("kb-demo-nonexistent-zzz-4242.com"); // Дважды подряд.</code></pre>
+      <pre class="out">networkaddress.cache.ttl=null, negative.ttl=10
+lookup 1: 4 addresses in 97.7 ms
+lookup 2: 4 addresses in 0.0 ms
+missing 1: UnknownHostException in 106.3 ms
+missing 2: UnknownHostException in 0.0 ms</pre>
+      <p>Второй поиск в обоих случаях занял ноль: ответ взят из кеша JVM. Четыре адреса — два IPv4 и два IPv6. Свойство <code>networkaddress.cache.ttl</code> не задано, и тогда JDK кеширует успешный ответ 30 секунд (раньше, с включённым SecurityManager, — навсегда). Отрицательный ответ кешируется 10 секунд: та самая ловушка с опечаткой из первого шага. В JDK 21 добавилось <code>networkaddress.cache.stale.ttl</code>: сколько отдавать устаревший ответ, если DNS недоступен. Свойства задают в файле <code>java.security</code> или через <code>Security.setProperty</code> до первого поиска.</p>
+      <p>Но главный источник задержки при переключении — не кеш DNS. Пул HTTP-клиента держит открытые соединения к старому адресу и не пересоздаёт их, пока они живы. DNS уже отдаёт новый адрес, а запросы идут по старым соединениям. Поэтому у соединений в пуле задают максимальное время жизни: через несколько минут соединение закрывается, новое открывается с новым поиском имени.</p>
+      <div class="note warn">
+        <p>В Kubernetes по умолчанию <code>ndots:5</code> и несколько доменов поиска. Имя вида <code>api.bank.com</code> с двумя точками сначала ищется как <code>api.bank.com.payments.svc.cluster.local</code> и ещё в двух-трёх доменах, и только потом как есть. Каждый внешний вызов даёт несколько лишних запросов к CoreDNS. Точка в конце имени (<code>api.bank.com.</code>) или меньший ndots в настройках pod-а убирает их.</p>
+      </div>
+    </section>
+
+    <section class="step" id="balancing">
+      <h2>DNS распределяет нагрузку грубо и переключает медленно</h2>
+      <p>Домен может вернуть несколько адресов, и клиенты выбирают из них. Резолвер 1.1.1.1 на трёх подряд запросах отдал первым один и тот же адрес, а резолвер машины автора ранее — другой порядок. Многие клиенты, в том числе Java по умолчанию, берут первый адрес из списка, поэтому распределение зависит от того, как резолвер перемешивает ответ. Это грубая балансировка: DNS не знает о нагрузке и здоровье серверов, если не стоит специальный сервис вроде Route 53 с проверками.</p>
+      <p>Переключение через DNS ограничено кешами: даже с TTL 60 секунд часть клиентов увидит новый адрес через минуты, а соединения в пулах — через время их жизни. Для быстрого переключения используют адрес балансировщика, который не меняется, а за ним — проверки здоровья и переключение за секунды.</p>
+      <p>Сам DNS — общая зависимость всего. Падение резолвера в кластере выглядит как падение всех внешних вызовов сразу, с <code>UnknownHostException</code> вместо таймаутов. Защищают кеш с отдачей устаревших ответов, локальный кеширующий резолвер на узле (NodeLocal DNSCache в Kubernetes) и метрики времени и ошибок разрешения имён. Ответы DNS по умолчанию не зашифрованы и не подписаны; DNSSEC подписывает записи, а DNS over HTTPS и over TLS шифруют сам запрос.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Рекурсивный резолвер проходит корень, зону верхнего уровня и авторитативный сервер и кеширует каждый шаг.</li>
+        <li>A, AAAA, CNAME, MX, TXT, NS, SOA, SRV — разные вопросы о домене; CNAME нельзя на apex.</li>
+        <li>TTL уменьшается в каждом кеше; NXDOMAIN кешируется на срок из SOA.</li>
+        <li>JVM кеширует успех 30 секунд и отказ 10; пул соединений держит старый адрес, пока соединения живы.</li>
+        <li>DNS — грубая балансировка и медленное переключение; для failover нужен постоянный адрес балансировщика.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="dns-how" data-freq="2">
+      <h3>Как работает DNS?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Приложение спрашивает рекурсивный резолвер. Если ответа нет в кеше, резолвер обходит иерархию: корневой сервер отсылает к серверам зоны верхнего уровня, те — к авторитативным серверам домена, и авторитативный сервер возвращает запись со сроком жизни TTL. Резолвер кеширует ответ и промежуточные шаги и следующие запросы обслуживает из кеша.</p>
+          <p>Основные записи: A и AAAA — адреса, CNAME — псевдоним, MX — почтовые серверы, TXT — проверки и SPF, NS и SOA — описание зоны.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Запросы идут по UDP 53; большие ответы — по TCP.</li>
+            <li>NXDOMAIN кешируется на срок из SOA, поэтому ранний запрос к ещё не созданному имени задерживает его появление.</li>
+            <li>DNSSEC подписывает записи, DoH и DoT шифруют запрос; по умолчанию DNS открыт.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="dns-ttl-java" data-freq="2">
+      <h3>Почему после смены DNS-записи сервис продолжает ходить на старый адрес?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ответ кешируется на каждом уровне: резолвер, ОС, JVM. JVM по умолчанию держит успешный ответ 30 секунд, неуспешный — 10. Но главное — пул HTTP-клиента: открытые соединения к старому адресу продолжают работать, и новый поиск имени происходит только при открытии нового соединения.</p>
+          <p>Поэтому у соединений задают максимальное время жизни, а TTL записи снижают заранее перед миграцией.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>networkaddress.cache.ttl и negative.ttl задаются в java.security или Security.setProperty до первого поиска.</li>
+            <li>JDK 21 добавил stale.ttl — отдавать устаревший ответ, если DNS недоступен.</li>
+            <li>В Kubernetes ndots:5 даёт несколько лишних запросов на каждое внешнее имя; помогает точка в конце имени.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Новый сервис выкатили, запись в DNS создали, а клиенты ещё 15 минут получают «имени нет». Почему?</summary>
+          <p>Кто-то запросил имя до создания записи — например, проверка здоровья или сам клиент при старте. Резолвер получил NXDOMAIN и закешировал его на срок из SOA зоны, у com это 900 секунд. Пока срок не истечёт, этот резолвер отвечает «нет», хотя запись уже есть. Создают запись до первого обращения, а в JVM отрицательный кеш ещё и свои 10 секунд.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="dns-balancing" data-freq="1">
+      <h3>Можно ли использовать DNS для балансировки и failover?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Можно, но грубо. Несколько A-записей дают распределение по клиентам, которое зависит от того, как резолвер перемешивает ответ и какой адрес клиент берёт первым. DNS не знает о нагрузке и здоровье, если не используется сервис с проверками вроде Route 53. Переключение медленное из-за кешей и пулов соединений.</p>
+          <p>Для быстрого failover лучше постоянный адрес балансировщика с проверками здоровья за ним.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>GeoDNS отвечает разными адресами в зависимости от расположения резолвера — так работают CDN.</li>
+            <li>Падение резолвера кластера выглядит как отказ всех внешних вызовов; помогает NodeLocal DNSCache.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>James Kurose, Keith Ross, Computer Networking: A Top-Down Approach, 8-е изд., раздел 2.4 — основа урока: иерархия, рекурсивный и итеративный поиск, кеширование, записи.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc2308">RFC 2308: Negative Caching of DNS Queries</a> — как кешируется NXDOMAIN и откуда берётся срок.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/core/java-networking.html">Java Networking: networkaddress.cache properties</a> — кеш имён в JVM.</li>
+      <li><a href="https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/">Kubernetes: DNS for Services and Pods</a> — домены поиска и ndots.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

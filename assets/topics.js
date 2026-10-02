@@ -109,7 +109,7 @@ window.KB_TREE = [
           scope: 'методы, коды ответов, заголовки, cookies, идемпотентность и безопасность методов' },
         { id: 'http-versions', freq: 2, status: 'draft', title: 'HTTP/2 & HTTP/3',
           scope: 'keep-alive и head-of-line blocking в HTTP/1.1, мультиплексирование в HTTP/2, QUIC в HTTP/3' },
-        { id: 'dns', freq: 2, status: 'empty', title: 'DNS',
+        { id: 'dns', freq: 2, status: 'draft', title: 'DNS',
           scope: 'резолв имени, рекурсивный и авторитативный сервер, записи A, CNAME, MX, TTL и кеш' },
         { id: 'tls', freq: 2, status: 'empty', title: 'TLS & HTTPS',
           scope: 'TLS-рукопожатие, сертификаты и цепочка доверия, HTTPS, mTLS' },
