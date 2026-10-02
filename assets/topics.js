@@ -576,7 +576,7 @@ window.KB_TREE = [
       ] },
       { id: 'spring-testing', freq: 2, status: 'draft', title: 'Testing',
         scope: '@SpringBootTest, тестовые срезы, MockMvc, @MockitoBean, кеш контекста, Testcontainers' },
-      { id: 'spring-cloud', freq: 1, status: 'empty', title: 'Spring Cloud',
+      { id: 'spring-cloud', freq: 1, status: 'draft', title: 'Spring Cloud',
         scope: 'Config, Gateway, discovery, Resilience4j, OpenFeign' },
     ],
   },

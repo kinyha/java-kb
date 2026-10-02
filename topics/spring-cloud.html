@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Cloud · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-cloud">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Cloud</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Spring Cloud — набор библиотек для сервиса, у которого есть соседи. Discovery и LoadBalancer превращают имя сервиса в адрес конкретного экземпляра. OpenFeign превращает Java-интерфейс в HTTP-клиент. Circuit breaker перестаёт звать соседа, который часто падает, и отдаёт запасной ответ. Config Server раздаёт настройки, Gateway принимает внешний трафик. Половину этих задач сегодня решает Kubernetes, поэтому главный вопрос на собеседовании — какой слой за что отвечает.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>У платёжного сервиса появились соседи, и каждый может упасть</h2>
+      <p>Пока платёжный сервис один, адрес базы и банка записан в настройках, а сбой виден сразу. Потом сервис разделяют: банк-шлюз, антифрод, уведомления, у каждого несколько экземпляров. Появляются новые вопросы. По какому адресу звать соседа, если его экземпляры появляются и исчезают? Как не повесить все потоки, если сосед отвечает минуту? Где хранить настройки двадцати сервисов?</p>
+      <p>Spring Cloud — набор проектов, которые отвечают на эти вопросы в коде приложения. Версии выходят поездом (release train) и привязаны к Boot: ветка 2025.1 «Oakwood» сделана для Boot 4.0. Демо этой темы запущено на Boot 4.1.1 со Spring Cloud 2025.1.3 и заработало. Официальная ветка для Boot 4.1 — 2026.0; на момент проверки в Maven Central был только её milestone. Несовместимую пару Spring Cloud обычно ловит при старте: compatibility verifier останавливает приложение с объяснением.</p>
+      <p>Демо <a href="../examples/cloud/CloudDemo.java">CloudDemo.java</a> поднимает в одной JVM два экземпляра «банка» на случайных портах и платёжный сервис с Feign-клиентом, балансировкой и circuit breaker. Стек: JDK 21, Spring Boot 4.1.1, Spring Cloud 2025.1.3, Resilience4j 2.3.</p>
+      <pre><code class="language-bash">cd examples/cloud
+./run.sh CloudDemo # Внешние сервисы не нужны: discovery задан списком адресов.</code></pre>
+    </section>
+
+    <section class="step" id="discovery">
+      <h2>Discovery и LoadBalancer превращают имя сервиса в адрес экземпляра</h2>
+      <p>Код платёжного сервиса знает только имя соседа: <code>bank</code>. <code>DiscoveryClient</code> знает, какие экземпляры с этим именем сейчас живы. Источник списка — реестр вроде Eureka или Consul, API Kubernetes или, как в демо, просто список в настройках. <code>LoadBalancer</code> на каждый вызов выбирает один экземпляр из списка, по умолчанию по кругу.</p>
+      <pre><code class="language-yaml">spring:
+  cloud:
+    discovery:
+      client:
+        simple:
+          instances:
+            bank: # Имя сервиса и его экземпляры; в проде список даёт реестр.
+              - uri: http://localhost:51001
+              - uri: http://localhost:51002</code></pre>
+      <pre class="out">== both banks healthy
+p-1 -> bank-2 charged p-1
+p-2 -> bank-1 charged p-2
+p-3 -> bank-2 charged p-3
+p-4 -> bank-1 charged p-4</pre>
+      <p>Порты в настройке выше для примера, демо подставляет случайные. Балансировка здесь клиентская: решение принимает платёжный сервис, а не отдельный балансировщик. Это удобно, когда сеть плоская и экземпляры регистрируются сами. Цена — каждый клиент должен знать о здоровье экземпляров, и это важно в шаге 4.</p>
+      <p>В Kubernetes эту задачу обычно уже решает платформа. Service <code>bank</code> получает постоянное DNS-имя, а kube-proxy раскладывает соединения по живым pod-ам, которых отбирает readiness probe из <a href="actuator.html">Actuator</a>. Клиенту достаточно адреса <code>http://bank</code>, и Spring Cloud Discovery не нужен. Его берут, когда нужна своя логика выбора: по зоне, по весу, по версии.</p>
+    </section>
+
+    <section class="step" id="feign">
+      <h2>OpenFeign делает из интерфейса HTTP-клиент, но новый код пишут на HTTP-интерфейсах</h2>
+      <pre><code class="language-java">// name — логическое имя сервиса; адрес выберет LoadBalancer.
+@FeignClient(name = "bank", fallback = BankFallback.class)
+interface BankClient {
+    @GetMapping("/charge")
+    String charge(@RequestParam("id") String id);
+}
+
+@EnableFeignClients(clients = BankClient.class)
+class PaymentApp {}</code></pre>
+      <p>Feign строит реализацию интерфейса при старте: читает аннотации Spring MVC, на вызов собирает запрос, через LoadBalancer выбирает экземпляр, отправляет, разбирает ответ. Код сервиса вызывает <code>bank.charge("p-1")</code> как обычный метод. Ошибки HTTP становятся <code>FeignException</code>.</p>
+      <p>Spring Cloud OpenFeign объявлен завершённым по функциям: новых возможностей не будет, только исправления. Для нового кода Spring рекомендует HTTP-интерфейсы из самого Framework: <code>@HttpExchange</code> поверх <code>RestClient</code>, разобранные в <a href="spring-clients.html">HTTP Clients</a>. Идея та же — интерфейс вместо кода, но без отдельной библиотеки, и LoadBalancer к ним подключается через <code>@LoadBalanced RestClient.Builder</code>.</p>
+      <p>Таймауты в Feign задают явно: <code>spring.cloud.openfeign.client.config.bank.read-timeout</code>. Значения по умолчанию рассчитаны на терпеливого клиента — секунды и десятки секунд, а платёж ждать столько не может. Медленный сосед без таймаута забирает потоки сервиса, и проблема одного сервиса превращается в проблему всех, кто его зовёт.</p>
+    </section>
+
+    <section class="step" id="breaker">
+      <h2>Circuit breaker отсекает соседа целиком, даже здоровые экземпляры</h2>
+      <p>Bank-2 начал отвечать 503. Каждый второй платёж теперь падает, а сервис продолжает его звать. Circuit breaker считает результаты последних вызовов. Если доля ошибок выше порога, он <b>открывается</b>: следующие вызовы сразу получают отказ или fallback, без похода в сеть. Через паузу он пропускает несколько пробных вызовов (<b>half-open</b>) и по их результату закрывается или снова открывается.</p>
+      <pre><code class="language-yaml">spring.cloud.openfeign.circuitbreaker.enabled: true # Обернуть Feign-клиенты в breaker.
+resilience4j.circuitbreaker.configs.default:
+  sliding-window-size: 4                    # Считать последние 4 вызова.
+  minimum-number-of-calls: 4
+  failure-rate-threshold: 50                # Открыть при 50% ошибок.
+  wait-duration-in-open-state: 1s           # Через 1 с — пробные вызовы.
+  permitted-number-of-calls-in-half-open-state: 2</code></pre>
+      <pre class="out">== bank-2 returns 503
+p-5 -> fallback: queued p-5  [CLOSED]
+p-6 -> bank-1 charged p-6  [CLOSED]
+p-7 -> fallback: queued p-7  [OPEN]
+p-8 -> fallback: queued p-8  [OPEN]
+p-9 -> fallback: queued p-9  [OPEN]
+p-10 -> fallback: queued p-10  [OPEN]
+p-11 -> fallback: queued p-11  [OPEN]
+p-12 -> fallback: queued p-12  [OPEN]
+breaker name: BankClientchargeString
+bank hits while broken: {bank-1=1, bank-2=2}
+== after 1.1 s, bank-2 still broken
+p-13 -> bank-1 charged p-13  [HALF_OPEN]
+p-14 -> fallback: queued p-14  [OPEN]
+p-15 -> fallback: queued p-15  [OPEN]</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Три состояния circuit breaker: CLOSED, OPEN и HALF_OPEN. Окно из последних четырёх вызовов. Сначала все вызовы успешны. Когда bank-2 сломан, окно заполняется успехами bank-1 и ошибками bank-2, доля ошибок достигает 50%, breaker открывается, и вызовы не доходят даже до здорового bank-1. Через секунду breaker пропускает две пробы: bank-1 отвечает, bank-2 падает, breaker снова открывается.">
+            <defs>
+              <marker id="cb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- состояния -->
+            <rect x="20" y="36" width="170" height="44" rx="9" class="dg-box"/>
+            <rect x="275" y="36" width="170" height="44" rx="9" class="dg-box"/>
+            <rect x="530" y="36" width="170" height="44" rx="9" class="dg-box"/>
+            <rect data-s="1-3" x="20" y="36" width="170" height="44" rx="9" class="dg-cell hit"/>
+            <rect data-s="4" x="275" y="36" width="170" height="44" rx="9" class="dg-cell miss"/>
+            <rect data-s="5" x="530" y="36" width="170" height="44" rx="9" class="dg-cell"/>
+            <path d="M190 58 L 271 58" class="dg-line" marker-end="url(#cb-n)"/>
+            <path d="M445 58 L 526 58" class="dg-line" marker-end="url(#cb-n)"/>
+            <path d="M615 80 C 615 108, 360 108, 360 84" class="dg-line" marker-end="url(#cb-n)"/>
+            <g text-anchor="middle">
+              <text x="105" y="63" class="dg-in">CLOSED</text>
+              <text x="360" y="63" class="dg-in">OPEN</text>
+              <text x="615" y="63" class="dg-in">HALF_OPEN</text>
+            </g>
+            <text x="196" y="50" class="dg-n">ошибок ≥ 50%</text>
+            <text x="452" y="50" class="dg-n">через 1 с</text>
+            <text x="470" y="120" class="dg-n">проба упала</text>
+            <!-- окно последних вызовов -->
+            <text x="20" y="140" class="dg-n">последние 4 вызова</text>
+            <g data-s="1"><rect x="20" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="96" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="172" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="248" y="148" width="70" height="30" rx="5" class="dg-cell hit"/>
+              <text x="55" y="168" class="dg-n" text-anchor="middle">p-1 b2</text><text x="131" y="168" class="dg-n" text-anchor="middle">p-2 b1</text><text x="207" y="168" class="dg-n" text-anchor="middle">p-3 b2</text><text x="283" y="168" class="dg-n" text-anchor="middle">p-4 b1</text></g>
+            <g data-s="2"><rect x="20" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="96" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="172" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="248" y="148" width="70" height="30" rx="5" class="dg-cell miss"/>
+              <text x="55" y="168" class="dg-n" text-anchor="middle">p-2 b1</text><text x="131" y="168" class="dg-n" text-anchor="middle">p-3 b2</text><text x="207" y="168" class="dg-n" text-anchor="middle">p-4 b1</text><text x="283" y="168" class="dg-bad" text-anchor="middle">p-5 b2</text></g>
+            <g data-s="3-4"><rect x="20" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="96" y="148" width="70" height="30" rx="5" class="dg-cell miss"/><rect x="172" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="248" y="148" width="70" height="30" rx="5" class="dg-cell miss"/>
+              <text x="55" y="168" class="dg-n" text-anchor="middle">p-4 b1</text><text x="131" y="168" class="dg-bad" text-anchor="middle">p-5 b2</text><text x="207" y="168" class="dg-n" text-anchor="middle">p-6 b1</text><text x="283" y="168" class="dg-bad" text-anchor="middle">p-7 b2</text></g>
+            <g data-s="5"><rect x="20" y="148" width="70" height="30" rx="5" class="dg-cell hit"/><rect x="96" y="148" width="70" height="30" rx="5" class="dg-cell miss"/>
+              <text x="55" y="168" class="dg-n" text-anchor="middle">p-13 b1</text><text x="131" y="168" class="dg-bad" text-anchor="middle">p-14 b2</text><text x="172" y="168" class="dg-n">2 пробы из 2</text></g>
+            <!-- что видит здоровый bank-1 -->
+            <g data-s="1"><text x="380" y="160" class="dg-t">ошибок 0 из 4</text><text x="380" y="180" class="dg-s">запросы идут по кругу</text></g>
+            <g data-s="2"><text x="380" y="160" class="dg-t">ошибок 1 из 4: 25%</text><text x="380" y="180" class="dg-s">p-5 ушёл на bank-2 → fallback</text></g>
+            <g data-s="3"><text x="380" y="160" class="dg-bad">ошибок 2 из 4: 50%</text><text x="380" y="180" class="dg-s">после p-7 breaker открывается</text></g>
+            <g data-s="4"><text x="380" y="160" class="dg-bad">p-8…p-12: сразу fallback</text><text x="380" y="180" class="dg-s">bank-1 здоров, но вызовов не получает</text></g>
+            <g data-s="5"><text x="380" y="160" class="dg-bad">1 из 2 проб упала: 50%</text><text x="380" y="180" class="dg-s">снова OPEN ещё на секунду</text></g>
+            <text data-s="1" x="20" y="222" class="dg-ok">Оба банка здоровы.</text>
+            <text data-s="2" x="20" y="222" class="dg-t">bank-2 отвечает 503: первая ошибка в окне.</text>
+            <text data-s="3" x="20" y="222" class="dg-bad">Порог достигнут: OPEN.</text>
+            <text data-s="4" x="20" y="222" class="dg-bad">Отсечён весь сервис bank, а не один экземпляр.</text>
+            <text data-s="5" x="20" y="222" class="dg-t">Проба по кругу снова попала на bank-2.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Breaker закрыт, оба экземпляра отвечают. Окно из четырёх последних вызовов — одни успехи.</li>
+          <li>bank-2 начал отвечать 503. p-5 попал на него и упал, Feign вернул fallback. В окне одна ошибка из четырёх.</li>
+          <li>p-6 ушёл на bank-1 и прошёл, p-7 — на bank-2 и упал. Ошибок две из четырёх, порог 50% достигнут, breaker открывается.</li>
+          <li>Пока breaker открыт, вызовы не уходят в сеть вовсе. Шесть платежей получили fallback, хотя половину из них мог бы провести здоровый bank-1.</li>
+          <li>Через секунду breaker пропускает две пробы. Балансировщик по кругу отправил одну на bank-1, другую на bank-2. Одна упала, и breaker снова открылся.</li>
+        </ol>
+      </figure>
+      <p>Счётчик попаданий подтверждает: пока bank-2 сломан, восемь платежей сделали всего три запроса — bank-1 получил один, bank-2 два. Breaker защитил сломанный сервис от лишней нагрузки, но заодно отрезал здоровый экземпляр. Он связан не с экземпляром, а с методом клиента: имя <code>BankClientchargeString</code> собрано из интерфейса и сигнатуры.</p>
+      <p>Отсюда несколько правил. Breaker не заменяет проверку здоровья экземпляров: балансировщик должен перестать слать запросы на bank-2 сам. Для этого есть <code>HealthCheckServiceInstanceListSupplier</code>, повтор на другом экземпляре через Spring Cloud LoadBalancer retry или реестр, который снимает больной экземпляр. А fallback должен быть честным. В демо он не делает вид, что платёж прошёл, а ставит его в очередь — клиент получит «обрабатывается», а не ложное «оплачено».</p>
+      <div class="trap">
+        <p class="myth">Fallback — это способ вернуть пользователю успешный ответ, когда сосед упал.</p>
+        <p class="fact">Fallback возвращает то, что честно можно сказать без соседа: кешированный тариф, «платёж в очереди», пустой список рекомендаций. Fallback «APPROVED» для списания превращает сбой банка в пропавшие деньги.</p>
+      </div>
+    </section>
+
+    <section class="step" id="config-gateway">
+      <h2>Config Server раздаёт настройки, Gateway принимает внешний трафик</h2>
+      <p>Эти две части не запускались в демо: им нужны git-репозиторий настроек и отдельный сервер. Описание по документации Spring Cloud.</p>
+      <p><b>Spring Cloud Config</b> — сервер, который отдаёт настройки сервисам из git-репозитория или хранилища секретов. Сервис подключает его строкой <code>spring.config.import=configserver:http://config:8888</code>, и настройки попадают в Environment как ещё один источник со своим приоритетом из <a href="spring-config.html">Configuration &amp; Profiles</a>. Плюсы — история изменений в git и одно место для настроек всех сервисов. Изменение на лету даёт <code>@RefreshScope</code>: бины в этой области пересоздаются после события обновления, а <code>@ConfigurationProperties</code> перепривязываются. Обычный Boot так не умеет. Обратная сторона — Config Server становится зависимостью старта: без него сервис не поднимется, если импорт не помечен <code>optional:</code>.</p>
+      <p><b>Spring Cloud Gateway</b> — входная точка для внешних запросов. Он маршрутизирует <code>/api/payments/**</code> в сервис payments, проверяет JWT, ограничивает частоту запросов, добавляет заголовки трассировки. Есть два варианта: на WebFlux и Server MVC на обычных сервлетах и виртуальных потоках. Gateway удобен, когда правила маршрутизации — часть кода команды и их тестируют вместе с сервисами.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Каждую задачу решает один слой: приложение или платформа</h2>
+      <table class="mx">
+        <thead><tr><th>Задача</th><th>Spring Cloud</th><th>Kubernetes и окружение</th></tr></thead>
+        <tbody>
+          <tr><td>Найти экземпляры соседа</td><td>DiscoveryClient, Eureka, Consul</td><td>Service и DNS</td></tr>
+          <tr><td>Балансировка</td><td>LoadBalancer в клиенте</td><td>kube-proxy, service mesh</td></tr>
+          <tr><td>Настройки и секреты</td><td>Config Server, Vault</td><td>ConfigMap, Secret, External Secrets</td></tr>
+          <tr><td>Вход снаружи</td><td>Gateway</td><td>Ingress, Gateway API, облачный балансировщик</td></tr>
+          <tr><td>Повторы, таймауты, breaker</td><td>Resilience4j в коде</td><td>Istio, Linkerd: outlier detection, retries</td></tr>
+        </tbody>
+      </table>
+      <p>В Kubernetes Spring Cloud чаще всего нужен частично. Discovery, Config Server и Gateway обычно заменяет платформа. Circuit breaker, таймауты и fallback остаются в коде: только приложение знает, что честно ответить без соседа и какой таймаут допустим для платежа.</p>
+      <p>Главная опасность — сделать одно и то же на двух уровнях. Если клиент повторяет вызов три раза, service mesh — ещё три, а gateway — ещё три, один пользовательский запрос в худшем случае становится двадцатью семью запросами к уже перегруженному банку. Это retry storm: повторы добивают сервис, который пытался восстановиться. Повторы, таймауты и breaker настраивают в одном месте и проверяют, что сумма таймаутов вложенных вызовов меньше таймаута внешнего.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Discovery даёт список экземпляров по имени сервиса, LoadBalancer выбирает один на вызов, по умолчанию по кругу.</li>
+        <li>OpenFeign завершён по функциям; новый декларативный клиент — @HttpExchange поверх RestClient.</li>
+        <li>Circuit breaker считает ошибки по клиенту и при пороге отсекает весь сервис, даже здоровые экземпляры.</li>
+        <li>Fallback возвращает честный ответ без соседа, а не фальшивый успех.</li>
+        <li>В Kubernetes discovery, настройки и вход обычно берёт платформа; повторы и breaker настраивают в одном слое.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="cloud-circuit-breaker" data-freq="2">
+      <h3>Как работает circuit breaker и что такое half-open?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Breaker считает результаты последних вызовов в скользящем окне. Пока доля ошибок ниже порога, он закрыт и пропускает вызовы. Когда порог превышен, он открывается: вызовы сразу получают отказ или fallback и не нагружают больной сервис. Через заданную паузу он переходит в half-open и пропускает несколько пробных вызовов. Если пробы успешны — закрывается, если нет — снова открывается.</p>
+          <p>В Spring это Resilience4j через Spring Cloud CircuitBreaker; для Feign-клиентов он включается одной настройкой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Breaker привязан к клиенту и методу, а не к экземпляру: в демо он отрезал и здоровый bank-1.</li>
+            <li>Он не заменяет таймауты: медленный вызов без таймаута держит поток, и breaker его не прервёт; нужны TimeLimiter или таймаут клиента.</li>
+            <li>Окно может считаться по числу вызовов или по времени; минимальное число вызовов защищает от открытия по одной ошибке.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cloud-discovery" data-freq="2">
+      <h3>Как один сервис находит другой и нужен ли для этого Spring Cloud в Kubernetes?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В Spring Cloud клиент знает имя сервиса, DiscoveryClient получает список живых экземпляров из реестра — Eureka, Consul или API Kubernetes, — а LoadBalancer выбирает один экземпляр на каждый вызов. Это клиентская балансировка.</p>
+          <p>В Kubernetes обычно хватает Service: у него постоянное DNS-имя, а kube-proxy раскладывает соединения по pod-ам, прошедшим readiness probe. Тогда клиенту нужен только адрес http://bank, и Spring Cloud Discovery лишний.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Клиентская балансировка нужна для своей логики выбора: зона, вес, версия, sticky-сессии.</li>
+            <li>Kube-proxy балансирует соединения, а не запросы; при долгих HTTP/2- и gRPC-соединениях нагрузка распределяется неровно.</li>
+            <li>Без проверки здоровья клиентский балансировщик продолжает слать запросы на сломанный экземпляр.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cloud-retry-storm" data-freq="1">
+      <h3>Где настраивать повторы и таймауты между сервисами?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В одном слое. Если повторы есть в клиенте, в service mesh и в gateway, они перемножаются: три уровня по три попытки — до 27 запросов на один пользовательский. Это retry storm, который добивает восстанавливающийся сервис.</p>
+          <p>Таймауты строю сверху вниз: внешний запрос платежа ждёт, например, 3 секунды, значит вызов банка с повтором должен уложиться меньше чем в 3 секунды. Повторяю только идемпотентные операции или с ключом идемпотентности.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Повторы с экспоненциальной паузой и случайным разбросом, чтобы клиенты не били синхронно.</li>
+            <li>Retry budget ограничивает долю повторов от общего трафика вместо фиксированного числа попыток.</li>
+            <li>Breaker ставят снаружи повторов: когда он открыт, повторы не выполняются вовсе.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что опасного в этом fallback?</summary>
+          <pre><code class="language-java">@Component
+class BankFallback implements BankClient {
+    public ChargeResult charge(ChargeRequest r) {
+        return new ChargeResult(r.paymentId(), "APPROVED"); // Чтобы клиент не видел ошибку.
+    }
+}</code></pre>
+          <p>При открытом breaker все списания «проходят», хотя банк денег не списал. Сервис отгрузит товар без оплаты, а сверка найдёт расхождение только ночью. Fallback для платежа должен возвращать честный статус — «в обработке» с постановкой в очередь — или ошибку, которую увидит клиент.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://spring.io/projects/spring-cloud">Spring Cloud</a> — основа урока: состав проектов и таблица совместимости release train с Boot.</li>
+      <li><a href="https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/loadbalancer.html">Spring Cloud LoadBalancer</a> и <a href="https://docs.spring.io/spring-cloud-openfeign/reference/">Spring Cloud OpenFeign</a> — выбор экземпляра, проверка здоровья, Feign и его интеграция с breaker.</li>
+      <li><a href="https://resilience4j.readme.io/docs/circuitbreaker">Resilience4j CircuitBreaker</a> — окно, пороги, состояния и half-open.</li>
+      <li>Michael Nygard, Release It!, 2-е изд., глава 5 — circuit breaker, bulkhead и таймауты как паттерны устойчивости.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
