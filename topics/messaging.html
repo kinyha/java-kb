@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Brokers &amp; Guarantees · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="messaging">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Brokers &amp; Guarantees</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Брокер сообщений развязывает отправителя и получателя по времени: отправитель не ждёт, а получатель обрабатывает, когда может. Очередь раздаёт каждое сообщение одному из конкурирующих консьюмеров, публикация-подписка — копию каждому подписчику. Гарантия доставки определяется тем, когда консьюмер подтверждает сообщение: до обработки — at-most-once, сообщения теряются при падении; после — at-least-once, сообщения приходят повторно. Exactly-once между брокером и внешним миром не бывает; его заменяет at-least-once плюс идемпотентный консьюмер, который распознаёт повторы по id сообщения.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Списание провели дважды, а другое не провели вовсе — и брокер работал без сбоев</h2>
+      <p>Сервис списаний читает команды «списать с карты» из брокера. После очередного деплоя два клиента получили двойное списание, а одна команда исчезла: в брокере её нет, в базе списания тоже. Брокер ни разу не падал. Причина в одном и том же месте — в моменте, когда консьюмер говорит брокеру «готово», относительно момента, когда он реально сделал работу. Деплой убил процессы посреди обработки, и в одном варианте кода это теряет сообщения, в другом — повторяет.</p>
+      <p>Тема разбирает модели доставки и гарантии, общие для всех брокеров. Устройство Kafka — в <a href="kafka-basics.html">Basics</a>, её транзакции и exactly-once — в <a href="kafka-delivery.html">Delivery Semantics</a>, поведение RabbitMQ — в <a href="rabbitmq.html">RabbitMQ</a>, повторы и DLQ — в <a href="kafka-dlq.html">Retries &amp; DLQ</a>. Демо <a href="../examples/rabbit-broker/MessagingDemo.java">MessagingDemo.java</a> работает с RabbitMQ 4.3.6 в Docker; падение процесса моделируется закрытием канала без подтверждения — для брокера это одно и то же.</p>
+    </section>
+
+    <section class="step" id="models">
+      <h2>Очередь делит сообщения между воркерами, публикация-подписка копирует их каждому</h2>
+      <pre class="out">== queue (competing consumers): worker1=[p-1, p-3] worker2=[p-2, p-4]
+== pub/sub (fanout): antifraud=[p-1, p-2] analytics=[p-1, p-2]</pre>
+      <p>В модели <b>очереди</b> (point-to-point) два воркера подписаны на одну очередь, и брокер раздаёт сообщения по кругу: каждое обрабатывает ровно один. Так масштабируют обработку задач: больше воркеров — больше пропускная способность. В модели <b>публикации-подписки</b> событие получает каждый подписчик: и антифрод, и аналитика увидели оба платежа. Так одно событие доходит до всех заинтересованных сервисов, а отправитель о них не знает.</p>
+      <p>Брокеры совмещают обе модели. В RabbitMQ fanout-exchange копирует событие в очередь каждого сервиса, а внутри очереди экземпляры сервиса конкурируют. В Kafka топик читают несколько групп консьюмеров, каждая получает все события, а внутри группы партиции делятся между экземплярами. Правило одно: каждому логическому получателю — своя очередь или группа, а его экземпляры — конкурирующие консьюмеры внутри неё.</p>
+    </section>
+
+    <section class="step" id="at-most-once">
+      <h2>Подтверждение до обработки теряет сообщения при падении: at-most-once</h2>
+      <p>Если консьюмер подтверждает сообщение сразу при получении (autoAck в RabbitMQ, коммит смещения до обработки в Kafka), брокер удаляет его до того, как работа сделана. Консьюмер получил три команды, обработал одну и упал:</p>
+      <pre><code class="language-java">received.add(body(ch.basicGet("charges", true)));   // autoAck=true: брокер удалил сразу.
+processed.add(received.get(0));                     // Обработал одно и упал.
+ch.close();</code></pre>
+      <pre class="out">== at-most-once (autoAck): received [charge p-1, charge p-2, charge p-3], processed [charge p-1], left in queue 0</pre>
+      <p>Две команды исчезли: брокер считает их доставленными, а консьюмер их не выполнил. Каждое сообщение обрабатывается не больше одного раза, а возможно, ни разу. Это допустимо для метрик, логов, обновлений позиции на карте — там, где потеря одного значения не важна, а следующее его заменит. Для денег и заказов — нет.</p>
+    </section>
+
+    <section class="step" id="at-least-once">
+      <h2>Подтверждение после обработки повторяет сообщения при падении: at-least-once</h2>
+      <p>Если подтверждать после обработки, сообщение не потеряется: брокер удалит его только по ack, а неподтверждённое вернёт и доставит снова. Но если процесс упал после работы и до ack, работа будет сделана дважды:</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Две шкалы времени обработки одного сообщения. At-most-once: ack, потом обработка; падение между ними теряет сообщение. At-least-once: обработка, потом ack; падение между ними приводит к повторной доставке и повторной обработке.">
+            <text x="20" y="22" class="dg-cap bad">AT-MOST-ONCE</text>
+            <rect x="160" y="34" width="110" height="34" rx="5" class="dg-cell"/>
+            <rect x="290" y="34" width="190" height="34" rx="5" class="dg-cell"/>
+            <text x="215" y="56" class="dg-in" text-anchor="middle">ack</text>
+            <text x="385" y="56" class="dg-in" text-anchor="middle">обработка</text>
+            <path d="M280 30 L 280 74" class="dg-line bad"/>
+            <text x="500" y="48" class="dg-bad">падение здесь:</text>
+            <text x="500" y="64" class="dg-bad">сообщение потеряно</text>
+            <text x="20" y="56" class="dg-n">получить →</text>
+            <text x="20" y="112" class="dg-cap">AT-LEAST-ONCE</text>
+            <rect x="160" y="124" width="190" height="34" rx="5" class="dg-cell"/>
+            <rect x="370" y="124" width="110" height="34" rx="5" class="dg-cell"/>
+            <text x="255" y="146" class="dg-in" text-anchor="middle">обработка</text>
+            <text x="425" y="146" class="dg-in" text-anchor="middle">ack</text>
+            <path d="M360 120 L 360 164" class="dg-line bad"/>
+            <text x="500" y="138" class="dg-n">падение здесь:</text>
+            <text x="500" y="154" class="dg-n">повтор → нужна дедупликация</text>
+            <text x="20" y="146" class="dg-n">получить →</text>
+            <text x="20" y="192" class="dg-s">Окно между работой и подтверждением есть всегда; выбирается только, что в нём теряется.</text>
+          </svg>
+        </div>
+        <figcaption>Подтверждение и работа — две разные системы, и атомарно их не объединить. Поэтому exactly-once на уровне доставки невозможен, а возможен на уровне эффекта.</figcaption>
+      </figure>
+      <pre><code class="language-java">handle(r2, done, log);      // Деньги списаны...
+ch.close();                 // ...и процесс упал до ack.
+
+static void handle(GetResponse r, Set&lt;String&gt; done, List&lt;String&gt; log) {
+    boolean fresh = done.add(r.getProps().getMessageId());   // В проде — insert в той же транзакции.
+    ...
+}</code></pre>
+      <pre class="out">== at-least-once (ack after work) + idempotent consumer:
+  charge p-1 id=evt-1 redelivered=false -&gt; charged
+  charge p-2 id=evt-2 redelivered=false -&gt; charged
+  charge p-2 id=evt-2 redelivered=true -&gt; duplicate, skipped
+  charge p-3 id=evt-3 redelivered=false -&gt; charged</pre>
+      <p>Команда p-2 пришла дважды: второй раз с флагом <code>redelivered=true</code>. Флаг лишь подсказывает, что сообщение уже доставлялось, но не говорит, обработано ли оно, поэтому полагаться на него нельзя. Защищает идемпотентный консьюмер: отправитель даёт каждому сообщению уникальный id, а консьюмер в той же транзакции, что и списание, записывает id в таблицу обработанных. Повтор находит id и ничего не делает. В демо таблица — множество в памяти; в реальном сервисе это <code>insert ... on conflict do nothing</code> в базе, иначе после рестарта память пуста и дубль пройдёт.</p>
+      <p>Альтернатива таблице — естественная идемпотентность операции: <code>update payment set status = 'CAPTURED' where id = ? and status = 'AUTHORIZED'</code> безопасно выполнить дважды, второй раз изменит ноль строк. Для операций во внешней системе — банк, письмо — ключ идемпотентности передают дальше, если она его поддерживает.</p>
+    </section>
+
+    <section class="step" id="exactly-once">
+      <h2>Exactly-once — это at-least-once с дедупликацией, а не свойство брокера</h2>
+      <p>Брокеры обещают exactly-once, и это правда в узких рамках. Kafka гарантирует, что цепочка «прочитать из топика — записать в топик — закоммитить смещение» выполнится атомарно, если всё происходит внутри Kafka. Как только обработчик пишет в базу, отправляет письмо или вызывает банк, транзакция Kafka эту запись не покрывает, и повтор после падения снова возможен. Подробно — в <a href="kafka-delivery.html">Delivery Semantics</a>.</p>
+      <p>Практическая формула: at-least-once доставка плюс идемпотентная обработка дают эффект ровно один раз. Отправитель со своей стороны тоже должен публиковать надёжно — без потерь между базой и брокером, — для этого есть <a href="outbox.html">Transactional Outbox</a>. Вместе получается цепочка: outbox на отправителе, at-least-once в брокере, inbox или идемпотентность на получателе.</p>
+      <div class="trap">
+        <p class="myth">Включим exactly-once в Kafka, и дубли списаний исчезнут.</p>
+        <p class="fact">Exactly-once в Kafka покрывает только запись в Kafka и коммит смещений. Списание в базе или вызов банка выполняются вне этой транзакции, и после падения обработчик повторит их. Дубли убирает идемпотентный консьюмер с id сообщения или идемпотентная операция.</p>
+      </div>
+    </section>
+
+    <section class="step" id="order">
+      <h2>Порядок и параллелизм конфликтуют: порядок держат по ключу</h2>
+      <p>Гарантированный порядок есть только у одного потока сообщений с одним консьюмером: одна очередь с одним активным консьюмером или одна партиция Kafka. Любой параллелизм — несколько консьюмеров, повторы, prefetch с параллельной обработкой — позволяет более позднему сообщению обработаться раньше. Глобальный порядок обычно и не нужен: важен порядок событий одного платежа, а события разных платежей независимы. Поэтому сообщения разбивают по ключу — id платежа — на партиции или очереди, и внутри ключа порядок сохраняется, а между ключами идёт параллельная обработка.</p>
+      <p>Обработчик всё равно стоит защищать от неправильного порядка: повтор из DLQ, ручная переотправка или ошибка маршрутизации могут привести устаревшее событие. Версия агрегата в событии и проверка «применять, только если версия больше текущей» делают обработку устойчивой к переупорядочиванию так же, как id делает её устойчивой к дублям.</p>
+      <p>Ядовитое сообщение, которое никогда не обработается, при строгом порядке блокирует свой ключ или всю партицию. Его отправляют в DLQ после ограниченного числа попыток, понимая, что для этого ключа порядок нарушится; как это устроено, разобрано в <a href="kafka-dlq.html">Retries &amp; DLQ</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Очередь — конкурирующие консьюмеры, каждое сообщение одному; pub/sub — копия каждому подписчику. Каждому сервису — своя очередь или группа.</li>
+        <li>Ack до работы — at-most-once: в демо две команды из трёх исчезли.</li>
+        <li>Ack после работы — at-least-once: падение до ack повторило списание; флаг redelivered не доказывает обработку.</li>
+        <li>Идемпотентный консьюмер: id сообщения в таблице обработанных в той же транзакции, что и работа.</li>
+        <li>Exactly-once — эффект at-least-once плюс дедупликации; порядок держат по ключу и версиям.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="messaging-guarantees" data-freq="3">
+      <h3>Какие бывают гарантии доставки и от чего они зависят?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>At-most-once — сообщение обработается не больше одного раза, но может потеряться: консьюмер подтверждает до обработки. At-least-once — не потеряется, но может прийти повторно: подтверждение после обработки, падение между ними даёт повтор. Exactly-once — ровно один раз; на уровне доставки между брокером и внешней системой недостижим, его эффект получают через at-least-once и идемпотентного консьюмера.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Гарантия определяется порядком «работа — подтверждение» у консьюмера и подтверждениями брокера у продюсера.</li>
+            <li>Exactly-once в Kafka покрывает только чтение, запись в Kafka и коммит смещений.</li>
+            <li>Отправителю нужна надёжная публикация: outbox вместо двойной записи.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="messaging-idempotent" data-freq="3">
+      <h3>Как сделать консьюмера идемпотентным?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>У каждого сообщения уникальный id от отправителя. Консьюмер в той же транзакции, что и свою работу, вставляет id в таблицу обработанных; если id уже есть, сообщение пропускается. Либо сама операция идемпотентна: условный update по статусу или версии, upsert по ключу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Хранилище id должно быть транзакционно связано с работой; set в памяти теряется при рестарте.</li>
+            <li>Флаг redelivered и номер попытки — подсказка, а не доказательство обработки.</li>
+            <li>Таблицу обработанных чистят по сроку больше окна возможных повторов.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему здесь всё равно возможно двойное списание?</summary>
+          <pre><code class="language-java">@RabbitListener(queues = "charges")
+void onCharge(ChargeCommand cmd, @Header(AmqpHeaders.REDELIVERED) boolean redelivered) {
+    if (redelivered) {
+        log.info("skip redelivered {}", cmd.id());
+        return;
+    }
+    bank.charge(cmd.cardToken(), cmd.amount());
+}</code></pre>
+          <p>Флаг redelivered ставится и тогда, когда первая попытка упала до списания, — такое сообщение будет пропущено и потеряно. А дубль, пришедший новым сообщением после переотправки продюсером, флага не имеет и спишет второй раз. Нужна дедупликация по id команды в базе в одной транзакции с фиксацией результата и ключ идемпотентности в вызове банка.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="messaging-queue-topic" data-freq="2">
+      <h3>Чем очередь отличается от публикации-подписки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В очереди каждое сообщение получает один из конкурирующих консьюмеров — так масштабируют обработку задач. В pub/sub каждый подписчик получает свою копию — так событие доходит до всех заинтересованных сервисов. Брокеры совмещают обе модели: своя очередь или группа консьюмеров на сервис, экземпляры сервиса конкурируют внутри неё.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В RabbitMQ — fanout или topic exchange плюс очередь на сервис; в Kafka — группа консьюмеров на сервис.</li>
+            <li>Порядок сохраняется только внутри одного потока: партиции или очереди с одним активным консьюмером.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Gregor Hohpe, Bobby Woolf, <a href="https://www.enterpriseintegrationpatterns.com/patterns/messaging/">Enterprise Integration Patterns</a> — основа урока: point-to-point, publish-subscribe, competing consumers, idempotent receiver.</li>
+      <li><a href="https://www.rabbitmq.com/docs/reliability">RabbitMQ: Reliability Guide</a> — подтверждения, повторная доставка, флаг redelivered.</li>
+      <li><a href="https://kafka.apache.org/documentation/#semantics">Apache Kafka: Message Delivery Semantics</a> — at-most-once, at-least-once, exactly-once в Kafka.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 11 — гарантии потоковой обработки и идемпотентность.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

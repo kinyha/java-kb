@@ -161,7 +161,7 @@ window.KB_TREE = [
           scope: 'RDB и AOF, репликация, Sentinel, Cluster, распределённые блокировки' },
       ] },
       { id: 'messaging', title: 'Messaging', items: [
-        { id: 'messaging', freq: 3, status: 'empty', title: 'Brokers & Guarantees',
+        { id: 'messaging', freq: 3, status: 'draft', title: 'Brokers & Guarantees',
           scope: 'очередь и топик, at-most-once, at-least-once, exactly-once, порядок, идемпотентный консьюмер, DLQ' },
         { id: 'kafka', title: 'Kafka', items: [
           { id: 'kafka-basics', freq: 3, status: 'draft', title: 'Basics',
