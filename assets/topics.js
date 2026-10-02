@@ -553,7 +553,7 @@ window.KB_TREE = [
           scope: 'связи и owning side, lazy и eager, N+1, fetch join, EntityGraph, маппинг наследования, составные ключи' },
         { id: 'jpa-locking', freq: 2, status: 'draft', title: 'Locking & Caching',
           scope: 'optimistic и pessimistic locking, @Version, кеш первого и второго уровня, batch-запись' },
-        { id: 'spring-data', freq: 2, status: 'empty', title: 'Spring Data',
+        { id: 'spring-data', freq: 2, status: 'draft', title: 'Spring Data',
           scope: 'репозитории, derived queries, @Query, проекции, пагинация, Spring Data JDBC' },
       ] },
       { id: 'security', title: 'Security', source: 'Spring Security Reference: Architecture, Authentication, Authorization, OAuth2', items: [

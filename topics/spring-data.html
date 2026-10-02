@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Data · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-data">
+<main class="page">
+  <header class="topic-head"><h1>Spring Data</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Репозиторий Spring Data превращает интерфейс приложения в операции конкретного хранилища. В JPA он вызывает EntityManager и сохраняет правила контекста персистентности; в JDBC работает с явно сохраняемым агрегатом. Название метода может задать запрос, возвращаемый тип — форму результата и цену пагинации. Чтобы понимать поведение платежа, проследи весь путь: какой метод вызван, какой запрос построен и где заканчивается транзакция.</p>
+    </div>
+
+    <section class="step" id="save-boundary">
+      <h2>Вызов save заканчивается раньше, чем весь платёж</h2>
+      <p>Сервис создаёт платёж на 1000 копеек и вызывает <code>repository.save</code>. Затем меняет сумму на 1200 и ждёт, что Hibernate заметит изменение. В базе остаётся 1000. Отдельный вызов save завершил свою транзакцию, а дальнейший Java-код уже работал с отсоединённым объектом.</p>
+      <p>Spring Data JPA упрощает доступ к JPA, но не создаёт контекст персистентности на всё время жизни возвращённого объекта. Если общей внешней транзакции нет, стандартный save открывает свою и завершает её до возврата. Сервисная граница <code>@Transactional</code> позволяет объединить несколько операций и сохранить managed-состояние на весь нужный участок.</p>
+      <pre><code class="language-java">@Entity(name = "Payment")
+class Payment {
+    @Id String id; // Идентификатор назначает платёжный сервис.
+    @Version Long version; // null означает новый объект для Spring Data.
+    String status;
+    long cents;
+    protected Payment() {}
+    // Конструктор и getters есть в полном демо.
+}
+
+var original = new Payment("p-17", "NEW", 1_000);
+var inserted = repository.save(original); // Здесь отдельная транзакция save уже завершилась.
+System.out.println("new save same object=" + (inserted == original));
+original.cents = 1_200; // После save внешней транзакции нет, объект detached.
+System.out.println("without save cents=" + repository.findById("p-17").orElseThrow().cents);
+var merged = repository.save(original); // Состояние копируется в managed-объект нового контекста.
+System.out.println("update save same object=" + (merged == original));
+System.out.println("after save cents=" + repository.findById("p-17").orElseThrow().cents);</code></pre>
+      <pre><code class="language-bash">cd examples/data
+./run.sh SpringDataDemo # JDK 21; Spring Data JPA 4.1.1, Hibernate 7.4.5.Final, H2 2.4.240.</code></pre>
+      <pre class="out">new save same object=true
+without save cents=1000
+update save same object=false
+after save cents=1200</pre>
+      <p>Это первые строки <a href="../examples/data/SpringDataDemo.java">SpringDataDemo.java</a>. Демо использует Framework 7.0.9 и зависимости из BOM Boot 4.1.1. Контекст создаётся самостоятельно, OSIV отсутствует. Один файл регистрирует фабрику EntityManager, JpaTransactionManager и настоящие репозитории Spring Data.</p>
+      <p>Save выбирает между <code>persist</code> и <code>merge</code> по признаку нового объекта. По умолчанию сначала смотрит на nullable-поле версии, затем — на id, если подходящей версии нет. В нашем случае <code>version=null</code> позволяет persist даже с уже назначенным id. После первой фиксации версия появилась, поэтому второй save использовал merge. Его возвращаемый объект нужно учитывать: merge копирует состояние, а исходный detached-объект managed не делает.</p>
+      <p>Для назначенных приложением id без nullable-версии можно реализовать <code>Persistable.isNew()</code>. Но это должно быть правильное состояние жизненного цикла, а не вечное true. В общей JPA-транзакции managed-сущность обновляется через dirty checking; обязательного save после каждого setter там нет. Подробно состояния и flush разобраны в <a href="jpa.html">JPA Basics</a>.</p>
+    </section>
+
+    <section class="step" id="repository-proxy">
+      <h2>За интерфейсом репозитория стоят разные пути выполнения</h2>
+      <p>Интерфейс репозитория выглядит как обычный код приложения. Реализацию создаёт фабрика модуля Spring Data. Она знает тип сущности и id, базовые CRUD-операции, объявленные запросы и пользовательские фрагменты реализации. Вызов проходит через прокси; дальше выбирается путь конкретного метода.</p>
+      <p>В JPA стандартный save выполняет <code>SimpleJpaRepository</code> через EntityManager. Метод поиска по имени получает подготовленную модель запроса. Пользовательский фрагмент может выполнить сложную операцию своим кодом. Сам Spring Data не заменяет Hibernate и JDBC: они продолжают загружать объекты и общаться с базой.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Сервис вызывает прокси репозитория. Save идёт в базовую JPA-реализацию, поисковый метод — в выполнение запроса, сложный метод — в пользовательский фрагмент. JPA-пути сходятся в EntityManager, который через Hibernate и JDBC обращается к базе. Интерфейс репозитория не заменяет эти уровни.">
+            <defs><marker id="repo-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="104" width="132" height="54" rx="8" class="dg-box"/>
+            <rect x="188" y="104" width="136" height="54" rx="8" class="dg-cell hit"/>
+            <rect x="366" y="20" width="186" height="48" rx="8" class="dg-cell"/>
+            <rect x="366" y="106" width="186" height="48" rx="8" class="dg-cell"/>
+            <rect x="366" y="202" width="186" height="48" rx="8" class="dg-cell"/>
+            <rect x="588" y="78" width="112" height="104" rx="8" class="dg-box"/>
+            <path d="M152 131 L184 131" class="dg-line" marker-end="url(#repo-n)"/>
+            <path d="M324 116 L344 116 L344 44 L362 44" class="dg-line" marker-end="url(#repo-n)"/>
+            <path d="M324 131 L362 131" class="dg-line" marker-end="url(#repo-n)"/>
+            <path d="M324 146 L344 146 L344 226 L362 226" class="dg-line" marker-end="url(#repo-n)"/>
+            <path d="M552 44 L572 44 L572 102 L584 102" class="dg-line" marker-end="url(#repo-n)"/>
+            <path d="M552 130 L584 130" class="dg-line" marker-end="url(#repo-n)"/>
+            <path d="M552 226 L572 226 L572 158 L584 158" class="dg-line" marker-end="url(#repo-n)"/>
+            <g text-anchor="middle">
+              <text x="86" y="135" class="dg-in">PaymentService</text>
+              <text x="256" y="125" class="dg-in">прокси</text><text x="256" y="146" class="dg-in">Payments</text>
+              <text x="459" y="41" class="dg-in">базовый save</text><text x="459" y="60" class="dg-n">persist / merge</text>
+              <text x="459" y="135" class="dg-in">запрос метода</text>
+              <text x="459" y="223" class="dg-in">свой фрагмент</text><text x="459" y="243" class="dg-n">например сложный поиск</text>
+              <text x="644" y="103" class="dg-n">EntityManager</text><text x="644" y="127" class="dg-n">Hibernate</text><text x="644" y="151" class="dg-n">JDBC → БД</text>
+            </g>
+            <text x="20" y="276" class="dg-t">Прокси выбирает способ выполнения; транзакция задаёт время жизни общей работы.</text>
+          </svg>
+        </div>
+        <figcaption>Один интерфейс не означает один механизм всех методов. Для save, поискового запроса и своего фрагмента нужно понимать отдельный путь.</figcaption>
+      </figure>
+      <p>CRUD-методы базовой реализации уже имеют транзакционные настройки. Для объявленных поисковых методов и своих фрагментов границу задают с учётом операции; надёжный ориентир — транзакция сервиса. Она охватывает чтение, проверку и изменения вместе. Несколько по отдельности успешных save могут оставлять частично выполненный платёж, если общей границы нет.</p>
+      <p>При нескольких модулях Spring Data важно, какой модуль создаёт репозиторий. JPA-тип репозитория и <code>@Entity</code> у модели помогают определить JPA-хранилище; JDBC имеет свою модель и аннотации. Разделяй пакеты и настройку сканирования, когда в приложении используются оба подхода. Условия Boot и прокси транзакции разобраны в <a href="spring-boot.html">Spring Boot</a> и <a href="spring-tx.html">Transactions</a>.</p>
+    </section>
+
+    <section class="step" id="query-methods">
+      <h2>Название метода задаёт запрос по свойствам модели</h2>
+      <p>Нужно найти новые платежи от 2000 копеек и вернуть их по id. Spring Data разбирает имя метода: после <code>By</code> идут свойства и условия, <code>And</code> связывает их, <code>GreaterThanEqual</code> задаёт сравнение, <code>OrderByIdAsc</code> — порядок. Параметры остаются значениями, связанными с запросом.</p>
+      <pre><code class="language-java">interface Payments extends JpaRepository&lt;Payment, String&gt; {
+    List&lt;Payment&gt; findByStatusAndCentsGreaterThanEqualOrderByIdAsc(String status, long minimum);
+
+    @Query("select p from Payment p where p.cents &gt;= :minimum order by p.id")
+    List&lt;Payment&gt; expensive(@Param("minimum") long minimum); // JPQL использует Payment и поле cents.
+}
+
+// В демо NEW: p-17=1200, p-18=2000, p-19=3000; PAID: p-20=4000.
+System.out.println("derived=" + ids(repository.findByStatusAndCentsGreaterThanEqualOrderByIdAsc("NEW", 2_000)));
+System.out.println("jpql=" + ids(repository.expensive(3_000)));</code></pre>
+      <pre class="out">derived=[p-18, p-19]
+jpql=[p-19, p-20]</pre>
+      <p>Второй запрос не фильтрует статус: p-20 вошёл в результат. Имя <code>expensive</code> ничего не добавляет к объявленному JPQL. <code>@Query</code> задаёт явный запрос для метода; JPQL использует имена сущностей и Java-полей. При <code>nativeQuery=true</code> это SQL конкретной базы с её таблицами и столбцами.</p>
+      <p>Ошибка имени свойства обычно обнаруживается при создании репозитория. Подчёркивание в имени метода помогает явно разделить путь вложенных свойств, когда разбор имени неоднозначен. Но метод из десяти условий плохо читается и трудно расширяется. Для сложного поиска выбери явный запрос, Specifications или пользовательский фрагмент с понятной моделью фильтра.</p>
+      <p>Меняющий данные запрос требует <code>@Modifying</code> и подходящей транзакционной границы. Bulk UPDATE выполняется напрямую в базе и может оставить уже загруженные сущности со старым состоянием. Нужно согласовать flush, сам запрос и очистку либо обновление контекста. Само наличие аннотации репозитория не заменяет эту последовательность.</p>
+    </section>
+
+    <section class="step" id="projections">
+      <h2>Проекция задаёт данные, нужные конкретному ответу</h2>
+      <p>Для списка платежей нужны id и сумма. Загрузка полной сущности с её связями и последующая сериализация могут сделать лишнюю работу. Проекция позволяет вернуть специально выбранную форму результата, не превращая внутреннюю entity-модель в API ответа.</p>
+      <pre><code class="language-java">interface PaymentView {
+    String getId();
+    long getCents(); // Оба свойства существуют у Payment: закрытая проекция.
+}
+
+// Метод объявлен внутри Payments.
+List&lt;PaymentView&gt; findByStatusOrderByIdAsc(String status);
+
+var views = repository.findByStatusOrderByIdAsc("NEW");
+System.out.println("projection=" + views.stream().map(v -&gt; v.getId() + ":" + v.getCents()).toList());</code></pre>
+      <pre class="out">projection=[p-17:1200, p-18:2000, p-19:3000]</pre>
+      <p>Для интерфейса Spring Data создаёт объекты проекции через прокси. Закрытая проекция знает набор свойств и позволяет ограничить выборку нужными данными. Проекция с вычисляемым SpEL может обращаться к произвольному состоянию объекта, поэтому такую оптимизацию обещать нельзя. Простое вычисление из известных getters удобно оставить default-методу интерфейса.</p>
+      <p>Другой вариант — DTO или record с конструктором нужных значений. Это обычные объекты без проекционного прокси. В явном JPQL можно использовать конструкторное выражение; именование и конструктор должны соответствовать выбранному типу. Для интерфейсной проекции поля явного запроса должны правильно сопоставляться getters, обычно через подходящие псевдонимы.</p>
+      <p>Проекция не гарантирует отсутствие join и N+1. Вложенные свойства могут потребовать соединить таблицы или загрузить связанный объект. Проверяй фактический SQL для своего запроса. Способы загрузки связей, fetch join и EntityGraph разобраны в <a href="jpa-relations.html">Relations &amp; Fetching</a>.</p>
+    </section>
+
+    <section class="step" id="pagination">
+      <h2>Page считает весь результат, Slice проверяет продолжение</h2>
+      <p>Пользователь просит первые два новых платежа. Если экран показывает «страница 1 из N», ему нужен полный размер результата. Если экран только предлагает «показать ещё», достаточно узнать, есть ли следующий кусок. Возвращаемый тип репозитория определяет эту разницу.</p>
+      <pre><code class="language-java">Page&lt;Payment&gt; findByStatus(String status, Pageable pageable);
+Slice&lt;Payment&gt; findSliceByStatus(String status, Pageable pageable);
+
+var request = PageRequest.of(0, 2, Sort.by("id")); // Номер страницы с 0, порядок по уникальному id.
+Selects.count.set(0); // StatementInspector считает SELECT, реально отправленные Hibernate.
+var page = repository.findByStatus("NEW", request);
+System.out.println("page=" + ids(page.getContent()) + ", total=" + page.getTotalElements()
+    + ", selects=" + Selects.count.get());
+Selects.count.set(0);
+var slice = repository.findSliceByStatus("NEW", request);
+System.out.println("slice=" + ids(slice.getContent()) + ", hasNext=" + slice.hasNext()
+    + ", selects=" + Selects.count.get());</code></pre>
+      <pre class="out">page=[p-17, p-18], total=3, selects=2
+slice=[p-17, p-18], hasNext=true, selects=1</pre>
+      <p>В демо три подходящих строки и размер страницы два. Page выполнил выборку данных и count. Slice запросил дополнительную строку для проверки продолжения, но вернул только две. Подробности счётчика видны в полном файле; он не добавляет собственный SELECT для проверки результата.</p>
+      <table class="mx">
+        <thead><tr><th>Результат</th><th>Что знает вызывающий код</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td><code>Page</code></td><td>Данные, общий размер, число страниц</td><td>Часто отдельный count; иногда размер выводится из полученного короткого результата</td></tr>
+          <tr><td><code>Slice</code></td><td>Данные и наличие следующего куска</td><td>Дополнительная строка вместо общего count</td></tr>
+          <tr><td>Список с ограничением</td><td>Только возвращённые данные</td><td>Без обещания общего размера и продолжения</td></tr>
+        </tbody>
+      </table>
+      <p>Page не обязан всегда отправлять два запроса: на неполной странице Spring Data иногда может определить размер без count. Для сложного JPQL или native SQL count также должен корректно отражать условия. Join, который размножает платежи, требует учитывать distinct и реальный смысл количества строк.</p>
+      <p>Большое смещение заставляет базу пройти и отбросить много строк. Для длинного журнала полезна навигация по последнему ключу: например «после пары createdAt/id», с подходящим индексом и устойчивым порядком. Дополнительный уникальный id разрешает равенство времён. При изменениях между двумя запросами offset-страницы способны повторять или пропускать записи; простой count тоже не делает весь просмотр единым снимком.</p>
+      <div class="note warn"><p>Пагинация сущности вместе с fetch join коллекции может размножить строки и привести к ограничению результата в памяти или ошибке в зависимости от настроек Hibernate. Для списка платежей часто безопаснее сначала выбрать страницу id, затем нужные данные по этим id, сохранив порядок.</p></div>
+    </section>
+
+    <section class="step" id="jdbc-aggregate">
+      <h2>Spring Data JDBC сохраняет агрегат без контекста персистентности</h2>
+      <p>У платежа есть корень с id и статусом, а также принадлежащие ему строки проводки. Spring Data JDBC читает такую структуру и сохраняет её явно. У него нет JPA-контекста, dirty checking и ленивого прокси связи. Изменённый объект нужно передать save; после чтения он не наблюдается скрыто открытой сессией.</p>
+      <pre><code class="language-java">@Table("ledger_payment") // Здесь аннотации Spring Data Relational, а не JPA.
+record LedgerPayment(@Id @Column("id") Long id, @Column("status") String status,
+    @MappedCollection(idColumn = "payment_id", keyColumn = "line_index") List&lt;LedgerLine&gt; lines) {}
+
+@Table("ledger_line")
+record LedgerLine(@Column("account_id") String account, @Column("cents") long cents) {}
+
+interface Ledger extends CrudRepository&lt;LedgerPayment, Long&gt; {}
+
+var saved = repository.save(new LedgerPayment(null, "NEW", List.of(new LedgerLine("payer", 1_000))));
+long firstToken = token(jdbc); // У таблицы строк есть дополнительный identity-столбец row_token.
+var changed = new LedgerPayment(saved.id(), "POSTED", saved.lines()); // Строка проводки та же.
+System.out.println("without save status=" + repository.findById(saved.id()).orElseThrow().status());
+repository.save(changed); // Явное сохранение всего агрегата.
+System.out.println("after save status=" + repository.findById(saved.id()).orElseThrow().status());
+System.out.println("child row_token=" + firstToken + " -&gt; " + token(jdbc));
+System.out.println("child count=" + jdbc.queryForObject("select count(*) from \"ledger_line\"", Long.class));</code></pre>
+      <pre><code class="language-bash">./run.sh JdbcAggregateDemo # Настоящий JDBC-репозиторий и менеджер JDBC-транзакций.</code></pre>
+      <pre class="out">without save status=NEW
+after save status=POSTED
+child row_token=1 -&gt; 2
+child count=1</pre>
+      <p>Полный <a href="../examples/data/JdbcAggregateDemo.java">JdbcAggregateDemo.java</a> создаёт таблицы H2 с явно согласованными именами столбцов. <code>row_token</code> не входит в модель: база назначает его каждой новой строке, чтобы увидеть замену. Данные проводки остались прежними, но токен изменился. При сохранении существующего агрегата JDBC удалил принадлежащие ему строки и записал актуальный набор заново.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 278" role="img" aria-label="Java-агрегат платежа включает корень и строку проводки. В базе корень id1 имеет дочернюю строку с токеном1. Новое Java-значение статуса не меняет базу до save. Сохранение обновляет корень, удаляет старую дочернюю строку и вставляет новую с токеном2 при тех же данных проводки.">
+            <defs><marker id="agg-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="24" width="264" height="200" rx="10" class="dg-sep" fill="none"/>
+            <rect x="38" y="56" width="228" height="54" rx="8" class="dg-box"/>
+            <rect x="38" y="150" width="228" height="54" rx="8" class="dg-cell"/>
+            <rect x="418" y="56" width="282" height="54" rx="8" class="dg-box"/>
+            <rect data-s="1-2" x="418" y="150" width="282" height="54" rx="8" class="dg-cell"/>
+            <rect data-s="3" x="418" y="150" width="282" height="54" rx="8" class="dg-cell miss"/>
+            <rect data-s="4" x="418" y="150" width="282" height="54" rx="8" class="dg-cell hit"/>
+            <path d="M152 110 L152 146" class="dg-line" marker-end="url(#agg-n)"/>
+            <path data-s="1-2" d="M559 110 L559 146" class="dg-line" marker-end="url(#agg-n)"/>
+            <path data-s="4" d="M559 110 L559 146" class="dg-line" marker-end="url(#agg-n)"/>
+            <path data-s="3-4" d="M266 83 L414 83" class="dg-line" marker-end="url(#agg-n)"/>
+            <g text-anchor="middle">
+              <text x="152" y="44" class="dg-cap">JAVA-АГРЕГАТ</text>
+              <text x="559" y="44" class="dg-cap">СТРОКИ БАЗЫ</text>
+              <text x="152" y="77" class="dg-in">id: 1</text>
+              <text data-s="1" x="152" y="100" class="dg-in">status: NEW</text>
+              <text data-s="2-4" x="152" y="100" class="dg-in">status: POSTED</text>
+              <text x="152" y="173" class="dg-in">lines: payer, 1000</text>
+              <text x="152" y="196" class="dg-n">принадлежит корню</text>
+              <text x="559" y="77" class="dg-in">payment id: 1</text>
+              <text data-s="1-2" x="559" y="100" class="dg-in">status: NEW</text>
+              <text data-s="3-4" x="559" y="100" class="dg-in">status: POSTED</text>
+              <text data-s="1-2" x="559" y="173" class="dg-in">line token: 1</text>
+              <text data-s="1-2" x="559" y="196" class="dg-in">payer, 1000</text>
+              <text data-s="3" x="559" y="182" class="dg-bad">старая строка удалена</text>
+              <text data-s="4" x="559" y="173" class="dg-in">line token: 2</text>
+              <text data-s="4" x="559" y="196" class="dg-in">payer, 1000</text>
+              <text data-s="3-4" x="340" y="73" class="dg-n">save</text>
+            </g>
+            <text data-s="1" x="20" y="259" class="dg-t">После первого save: корень и одна дочерняя строка сохранены.</text>
+            <text data-s="2" x="20" y="259" class="dg-t">Изменён только объект Java. База по-прежнему хранит NEW.</text>
+            <text data-s="3" x="20" y="259" class="dg-t">Save обновляет корень и удаляет его прежние дочерние строки.</text>
+            <text data-s="4" x="20" y="259" class="dg-ok">Вставлен актуальный набор. Те же данные получили новый токен.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Первый save записал новый корень id=1 и его строку. Дополнительный столбец базы row_token получил 1.</li>
+          <li>Код создал объект со статусом POSTED. Данные проводки прежние. Пока save не вызван, база хранит NEW.</li>
+          <li>Сохранение существующего агрегата обновляет корень и удаляет прежние принадлежащие ему строки. Это части одной транзакционной операции, а не два видимых клиенту завершённых платежа.</li>
+          <li>Вставляется актуальная строка проводки. База назначает новый row_token=2; количество строк остаётся 1. Схема показывает состав действий, а не обещает порядок внутренних SQL для всех моделей.</li>
+        </ol>
+      </figure>
+      <p>Это важная цена простого агрегатного подхода. Большая коллекция может дать много записи при маленьком изменении корня. Границу агрегата выбирают по тому, что должно согласованно сохраняться и принадлежит корню. Ссылку на другой самостоятельный агрегат обычно представляют id или <code>AggregateReference</code>, а не включают его целиком во владение первого.</p>
+      <p>Spring Data JDBC подходит, когда нужен понятный жизненный цикл небольшого агрегата и явное сохранение. JPA удобнее там, где полезны контекст, отслеживание изменений и развитая загрузка связей. Оба подхода всё равно требуют индексов, ограничений базы, транзакций и контроля фактических запросов. Для сложного отчёта или точечного массового изменения полезнее явный SQL, чем попытка выразить всё одним save.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Репозиторий — прокси над механизмом своего хранилища. Он не отменяет правила JPA, JDBC и транзакций.</li>
+      <li>JPA save выбирает persist или merge по новизне. При merge учитывай возвращённый объект; внешняя транзакция определяет время managed-состояния.</li>
+      <li>Derived query разбирается по Java-свойствам. Явный Query выполняет написанные условия и не дополняется смыслом имени метода.</li>
+      <li>Проекция задаёт форму данных. Page часто добавляет count, Slice проверяет продолжение дополнительной строкой.</li>
+      <li>JDBC сохраняет агрегат явно. Его дочерние строки могут быть пересозданы даже при неизменных значениях.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="repository-mechanism" data-freq="2">
+      <h3>Как Spring Data создаёт реализацию интерфейса репозитория?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Фабрика модуля создаёт прокси и собирает способы выполнения методов. В JPA стандартные CRUD-методы идут в базовую реализацию через EntityManager; методы поиска получают запрос из имени или аннотации; свой фрагмент даёт отдельный код. Поэтому интерфейс экономит обычную обвязку, но Hibernate и JDBC продолжают работать под ним.</p>
+          <p>Границу бизнес-операции задаю в сервисе. Успешные отдельные save не означают, что весь перевод атомарен: для него нужна общая транзакция.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Объявленные поисковые методы и свои фрагменты требуют осмысленной транзакционной настройки. Поведение CRUD нельзя автоматически переносить на любой метод интерфейса.</li>
+          <li>При нескольких модулях разделяю пакеты и модели, чтобы JPA и JDBC не пытались обслуживать неоднозначный репозиторий.</li>
+          <li>Для сложного фильтра использую пользовательский фрагмент или Specifications, сохраняя понятную модель поиска.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="save-is-new" data-freq="3">
+      <h3>Что делает save в Spring Data JPA? Почему важен возвращённый объект?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Save выбирает persist для нового объекта и merge для существующего. По умолчанию новизна определяется nullable-версией, затем id, если подходящей версии нет. Merge копирует состояние в managed-объект и возвращает его, а исходная detached-ссылка остаётся прежней.</p>
+          <p>В демо первый save вернул тот же объект, второй — другой. Без внешней транзакции после возврата дальнейший setter сам не обновил базу. В общей транзакции managed-сущность отслеживается, поэтому обязательного save после каждого изменения нет.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Назначенный id без nullable-версии может направить новый объект в merge. Для явного определения новизны есть Persistable.isNew; его состояние должно корректно меняться после сохранения и чтения.</li>
+          <li>Save не равен немедленному SQL, а saveAndFlush не равен commit внешней транзакции. Ограничение может обнаружиться при последующей синхронизации.</li>
+          <li>Merge всего объекта из JSON способен перенести нежелательные поля и связи. Для перехода статуса загружаю текущий платёж и применяю разрешённую команду.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="задача">
+        <summary>Объект имеет назначенный id и version=null. Можно ли по одному id уверенно сказать, что save вызовет merge?</summary>
+        <p>Нет. При обычной nullable-проверке версии null означает новизну, поэтому будет выбран persist. Если nullable-версии нет, проверяется id. Нужно знать всю стратегию определения новизны, включая возможный Persistable.</p>
+      </details></div>
+    </article>
+    <article class="q" id="query-projection" data-freq="2">
+      <h3>Когда выбрать запрос по имени, Query и проекцию?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для короткого понятного условия выберу имя метода по свойствам модели. Если условия становятся длинными или нужен особый запрос, запишу Query либо свой фрагмент. В JPA Query по умолчанию содержит JPQL с entity и Java-полями; nativeQuery включает SQL конкретной базы.</p>
+          <p>Для списка id и сумм возвращу проекцию, чтобы результат отражал нужды ответа. Закрытый интерфейс перечисляет свойства; DTO или record задаёт обычный объект с нужными значениями.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Явный Query выполняет свои условия. Слова имени метода не добавляют пропущенный фильтр статуса или проверку владельца платежа.</li>
+          <li>Вложенная проекция может потребовать join или загрузку связи. Форму результата и число SQL проверяю отдельно.</li>
+          <li>Для bulk UPDATE нужны Modifying и транзакция; уже загруженные сущности могут устареть. Согласую flush и очистку контекста.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="page-slice-offset" data-freq="2">
+      <h3>Чем Page отличается от Slice и что плохо в далёких страницах?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Page даёт общий размер результата и число страниц, поэтому часто выполняет count. Slice знает только, есть ли следующий кусок: для этого берёт дополнительную строку. В нашем опыте Page выполнил два SELECT, Slice — один, при одинаковых двух возвращённых платежах.</p>
+          <p>Большое offset заставляет базу пройти много лишних строк. Для длинного журнала рассматриваю переход по последнему ключу с устойчивым порядком и подходящим индексом.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Page не всегда выполняет count: неполный результат иногда позволяет вывести размер без дополнительного запроса.</li>
+          <li>Сортировка должна различать равные значения, например createdAt плюс уникальный id. Между запросами данные меняются, поэтому offset способен повторять или пропускать записи.</li>
+          <li>Коллекционный fetch join и пагинация требуют осторожности из-за размножения строк. Часто выбираю страницу id, затем нужный граф отдельным запросом.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="jdbc-vs-jpa" data-freq="2">
+      <h3>Чем Spring Data JDBC отличается от Spring Data JPA?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JPA работает с контекстом, managed-сущностями, dirty checking и стратегиями загрузки связей. JDBC читает и явно сохраняет агрегат без контекста персистентности. Setter вне JPA-контекста и создание нового JDBC-объекта сами по себе базу не меняют.</p>
+          <p>В JDBC-демо изменили только статус корня, но save пересоздал принадлежащую строку проводки. Поэтому выбираю границу агрегата и оцениваю размер коллекций; простой API save не всегда означает одну короткую команду SQL.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Ссылка на самостоятельный агрегат обычно представлена id или AggregateReference. Включённый дочерний объект означает владение и совместное сохранение.</li>
+          <li>У JDBC есть свои аннотации отображения и контроля версии. Entity-модель JPA не переносится автоматически в другой модуль.</li>
+          <li>Если нужны отчёт или точечный массовый UPDATE, явный SQL может быть проще обоих способов сохранения графа. Транзакции и ограничения базы нужны в каждом случае.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html">Spring Data JPA: Persisting Entities</a> — persist/merge, версия и id, Persistable.</li>
+    <li><a href="https://docs.spring.io/spring-data/commons/reference/repositories/query-methods-details.html">Spring Data Commons: Query Methods</a> — имена методов, ограничения, Page и Slice.</li>
+    <li><a href="https://docs.spring.io/spring-data/jpa/reference/repositories/projections.html">Spring Data JPA: Projections</a> — интерфейсы, DTO, вложенность и ограничения выбора полей.</li>
+    <li><a href="https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html">Spring Data JPA: Transactionality</a> — базовые методы, запросы и сервисная граница.</li>
+    <li><a href="https://docs.spring.io/spring-data/relational/reference/jdbc/entity-persistence.html">Spring Data JDBC: Persisting Entities</a> — сохранение агрегата и повторная запись дочерних строк.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
