@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cassandra · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="cassandra">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Cassandra</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Cassandra — распределённое хранилище без ведущего узла: все узлы равноправны, данные распределены по кольцу токенов, каждая партиция хранится на нескольких репликах. Таблицу проектируют под запрос: partition key определяет, на каких узлах лежат данные, clustering key — порядок строк внутри партиции, а запрос без partition key база отказывается выполнять. Уровень согласованности выбирается на каждый запрос: при R + W больше фактора репликации чтение видит последнюю запись. Запись — всегда upsert с меткой времени, удаление — tombstone, а условные операции IF NOT EXISTS идут через Paxos и стоят в несколько раз дороже.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Журнал событий платежей пишется без проблем, но найти платёж по id нельзя</h2>
+      <p>Для журнала событий платёжной системы выбрали Cassandra: миллионы записей в минуту, несколько дата-центров, отказ узла не останавливает запись. Таблицу сделали по образцу реляционной, с первичным ключом по магазину и времени. Через месяц поддержка просит найти платёж по его id — запрос отклонён. Аналитики удаляют устаревшие события, и чтения начинают падать по таймауту. А во время учений с отключением двух узлов часть запросов вернула ошибку, хотя один узел с данными был жив.</p>
+      <p>Тема разбирает устройство Cassandra, моделирование под запрос, уровни согласованности, upsert и Paxos. Обзор моделей NoSQL и когда выбирать Cassandra — в <a href="nosql.html">Overview</a>, consistent hashing — в <a href="consistent-hashing.html">Consistent Hashing</a>, CAP и согласованность — в <a href="cap.html">CAP &amp; Consistency</a>. Демо <a href="../examples/cassandra/demo.sh">demo.sh</a> работает с кластером из трёх узлов Cassandra 5.0.9 в Docker (скрипт <code>setup.sh</code>) через <code>cqlsh</code> и <code>nodetool</code>.</p>
+    </section>
+
+    <section class="step" id="ring">
+      <h2>Все узлы равны, а партиция лежит на репликах, выбранных по токену</h2>
+      <pre><code class="language-sql">create keyspace pay with replication = {'class': 'NetworkTopologyStrategy', 'dc1': 3};</code></pre>
+      <pre class="out">== replicas of partition (7, 2026-10-02)
+172.25.0.3
+172.25.0.4
+172.25.0.2</pre>
+      <p>Хеш partition key (Murmur3) даёт токен, а токены разделены между узлами кольца; каждый узел владеет несколькими участками (vnodes, здесь 16 на узел). Партиция хранится на узле-владельце и на следующих по кольцу — столько, сколько задаёт фактор репликации. При RF=3 на трёх узлах каждая партиция есть на всех трёх. Клиент может прийти к любому узлу, и тот станет координатором запроса: разошлёт его репликам и соберёт ответы. Нет primary, нет failover — отказ узла означает лишь, что реплик стало меньше.</p>
+      <p>Запись устроена как LSM-дерево: сначала в commit log для надёжности и в memtable в памяти, потом memtable сбрасывается на диск неизменяемым файлом SSTable. Чтение собирает строку из memtable и нескольких SSTable, отсеивая лишние фильтрами Блума, а фоновая компакция сливает SSTable. Поэтому запись в Cassandra дешёвая и последовательная, а чтение дороже и зависит от компакции.</p>
+    </section>
+
+    <section class="step" id="model">
+      <h2>Таблицу проектируют под запрос: partition key выбирает узлы, clustering key — порядок</h2>
+      <pre><code class="language-sql">create table pay.payments_by_merchant (
+    merchant_id int, day date, created_at timestamp, payment_id text, amount bigint,
+    primary key ((merchant_id, day), created_at, payment_id)       -- партиция: магазин за день
+) with clustering order by (created_at desc, payment_id asc);</code></pre>
+      <pre class="out">== query by partition key: last 3 payments of merchant 7 for a day
+ created_at                      | payment_id | amount
+---------------------------------+------------+--------
+ 2026-10-02 10:05:00.000000+0000 |        p-5 |    500
+ 2026-10-02 10:04:00.000000+0000 |        p-4 |    400
+ 2026-10-02 10:03:00.000000+0000 |        p-3 |    300
+(3 rows)
+== query without partition key
+&lt;stdin&gt;:1:InvalidRequest: Error from server: code=2200 [Invalid query] message="Cannot execute this query as it might involve data filtering and thus may have unpredictable performance. If you want to execute this query despite the performance unpredictability, use ALLOW FILTERING"</pre>
+      <p>Первичный ключ состоит из двух частей. Partition key <code>(merchant_id, day)</code> — все платежи магазина за день лежат вместе на одних репликах. Clustering key <code>created_at, payment_id</code> — порядок строк внутри партиции на диске, поэтому «последние три платежа» читаются подряд без сортировки. Запрос по сумме без partition key Cassandra отклонила: чтобы его выполнить, пришлось бы опросить все партиции на всех узлах. <code>ALLOW FILTERING</code> разрешает это, но на проде это полный обход кластера.</p>
+      <p>Отсюда правило моделирования: сначала перечисляют запросы, потом под каждый делают таблицу. Поиск платежа по id — отдельная таблица <code>payments_by_id</code> с partition key <code>payment_id</code>, и приложение пишет в обе; batch с обеими вставками гарантирует, что обе применятся со временем, но не изоляцию. День в partition key ограничивает размер партиции: без него все платежи крупного магазина за годы оказались бы в одной огромной партиции на одних и тех же трёх узлах. Партиции держат в пределах десятков, максимум сотни мегабайт.</p>
+    </section>
+
+    <section class="step" id="consistency">
+      <h2>Уровень согласованности выбирают на запрос, и R + W &gt; RF даёт свежее чтение</h2>
+      <pre class="out">== consistency levels with two of three replicas down
+-- CONSISTENCY ONE
+ count
+-------
+     5
+(1 rows)
+-- CONSISTENCY QUORUM
+&lt;stdin&gt;:1:NoHostAvailable: ('Unable to complete the operation against any hosts', {&lt;Host: 127.0.0.1:9042 dc1&gt;: Unavailable('Error from server: code=1000 [Unavailable exception] message="Cannot achieve consistency level QUORUM" info={\'consistency\': \'QUORUM\', \'required_replicas\': 2, \'alive_replicas\': 1}')})</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 170" role="img" aria-label="Три реплики. Запись с QUORUM подтверждают две из трёх. Чтение с QUORUM спрашивает две из трёх. Два множества по две реплики из трёх всегда пересекаются, поэтому чтение видит последнюю запись.">
+            <text x="20" y="22" class="dg-cap">RF = 3: ЗАПИСЬ QUORUM (2) + ЧТЕНИЕ QUORUM (2) &gt; 3</text>
+            <rect x="60" y="50" width="140" height="44" rx="9" class="dg-cell hit"/><text x="130" y="77" class="dg-in" text-anchor="middle">реплика A</text>
+            <rect x="290" y="50" width="140" height="44" rx="9" class="dg-cell hit"/><text x="360" y="77" class="dg-in" text-anchor="middle">реплика B</text>
+            <rect x="520" y="50" width="140" height="44" rx="9" class="dg-cell"/><text x="590" y="77" class="dg-in" text-anchor="middle">реплика C</text>
+            <path d="M54 44 L 436 44 L 436 100 L 54 100 Z" class="dg-sep" fill="none"/>
+            <text x="60" y="118" class="dg-ok">запись подтвердили A и B</text>
+            <path d="M284 40 L 666 40 L 666 104 L 284 104 Z" class="dg-sep" fill="none"/>
+            <text x="440" y="132" class="dg-n">чтение спросило B и C — B знает запись</text>
+            <text x="20" y="162" class="dg-s">Любые два узла из трёх пересекаются хотя бы в одном. ONE + ONE такой гарантии не даёт.</text>
+          </svg>
+        </div>
+        <figcaption>Последнюю версию координатор выбирает по метке времени и заодно чинит отстающую реплику (read repair).</figcaption>
+      </figure>
+      <p>С двумя остановленными узлами из трёх чтение с <code>ONE</code> получило ответ от единственной живой реплики, а <code>QUORUM</code> требует двух и сразу отказал: <code>required_replicas: 2, alive_replicas: 1</code>. Это ошибки из истории с учениями. Выбор уровня — компромисс: <code>QUORUM</code> на запись и чтение даёт R + W = 4 &gt; 3, и чтение гарантированно видит последнюю подтверждённую запись, а кластер переживает потерю одного узла. <code>ONE</code> быстрее и доступнее, но может вернуть устаревшее. В нескольких дата-центрах используют <code>LOCAL_QUORUM</code>, чтобы не ждать межконтинентальную сеть.</p>
+      <p>Реплики сходятся несколькими механизмами: координатор сохраняет подсказки для недоступной реплики и дошлёт их, когда она вернётся (hinted handoff); чтение с несколькими репликами чинит отстающую (read repair); регулярный <code>nodetool repair</code> сверяет реплики полностью. Без регулярного repair удалённые данные могут «воскреснуть».</p>
+    </section>
+
+    <section class="step" id="writes">
+      <h2>Любая запись — upsert с меткой времени, условная — через Paxos</h2>
+      <pre class="out">== INSERT is an upsert: same primary key, new amount
+ payment_id | amount
+------------+--------
+        p-1 |    999
+(1 rows)
+== lightweight transaction: insert only if absent
+ [applied]
+-----------
+      True
+ [applied] | key  | payment_id
+-----------+------+------------
+     False | k-42 |      p-100</pre>
+      <p>INSERT с существующим первичным ключом не дал ошибки: он перезаписал сумму. В Cassandra INSERT и UPDATE — одна операция upsert, а конфликт между репликами решается по метке времени: побеждает более поздняя запись (last write wins). Если часы узлов расходятся, «более поздней» может оказаться не та запись. Проверка «нет ли уже такого платежа» обычным SELECT перед INSERT не защищает от гонки — это потерянное обновление из <a href="db-tx.html">ACID &amp; Isolation</a> без всяких транзакций.</p>
+      <p>Для таких проверок есть lightweight transactions: <code>INSERT ... IF NOT EXISTS</code> или <code>UPDATE ... IF balance = 100</code>. Первый ключ идемпотентности записан, второй отклонён с текущим значением — как уникальное ограничение. Внутри это протокол Paxos между репликами: несколько кругов сообщений вместо одного, поэтому LWT в разы медленнее и применяется точечно — ключи идемпотентности, резервирование. Полноценные транзакции на протоколе Accord (CEP-15) разрабатываются для следующих версий и в 5.0 не входят.</p>
+      <p>Удаление записывает tombstone — пометку об удалении, которая хранится не меньше <code>gc_grace_seconds</code> (10 дней), чтобы дойти до всех реплик. Чтение должно пропустить все tombstone в партиции, и таблица-очередь, где строки постоянно удаляются, превращается в кладбище: после 100 тысяч tombstone в одном запросе Cassandra прерывает его. Это и было падение чтений после чистки. Для данных с ограниченным сроком используют TTL и стратегию компакции по времени, а очереди в Cassandra не строят.</p>
+      <div class="trap">
+        <p class="myth">В Cassandra можно перенести реляционную схему и добавить индексы под новые запросы.</p>
+        <p class="fact">Запрос без partition key Cassandra отклоняет, потому что он требует обхода всего кластера; вторичные индексы спасают лишь отдельные случаи. Модель строят от запросов: таблица под каждый способ чтения, денормализация при записи, partition key с ограниченным размером партиции.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Кольцо без ведущего: токен partition key выбирает RF реплик; любой узел — координатор. Запись — LSM: commit log, memtable, SSTable.</li>
+        <li>Таблица под запрос: (merchant_id, day) — партиция, created_at — порядок; без partition key запрос отклонён.</li>
+        <li>CL на запрос: при двух упавших из трёх ONE ответил, QUORUM — Unavailable; R + W &gt; RF даёт свежее чтение.</li>
+        <li>INSERT — upsert, LWW по меткам времени; IF NOT EXISTS через Paxos отклонил второй ключ; tombstone и очереди — антипаттерн.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="cas-model" data-freq="2">
+      <h3>Как моделировать данные в Cassandra?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>От запросов: для каждого способа чтения — своя таблица, где partition key соответствует условию равенства в запросе, а clustering key — порядку и диапазону. Данные денормализуют и пишут в несколько таблиц. Partition key выбирают так, чтобы партиции были ограничены по размеру и распределялись равномерно: например, магазин плюс день.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Запрос без partition key требует ALLOW FILTERING — обход кластера.</li>
+            <li>Logged batch гарантирует, что все записи применятся, но не изоляцию.</li>
+            <li>Большие и горячие партиции — главная причина проблем с производительностью.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cas-cl" data-freq="2">
+      <h3>Что такое уровни согласованности в Cassandra?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сколько реплик должно ответить на запрос: ONE, QUORUM (большинство), ALL, LOCAL_QUORUM (большинство в своём дата-центре). Выбирается на каждый запрос. Если число реплик записи плюс чтения больше фактора репликации, чтение пересекается с записью и видит её: QUORUM + QUORUM при RF=3. Если живых реплик меньше уровня, запрос сразу получает Unavailable.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Hinted handoff, read repair и регулярный repair сводят реплики.</li>
+            <li>LWW по меткам времени зависит от синхронизации часов.</li>
+            <li>LOCAL_QUORUM избегает задержек между дата-центрами.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой таблицей для очереди выплат?</summary>
+          <pre><code class="language-sql">create table payouts_queue (shard int, id timeuuid, payload text, primary key (shard, id));
+-- воркеры: select ... where shard = 0 limit 100; затем delete каждой обработанной строки
+-- consistency ONE для записи и чтения</code></pre>
+          <p>Очередь с постоянными удалениями копит tombstone в одной партиции shard = 0, и чтения начинают пропускать сотни тысяч пометок, пока не упадут по лимиту. Одна партиция — один набор реплик и горячая точка. ONE на запись и чтение не гарантирует, что воркер увидит новую запись или удаление. Очереди строят на брокере сообщений, а в Cassandra хранят журнал с TTL и разбиением по времени.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cas-when" data-freq="1">
+      <h3>Когда выбирать Cassandra?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для огромного потока записи с известными заранее запросами по ключу: журналы, события, телеметрия, история операций; когда нужна работа в нескольких дата-центрах без ведущего узла и отказ узлов не должен останавливать запись. Не подходит для произвольных запросов, соединений, транзакций через сущности и очередей.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>LWT для идемпотентности и резервирования, но они в разы дороже.</li>
+            <li>Аналитику по данным Cassandra выносят в Spark или отдельное хранилище.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://cassandra.apache.org/doc/latest/cassandra/architecture/">Apache Cassandra: Architecture</a> — основа урока: кольцо, репликация, согласованность, хранение.</li>
+      <li><a href="https://cassandra.apache.org/doc/latest/cassandra/developing/data-modeling/">Cassandra Data Modeling</a> — моделирование от запросов.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», главы 3 и 5 — LSM-деревья, кворумы, LWW.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

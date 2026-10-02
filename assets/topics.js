@@ -269,7 +269,7 @@ window.KB_TREE = [
           scope: 'key-value, документные, колоночные, графовые, time series, SQL или NoSQL' },
         { id: 'mongodb', freq: 1, status: 'draft', title: 'MongoDB',
           scope: 'документы, индексы, replica set, шардинг' },
-        { id: 'cassandra', freq: 1, status: 'empty', title: 'Cassandra',
+        { id: 'cassandra', freq: 1, status: 'draft', title: 'Cassandra',
           scope: 'wide column, partition key, consistency level, запись и компакция' },
         { id: 'elasticsearch', freq: 1, status: 'empty', title: 'Elasticsearch',
           scope: 'инвертированный индекс, анализаторы, шарды и реплики, релевантность' },
