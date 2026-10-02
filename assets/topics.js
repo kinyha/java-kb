@@ -259,7 +259,7 @@ window.KB_TREE = [
       { id: 'scale', title: 'Scaling', source: 'DDIA, гл. Replication и Partitioning', items: [
         { id: 'replication', freq: 2, status: 'empty', title: 'Replication',
           scope: 'leader-follower, синхронная и асинхронная, лаг реплики, чтение с реплик, failover' },
-        { id: 'partitioning', freq: 2, status: 'empty', title: 'Partitioning',
+        { id: 'partitioning', freq: 2, status: 'draft', title: 'Partitioning',
           scope: 'секционирование таблицы, range, list и hash, partition pruning, удаление старых данных партициями' },
         { id: 'sharding', freq: 2, status: 'empty', title: 'Sharding',
           scope: 'ключ шардирования, решардинг, горячие шарды, запросы через шарды' },

@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Partitioning · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="partitioning">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Partitioning</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Секционирование делит одну большую таблицу на несколько физических таблиц-секций внутри одной базы, а запросы по-прежнему обращаются к общей таблице. Ключ секционирования — обычно время — определяет, в какую секцию попадает строка. Если запрос фильтрует по ключу, планировщик читает только нужные секции (partition pruning). Главная польза — управление данными: старый месяц удаляется отсоединением секции за миллисекунды вместо многочасового DELETE с раздуванием. Цена — ограничения: уникальность должна включать ключ секционирования, запросы без ключа обходят все секции, а секции нужно создавать заранее.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Журнал проводок вырос до миллиардов строк, и удаление старого года шло сутки</h2>
+      <p>Журнал проводок платёжной системы хранится пять лет, потом удаляется. Таблица выросла до миллиардов строк. Ежемесячный <code>DELETE</code> строк старше пяти лет идёт часами, создаёт миллионы мёртвых версий, раздувает таблицу и индексы, а autovacuum после него работает сутки. Индекс по счёту и дате весит больше памяти сервера, и даже запросы за последний месяц читают его с диска.</p>
+      <p>Тема разбирает декларативное секционирование PostgreSQL: как оно устроено, что даёт и чего стоит. Распределение данных по разным серверам — в <a href="sharding.html">Sharding</a>, VACUUM и раздувание — в <a href="vacuum.html">VACUUM</a>. Демо <a href="../examples/db-tx/PartitionDemo.java">PartitionDemo.java</a> работает с PostgreSQL 17 в Docker: журнал из трёх миллионов проводок за год, секции по месяцам, и для сравнения та же таблица без секций.</p>
+    </section>
+
+    <section class="step" id="how">
+      <h2>Одна логическая таблица, много физических секций</h2>
+      <pre><code class="language-sql">create table ledger(id bigint, created_at timestamptz not null, account int, amount bigint)
+    partition by range (created_at);
+create table ledger_2026_03 partition of ledger
+    for values from ('2026-03-01') to ('2026-04-01');
+create index on ledger(account, created_at);     -- создаётся в каждой секции</code></pre>
+      <p>Родительская таблица не хранит строк. Вставка в <code>ledger</code> направляется в секцию по значению <code>created_at</code>, индекс, созданный на родителе, создаётся отдельно в каждой секции. Для приложения это одна таблица: JPA-сущность и SQL не меняются.</p>
+      <table class="mx">
+        <thead><tr><th>Вид</th><th>Как делит</th><th>Когда</th></tr></thead>
+        <tbody>
+          <tr><td>Range</td><td>По диапазонам значений</td><td>Время: журналы, события, платежи — удаление старых периодов</td></tr>
+          <tr><td>List</td><td>По перечню значений</td><td>Страна, регион, тип клиента</td></tr>
+          <tr><td>Hash</td><td>По хешу ключа на N секций</td><td>Равномерно разбить большую таблицу без естественного диапазона</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="pruning">
+      <h2>Запрос с ключом секционирования читает только нужные секции</h2>
+      <pre class="out">== one month for one account
+   Bitmap Heap Scan on ledger_2026_03 ledger (actual rows=54 loops=1)
+   partitions scanned: 1 of 12; Execution Time: 0.182 ms
+== no partition key in WHERE
+   Bitmap Heap Scan on ledger_2026_01 ledger_1 (actual rows=54 loops=1)
+   partitions scanned: 12 of 12; Execution Time: 1.174 ms</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 150" role="img" aria-label="Двенадцать секций по месяцам. Запрос за март с условием по created_at читает только мартовскую секцию. Запрос только по счёту без даты обходит индексы всех двенадцати секций.">
+            <text x="20" y="22" class="dg-cap">WHERE account = 42 AND created_at В МАРТЕ</text>
+            <rect x="20" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="46" y="56" class="dg-n" text-anchor="middle">янв</text>
+            <rect x="77" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="103" y="56" class="dg-n" text-anchor="middle">фев</text>
+            <rect x="134" y="34" width="52" height="34" rx="4" class="dg-cell hit"/>
+            <text x="160" y="56" class="dg-n" text-anchor="middle">мар</text>
+            <rect x="191" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="217" y="56" class="dg-n" text-anchor="middle">апр</text>
+            <rect x="248" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="274" y="56" class="dg-n" text-anchor="middle">май</text>
+            <rect x="305" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="331" y="56" class="dg-n" text-anchor="middle">июн</text>
+            <rect x="362" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="388" y="56" class="dg-n" text-anchor="middle">июл</text>
+            <rect x="419" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="445" y="56" class="dg-n" text-anchor="middle">авг</text>
+            <rect x="476" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="502" y="56" class="dg-n" text-anchor="middle">сен</text>
+            <rect x="533" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="559" y="56" class="dg-n" text-anchor="middle">окт</text>
+            <rect x="590" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="616" y="56" class="dg-n" text-anchor="middle">ноя</text>
+            <rect x="647" y="34" width="52" height="34" rx="4" class="dg-cell"/>
+            <text x="673" y="56" class="dg-n" text-anchor="middle">дек</text>
+            <text x="20" y="92" class="dg-cap bad">WHERE account = 42 — БЕЗ КЛЮЧА</text>
+            <rect x="20" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="46" y="126" class="dg-n" text-anchor="middle">янв</text>
+            <rect x="77" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="103" y="126" class="dg-n" text-anchor="middle">фев</text>
+            <rect x="134" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="160" y="126" class="dg-n" text-anchor="middle">мар</text>
+            <rect x="191" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="217" y="126" class="dg-n" text-anchor="middle">апр</text>
+            <rect x="248" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="274" y="126" class="dg-n" text-anchor="middle">май</text>
+            <rect x="305" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="331" y="126" class="dg-n" text-anchor="middle">июн</text>
+            <rect x="362" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="388" y="126" class="dg-n" text-anchor="middle">июл</text>
+            <rect x="419" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="445" y="126" class="dg-n" text-anchor="middle">авг</text>
+            <rect x="476" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="502" y="126" class="dg-n" text-anchor="middle">сен</text>
+            <rect x="533" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="559" y="126" class="dg-n" text-anchor="middle">окт</text>
+            <rect x="590" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="616" y="126" class="dg-n" text-anchor="middle">ноя</text>
+            <rect x="647" y="104" width="52" height="34" rx="4" class="dg-cell miss"/>
+            <text x="673" y="126" class="dg-n" text-anchor="middle">дек</text>
+          </svg>
+        </div>
+        <figcaption>Планировщик отбрасывает секции, диапазон которых не пересекается с условием. Без условия на ключ остаётся только опросить каждую.</figcaption>
+      </figure>
+      <p>Условие на <code>created_at</code> позволило планировщику отбросить одиннадцать секций ещё до выполнения, и запрос прочитал одну. Работает это и с параметрами подготовленного запроса — тогда отбрасывание происходит при выполнении. Запрос только по счёту прошёл по индексам всех двенадцати секций: в шесть раз медленнее, хотя строк столько же. На проде с сотнями секций такой запрос дорожает пропорционально, а планирование с тысячами секций само по себе занимает заметное время. Поэтому ключ секционирования выбирают по тому, как данные фильтруют, и он должен быть в каждом частом запросе.</p>
+      <p>Скорость поиска внутри одного месяца секционирование почти не меняет: B-tree по 270 тысячам строк лишь на уровень мельче, чем по трём миллионам. Индексы секций меньше, и горячие — последних месяцев — помещаются в память, но главный выигрыш не в чтении.</p>
+    </section>
+
+    <section class="step" id="retention">
+      <h2>Старые данные удаляются отсоединением секции, а не DELETE</h2>
+      <pre class="out">== removing January
+   DELETE from flat table: 267839 rows, 98 ms (and dead rows left for VACUUM)
+   DETACH + DROP partition: 3 ms</pre>
+      <p>Удаление января из обычной таблицы — 268 тысяч удалённых строк, мёртвые версии в таблице и индексе, работа для VACUUM и WAL на каждую строку. На миллиардах строк это часы, как в истории выше. Отсоединение и удаление секции — операция над каталогом и файлом: 3 мс, без мёртвых версий и почти без журнала. <code>DETACH PARTITION CONCURRENTLY</code> отсоединяет секцию без долгой блокировки родителя. Отсоединённую секцию можно не удалять, а выгрузить в архив или перенести в дешёвое хранилище.</p>
+      <p>Так же дёшево загружать: подготовить данные в отдельной таблице с нужными индексами и подключить её как секцию <code>ATTACH PARTITION</code>. Чтобы при подключении не сканировать таблицу, заранее добавляют CHECK-ограничение, совпадающее с диапазоном секции.</p>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Уникальность включает ключ, секции создают заранее, а глобального индекса нет</h2>
+      <pre class="out">== unique constraint without the partition key
+   unique (id) -&gt; ERROR: unique constraint on partitioned table must include all partitioning columns
+   unique (id, created_at) -&gt; ok
+== insert outside any partition
+   23514 ERROR: no partition of relation "ledger" found for row</pre>
+      <p>Индексы существуют в каждой секции отдельно, глобального индекса по всей таблице в PostgreSQL нет. Поэтому уникальность можно проверить только внутри секции, и ограничение обязано включать ключ секционирования: <code>unique (id)</code> отклонён, <code>unique (id, created_at)</code> принят. Если нужен глобально уникальный id, его обеспечивают генератором — последовательностью или UUIDv7 — а не ограничением. По той же причине внешние ключи на секционированную таблицу должны ссылаться на ключ, включающий колонку секционирования.</p>
+      <p>Строка, для которой нет секции, отклоняется: вставка 2027 года упала, потому что секции на него никто не создал. Секции создают заранее по расписанию — расширение <code>pg_partman</code> или задача в приложении, — и добавляют секцию <code>DEFAULT</code> как страховку. С ней нужна осторожность: при создании новой секции PostgreSQL проверяет default-секцию на строки, которые должны были бы туда попасть, и чем она больше, тем дольше.</p>
+      <div class="trap">
+        <p class="myth">Секционирование ускоряет все запросы к большой таблице.</p>
+        <p class="fact">Ускоряются запросы с условием на ключ секционирования, и то в основном за счёт меньших индексов. Запрос без ключа обходит все секции и становится медленнее: в демо 12 секций вместо одной. Главная польза секционирования — дешёвое удаление и загрузка периодов: DROP секции 3 мс против DELETE с мёртвыми версиями.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Одна логическая таблица, физические секции по range, list или hash; приложение не меняется.</li>
+        <li>Pruning: запрос с ключом читает 1 секцию из 12; без ключа — все 12, и в шесть раз дольше.</li>
+        <li>Удаление периода: DETACH + DROP за 3 мс вместо DELETE с мёртвыми версиями и VACUUM.</li>
+        <li>Уникальность включает ключ секционирования, глобального индекса нет; секции создают заранее, default-секция — страховка с оговорками.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="part-what" data-freq="2">
+      <h3>Что такое секционирование таблицы и зачем оно нужно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Разделение одной логической таблицы на физические секции по ключу — диапазону времени, списку значений или хешу — внутри одной базы. Запросы с условием на ключ читают только нужные секции. Главная польза — управление жизненным циклом: старый период удаляется отсоединением секции мгновенно, а новые данные загружаются подключением готовой таблицы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Индексы секций меньше, горячие секции помещаются в память.</li>
+            <li>Запросы без ключа обходят все секции; тысячи секций дорожают на планировании.</li>
+            <li>Секционирование — в одной базе; распределение по серверам — шардирование.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="part-limits" data-freq="2">
+      <h3>Какие ограничения у секционирования в PostgreSQL?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нет глобального индекса, поэтому первичный ключ и уникальные ограничения должны включать ключ секционирования. Строка без подходящей секции отклоняется, и секции нужно создавать заранее. Запросы без условия на ключ обходят все секции. Перенос строки между секциями при изменении ключа — это удаление и вставка.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>DEFAULT-секция ловит строки без секции, но замедляет создание новых секций.</li>
+            <li>pg_partman автоматизирует создание и удаление секций.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим планом секционирования?</summary>
+          <pre><code class="language-sql">create table payment(id uuid primary key, merchant_id int, created_at timestamptz, amount bigint)
+    partition by hash (merchant_id);
+-- 64 секции; самые частые запросы: «платежи за последний час» и удаление данных старше 3 лет</code></pre>
+          <p>Первичный ключ id не включает ключ секционирования и не будет создан. Хеш по магазину не помогает ни частым запросам за последний час — они обойдут все 64 секции, — ни удалению старых данных: каждая секция содержит все годы, и удалять придётся DELETE. Для этих задач нужен range по created_at с ключом (id, created_at), а поиск по магазину — индекс внутри секций.</p>
+        </details>
+      </div>
+    </article>
+    <article class="q" id="part-retention" data-freq="2">
+      <h3>Как регулярно удалять старые данные из таблицы на миллиарды строк?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Не DELETE: он создаёт мёртвые версии каждой строки, раздувает таблицу и индексы, пишет WAL на каждую строку и нагружает VACUUM. Таблицу секционируют по времени, и старый период удаляют отсоединением и удалением секции — операция над каталогом и файлом, миллисекунды. В демо DROP секции занял 3 мс.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>DETACH PARTITION CONCURRENTLY не держит долгую блокировку родителя.</li>
+            <li>Если секционировать поздно, DELETE делают пачками по id в коротких транзакциях.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/ddl-partitioning.html">PostgreSQL 17: Table Partitioning</a> — основа урока: виды, pruning, ограничения, attach и detach.</li>
+      <li><a href="https://github.com/pgpartman/pg_partman">pg_partman</a> — автоматическое создание и удаление секций.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 6 — секционирование по диапазону и хешу.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

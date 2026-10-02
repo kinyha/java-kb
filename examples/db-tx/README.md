@@ -1,6 +1,6 @@
 # Transactions demos
 
-Примеры к папкам Databases › Transactions, PostgreSQL Internals, Performance и Schema. Нужны JDK 21, Maven и Docker.
+Примеры к папкам Databases › Transactions, PostgreSQL Internals, Performance, Schema и Scaling. Нужны JDK 21, Maven и Docker.
 
 ```bash
 docker run -d --name kb-pg -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:17-alpine
@@ -16,6 +16,7 @@ java -cp "$(cat target/classpath.txt)" QueryPlanDemo.java
 java -cp "$(cat target/classpath.txt)" IndexTypesDemo.java
 java -cp "$(cat target/classpath.txt)" MigrationDemo.java
 java -cp "$(cat target/classpath.txt)" ModelingDemo.java
+java -cp "$(cat target/classpath.txt)" PartitionDemo.java
 
 # SlowQueriesDemo нужен pg_stat_statements:
 docker rm -f kb-pg
