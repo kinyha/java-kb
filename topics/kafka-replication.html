@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kafka: Replication · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kafka-replication">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Kafka: Replication</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>У каждой партиции один лидер и несколько последователей, которые копируют его лог. ISR — реплики, которые не отстают; лидер выбирается только из них. Запись с <code>acks=all</code> подтверждается, когда её получили все реплики ISR, а <code>min.insync.replicas</code> запрещает запись, если ISR стал слишком мал. Стандарт надёжности — три реплики и <code>min.insync.replicas=2</code>: кластер переживает потерю брокера без потерь и без остановки записи. Unclean leader election отдаёт лидерство отставшей реплике, чтобы партиция ожила, и стирает подтверждённые записи. Метаданными кластера в Kafka 4 управляет кворум контроллеров KRaft.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Брокер ушёл на обслуживание, второй упал — и одна команда потеряла события, а другая перестала писать</h2>
+      <p>В кластере из трёх брокеров один вывели на обновление ОС, и в этот момент второй упал по памяти. Сервис платежей начал получать таймауты на каждую отправку, и очередь событий в нём росла. В соседней команде, где топики были настроены «для скорости», запись продолжалась, но после возвращения брокеров часть подтверждённых событий исчезла.</p>
+      <p>Это две стороны одного выбора между доступностью и сохранностью, который в Kafka задают три настройки: фактор репликации, <code>min.insync.replicas</code> и <code>unclean.leader.election.enable</code>. Тема показывает, как они работают на живом кластере. Устройство брокеров и партиций — в <a href="kafka-basics.html">Basics</a>, <code>acks</code> со стороны продюсера — в <a href="kafka-producer.html">Producer</a>. Демо <a href="../examples/kafka-cluster/ReplicationDemo.java">ReplicationDemo.java</a> и <a href="../examples/kafka-cluster/UncleanDemo.java">UncleanDemo.java</a> работают с Kafka 4.3 в Docker — три контроллера KRaft и три брокера — и сами останавливают и запускают контейнеры брокеров.</p>
+    </section>
+
+    <section class="step" id="isr">
+      <h2>ISR — реплики, которые успевают за лидером; лидер выбирается только из них</h2>
+      <p>Продюсеры и консьюмеры работают только с лидером партиции. Последователи постоянно запрашивают у лидера новые записи, как консьюмеры. Реплика входит в ISR (in-sync replicas), пока не отстаёт дольше <code>replica.lag.time.max.ms</code> (30 секунд). Отставшую или остановленную реплику лидер исключает из ISR через контроллер, а догнавшую возвращает.</p>
+      <p>Консьюмеры читают только до high watermark — смещения, до которого запись есть на всех репликах ISR. Поэтому запись, которую видел хоть один консьюмер, переживёт смену лидера на любую реплику из ISR. Настройки <code>min.insync.replicas=2</code> и фактор репликации 3 задают ровно это: каждая подтверждённая запись есть минимум на двух брокерах.</p>
+      <pre><code class="language-java">new NewTopic("ledger-rep", 1, (short) 3).configs(Map.of("min.insync.replicas", "2"));</code></pre>
+      <pre class="out">== all brokers up: leader=2 replicas=[1, 2, 3] isr=[1, 2, 3]
+   acks=all -&gt; ok, offset 0
+-- docker stop kafka-1
+== broker 1 stopped: leader=2 replicas=[1, 2, 3] isr=[2, 3]
+   acks=all -&gt; ok, offset 1</pre>
+      <p>Брокер 1 остановлен, ISR сократился до двух реплик, и запись с <code>acks=all</code> по-прежнему проходит: двух реплик достаточно. Это и есть смысл схемы 3/2 — плановое обслуживание или падение одного брокера незаметно для продюсеров.</p>
+    </section>
+
+    <section class="step" id="min-isr">
+      <h2>Когда ISR меньше min.insync.replicas, Kafka отказывает в записи, а не рискует данными</h2>
+      <pre class="out">-- docker stop kafka-3
+== broker 3 stopped too: leader=2 replicas=[1, 2, 3] isr=[2]
+   acks=all -&gt; TimeoutException
+   acks=all, retries=0 -&gt; NotEnoughReplicasException
+   acks=1   -&gt; ok, offset 2</pre>
+      <p>Остался один брокер, ISR из одной реплики меньше <code>min.insync.replicas=2</code>, и лидер отклоняет запись с <code>acks=all</code> ошибкой <code>NotEnoughReplicasException</code>. Ошибка повторяемая, поэтому обычный продюсер молча повторяет её до <code>delivery.timeout.ms</code> и в итоге отдаёт <code>TimeoutException</code> — именно эти таймауты видел сервис платежей. Запись с <code>acks=1</code> при этом проходит: <code>min.insync.replicas</code> проверяется только для <code>acks=all</code>, и такая запись лежит на единственном брокере.</p>
+      <p>Это осознанный выбор Kafka: лучше остановить запись, чем подтвердить данные, которые исчезнут при следующем сбое. Партиция остаётся доступной для чтения. Когда брокеры вернулись, они догнали лидера и вернулись в ISR:</p>
+      <pre class="out">-- docker start kafka-1
+-- docker start kafka-3
+== both brokers back: leader=2 replicas=[1, 2, 3] isr=[1, 2, 3]
+-- docker stop kafka-2
+== leader 2 stopped: leader=3 replicas=[1, 2, 3] isr=[1, 3]
+   acks=all -&gt; ok, offset 3
+-- docker start kafka-2
+== broker 2 back: leader=3 replicas=[1, 2, 3] isr=[1, 2, 3]
+   records readable: 4</pre>
+      <p>Остановка лидера привела к выборам: контроллер назначил лидером брокер 3 из ISR, и запись продолжилась. Все четыре подтверждённые записи на месте, включая записанную с <code>acks=1</code>: брокеры вернулись к живому лидеру и скопировали её. Продюсеры и консьюмеры узнают о новом лидере из метаданных и переключаются сами.</p>
+    </section>
+
+    <section class="step" id="unclean">
+      <h2>Unclean leader election оживляет партицию ценой подтверждённых записей</h2>
+      <p>Если все реплики ISR недоступны, у партиции нет лидера, и она недоступна ни для записи, ни для чтения, пока одна из реплик ISR не вернётся. <code>unclean.leader.election.enable=true</code> разрешает выбрать лидером реплику не из ISR — отставшую. Партиция оживает сразу, но всё, чего у этой реплики не было, теряется. Демо создаёт топик «для скорости» — <code>min.insync.replicas=1</code> и unclean-выборы включены:</p>
+      <pre class="out">== start: leader=3 isr=[1, 2, 3]
+   ack before-1 offset 0
+   ack before-2 offset 1
+   ack before-3 offset 2
+-- docker stop kafka-1
+-- docker stop kafka-2
+   ack only-leader-1 offset 3
+   ack only-leader-2 offset 4
+   ack only-leader-3 offset 5
+-- docker stop kafka-3
+-- docker start kafka-1
+-- docker start kafka-2
+== old leader down, followers back: leader=1 isr=[1, 2]
+-- docker start kafka-3
+== old leader back: leader=1 isr=[1, 2, 3]
+   acknowledged 6, readable: [before-1, before-2, before-3]</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Лидер 3 подтверждает записи 3–5, когда последователи остановлены. Лидер падает, вернувшийся брокер 1 становится лидером без этих записей. Старый лидер возвращается и обрезает свой лог до лога нового лидера: подтверждённые записи 3–5 исчезают.">
+            <text x="20" y="60" class="dg-in">kafka-1</text>
+            <rect x="130" y="40" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="150" y="59" class="dg-n" text-anchor="middle">0</text>
+            <rect x="176" y="40" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="196" y="59" class="dg-n" text-anchor="middle">1</text>
+            <rect x="222" y="40" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="242" y="59" class="dg-n" text-anchor="middle">2</text>
+            <text x="20" y="110" class="dg-in">kafka-2</text>
+            <rect x="130" y="90" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="150" y="109" class="dg-n" text-anchor="middle">0</text>
+            <rect x="176" y="90" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="196" y="109" class="dg-n" text-anchor="middle">1</text>
+            <rect x="222" y="90" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="242" y="109" class="dg-n" text-anchor="middle">2</text>
+            <text x="20" y="160" class="dg-in">kafka-3</text>
+            <rect x="130" y="140" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="150" y="159" class="dg-n" text-anchor="middle">0</text>
+            <rect x="176" y="140" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="196" y="159" class="dg-n" text-anchor="middle">1</text>
+            <rect x="222" y="140" width="40" height="28" rx="4" class="dg-cell"/>
+            <text x="242" y="159" class="dg-n" text-anchor="middle">2</text>
+            <rect data-s="1-3" x="268" y="140" width="40" height="28" rx="4" class="dg-cell hit"/>
+            <rect data-s="4" x="268" y="140" width="40" height="28" rx="4" class="dg-cell miss"/>
+            <text x="288" y="159" class="dg-n" text-anchor="middle">3</text>
+            <rect data-s="1-3" x="314" y="140" width="40" height="28" rx="4" class="dg-cell hit"/>
+            <rect data-s="4" x="314" y="140" width="40" height="28" rx="4" class="dg-cell miss"/>
+            <text x="334" y="159" class="dg-n" text-anchor="middle">4</text>
+            <rect data-s="1-3" x="360" y="140" width="40" height="28" rx="4" class="dg-cell hit"/>
+            <rect data-s="4" x="360" y="140" width="40" height="28" rx="4" class="dg-cell miss"/>
+            <text x="380" y="159" class="dg-n" text-anchor="middle">5</text>
+            <text data-s="1-2" x="420" y="60" class="dg-n">остановлен</text>
+            <text data-s="1-2" x="420" y="110" class="dg-n">остановлен</text>
+            <text data-s="3-" x="420" y="60" class="dg-bad">лидер (не был в ISR)</text>
+            <text data-s="3-" x="420" y="110" class="dg-n">последователь</text>
+            <text data-s="1" x="420" y="160" class="dg-ok">лидер, ISR = [3]</text>
+            <text data-s="2-3" x="420" y="160" class="dg-bad">упал</text>
+            <text data-s="4" x="420" y="160" class="dg-bad">обрезал 3–5</text>
+            <text data-s="1" x="20" y="208" class="dg-t">ISR = только лидер; min.insync=1 позволяет подтверждать записи 3–5.</text>
+            <text data-s="2" x="20" y="208" class="dg-bad">Лидер упал; записей 3–5 больше нигде нет.</text>
+            <text data-s="3" x="20" y="208" class="dg-bad">Unclean: лидером стал отставший брокер 1.</text>
+            <text data-s="4" x="20" y="208" class="dg-bad">Старый лидер вернулся и обрезал лог: 3–5 потеряны навсегда.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Последователи остановлены, ISR сократился до лидера. С min.insync.replicas=1 лидер подтверждает записи 3–5, хотя они есть только у него.</li>
+          <li>Лидер падает. Реплик из ISR не осталось, партиция без лидера.</li>
+          <li>Брокеры 1 и 2 возвращаются с логом до смещения 2. Unclean-выборы разрешены, и брокер 1 становится лидером, хотя был вне ISR.</li>
+          <li>Старый лидер возвращается последователем и обрезает свой лог до лога нового лидера. Подтверждённые записи 3–5 исчезли из кластера.</li>
+        </ol>
+      </figure>
+      <p>Продюсер получил шесть подтверждений, а прочитать можно три. Потерю создали две настройки вместе: <code>min.insync.replicas=1</code> позволил подтверждать записи, которые есть на одном брокере, а unclean-выборы отдали лидерство брокеру без них. По умолчанию unclean-выборы выключены, и правильная реакция на такую аварию — ждать возвращения реплики из ISR. Включают их для данных, где доступность важнее полноты: метрики, логи.</p>
+    </section>
+
+    <section class="step" id="kraft">
+      <h2>Метаданными управляет кворум контроллеров KRaft, и его потеря замораживает кластер</h2>
+      <p>Кто лидер партиции, кто в ISR, какие есть топики — всё это метаданные кластера. С Kafka 4.0 их хранит только KRaft: несколько контроллеров ведут журнал метаданных по протоколу Raft, а ZooKeeper удалён. Один контроллер активный, остальные — горячий резерв; изменение метаданных принимается, когда его записало большинство контроллеров. Три контроллера переживают потерю одного, пять — двух. Брокеры получают метаданные из журнала контроллеров и регулярно шлют им heartbeat.</p>
+      <p>Первый вариант демо держал роли брокера и контроллера на тех же трёх узлах. Остановка двух брокеров заодно останавливала два контроллера из трёх: кворум метаданных терялся, оставшийся брокер не мог подтвердить своё состояние и перестал принимать запись даже с <code>min.insync.replicas=1</code>. Поэтому в проде контроллеры выносят на отдельные узлы, а в демо их три отдельных контейнера. Совмещённый режим годится для разработки и маленьких кластеров. Как работает кворум и выборы лидера в Raft, разобрано в <a href="consensus.html">Consensus &amp; Time</a>.</p>
+      <div class="trap">
+        <p class="myth">С фактором репликации 3 данные в Kafka не теряются.</p>
+        <p class="fact">Три копии защищают только подтверждённое на нескольких из них. С acks=1 или min.insync.replicas=1 запись может существовать на одном брокере, и unclean-выборы её сотрут: в демо из шести подтверждённых записей осталось три. Надёжность даёт сочетание RF=3, min.insync.replicas=2, acks=all и выключенных unclean-выборов.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Лидер обслуживает партицию, последователи копируют; ISR — не отставшие реплики, лидер выбирается из них.</li>
+        <li>Консьюмеры читают до high watermark — записанного на всех репликах ISR.</li>
+        <li>RF=3 и min.insync.replicas=2: потеря одного брокера незаметна; двух — NotEnoughReplicas для acks=all, а продюсер видит TimeoutException.</li>
+        <li>acks=1 и min.insync=1 подтверждают записи на одном брокере; unclean-выборы стирают их: 6 подтверждено, 3 прочитано.</li>
+        <li>KRaft: кворум контроллеров хранит метаданные; контроллеры выносят на отдельные узлы.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="replication-isr" data-freq="3">
+      <h3>Что такое ISR и min.insync.replicas?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>ISR — набор реплик партиции, которые не отстают от лидера дольше replica.lag.time.max.ms; новый лидер выбирается только из них. min.insync.replicas — минимальный размер ISR, при котором лидер принимает запись с acks=all; если реплик меньше, запись отклоняется с NotEnoughReplicas. Схема RF=3, min.insync.replicas=2 переживает потерю одного брокера без остановки записи и без потерь.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>NotEnoughReplicas повторяемая: продюсер повторяет её до delivery.timeout.ms и отдаёт TimeoutException.</li>
+            <li>min.insync.replicas не действует на acks=1 и acks=0.</li>
+            <li>Консьюмеры читают до high watermark, поэтому видимая запись переживёт смену лидера в пределах ISR.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="replication-unclean" data-freq="2">
+      <h3>Что такое unclean leader election и когда его включать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Выбор лидером реплики не из ISR, когда все реплики ISR недоступны. Партиция становится доступной сразу, но записи, которых не было у новой реплики, теряются, а старый лидер при возвращении обрезает лог. По умолчанию выключено; включают для данных, где доступность важнее полноты, — метрики, логи.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Опасно в сочетании с acks=1 или min.insync.replicas=1: подтверждённые записи живут на одном брокере.</li>
+            <li>Без unclean-выборов партиция остаётся без лидера, пока не вернётся реплика из ISR.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Чем опасна эта конфигурация топика платежей?</summary>
+          <pre><code class="language-text">replication.factor=3
+min.insync.replicas=1
+unclean.leader.election.enable=true
+# продюсер: acks=1</code></pre>
+          <p>Подтверждённая запись может существовать только на лидере: acks=1 не ждёт реплик, а min.insync.replicas=1 позволил бы и acks=all подтверждать при ISR из одного брокера. При падении лидера unclean-выборы отдадут лидерство отставшей реплике, и подтверждённые события пропадут, как в демо. Для платежей нужны acks=all, min.insync.replicas=2 и выключенные unclean-выборы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="replication-kraft" data-freq="2">
+      <h3>Что такое KRaft и чем он заменил ZooKeeper?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>KRaft — режим, в котором метаданные кластера хранит кворум контроллеров Kafka в журнале по протоколу Raft, без внешнего ZooKeeper. Один контроллер активный, изменения подтверждает большинство. С Kafka 4.0 ZooKeeper не поддерживается. Брокеры получают метаданные из журнала контроллеров и шлют им heartbeat.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Три контроллера переживают потерю одного; потеря кворума замораживает изменения метаданных и выборы лидеров.</li>
+            <li>В проде контроллеры выносят на отдельные узлы, чтобы падение брокеров не роняло кворум.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://kafka.apache.org/documentation/#replication">Apache Kafka: Replication</a> — основа урока: лидеры, ISR, high watermark, unclean leader election.</li>
+      <li><a href="https://kafka.apache.org/documentation/#kraft">Apache Kafka: KRaft</a> — кворум контроллеров и роли узлов.</li>
+      <li><a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-500%3A+Replace+ZooKeeper+with+a+Self-Managed+Metadata+Quorum">KIP-500: Replace ZooKeeper with a Self-Managed Metadata Quorum</a>.</li>
+      <li><a href="https://kafka.apache.org/documentation/#topicconfigs_min.insync.replicas">min.insync.replicas</a> и <a href="https://kafka.apache.org/documentation/#topicconfigs_unclean.leader.election.enable">unclean.leader.election.enable</a> — описание настроек топика.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
