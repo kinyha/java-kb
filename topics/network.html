@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Networking: How a Request Travels · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="network">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Networking: How a Request Travels</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Запрос к API проходит несколько этапов, и у каждого своя цена. Сначала DNS превращает имя в IP-адрес, затем TCP открывает соединение, TLS договаривается о шифровании, и только потом уходит HTTP-запрос. Каждый уровень стека заворачивает данные верхнего в свой заголовок и знает свой адрес: MAC — до соседнего узла, IP — до машины, порт — до процесса, Host — до сайта. По дороге пакет проходит маршрутизаторы, NAT подменяет адреса, а прокси и балансировщики завершают соединения и открывают новые. Почти любую сетевую проблему диагностируют вопросом «на каком этапе ушло время и с кем на самом деле установлено соединение».</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Клиент нажал «Оплатить», и полсекунды ушло до первого байта ответа</h2>
+      <p>Мобильное приложение вызывает платёжный API, а пользователь видит спиннер. Сервер по своим логам отвечает за 30 мс. Где остальное время? Ответ даёт разбор запроса по этапам. curl умеет печатать время каждого этапа от начала запроса:</p>
+      <pre><code class="language-bash">curl -s -o /dev/null -w 'dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} \
+ttfb=%{time_starttransfer} total=%{time_total} http=%{http_version}\n' https://example.com/
+# Все значения — секунды от начала запроса, нарастающим итогом.</code></pre>
+      <pre class="out">dns=0.096031 tcp=0.097820 tls=0.393674 ttfb=0.529989 total=0.530287 http=2</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Шкала времени двух запросов к example.com. Первый: DNS 96 мс, TCP 1.8 мс, TLS 296 мс, ожидание первого байта 136 мс, всего 530 мс. Второй сразу после первого: DNS 3.4 мс из кеша, TCP 1.4 мс, TLS 309 мс, первый байт 132 мс. Дольше всего — TLS.">
+            <text x="20" y="22" class="dg-cap">ЭТАПЫ ЗАПРОСА, МС</text>
+            <text x="20" y="62" class="dg-n">1-й</text>
+            <rect x="60" y="44" width="113.8" height="28" rx="4" class="dg-cell"/>
+            <rect x="173.8" y="44" width="2.1" height="28" class="dg-cell hit"/>
+            <rect x="175.9" y="44" width="350.7" height="28" rx="4" class="dg-cell miss"/>
+            <rect x="526.6" y="44" width="161.5" height="28" rx="4" class="dg-cell hit"/>
+            <text x="20" y="132" class="dg-n">2-й</text>
+            <rect x="60" y="114" width="4" height="28" class="dg-cell"/>
+            <rect x="64" y="114" width="1.7" height="28" class="dg-cell hit"/>
+            <rect x="65.7" y="114" width="366.6" height="28" rx="4" class="dg-cell miss"/>
+            <rect x="432.3" y="114" width="156.3" height="28" rx="4" class="dg-cell hit"/>
+            <g text-anchor="middle">
+              <text x="117" y="63" class="dg-n">DNS 96</text>
+              <text x="351" y="63" class="dg-bad">TLS 296</text>
+              <text x="607" y="63" class="dg-n">первый байт 136</text>
+              <text x="249" y="133" class="dg-bad">TLS 309</text>
+              <text x="510" y="133" class="dg-n">первый байт 132</text>
+            </g>
+            <text x="180" y="90" class="dg-ok">TCP 1.8</text>
+            <text x="70" y="160" class="dg-n">DNS 3.4 из кеша, TCP 1.4</text>
+            <path d="M60 180 L 700 180" class="dg-line"/>
+            <text x="60" y="194" class="dg-n">0</text>
+            <text x="660" y="194" class="dg-n">530 мс</text>
+          </svg>
+        </div>
+        <figcaption>DNS при повторе взялся из кеша. TLS дорогой оба раза: каждый новый запрос curl открывает новое соединение. А TCP подозрительно быстрый — о причине в шаге 5.</figcaption>
+      </figure>
+      <p>Числа сняты на машине автора и в другой сети будут другими. Главное — структура. Полсекунды складываются из нескольких сетевых обменов, которые происходят до того, как сервер вообще увидел запрос. Чтобы понимать, какой из них можно сократить, нужно знать, что происходит на каждом уровне. DNS, TCP, TLS и HTTP подробно разобраны в соседних темах <a href="dns.html">DNS</a>, <a href="tcp-udp.html">TCP &amp; UDP</a>, <a href="tls.html">TLS &amp; HTTPS</a> и <a href="http.html">HTTP</a>. Здесь — общая карта пути.</p>
+    </section>
+
+    <section class="step" id="layers">
+      <h2>Каждый уровень заворачивает данные в свой заголовок и знает свой адрес</h2>
+      <p>Сетевой стек делится на уровни, чтобы каждый решал одну задачу и не знал о деталях соседей. Модель OSI насчитывает семь уровней, на практике пользуются четырьмя уровнями TCP/IP. Когда приложение отправляет HTTP-запрос, каждый уровень ниже добавляет к данным свой заголовок. Это называют инкапсуляцией.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 248" role="img" aria-label="Кадр Ethernet содержит IP-пакет, IP-пакет содержит TCP-сегмент, сегмент содержит 72 байта HTTP-запроса. Заголовки: Ethernet 14 байт, IP 20 байт, TCP 20 байт. Справа для каждого уровня указан его адрес: MAC — следующий узел, IP — машина, порт — процесс, Host — сайт.">
+            <rect x="20" y="30" width="440" height="190" rx="10" class="dg-box"/>
+            <rect x="40" y="62" width="400" height="146" rx="9" class="dg-cell"/>
+            <rect x="60" y="94" width="360" height="102" rx="8" class="dg-cell"/>
+            <rect x="80" y="126" width="320" height="58" rx="7" class="dg-cell hit"/>
+            <text x="32" y="50" class="dg-in">Ethernet: 14 байт заголовка</text>
+            <text x="52" y="82" class="dg-in">IP: 20 байт</text>
+            <text x="72" y="114" class="dg-in">TCP: 20 байт</text>
+            <text x="92" y="150" class="dg-in">HTTP: 72 байта</text>
+            <text x="92" y="170" class="dg-n">GET /payments/17 HTTP/1.1, Host: …</text>
+            <!-- адреса уровней -->
+            <text x="490" y="50" class="dg-cap">ЧТО АДРЕСУЕТ УРОВЕНЬ</text>
+            <text x="490" y="78" class="dg-in">MAC</text>
+            <text x="540" y="78" class="dg-n">следующий узел в сети</text>
+            <text x="490" y="110" class="dg-in">IP</text>
+            <text x="540" y="110" class="dg-n">машина в интернете</text>
+            <text x="490" y="142" class="dg-in">порт</text>
+            <text x="540" y="142" class="dg-n">процесс на машине</text>
+            <text x="490" y="174" class="dg-in">Host</text>
+            <text x="540" y="174" class="dg-n">сайт за одним IP</text>
+            <text x="20" y="242" class="dg-s">MTU кадра 1500 байт: на TCP-данные остаётся 1460 (MSS).</text>
+          </svg>
+        </div>
+        <figcaption>Маршрутизатор смотрит только до IP, балансировщик L4 — до порта, L7 — до HTTP. Чем глубже смотрит узел, тем больше он может сделать и тем больше работы тратит на пакет.</figcaption>
+      </figure>
+      <p>Демо <a href="../examples/net/RequestPathDemo.java">RequestPathDemo.java</a> отправляет HTTP-запрос через обычный сокет, без HTTP-клиента, и показывает, что такое «HTTP» на самом деле — текст поверх TCP:</p>
+      <pre><code class="language-java">String request = "GET /payments/17 HTTP/1.1\r\n"
+        + "Host: " + host + "\r\n"     // Обязательный в HTTP/1.1: какой сайт нужен.
+        + "Connection: close\r\n"
+        + "\r\n";                       // Пустая строка — конец заголовков.
+socket.getOutputStream().write(request.getBytes(StandardCharsets.US_ASCII));</code></pre>
+      <pre><code class="language-bash">cd examples/net
+java RequestPathDemo.java # JDK 21; работает только на loopback, сеть не нужна.</code></pre>
+      <pre class="out">connection: 127.0.0.1:60956 -&gt; 127.0.0.1:60955
+request bytes: 72, first line: GET /payments/17 HTTP/1.1
+response: HTTP/1.1 200 OK | payments-backend served /payments/17 for client port 60956</pre>
+      <p>Каждое TCP-соединение определяется четвёркой: IP и порт клиента, IP и порт сервера. Порт клиента выдаёт ядро из диапазона эфемерных портов, на macOS это 49152–65535 (<code>sysctl net.inet.ip.portrange</code>), на Linux по умолчанию 32768–60999. Порты в выводе меняются от запуска к запуску. Диапазон кончается: сервис, который открывает новое соединение на каждый запрос к одному адресу, упирается в эфемерные порты и TIME_WAIT. Это разобрано в <a href="tcp-udp.html">TCP &amp; UDP</a>.</p>
+    </section>
+
+    <section class="step" id="routing">
+      <h2>IP-пакет идёт от маршрутизатора к маршрутизатору, и каждый решает только следующий шаг</h2>
+      <p>Ни один маршрутизатор не знает полного пути до сервера. У каждого есть таблица маршрутов: для какого диапазона адресов на какой интерфейс и какому соседу отдать пакет. Ноутбук отдаёт почти всё шлюзу по умолчанию — домашнему роутеру. Тот — провайдеру, и так далее, пока пакет не попадёт в сеть сервера. Между крупными сетями маршруты распространяет протокол BGP.</p>
+      <p>Каждый маршрутизатор уменьшает в заголовке IP поле TTL на единицу. Когда оно становится нулём, пакет выбрасывается, а отправителю уходит ICMP-сообщение «время жизни истекло». Это защищает сеть от петель. На этом же построен <code>traceroute</code>: он шлёт пакеты с TTL 1, 2, 3… и по ответам узнаёт каждый промежуточный узел.</p>
+      <pre><code class="language-bash">route -n get 172.66.147.243 | grep interface # Через какой интерфейс уйдёт пакет к example.com.
+traceroute -m 8 -q 1 -w 1 example.com</code></pre>
+      <pre class="out">  interface: utun6
+traceroute to example.com (172.66.147.243), 8 hops max, 40 byte packets
+ 1  *
+ 2  *
+ 3  *</pre>
+      <p>На машине автора маршрут к example.com идёт не через Wi-Fi (<code>en0</code>), а через туннель <code>utun6</code> — интерфейс VPN-клиента. Пакеты заворачиваются в ещё один уровень инкапсуляции и уходят на VPN-сервер, а traceroute не видит ни одного узла: туннель не отвечает на истёкший TTL. Звёздочки в traceroute не значат, что сеть сломана: многие узлы просто не отвечают на ICMP. Для живой диагностики полезнее <code>mtr</code>, который показывает потери и задержки на каждом узле непрерывно.</p>
+    </section>
+
+    <section class="step" id="nat">
+      <h2>NAT подменяет адрес и порт, поэтому сервер видит не тебя</h2>
+      <p>Ноутбук в домашней сети имеет частный адрес вида <code>192.168.1.20</code>. В интернете такие адреса не маршрутизируются: их миллионы одинаковых. Роутер выполняет NAT — подменяет адрес и порт отправителя на свой публичный адрес и свободный порт, а соответствие запоминает в таблице. Адреса на схеме взяты из диапазонов для документации.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Ноутбук 192.168.1.20 порт 60872 отправляет пакет на сервер 198.51.100.10 порт 443. Роутер заменяет отправителя на свой публичный адрес 203.0.113.7 порт 40001 и записывает соответствие в таблицу NAT. Сервер отвечает на 203.0.113.7:40001, роутер по таблице возвращает ответ ноутбуку. Входящий пакет без записи в таблице роутер отбрасывает.">
+            <defs>
+              <marker id="nt-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="nt-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="nt-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="40" width="170" height="60" rx="9" class="dg-box"/>
+            <rect x="270" y="30" width="190" height="130" rx="9" class="dg-box"/>
+            <rect x="540" y="40" width="160" height="60" rx="9" class="dg-box"/>
+            <rect data-s="1-" x="284" y="96" width="162" height="50" rx="6" class="dg-cell"/>
+            <g text-anchor="middle">
+              <text x="105" y="64" class="dg-in">ноутбук</text>
+              <text x="105" y="82" class="dg-n">192.168.1.20</text>
+              <text x="365" y="52" class="dg-in">роутер с NAT</text>
+              <text x="365" y="70" class="dg-n">публичный 203.0.113.7</text>
+              <text x="620" y="64" class="dg-in">сервер</text>
+              <text x="620" y="82" class="dg-n">198.51.100.10:443</text>
+            </g>
+            <text data-s="1-" x="294" y="116" class="dg-n">таблица NAT</text>
+            <text data-s="1-" x="294" y="134" class="dg-in">.1.20:60872 ↔ :40001</text>
+            <!-- шаг 1: исходящий -->
+            <path data-s="1" d="M190 60 L 266 60" class="dg-line" marker-end="url(#nt-n)"/>
+            <text data-s="1" x="20" y="130" class="dg-n">от 192.168.1.20:60872</text>
+            <!-- шаг 2: подмена -->
+            <path data-s="2" d="M460 60 L 536 60" class="dg-line" marker-end="url(#nt-n)"/>
+            <text data-s="2" x="470" y="130" class="dg-n">от 203.0.113.7:40001</text>
+            <!-- шаг 3: ответ сервера -->
+            <path data-s="3" d="M540 86 L 464 86" class="dg-line ok" marker-end="url(#nt-ok)"/>
+            <text data-s="3" x="470" y="130" class="dg-ok">кому 203.0.113.7:40001</text>
+            <!-- шаг 4: обратная подмена -->
+            <path data-s="4" d="M270 86 L 194 86" class="dg-line ok" marker-end="url(#nt-ok)"/>
+            <text data-s="4" x="20" y="130" class="dg-ok">кому 192.168.1.20:60872</text>
+            <!-- шаг 5: входящее без записи -->
+            <path data-s="5" d="M540 190 C 500 196, 470 186, 446 166" class="dg-line bad" marker-end="url(#nt-bad)"/>
+            <text data-s="5" x="470" y="215" class="dg-bad">:50123 — записи нет, отброшен</text>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="200" class="dg-t">Пакет уходит с частным адресом.</text>
+            <text data-s="2" x="20" y="200" class="dg-t">Роутер подменил адрес и порт.</text>
+            <text data-s="3" x="20" y="200" class="dg-ok">Сервер видит только роутер.</text>
+            <text data-s="4" x="20" y="200" class="dg-ok">Ответ вернулся по таблице.</text>
+            <text data-s="5" x="20" y="200" class="dg-bad">Снаружи не подключиться.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Ноутбук отправляет пакет с адреса 192.168.1.20 и эфемерного порта 60872 на сервер 198.51.100.10:443.</li>
+          <li>Роутер заменяет отправителя на свой публичный адрес 203.0.113.7 и свободный порт 40001 и записывает соответствие в таблицу.</li>
+          <li>Сервер видит соединение от 203.0.113.7:40001 и отвечает на этот адрес. О ноутбуке он не знает.</li>
+          <li>Роутер находит запись в таблице и возвращает ответ на 192.168.1.20:60872.</li>
+          <li>Пакет, пришедший снаружи без записи в таблице, роутер отбрасывает: никто изнутри такого соединения не открывал.</li>
+        </ol>
+      </figure>
+      <p>Для бэкенда у NAT несколько следствий. Сервер видит адрес NAT, а не клиента: сотни пользователей мобильного оператора приходят с одного IP, и лимит запросов «по IP» блокирует их всех вместе. Подключиться снаружи к машине за NAT нельзя без проброса порта — поэтому веб-хуки банка приходят на публичный адрес балансировщика, а не на pod. Таблица NAT конечна: в облаке NAT-шлюз ограничивает число одновременных соединений к одному адресу назначения, и сервис, открывающий соединение на каждый запрос к банку, упирается в этот лимит раньше, чем в свои ресурсы.</p>
+    </section>
+
+    <section class="step" id="proxies">
+      <h2>Прокси и балансировщик завершают соединение и открывают новое</h2>
+      <p>Между клиентом и приложением почти всегда стоит что-то ещё: облачный балансировщик, ingress-контроллер Kubernetes, nginx, CDN. <b>Балансировщик L4</b> видит IP и порты и распределяет TCP-соединения целиком, не заглядывая внутрь. <b>Балансировщик L7</b> — обратный прокси — завершает TCP и TLS, читает HTTP и выбирает backend по заголовкам и пути. Демо делает именно это: на одном порту два «сайта», и выбор зависит только от заголовка Host.</p>
+      <pre><code class="language-java">// «Обратный прокси»: тот же IP и порт, backend выбирается по Host.
+String backend = host.startsWith("admin.") ? "admin-backend" : "payments-backend";</code></pre>
+      <pre class="out">response: HTTP/1.1 200 OK | payments-backend served /payments/17 for client port 60956
+connection: 127.0.0.1:60957 -&gt; 127.0.0.1:60955
+request bytes: 74, first line: GET /payments/17 HTTP/1.1
+response: HTTP/1.1 200 OK | admin-backend served /payments/17 for client port 60957</pre>
+      <p>Запросы отличаются одной строкой Host, а попали в разные backend. Так один IP балансировщика обслуживает десятки сервисов. Цена L7: прокси держит два соединения на каждый запрос — с клиентом и с backend, — а приложение видит прокси, а не клиента. Адрес клиента и исходный протокол прокси передаёт заголовками <code>X-Forwarded-For</code> и <code>X-Forwarded-Proto</code> или стандартным <code>Forwarded</code>. Доверять им можно только от своего прокси: клиент может прислать любой X-Forwarded-For сам. В Spring Boot это включает <code>server.forward-headers-strategy</code>.</p>
+      <p>Теперь понятна аномалия из первого шага. TCP установился за 1.8 мс, а TLS занял 296 мс. До сервера в другом городе TCP-рукопожатие не может занять две миллисекунды: свет не успеет. Значит, TCP завершился на ближнем узле — здесь это VPN-клиент на самой машине, — а TLS-рукопожатие уже пошло через туннель до настоящего сервера. Время connect меньше нескольких миллисекунд почти всегда означает соединение с ближним прокси, sidecar или балансировщиком, а не с приложением.</p>
+      <div class="trap">
+        <p class="myth">Если в логах приложения IP клиента, значит, это адрес пользователя.</p>
+        <p class="fact">За балансировщиком приложение видит адрес балансировщика, за NAT оператора — адрес NAT. Настоящий адрес приходит в X-Forwarded-For, и только если прокси свой и доверенный. Правила лимитов и блокировок по IP строят с учётом всей цепочки.</p>
+      </div>
+    </section>
+
+    <section class="step" id="diagnose">
+      <h2>Медленный запрос разбирают по этапам, и каждый этап лечится по-своему</h2>
+      <table class="mx">
+        <thead><tr><th>Этап</th><th>Цена</th><th>Как сократить</th></tr></thead>
+        <tbody>
+          <tr><td>DNS</td><td>Десятки миллисекунд при промахе кеша</td><td>Кеш резолвера; в JVM — <code>networkaddress.cache.ttl</code>; не резолвить на каждый запрос</td></tr>
+          <tr><td>TCP</td><td>Один круг до сервера (RTT)</td><td>Переиспользовать соединения: keep-alive, пул в HTTP-клиенте</td></tr>
+          <tr><td>TLS</td><td>Ещё один-два RTT и вычисления</td><td>TLS 1.3, возобновление сессий, то же переиспользование соединений</td></tr>
+          <tr><td>Первый байт</td><td>Время сервера и сети</td><td>Профилирование сервера, близость к клиенту, CDN</td></tr>
+        </tbody>
+      </table>
+      <p>Второй запрос в первом шаге показал разницу: DNS взялся из кеша за 3.4 мс, но TLS снова занял 309 мс, потому что curl открыл новое соединение. HTTP-клиент с пулом соединений платит за TCP и TLS один раз, а дальше отправляет запросы по готовому соединению. Поэтому пул и таймауты HTTP-клиента — первое, что настраивают для вызовов банка, как разобрано в <a href="spring-clients.html">HTTP Clients</a>. HTTP/2 и HTTP/3 идут дальше и разными способами сокращают задержки на одном соединении — это тема <a href="http-versions.html">HTTP/2 &amp; HTTP/3</a>.</p>
+      <p>Набор инструментов для расследования: <code>curl -w</code> для этапов одного запроса, <code>dig</code> для DNS, <code>ss</code> или <code>netstat</code> для состояния соединений на машине, <code>mtr</code> для маршрута, <code>openssl s_client</code> для TLS. А в приложении — метрики HTTP-клиента: время получения соединения из пула отдельно от времени запроса.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Запрос проходит DNS, TCP, TLS и HTTP; до первого байта сервера уходит несколько сетевых кругов.</li>
+        <li>Каждый уровень добавляет свой заголовок и адресует своё: MAC — соседа, IP — машину, порт — процесс, Host — сайт.</li>
+        <li>Маршрутизаторы решают только следующий шаг; TTL защищает от петель, на нём построен traceroute.</li>
+        <li>NAT подменяет адрес и порт: сервер видит адрес NAT, а снаружи к машине за NAT не подключиться.</li>
+        <li>L7-прокси завершает соединение и выбирает backend по HTTP; адрес клиента приходит в X-Forwarded-For.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="net-browser-request" data-freq="3">
+      <h3>Что происходит, когда вводишь адрес сайта в браузере?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Браузер разбирает URL и узнаёт IP через DNS: сначала свои кеши и кеш ОС, потом резолвер, который при необходимости обходит корневые, доменные и авторитативные серверы. Затем открывает TCP-соединение — трёхстороннее рукопожатие, — для HTTPS проводит TLS-рукопожатие и проверяет сертификат. После этого отправляет HTTP-запрос, получает ответ, разбирает HTML и делает новые запросы за ресурсами, обычно по тому же соединению.</p>
+          <p>По дороге пакеты проходят домашний роутер с NAT, маршрутизаторы провайдеров и, как правило, балансировщик или CDN перед приложением.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>До первого байта ответа уходит несколько RTT: DNS, TCP, один-два на TLS; TLS 1.3 и HTTP/3 сокращают их.</li>
+            <li>Балансировщик L7 завершает TCP и TLS и открывает новое соединение к backend.</li>
+            <li>Переиспользование соединений и кеши убирают большую часть этих затрат для повторных запросов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="net-osi" data-freq="2">
+      <h3>Зачем нужны уровни OSI и TCP/IP и что на каком уровне?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Уровни разделяют задачи: каждый решает свою и не знает деталей соседей. В TCP/IP их четыре: канальный (Ethernet, Wi-Fi, MAC-адреса), сетевой (IP, маршрутизация), транспортный (TCP и UDP, порты) и прикладной (HTTP, DNS, TLS). Отправляя данные, каждый уровень добавляет свой заголовок, а получатель снимает их в обратном порядке.</p>
+          <p>На практике уровни важны для понимания оборудования: маршрутизатор работает до IP, балансировщик L4 — до портов, L7 — с HTTP.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>MTU Ethernet 1500 байт; после заголовков IP и TCP на данные остаётся 1460 — MSS. VPN и туннели уменьшают MTU.</li>
+            <li>TLS формально сидит между транспортом и приложением; в модели OSI его относят к уровням 5–6.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="net-nat-proxy" data-freq="2">
+      <h3>Как NAT и прокси влияют на бэкенд?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>NAT подменяет частный адрес и порт клиента на публичный, поэтому сервер видит адрес NAT. Много пользователей оператора приходят с одного IP, а снаружи к машине за NAT не подключиться без проброса порта. Обратный прокси или балансировщик L7 завершает соединение клиента и открывает своё к приложению, так что приложение видит адрес прокси.</p>
+          <p>Настоящий адрес клиента приходит в X-Forwarded-For или Forwarded; в Spring Boot его учитывают через server.forward-headers-strategy и доверяют только своему прокси.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Лимиты и блокировки по IP за NAT оператора задевают сотни пользователей сразу.</li>
+            <li>У облачного NAT-шлюза ограничено число одновременных соединений к одному адресу; пул соединений к банку от этого спасает.</li>
+            <li>Время connect в единицы миллисекунд — признак, что соединение установлено с ближним прокси или sidecar, а не с сервером.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему лимит запросов по IP иногда блокирует сразу целый город?</summary>
+          <pre><code class="language-java">String clientIp = request.getRemoteAddr();            // Адрес, с которого пришло соединение.
+if (rateLimiter.tooMany(clientIp)) return status(429); // 100 запросов в минуту на IP.</code></pre>
+          <p>За балансировщиком getRemoteAddr вернёт адрес балансировщика, и лимит станет общим на всех клиентов. Если же адрес клиента берётся правильно, мобильный оператор всё равно выводит тысячи абонентов через несколько адресов NAT. Лимит по IP годится только как грубая защита; основной лимит строят по пользователю или ключу API, а адрес берут из X-Forwarded-For своего доверенного прокси.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>James Kurose, Keith Ross, Computer Networking: A Top-Down Approach, 8-е изд., главы 1 и 4 — основа урока: уровни, инкапсуляция, маршрутизация, NAT.</li>
+      <li>Ilya Grigorik, <a href="https://hpbn.co/">High Performance Browser Networking</a>, главы 1–2 — задержки, из чего складывается время запроса.</li>
+      <li><a href="https://everything.curl.dev/usingcurl/verbose/writeout.html">everything curl: --write-out</a> — какие этапы измеряют time_namelookup, time_connect, time_appconnect.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc7239">RFC 7239: Forwarded HTTP Extension</a> — стандартный заголовок с адресом клиента за прокси.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -101,7 +101,7 @@ window.KB_TREE = [
           scope: 'процессы и сигналы, права, pipes, grep, top, ss, lsof, df, где смотреть логи' },
       ] },
       { id: 'net', title: 'Networking', source: 'Kurose, Ross: сверху вниз по стеку; High Performance Browser Networking', items: [
-        { id: 'network', freq: 2, status: 'empty', title: 'How a Request Travels',
+        { id: 'network', freq: 2, status: 'draft', title: 'How a Request Travels',
           scope: 'модели OSI и TCP/IP, путь запроса от браузера до сервера, IP и маршрутизация, NAT, прокси' },
         { id: 'tcp-udp', freq: 2, status: 'empty', title: 'TCP & UDP',
           scope: 'рукопожатие, управление потоком и перегрузкой, keep-alive, TIME_WAIT, когда нужен UDP' },
