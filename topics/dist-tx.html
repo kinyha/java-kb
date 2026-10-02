@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Distributed Transactions · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="dist-tx">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Distributed Transactions</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Когда операция меняет данные в двух сервисах или базах, обычная транзакция не помогает: у каждого участника свой коммит. Двухфазный коммит (2PC) делает их атомарными: сначала все участники подготавливаются и обещают закоммитить, потом координатор командует коммит. Цена — блокировки до решения координатора: если он упал между фазами, данные участников заперты. Поэтому между сервисами используют саги: цепочку локальных транзакций, где каждая видна сразу, а при отказе на следующем шаге предыдущие отменяются компенсирующими транзакциями. Сага не даёт изоляции: промежуточные состояния видны всем, и это проектируют явно.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Деньги ушли с кошелька, а до магазина не дошли</h2>
+      <p>Оплата заказа с внутреннего кошелька затрагивает два сервиса: кошелёк списывает деньги у покупателя, банковский сервис зачисляет их магазину. У каждого своя база. Кошелёк закоммитил списание, а зачисление упало: счёт магазина заблокирован. Деньги покупателя исчезли — их нет ни на кошельке, ни у магазина. Сделать обе операции одной транзакцией базы невозможно: баз две.</p>
+      <p>Тема сравнивает два подхода к атомарности через границы: двухфазный коммит и сагу. Транзакции внутри одной базы — в <a href="db-tx.html">ACID &amp; Isolation</a>, надёжная публикация шагов саги — в <a href="outbox.html">Transactional Outbox</a>, повторы шагов — в <a href="idempotency.html">Idempotency</a>. Демо <a href="../examples/dist-tx/DistTxDemo.java">DistTxDemo.java</a> работает с двумя базами PostgreSQL 17 — <code>wallet</code> и <code>bank</code> — в одном контейнере с включёнными prepared-транзакциями.</p>
+    </section>
+
+    <section class="step" id="two-pc">
+      <h2>2PC: все участники обещают закоммитить, потом координатор командует</h2>
+      <pre><code class="language-java">exec(w, "update wallet set balance = balance - 300 where id = 'anna'");
+exec(b, "update account set balance = balance + 300 where id = 'shop-7'");
+exec(w, "prepare transaction 'pay-1-wallet'");    // Фаза 1: каждая база обещает, что сможет закоммитить.
+exec(b, "prepare transaction 'pay-1-bank'");
+exec(w, "commit prepared 'pay-1-wallet'");        // Фаза 2: координатор говорит «коммит» обеим.
+exec(b, "commit prepared 'pay-1-bank'");</code></pre>
+      <pre class="out">== 2PC: anna 700, shop-7 300</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Координатор отправляет prepare кошельку и банку. Оба записывают изменения на диск и отвечают готов. Координатор фиксирует решение коммит и отправляет commit обоим. Если координатор упал после prepare, участники ждут решения, держа блокировки.">
+            <defs><marker id="pc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="260" y="20" width="200" height="56" rx="9" class="dg-box"/>
+            <text x="360" y="44" class="dg-in" text-anchor="middle">координатор</text>
+            <text data-s="3" x="360" y="64" class="dg-ok" text-anchor="middle">решение: commit</text>
+            <text data-s="4" x="360" y="64" class="dg-bad" text-anchor="middle">упал</text>
+            <rect x="40" y="130" width="200" height="56" rx="9" class="dg-box"/>
+            <text x="140" y="154" class="dg-in" text-anchor="middle">wallet</text>
+            <rect x="480" y="130" width="200" height="56" rx="9" class="dg-box"/>
+            <text x="580" y="154" class="dg-in" text-anchor="middle">bank</text>
+            <text data-s="2" x="140" y="174" class="dg-n" text-anchor="middle">prepared, блокировки</text>
+            <text data-s="2" x="580" y="174" class="dg-n" text-anchor="middle">prepared, блокировки</text>
+            <text data-s="3" x="140" y="174" class="dg-ok" text-anchor="middle">committed</text>
+            <text data-s="3" x="580" y="174" class="dg-ok" text-anchor="middle">committed</text>
+            <text data-s="4" x="140" y="174" class="dg-bad" text-anchor="middle">ждёт решения</text>
+            <text data-s="4" x="580" y="174" class="dg-bad" text-anchor="middle">ждёт решения</text>
+            <path data-s="1" d="M300 76 L 180 126" class="dg-line" marker-end="url(#pc-n)"/>
+            <path data-s="1" d="M420 76 L 540 126" class="dg-line" marker-end="url(#pc-n)"/>
+            <text data-s="1" x="160" y="100" class="dg-n">prepare</text>
+            <text data-s="1" x="500" y="100" class="dg-n">prepare</text>
+            <path data-s="2" d="M180 126 L 300 80" class="dg-line ok" marker-end="url(#pc-n)"/>
+            <path data-s="2" d="M540 126 L 420 80" class="dg-line ok" marker-end="url(#pc-n)"/>
+            <text data-s="2" x="160" y="100" class="dg-ok">готов</text>
+            <text data-s="2" x="510" y="100" class="dg-ok">готов</text>
+            <path data-s="3" d="M300 76 L 180 126" class="dg-line ok" marker-end="url(#pc-n)"/>
+            <path data-s="3" d="M420 76 L 540 126" class="dg-line ok" marker-end="url(#pc-n)"/>
+            <text data-s="1" x="20" y="206" class="dg-t">Фаза 1: координатор просит всех подготовиться.</text>
+            <text data-s="2" x="20" y="206" class="dg-t">Участники записали изменения и обещали закоммитить.</text>
+            <text data-s="3" x="20" y="206" class="dg-ok">Фаза 2: решение «commit» — оба коммитят.</text>
+            <text data-s="4" x="20" y="206" class="dg-bad">Координатор упал: участники не знают решения и держат блокировки.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Координатор выполнил изменения у обоих участников и просит их подготовиться: PREPARE TRANSACTION.</li>
+          <li>Каждый участник записал изменения на диск так, что переживёт сбой, и ответил «готов». С этого момента он не может передумать сам.</li>
+          <li>Все готовы — координатор записывает решение и командует COMMIT PREPARED каждому.</li>
+          <li>Если координатор упал после фазы 1, участники застряли в prepared: откатить они не вправе (вдруг решение было «commit»), закоммитить — тоже. Блокировки держатся до восстановления координатора.</li>
+        </ol>
+      </figure>
+      <p>После фазы 1 каждый участник гарантирует, что сможет закоммитить, — изменения записаны в WAL, проверки пройдены. Если хоть один ответил «не могу», координатор откатывает всех. Так получается атомарность через несколько баз: в демо 300 ушли от Анны и пришли магазину одним решением.</p>
+    </section>
+
+    <section class="step" id="blocking">
+      <h2>Упавший координатор оставляет участников с запертыми данными</h2>
+      <pre class="out">== coordinator crashed after prepare: 1 prepared transaction left
+   another payment of anna: 55P03 ERROR: canceling statement due to lock timeout
+   after manual ROLLBACK PREPARED anna = 700</pre>
+      <p>Координатор подготовил транзакцию кошелька и упал. Prepared-транзакция пережила отключение клиента и держит блокировку строки Анны: любой другой платёж Анны ждёт и падает по таймауту. Решить судьбу транзакции может только восстановленный координатор по своему журналу решений или человек командой <code>ROLLBACK PREPARED</code>. Пока писалось это демо, его упавший запуск оставил такие транзакции, и следующий запуск повис на <code>DROP TABLE</code> — пришлось убирать их вручную.</p>
+      <p>Отсюда минусы 2PC между сервисами: координатор — единая точка отказа, блокировки держатся на время сетевых кругов всех участников, а каждый участник должен поддерживать протокол. В Java это XA и JTA-менеджеры транзакций, но HTTP-API партнёров, Kafka и большинство NoSQL-хранилищ в XA не участвуют. Поэтому 2PC живёт внутри распределённых баз — Spanner, CockroachDB, Citus делают его сами с отказоустойчивым координатором, — а между сервисами используют саги.</p>
+    </section>
+
+    <section class="step" id="saga">
+      <h2>Сага — цепочка локальных транзакций с компенсациями</h2>
+      <pre><code class="language-java">// Шаг 1 — локальная транзакция кошелька, сразу видна всем.
+exec(wallet, "update wallet set balance = balance - 200 where id = 'anna'");
+// Шаг 2 — зачисление в банке; неактивный счёт — бизнес-отказ.
+if (bank.update("... where id = ? and active") == 0) {
+    // Компенсация шага 1 — отдельная транзакция, не откат.
+    exec(wallet, "update wallet set balance = balance + 200 where id = 'anna'");
+}</code></pre>
+      <pre class="out">== saga to shop-7: wallet: -200 committed -&gt; bank: +200 committed
+   anna balance seen by others meanwhile: 500, final anna 500
+== saga to shop-9: wallet: -200 committed -&gt; bank: rejected (account shop-9 is not active) -&gt; wallet: +200 compensation committed
+   anna balance seen by others meanwhile: 300, final anna 500</pre>
+      <p>Каждый шаг саги — обычная локальная транзакция своего сервиса, коммитится сразу и никого не блокирует. Если следующий шаг невозможен, сага выполняет компенсации уже сделанных шагов в обратном порядке. Компенсация — не откат, а новая бизнес-операция: «вернуть 200 на кошелёк» с собственной записью в истории. Платёж магазину shop-9 отклонён, и деньги Анны вернулись.</p>
+      <p>Обратите внимание на строку «seen by others meanwhile: 300». Пока сага шла к отказу, баланс Анны был 300 — и любой, кто читал его в этот момент, видел деньги списанными. Если в это время Анна попробовала оплатить что-то ещё на 400, ей отказали бы, хотя после компенсации у неё 500. Это отсутствие изоляции — главная особенность саг. С ней работают явно: семантическая блокировка — статус <code>PENDING</code> у платежа и резерв вместо списания, — порядок шагов, при котором самые вероятные отказы проверяются первыми, и коммутативные операции, которым неважен порядок.</p>
+    </section>
+
+    <section class="step" id="orchestration">
+      <h2>Оркестратор держит состояние саги, хореография раздаёт его по событиям</h2>
+      <table class="mx">
+        <thead><tr><th></th><th>Оркестрация</th><th>Хореография</th></tr></thead>
+        <tbody>
+          <tr><td>Кто ведёт</td><td>Оркестратор вызывает шаги и компенсации</td><td>Сервисы реагируют на события друг друга</td></tr>
+          <tr><td>Где состояние саги</td><td>В таблице оркестратора, видно целиком</td><td>Размазано по сервисам и событиям</td></tr>
+          <tr><td>Добавить шаг</td><td>Изменить оркестратор</td><td>Подписать новый сервис</td></tr>
+          <tr><td>Подходит</td><td>Сложные процессы с ветвлениями, платежи</td><td>Короткие цепочки, слабая связанность</td></tr>
+        </tbody>
+      </table>
+      <p>Оркестратор хранит состояние саги в своей базе — на каком шаге, что выполнено, что компенсировано — и после перезапуска продолжает с того же места. Отсюда требования к шагам: каждый шаг и каждая компенсация должны быть идемпотентными, потому что после сбоя оркестратор повторит последний неподтверждённый шаг. Команды и события между шагами отправляют через outbox, чтобы не потерять их между локальной транзакцией и брокером. Компенсация не может провалиться окончательно: её повторяют, пока не выполнится, а то, что не компенсируется — отправленное письмо, выданный наличными платёж, — ставят последним шагом. Готовые движки — Temporal, Camunda, Axon — берут на себя хранение состояния и повторы.</p>
+      <div class="trap">
+        <p class="myth">Сага — это распределённая транзакция с откатом, только без блокировок.</p>
+        <p class="fact">Сага не откатывает, а компенсирует новыми операциями, и её промежуточные состояния видны всем: в демо баланс Анны на время саги был 300, хотя итог 500. У неё нет изоляции, и последствия — двойные траты, ложные отказы — проектируют явно: резервы, статусы PENDING, порядок шагов.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>2PC: prepare у всех, затем commit; атомарно, но участники держат блокировки до решения координатора.</li>
+        <li>Упавший координатор оставил prepared-транзакцию: чужой платёж упал по lock timeout до ручного ROLLBACK PREPARED.</li>
+        <li>2PC живёт внутри распределённых баз; между сервисами — саги.</li>
+        <li>Сага: локальные транзакции и компенсации; изоляции нет — баланс 300 был виден, итог 500.</li>
+        <li>Оркестрация хранит состояние саги; шаги и компенсации идемпотентны, команды через outbox, необратимое — последним.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="dtx-2pc-saga" data-freq="3">
+      <h3>Чем 2PC отличается от саги и что выбрать между микросервисами?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>2PC даёт атомарность: участники сначала подготавливаются, затем по команде координатора коммитят. Но они держат блокировки до решения, координатор — единая точка отказа, и все участники должны поддерживать протокол. Сага — цепочка локальных транзакций с компенсациями при отказе: без блокировок и общего протокола, но без изоляции, промежуточные состояния видны. Между микросервисами выбирают сагу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>XA в Java существует, но HTTP-API, Kafka и многие хранилища в нём не участвуют.</li>
+            <li>2PC с отказоустойчивым координатором — внутри распределённых баз: Spanner, CockroachDB.</li>
+            <li>Отсутствие изоляции в саге закрывают семантическими блокировками и порядком шагов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="dtx-saga-design" data-freq="3">
+      <h3>Как спроектировать надёжную сагу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для каждого шага определить компенсацию. Хранить состояние саги в базе оркестратора, чтобы после перезапуска продолжить. Делать шаги и компенсации идемпотентными, потому что их повторяют после сбоев. Отправлять команды и события через outbox. Компенсации повторять до успеха, а необратимые действия ставить в конец.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Резерв вместо списания и статус PENDING — семантическая блокировка.</li>
+            <li>Шаг, после которого сага уже не откатывается, — pivot; до него — компенсируемые, после — повторяемые.</li>
+            <li>Temporal, Camunda, Axon хранят состояние и повторы.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой сагой оплаты?</summary>
+          <pre><code class="language-java">public void pay(Order o) {
+    wallet.debit(o.customer(), o.amount());           // HTTP
+    try {
+        bank.credit(o.merchant(), o.amount());        // HTTP
+        notifications.sendReceipt(o);                 // HTTP, письмо клиенту
+    } catch (Exception e) {
+        wallet.credit(o.customer(), o.amount());      // компенсация
+        throw e;
+    }
+}</code></pre>
+          <p>Состояние саги живёт только в памяти: если процесс упадёт между debit и credit, никто не сделает ни зачисление, ни компенсацию. Вызовы без ключей идемпотентности при повторе спишут или вернут дважды. Если упадёт sendReceipt, деньги магазину уже зачислены, а клиенту вернут списание — сага откатит успешный платёж из-за письма; необратимое и неважное должно идти после точки невозврата и не вызывать компенсацию. Нужен оркестратор с состоянием в базе, идемпотентные шаги, компенсация с повтором до успеха и письмо отдельным событием через outbox.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Chris Richardson, «Microservices Patterns», глава 4 — основа урока о сагах: оркестрация, хореография, контрмеры изоляции.</li>
+      <li><a href="https://www.postgresql.org/docs/17/sql-prepare-transaction.html">PostgreSQL 17: PREPARE TRANSACTION</a> — 2PC в PostgreSQL и его опасности.</li>
+      <li>Hector Garcia-Molina, Kenneth Salem, «Sagas» (1987) — исходная статья.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 9 — 2PC и его блокирующая природа.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
