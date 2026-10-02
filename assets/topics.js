@@ -147,7 +147,7 @@ window.KB_TREE = [
           scope: 'роли, authorization code и PKCE, client credentials, scopes, OpenID Connect и id token, SSO, SAML' },
         { id: 'web-security', freq: 2, status: 'draft', title: 'Web Vulnerabilities',
           scope: 'OWASP Top 10, SQL injection, XSS, CSRF, CORS, CSP' },
-        { id: 'crypto', freq: 2, status: 'empty', title: 'Cryptography',
+        { id: 'crypto', freq: 2, status: 'draft', title: 'Cryptography',
           scope: 'хеширование паролей, соль, bcrypt, HMAC, симметричное и асимметричное шифрование, подпись' },
       ] },
       { id: 'cache', title: 'Caching', items: [

@@ -7,6 +7,7 @@ cd examples/security-basics
 java AuthDemo.java
 java JwtAttacksDemo.java
 java OAuthFlowDemo.java
+java CryptoDemo.java
 mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
 java -cp "$(cat target/classpath.txt)" WebVulnDemo.java
 ```

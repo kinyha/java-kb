@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cryptography · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="crypto">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Cryptography</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>У бэкенда четыре криптографические задачи, и для каждой свой инструмент. Пароли хранят медленным хешем с солью — bcrypt, scrypt, Argon2id или PBKDF2, — чтобы перебор после утечки был дорогим. Целостность сообщения с общим секретом проверяют HMAC. Данные шифруют AES-GCM: он и скрывает содержимое, и обнаруживает подмену, но ломается при повторе nonce. Подпись закрытым ключом — RSA, ECDSA, Ed25519 — доказывает авторство любому, у кого есть публичный ключ. Собственные схемы не изобретают, а ключи держат в KMS, а не в коде.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Утёкший бэкап базы проверяет, правильно ли выбраны алгоритмы</h2>
+      <p>Бэкап базы платёжного сервиса оказался в открытом бакете. В нём таблица пользователей с хешами паролей, таблица магазинов с банковскими реквизитами и журнал вебхуков с подписями. Что атакующий сможет с этим сделать, зависит не от сложности алгоритмов, а от того, правильный ли инструмент выбран для каждой задачи: быстрый хеш паролей перебирается за часы, шифрование в режиме ECB показывает повторы, повтор nonce в GCM раскрывает данные без ключа.</p>
+      <p>Тема разбирает, какой примитив для какой задачи и где его ломают неправильным применением. Как Spring Security хранит пароли через <code>PasswordEncoder</code>, разобрано в <a href="spring-authn.html">Authentication</a>, а как криптография работает в TLS — в <a href="tls.html">TLS</a>. Демо <a href="../examples/security-basics/CryptoDemo.java">CryptoDemo.java</a> использует только стандартные провайдеры JDK: <code>java CryptoDemo.java</code> на JDK 21. Ключи, соли и nonce случайные; скорость снята на машине автора, на одном ядре.</p>
+    </section>
+
+    <section class="step" id="passwords">
+      <h2>Пароль хешируют медленно и с солью, чтобы перебор стал дорогим</h2>
+      <p>Криптографический хеш вроде SHA-256 необратим, но быстр. Это хорошо для проверки целостности файлов и плохо для паролей: атакующий с утёкшим хешем не обращает его, а перебирает кандидатов из словаря и сравнивает. Скорость перебора — скорость хеша:</p>
+      <pre><code class="language-java">sha.digest(pwd);                                                     // SHA-256
+pbkdf2.generateSecret(new PBEKeySpec(pwd, salt, 600_000, 256));     // PBKDF2-HMAC-SHA256, 600 000 итераций</code></pre>
+      <pre class="out">== password hashing cost (one core)
+SHA-256:                ~33.0 million guesses/s
+PBKDF2-SHA256 x600000:  ~50 ms per guess (~20 guesses/s)</pre>
+      <p>Одно ядро процессора проверяет 33 миллиона паролей в секунду по SHA-256 и 20 — по PBKDF2 с 600 000 итераций: в полтора миллиона раз медленнее. Словарь из миллиарда популярных паролей по SHA-256 перебирается за полминуты на одном ядре, а видеокарта на порядки быстрее. Для пользователя 50 мс при входе незаметны. Специализированные функции — bcrypt, scrypt, Argon2id — ещё и требуют памяти, что лишает видеокарты преимущества. OWASP рекомендует Argon2id, а если его нет — scrypt, bcrypt или PBKDF2 с 600 000 итераций; стоимость поднимают по мере роста железа.</p>
+      <pre class="out">== salt
+anna  sha256(pwd)        = daaad6e5604e8e17...
+boris sha256(pwd)        = daaad6e5604e8e17...  same password visible
+anna  pbkdf2(salt, pwd)  = b9096fbefc54be1e...  salt 1b705602...
+boris pbkdf2(salt, pwd)  = 06072da00c049146...  salt bd62d280...</pre>
+      <p>Без соли одинаковые пароли дают одинаковые хеши: видно, у кого общий пароль, а заранее посчитанные таблицы хешей популярных паролей находят их мгновенно. Соль — случайные байты, уникальные для каждого пользователя и хранимые рядом с хешем. Она не секрет; её задача — заставить атакующего перебирать каждого пользователя отдельно. Перец (pepper) — дополнительный секрет, общий для всех и хранимый вне базы, например в KMS: утечка одной базы без него бесполезна.</p>
+    </section>
+
+    <section class="step" id="hmac">
+      <h2>HMAC проверяет целостность и автора, если секрет общий</h2>
+      <p>Хеш сообщения сам по себе не защищает от подмены: атакующий изменит сообщение и пересчитает хеш. Нужен ключ. HMAC — хеш с секретом, построенный так, что без ключа нельзя вычислить правильное значение для изменённого сообщения. На нём держатся подписи вебхуков и запросов из <a href="auth.html">Authentication Basics</a> и токены HS256 из <a href="jwt.html">JWT</a>.</p>
+      <p>Самодельная замена <code>sha256(secret + message)</code> уязвима: у SHA-256 и SHA-1 есть атака удлинения сообщения, позволяющая дописать данные к сообщению и вычислить правильный хеш, не зная секрета. HMAC специально построен с двумя проходами хеша и этой атаке не подвержен. Сравнивают HMAC за постоянное время — <code>MessageDigest.isEqual</code>.</p>
+      <p>HMAC проверяет только тот, у кого есть секрет, и он же может подделать сообщение. Если проверяющих много или нужно доказать авторство третьей стороне, нужна асимметричная подпись.</p>
+    </section>
+
+    <section class="step" id="symmetric">
+      <h2>AES-GCM скрывает данные и ловит подмену, но не прощает повтора nonce</h2>
+      <p>Симметричное шифрование — один ключ для шифрования и расшифровки; стандарт — AES. Сам AES шифрует блок в 16 байт, а то, как шифруются длинные данные, определяет режим. Простейший режим ECB шифрует каждый блок независимо одним ключом:</p>
+      <pre class="out">== ECB vs GCM, three equal 16-byte blocks
+ECB: 7ccef691… 7ccef691… 7ccef691…
+GCM: 4430ba6e… c6f85531… c1b855c4…</pre>
+      <p>Три одинаковых блока открытого текста дали три одинаковых блока шифртекста: не зная ключа, атакующий видит, где данные повторяются, и может переставлять блоки. ECB не используют никогда. GCM превращает AES в поточный шифр со счётчиком и уникальным nonce, поэтому повторы исчезают, и добавляет тег аутентичности — 16 байт, проверяемых при расшифровке:</p>
+      <pre class="out">== GCM tamper
+flipped 1 bit -&gt; AEADBadTagException</pre>
+      <p>Это AEAD — шифрование с аутентификацией: изменение хоть одного бита отклоняется, а не расшифровывается в искажённые данные. Режимы без аутентификации, как CBC и CTR, молча расшифровывают подделку, и на этом построены атаки вроде padding oracle. Цена GCM — строгое требование к nonce: он не должен повторяться для одного ключа никогда.</p>
+      <pre><code class="language-java">byte[] c1 = gcm(key, iv, "card=4111111111111111".getBytes());
+byte[] c2 = gcm(key, iv, "card=5500005555555559".getBytes());   // Тот же nonce.
+recovered[i] = (byte) (c1[i] ^ c2[i] ^ p1[i]);                   // Ключ не нужен.</code></pre>
+      <pre class="out">== GCM nonce reuse
+attacker knows p1, recovers p2 = card=5500005555555559</pre>
+      <p>При одинаковом nonce оба сообщения шифруются одним и тем же потоком ключа, и XOR двух шифртекстов равен XOR двух открытых текстов. Зная одно сообщение, атакующий читает второе без ключа; кроме того, он может подделывать теги. Nonce в 12 байт генерируют <code>SecureRandom</code> для каждого шифрования или берут счётчиком, а после примерно 2<sup>32</sup> шифрований со случайным nonce ключ меняют. Для Java сторонние библиотеки вроде Google Tink дают API, в котором nonce выбрать неправильно нельзя.</p>
+    </section>
+
+    <section class="step" id="asymmetric">
+      <h2>Асимметричная пара: публичным ключом проверяют подпись и договариваются о ключе</h2>
+      <p>В асимметричной криптографии у владельца пара ключей: закрытый держат в секрете, публичный раздают всем. Для бэкенда важны две операции. <b>Подпись</b>: владелец подписывает закрытым ключом, любой проверяет публичным, и никто, кроме владельца, не может подписать. <b>Согласование ключа</b> (ECDH): две стороны, обменявшись публичными ключами, получают общий секрет, которого не было в сети; так TLS получает симметричный ключ сессии.</p>
+      <pre class="out">== Ed25519 signature
+signature bytes = 64, public key (X.509) bytes = 44
+verify original = true
+verify amount=5000 = false</pre>
+      <p>Ed25519 — подпись на эллиптической кривой: ключ 32 байта, подпись 64, быстрая и без подводных камней со случайностью, которые были у ECDSA. RSA-2048 даёт подписи по 256 байт и нужен для совместимости. Шифрование данных публичным ключом напрямую почти не используют: асимметричные операции медленные и ограничены размером. Вместо этого применяют гибридную схему: данные шифруют случайным симметричным ключом, а его — публичным ключом получателя или через ECDH.</p>
+    </section>
+
+    <section class="step" id="practice">
+      <h2>Ключ в коде сводит на нет любой алгоритм</h2>
+      <p>Шифрование реквизитов в базе бесполезно, если ключ лежит в <code>application.yml</code> в том же репозитории или в переменной окружения рядом с паролем от базы. Ключи хранят в KMS — облачном сервисе ключей или HSM, из которого главный ключ не выходит. Данные шифруют по схеме конвертов (envelope encryption):</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Главный ключ живёт в KMS и никогда его не покидает. Сервис просит у KMS ключ данных и получает его в открытом и зашифрованном виде. Открытым ключом данных он шифрует запись AES-GCM и стирает его из памяти. В базе рядом с шифртекстом хранится зашифрованный ключ данных.">
+            <defs>
+              <marker id="ev-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">KMS</text>
+            <text x="270" y="22" class="dg-cap">СЕРВИС</text>
+            <text x="520" y="22" class="dg-cap">БАЗА</text>
+            <rect x="20" y="36" width="190" height="130" rx="9" class="dg-box"/>
+            <rect x="34" y="70" width="162" height="30" rx="5" class="dg-cell hit"/>
+            <text x="44" y="90" class="dg-in">главный ключ</text>
+            <text x="34" y="124" class="dg-n">не покидает KMS,</text>
+            <text x="34" y="142" class="dg-n">ротация здесь</text>
+            <rect x="270" y="36" width="190" height="130" rx="9" class="dg-box"/>
+            <text x="282" y="60" class="dg-n">ключ данных:</text>
+            <rect x="282" y="70" width="166" height="30" rx="5" class="dg-cell miss"/>
+            <text x="292" y="90" class="dg-n">открытый, в памяти</text>
+            <text x="282" y="124" class="dg-n">AES-GCM записи,</text>
+            <text x="282" y="142" class="dg-n">потом стереть</text>
+            <rect x="520" y="36" width="180" height="130" rx="9" class="dg-box"/>
+            <rect x="532" y="56" width="156" height="30" rx="5" class="dg-cell"/>
+            <text x="542" y="76" class="dg-n">шифртекст записи</text>
+            <rect x="532" y="96" width="156" height="30" rx="5" class="dg-cell"/>
+            <text x="542" y="116" class="dg-n">зашифр. ключ данных</text>
+            <text x="532" y="150" class="dg-n">оба бесполезны без KMS</text>
+            <path d="M210 86 L 266 86" class="dg-line" marker-end="url(#ev-n)"/>
+            <path d="M460 71 L 528 71" class="dg-line" marker-end="url(#ev-n)"/>
+            <path d="M460 111 L 528 111" class="dg-line" marker-end="url(#ev-n)"/>
+            <text x="20" y="194" class="dg-s">Расшифровка: зашифрованный ключ данных уходит в KMS, доступ логируется.</text>
+          </svg>
+        </div>
+        <figcaption>Утечка базы даёт шифртексты и зашифрованные ключи, но не главный ключ. Ротация главного ключа не требует перешифровывать данные — только ключи данных.</figcaption>
+      </figure>
+      <p>Остальные правила короткие. Случайность для ключей, токенов и nonce — только <code>SecureRandom</code>; <code>java.util.Random</code> предсказуем по нескольким выходам. Устаревшие MD5, SHA-1, DES и RSA с PKCS#1 v1.5 для шифрования не применяют в новом коде. Шифрование не заменяет контроль доступа: если приложение расшифровывает данные для любого, кто спросил, шифрование защищает только бэкапы и диски.</p>
+      <div class="trap">
+        <p class="myth">Пароли надо шифровать, чтобы их можно было восстановить для пользователя.</p>
+        <p class="fact">Пароль, который можно расшифровать, утечёт вместе с ключом. Пароли хешируют необратимо медленной функцией с солью, а вместо восстановления дают сбросить пароль через подтверждённый канал.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Пароли: Argon2id, bcrypt, scrypt или PBKDF2 с солью; в демо SHA-256 — 33 млн проверок в секунду, PBKDF2 — 20.</li>
+        <li>HMAC — целостность с общим секретом; sha256(secret + msg) уязвим к удлинению.</li>
+        <li>AES-GCM — шифрование с аутентификацией; ECB показывает повторы, повтор nonce раскрывает текст без ключа.</li>
+        <li>Подпись закрытым ключом проверяет любой; данные шифруют гибридно: симметричный ключ плюс асимметричная обёртка.</li>
+        <li>Ключи в KMS, envelope encryption, SecureRandom; своих схем не изобретают.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="crypto-passwords" data-freq="3">
+      <h3>Как правильно хранить пароли и зачем соль?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Хешировать специализированной медленной функцией — Argon2id, bcrypt, scrypt или PBKDF2 с большим числом итераций. Быстрый SHA-256 даёт десятки миллионов проверок в секунду на ядро, и словарные пароли после утечки подбираются быстро. Соль — случайное значение на пользователя, хранится рядом с хешем: одинаковые пароли дают разные хеши, а заранее посчитанные таблицы бесполезны.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стоимость подбирают под 50–500 мс на сервере и повышают со временем; хеш хранит параметры, чтобы перехешировать при входе.</li>
+            <li>Argon2id и scrypt требуют памяти и лишают видеокарты преимущества.</li>
+            <li>Перец — общий секрет вне базы; bcrypt учитывает только первые 72 байта пароля.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="crypto-sym-asym" data-freq="2">
+      <h3>Чем симметричное шифрование отличается от асимметричного и где что применяют?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Симметричное — один общий ключ, быстрое, для данных: AES-GCM. Асимметричное — пара ключей: публичным проверяют подпись или шифруют, закрытым подписывают или расшифровывают; медленное и ограничено размером. На практике их совмещают: TLS договаривается о симметричном ключе через ECDH и проверяет сервер по подписи, а данные шифрует AES.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Подпись (Ed25519, ECDSA, RSA) доказывает авторство любому; HMAC — только владельцу общего секрета.</li>
+            <li>Envelope encryption: данные — ключом данных, ключ данных — главным ключом в KMS.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="crypto-modes" data-freq="2">
+      <h3>Почему AES-GCM, а не ECB или CBC, и что важно при его использовании?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>ECB шифрует одинаковые блоки одинаково и раскрывает структуру данных. CBC без MAC не обнаруживает подмену и уязвим к padding oracle. GCM — AEAD: шифрует и проверяет целостность тегом, любой изменённый бит даёт ошибку расшифровки.</p>
+          <p>Главное требование GCM — уникальный nonce для каждого шифрования одним ключом. Повтор nonce раскрывает XOR открытых текстов и позволяет подделывать теги.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Nonce 12 байт из SecureRandom или счётчик; после ~2^32 сообщений со случайным nonce ключ меняют.</li>
+            <li>Библиотеки вроде Tink скрывают nonce и режим, чтобы их нельзя было выбрать неправильно.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с шифрованием реквизитов?</summary>
+          <pre><code class="language-java">private static final byte[] KEY = "pay-secret-key-0123456789abcdef!".getBytes();
+private static final byte[] IV = new byte[12];
+
+byte[] encrypt(String iban) throws Exception {
+    Cipher c = Cipher.getInstance("AES/GCM/NoPadding");
+    c.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(KEY, "AES"), new GCMParameterSpec(128, IV));
+    return c.doFinal(iban.getBytes());
+}</code></pre>
+          <p>Nonce — нулевой и одинаковый для всех записей: XOR двух шифртекстов раскрывает XOR двух IBAN, а зная один, атакующий читает остальные; теги тоже можно подделать. Ключ зашит в код и попадает в репозиторий и артефакты. Нужен случайный nonce на каждое шифрование, сохраняемый рядом с шифртекстом, и ключ из KMS по схеме конвертов.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html">OWASP: Password Storage Cheat Sheet</a> — основа урока о паролях: Argon2id, bcrypt, PBKDF2 600 000, соль и перец.</li>
+      <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html">OWASP: Cryptographic Storage Cheat Sheet</a> — режимы, ключи, envelope encryption.</li>
+      <li><a href="https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf">NIST SP 800-38D</a> — GCM и требования к уникальности nonce.</li>
+      <li><a href="https://developers.google.com/tink">Google Tink</a> — криптографический API без опасных настроек.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
