@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Components &amp; Modules · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="components">
+<main class="page">
+  <header class="topic-head"><h1>Components &amp; Modules</h1></header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Граница модуля помогает менять одну часть сервиса, не разбирая весь сервис. Для этого внутри собирают код, который меняется вместе, а снаружи оставляют небольшой понятный вход. Направление зависимостей решает, кому придётся подстраиваться под очередную правку. Пакеты и интерфейсы выражают это решение в Java; автоматическая проверка удерживает его после сотни новых изменений. Число модулей и количество интерфейсов сами по себе качество не показывают.</p>
+    </div>
+
+    <section class="step" id="change-boundary">
+      <h2>Правка банка заставила пересобрать платежи и уведомления</h2>
+      <p>В платёжном сервисе три части: <code>payments</code> проводит платёж, <code>bank</code> общается с банком, <code>notifications</code> готовит сообщение клиенту. Новый SDK банка поменял тип ответа. Платёжный сервис напрямую использует <code>BankClient</code>, банк берёт удобный метод из <code>PaymentService</code>, а уведомления читают внутренний <code>PaymentLedger</code>. Компилятор доволен. Разработчик меняет один класс и обнаруживает, что соседние части уже знают его устройство.</p>
+      <p>Начать можно с <strong>логических модулей</strong> одного приложения: задача, публичный вход и скрытая реализация. У Мартина компонент — единица выпуска и развёртывания, например библиотека JAR. Пакет сам по себе такой единицей не становится: нужно задать его границу.</p>
+      <pre><code class="language-text">kb.modules
+├── payments
+│   ├── PaymentService.java       // Вход для проведения платежа.
+│   ├── PaymentReceipt.java       // Результат для соседних модулей.
+│   ├── BankGateway.java          // Требуемая платежам операция банка.
+│   └── internal
+│       └── PaymentLedger.java   // Деталь реализации платежей.
+├── bank
+│   └── BankClient.java           // Реализация BankGateway.
+└── notifications
+    └── NotificationSender.java // Использует готовый PaymentReceipt.</code></pre>
+      <p>Это <strong>package by feature</strong>: сначала возможность приложения, потом её устройство. В глобальных пакетах <code>controller</code>, <code>service</code>, <code>repository</code> один сценарий размазан по трём каталогам. Внутри крупного <code>payments</code> слои полезны: <code>payments.web</code>, <code>payments.application</code>, <code>payments.persistence</code>. Переставить файлы недостаточно — важны разрешённые связи.</p>
+      <p>Java считает <code>payments</code> и <code>payments.internal</code> разными пакетами. Доступ с уровнем package-private через эту границу не проходит. Поэтому внутренний класс иногда приходится сделать <code>public</code>, чтобы его видел свой соседний пакет. Теперь его видит и <code>notifications</code>. Имя <code>internal</code> остаётся намерением автора; компилятор его не понимает.</p>
+      <p>Демо <a href="../examples/design/modules/ModuleDemo.java">ModuleDemo.java</a> читает настоящие <code>.class</code> трёх пакетов через ArchUnit 1.5.1. <a href="../examples/design/modules/run.sh">run.sh</a> собирает три варианта. Нужны JDK 21 и Maven; запуск из корня репозитория: <code>bash examples/design/modules/run.sh</code>. Остальные примеры в <code>examples/design</code> запускаются без сборки.</p>
+    </section>
+
+    <section class="step" id="cohesion">
+      <h2>Вместе держат то, что выпускают, меняют и используют вместе</h2>
+      <p>Три принципа связности из части IV «Чистой архитектуры» помогают выбрать состав компонента. Они смотрят на выпуск, причины изменения и потребителей одного набора классов.</p>
+      <table class="mx">
+        <thead><tr><th>Принцип</th><th>Вопрос к границе</th><th>Пример платежей</th></tr></thead>
+        <tbody>
+          <tr><td>REP — Reuse/Release Equivalence</td><td>Что потребитель получает как один поддерживаемый выпуск?</td><td>Клиент банка с адаптером ошибок выпускается одной версией; пользователю не нужно собирать совместимые классы вручную.</td></tr>
+          <tr><td>CCP — Common Closure</td><td>Какие классы меняет одна и та же причина?</td><td>Правка протокола банка меняет его запросы, разбор ответа и перевод ошибок внутри <code>bank</code>.</td></tr>
+          <tr><td>CRP — Common Reuse</td><td>Какие классы нужны одним и тем же потребителям?</td><td>Коду, которому нужен <code>Money</code>, не следует тянуть SDK банка, JDBC и шаблоны писем.</td></tr>
+        </tbody>
+      </table>
+      <p><strong>REP</strong> связывает повторное использование с выпуском. Пользователь библиотеки получает совместимый набор, видит изменения и выбирает момент обновления. Копирование классов из чужой ветки этой возможности не даёт. В монолите отдельная версия каждому пакету обычно не нужна; для библиотеки с несколькими потребителями управляемый выпуск уже важен.</p>
+      <p><strong>CCP</strong> переносит единую причину изменения с класса на компонент. Новая банковская подпись должна менять один адаптер и его тесты. Если она требует совместного выпуска <code>payments-api</code>, <code>bank-models</code> и <code>notification-utils</code>, границы разрезали одну причину. «Закрытость» означает, что одни и те же изменения затрагивают код вместе.</p>
+      <p><strong>CRP</strong> защищает от лишней зависимости. Отчётности нужен тип денежной суммы. Если его библиотека содержит банковский HTTP-клиент, обновление клиента затрагивает и отчёты. Между этими группами классов может почти не быть вызовов, но потребители у них разные.</p>
+      <p>Принципы тянут в разные стороны. CCP собирает изменяющиеся вместе классы, CRP разделяет код для разных потребителей. Большой <code>common</code> заставляет всех обновляться из-за чужих правок; слишком мелкие библиотеки превращают одну правку в десять выпусков. Молодому сервису полезно сначала держать сценарий целиком. Самостоятельную границу оправдывают собственные потребители и причина меняться отдельно.</p>
+      <div class="note"><p>Связность объясняет история изменений. Общий суффикс <code>Service</code> или аннотация Spring для этого слишком слабы.</p></div>
+    </section>
+
+    <section class="step" id="acyclic-dependencies">
+      <h2>Порт платежей разрывает цикл, хотя вызов по-прежнему идёт в банк</h2>
+      <p><strong>ADP — Acyclic Dependencies Principle</strong> требует граф без циклов. Стрелка <code>payments → bank</code> означает: исходный код платежей знает тип из банка. При обратной стрелке каждая сторона тащит вторую, а порядок «сначала проверить банк, потом платежи» теряет смысл. Java такой код компилирует; отдельным модулям цикл мешает задавать порядок сборки.</p>
+      <p>Вот существенные строки из файлов каталога <code>broken</code>. Обратную связь породил всего один удобный статический метод:</p>
+      <pre><code class="language-java">// payments/PaymentService.java
+private final BankClient bank;                 // payments знает реализацию bank.
+public static String bankReference(String id) { return "bank:" + id; }
+
+// bank/BankClient.java
+public String charge(String id) {
+    return PaymentService.bankReference(id);   // bank уже знает payments: цикл замкнулся.
+}</code></pre>
+      <p>Исправление через <strong>DIP</strong> начинается с владельца интерфейса. Платежам нужна операция списания, поэтому <code>BankGateway</code> принадлежит платежам. Они выражают свою потребность, банк её реализует. Формат банковской ссылки остаётся деталью банка. Существенные части варианта <code>fixed</code>:</p>
+      <pre><code class="language-java">// payments/BankGateway.java
+public interface BankGateway {
+    String charge(String paymentId);           // Операция на языке потребителя.
+}
+
+// payments/PaymentService.java
+private final BankGateway bank;                // Зависимость теперь внутри payments.
+public PaymentService(BankGateway bank) { this.bank = bank; }
+public PaymentReceipt pay(String id) {
+    return new PaymentReceipt(id, ledger.caption(id), bank.charge(id));
+}
+
+// bank/BankClient.java
+public final class BankClient implements BankGateway { // bank зависит от payments.
+    @Override public String charge(String id) { return "bank:" + id; }
+}</code></pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 350" role="img" aria-label="До исправления payments и bank зависят друг от друга, notifications зависит от payments. После введения BankGateway внутри payments остаются только зависимости bank и notifications в payments. Во время выполнения платежи всё ещё вызывают банк через порт.">
+            <defs><marker id="cmp-cycle-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="22" y="25" class="dg-cap">ДО: ЦИКЛ ИМПОРТОВ</text>
+            <text x="385" y="25" class="dg-cap">ПОСЛЕ: ПОРТ В PAYMENTS</text>
+            <rect x="22" y="52" width="310" height="92" rx="8" class="dg-box"/>
+            <text x="36" y="76" class="dg-t">payments</text>
+            <text x="36" y="102" class="dg-in">PaymentService</text>
+            <text x="36" y="126" class="dg-s">поле типа BankClient</text>
+            <rect x="22" y="234" width="150" height="60" rx="8" class="dg-cell miss"/>
+            <text x="36" y="258" class="dg-t">bank</text>
+            <text x="36" y="280" class="dg-in">BankClient</text>
+            <rect x="190" y="234" width="142" height="60" rx="8" class="dg-cell"/>
+            <text x="202" y="270" class="dg-in">notifications</text>
+            <path d="M57 144 L57 230" class="dg-line" marker-end="url(#cmp-cycle-a)"/>
+            <path d="M104 234 L104 148" class="dg-line" marker-end="url(#cmp-cycle-a)"/>
+            <text x="116" y="175" class="dg-s">обратный</text>
+            <text x="116" y="193" class="dg-s">импорт</text>
+            <path d="M272 234 L272 148" class="dg-line" marker-end="url(#cmp-cycle-a)"/>
+            <text x="22" y="322" class="dg-bad">payments ↔ bank</text>
+            <rect x="385" y="52" width="313" height="92" rx="8" class="dg-box"/>
+            <text x="399" y="76" class="dg-t">payments</text>
+            <text x="399" y="102" class="dg-in">PaymentService → BankGateway</text>
+            <text x="399" y="126" class="dg-s">порт принадлежит платежам</text>
+            <rect x="385" y="234" width="150" height="60" rx="8" class="dg-cell hit"/>
+            <text x="399" y="258" class="dg-t">bank</text>
+            <text x="399" y="280" class="dg-in">BankClient</text>
+            <rect x="552" y="234" width="146" height="60" rx="8" class="dg-cell"/>
+            <text x="564" y="270" class="dg-in">notifications</text>
+            <path d="M444 234 L444 148" class="dg-line" marker-end="url(#cmp-cycle-a)"/>
+            <text x="456" y="175" class="dg-s">implements</text>
+            <path d="M649 234 L649 148" class="dg-line" marker-end="url(#cmp-cycle-a)"/>
+            <text x="385" y="322" class="dg-ok">оба импорта ведут в payments</text>
+          </svg>
+        </div>
+        <figcaption>Стрелки показывают зависимости типов. Вызов <code>bank.charge()</code> в работающем приложении идёт из платежей в банк и после исправления.</figcaption>
+      </figure>
+      <p>Внешняя точка сборки соединяет стороны: <code>new PaymentService(new BankClient())</code>. В Spring это конфигурация бинов. Передача объекта через конструктор сама по себе цикл не разрывает. Если оставить <code>BankGateway</code> внутри <code>bank</code>, платежи продолжат зависеть от банка. Важен владелец интерфейса.</p>
+      <p>Другое исправление ADP — вынести самостоятельное общее понятие в третий компонент. Его существование тоже нужно обосновать: <code>common</code> со всеми неудобными типами быстро начинает управлять приложением. Одинаково меняющиеся части иногда лучше объединить.</p>
+      <div class="note warn"><p><code>@Lazy</code> может изменить момент создания Spring-бина. Он не меняет импорт Java и не убирает цикл компонентов. Аналогично, асинхронное событие разрывает прямой вызов, но сохраняет зависимость от формата события и добавляет правила доставки. Выбор механизма должен соответствовать задаче.</p></div>
+    </section>
+    <section class="step" id="stability-and-abstraction">
+      <h2>Зависимости направляют к устойчивому API, а метрики объясняют цену правки</h2>
+      <p>Если десятки модулей используют платёжное ядро, а ядро импортирует тип ответа меняющегося SDK, правка SDK расходится далеко. <strong>SDP — Stable Dependencies Principle</strong> направляет зависимости к более устойчивым компонентам. Устойчивость означает сопротивление изменению из-за зависимых потребителей. Это не работоспособность сервиса и не частота правок.</p>
+      <p>До подсчёта выбирают единицу и область: компоненты или классы, рабочий код или тесты, включать ли сторонние библиотеки. Между запусками правила должны совпадать.</p>
+      <table class="mx">
+        <thead><tr><th>Метрика</th><th>Смысл</th><th>Расчёт</th></tr></thead>
+        <tbody>
+          <tr><td>Ca, входящая связность</td><td>Кто зависит от компонента. Большое значение увеличивает число затронутых потребителей.</td><td>В демо — число других компонентов с входящей зависимостью.</td></tr>
+          <tr><td>Ce, исходящая связность</td><td>От кого зависит компонент. Эти внешние изменения могут прийти внутрь.</td><td>В демо — число других компонентов, на которые он ссылается.</td></tr>
+          <tr><td>I, неустойчивость</td><td>0 — только входящие связи; 1 — только исходящие.</td><td><code>I = Ce / (Ca + Ce)</code></td></tr>
+          <tr><td>A, абстрактность</td><td>Доля интерфейсов и абстрактных классов.</td><td><code>A = Na / Nc</code></td></tr>
+          <tr><td>D, расстояние до главной последовательности</td><td>Отклонение от линии <code>A + I = 1</code>.</td><td><code>D = |A + I − 1|</code>, диапазон 0…1.</td></tr>
+        </tbody>
+      </table>
+      <p>В формулировке главы 14 «Чистой архитектуры» Fan-in считает классы снаружи, зависящие от компонента, а Fan-out — классы внутри, зависящие от внешних классов. ArchUnit считает связи между выделенными компонентами; десять импортов в один соседний компонент дают одну связь Ce. Ещё одно отличие: его A учитывает только публичные типы. Это нужно помнить перед сравнением отчёта инструмента с примером из книги. Если Ca и Ce оба равны нулю, формула I содержит деление на ноль: значение для изолированного компонента определяется соглашением инструмента, а не особым архитектурным законом.</p>
+      <p>В исправленном демо мы измеряем только три собственных модуля. Внешние типы JDK не входят в этот граф. <code>bank → payments</code> и <code>notifications → payments</code>, поэтому у payments Ca=2 и Ce=0. У него четыре публичных типа: <code>PaymentService</code>, <code>PaymentReceipt</code>, <code>BankGateway</code> и <code>PaymentLedger</code>. Только один из четырёх — интерфейс.</p>
+      <pre><code class="language-java">var components = MetricsComponents.fromPackages(
+    fixed.getPackage("kb.modules").getSubpackages()); // С вложенными пакетами каждой функции.
+var metrics = ArchitectureMetrics.componentDependencyMetrics(components);
+
+// ModuleDemo печатает Ca, Ce, I, A и D для каждого компонента.
+metrics.getInstability("kb.modules.payments");
+metrics.getAbstractness("kb.modules.payments");
+metrics.getNormalizedDistanceFromMainSequence("kb.modules.payments");</code></pre>
+      <pre class="out">payments Ca=2 Ce=0 I=0.00 A=0.25 D=0.75
+bank Ca=0 Ce=1 I=1.00 A=0.00 D=0.00
+notifications Ca=0 Ce=1 I=1.00 A=0.00 D=0.00</pre>
+      <p>SDP соблюдён: модули с I=1 зависят от payments с I=0. Но D у payments велик. <strong>SAP — Stable Abstractions Principle</strong> предлагает устойчивой части абстракции: потребители затрудняют правку, поэтому изменяемое поведение расширяют через точки подключения. DIP и SAP работают вместе: интерфейс в устойчивой части, сменяемая реализация — снаружи.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 370" role="img" aria-label="График абстрактности A и неустойчивости I. Главная последовательность соединяет A=1,I=0 с A=0,I=1. Payments находится в I=0,A=0,25, D=0,75. Bank и notifications совпадают в I=1,A=0,D=0. Нижний левый угол обозначает устойчивый конкретный код, верхний правый — абстракции без входящих зависимостей.">
+            <defs><marker id="cmp-metric-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="36" y="25" class="dg-cap">A · АБСТРАКТНОСТЬ</text>
+            <rect x="80" y="60" width="240" height="240" class="dg-sep" fill="none"/>
+            <path d="M80 60 L320 300" class="dg-line"/>
+            <path d="M80 306 L80 48 M74 300 L340 300" class="dg-line" marker-end="url(#cmp-metric-a)"/>
+            <text x="60" y="66" class="dg-s">1</text>
+            <text x="60" y="245" class="dg-s">¼</text>
+            <text x="60" y="304" class="dg-s">0</text>
+            <text x="76" y="323" class="dg-s">0</text>
+            <text x="316" y="323" class="dg-s">1</text>
+            <text x="80" y="344" class="dg-s">I · неустойчивость →</text>
+            <text x="94" y="283" class="dg-n">зона боли</text>
+            <text x="204" y="80" class="dg-n">бесполезность</text>
+            <circle cx="80" cy="240" r="6" class="dg-arrow"/>
+            <text x="96" y="239" class="dg-t">payments</text>
+            <circle cx="320" cy="300" r="6" class="dg-arrow"/>
+            <text x="372" y="81" class="dg-t">главная последовательность</text>
+            <text x="372" y="105" class="dg-s">A + I = 1</text>
+            <text x="372" y="156" class="dg-t">payments: D = 0,75</text>
+            <text x="372" y="180" class="dg-s">устойчивый, много конкретных типов</text>
+            <text x="372" y="240" class="dg-t">bank и notifications: D = 0</text>
+            <text x="372" y="264" class="dg-s">конкретные, без входящих связей</text>
+          </svg>
+        </div>
+        <figcaption>Числа взяты из исправленного демо. Две точки справа внизу совпали: одинаковые I и A не делают банковский клиент и уведомления одинаковыми по смыслу.</figcaption>
+      </figure>
+      <p><strong>Зона боли</strong> рядом с (I=0, A=0): на конкретный код завязано много потребителей, а менять его трудно. <strong>Зона бесполезности</strong> рядом с (I=1, A=1): абстракции существуют, но в выбранном графе от них никто не зависит. Главная последовательность показывает баланс, а не обязанность каждого пакета попасть на линию.</p>
+      <p>В payments лежат порт, реализация и результат. Делать интерфейс для <code>PaymentReceipt</code> ради уменьшения D бессмысленно: конкретный тип значения полезен. В расчёт A попал и public-класс <code>PaymentLedger</code>, скрытый нашим правилом. Метрика видит модификатор Java, а не границу API. Выделение маленького <code>payments-api</code> с портами и типами оправдывают потребители, а не один отчёт.</p>
+      <details class="deep">
+        <summary>Под капотом: почему идеальная метрика не гарантирует удобный API</summary>
+        <p>Два компонента имеют одинаковые I и A. API первого принимает <code>charge(paymentId)</code>, API второго выставляет двадцать флагов чужого SDK. Числа не видят смысл методов и стоимость согласования команд. Общая схема БД, строковый поиск бина и сетевой протокол также связывают модули вне графа Java-типов.</p>
+      </details>
+    </section>
+
+    <section class="step" id="verify-boundaries">
+      <h2>Проверка границ ловит и цикл, и доступ к внутреннему классу</h2>
+      <p>Новый разработчик увидит публичный класс и воспользуется им. ArchUnit читает байткод и строит связи между типами. Демо импортирует отдельный каталог классов для каждого варианта и проверяет зависимости настоящего кода.</p>
+      <pre><code class="language-java">JavaClasses classes = new ClassFileImporter().importPath(target.resolve(variant));
+
+ArchRule noCycles = slices().matching("kb.modules.(*)..") // Первый пакет под modules — модуль.
+    .should().beFreeOfCycles();
+
+ArchRule noInternalAccess = noClasses()
+    .that().resideOutsideOfPackage("kb.modules.payments..")
+    .should().dependOnClassesThat()
+    .resideInAPackage("kb.modules.payments.internal..");  // public не снимает этот запрет.
+
+EvaluationResult cycleResult = noCycles.evaluate(classes);
+EvaluationResult boundaryResult = noInternalAccess.evaluate(classes);
+// Демо печатает hasViolation(). В CI обычно вызывают rule.check(classes):
+// любое нарушение тогда бросает AssertionError и роняет тест.</code></pre>
+      <p>В сломанном варианте уведомления знают внутренний журнал:</p>
+      <pre><code class="language-java">// broken/notifications/NotificationSender.java
+private final PaymentLedger ledger = new PaymentLedger(); // Чужая внутренняя реализация.
+public String message(String id) { return ledger.caption(id); }
+
+// fixed/notifications/NotificationSender.java
+public String message(PaymentReceipt receipt) {
+    return receipt.caption();                             // Публичный результат платежей.
+}</code></pre>
+      <p>Вариант <code>port</code> берёт исправленные платежи и банк, но старый <code>NotificationSender</code>. Предскажи обе проверки: направление связи банка поменялось, а уведомления всё ещё обходят API. Начало вывода:</p>
+      <pre class="out">broken edges=bank-&gt;payments,notifications-&gt;payments,payments-&gt;bank
+broken cycles=FAIL
+broken internal access=FAIL
+port edges=bank-&gt;payments,notifications-&gt;payments
+port cycles=PASS
+port internal access=FAIL
+fixed edges=bank-&gt;payments,notifications-&gt;payments
+fixed cycles=PASS
+fixed internal access=PASS</pre>
+      <p>У <code>port</code> и <code>fixed</code> одинаковые стрелки модулей. Уведомления перешли с <code>payments.internal.PaymentLedger</code> на <code>payments.PaymentReceipt</code>. Поэтому циклы и доступ к внутренностям проверяют отдельно. Ещё можно ограничить направления: например, только банковскому адаптеру разрешить типы SDK.</p>
+      <p><strong>Spring Modulith</strong> задаёт похожую модель поверх Spring-приложения. При стандартном обнаружении прямые подпакеты пакета приложения становятся модулями. Публичные типы корневого пакета модуля составляют его API, вложенные пакеты считаются внутренними. Метод <code>verify()</code> проверяет циклы, обращения к внутренностям и явно заданные разрешённые зависимости.</p>
+      <pre><code class="language-java">// В Spring-приложении класс Application находится в kb.modules.
+ApplicationModules.of(Application.class).verify(); // Выполнить в архитектурном тесте.
+
+// kb/modules/notifications/package-info.java
+@org.springframework.modulith.ApplicationModule(allowedDependencies = "payments")
+package kb.modules.notifications;                // Зависимость от bank теперь запрещена.</code></pre>
+      <p>Если нужный внешним модулям порт лежит в <code>payments.spi</code>, такой пакет можно явно открыть через <code>@NamedInterface("bank")</code> в его <code>package-info.java</code>. Потребитель указывает <code>allowedDependencies = "payments :: bank"</code> и получает только этот именованный API. Это явный выбор границы; перенос всех внутренностей в открытые пакеты уничтожит её смысл. Фрагмент Modulith показывает настройку для Spring-проекта. Исполняемое демо этой страницы использует ArchUnit.</p>
+      <p>Проверка с одними классами платежей не увидит нарушение из отсутствующего <code>notifications</code>. Импортируй весь код выбранных модулей и проверяй шаблон пакетов. Демо явно отвергает пустой каталог. Исключения из правил должны быть узкими и иметь владельца.</p>
+    </section>
+
+    <section class="step" id="module-limits">
+      <h2>Модуль оправдан, когда его граница упрощает реальные изменения</h2>
+      <p>Исправление банковского протокола остаётся в <code>bank</code>; новый текст письма — в <code>notifications</code>; правила платежа — в <code>payments</code>. У границы есть владелец, небольшой вход и правила совместимости. Публичный результат помогает соседу обойтись без чтения внутренних полей и таблиц.</p>
+      <table class="mx">
+        <thead><tr><th>Граница</th><th>Что удерживает</th><th>Что остаётся решить</th></tr></thead>
+        <tbody>
+          <tr><td>Пакеты по возможностям + ArchUnit</td><td>Направление связей и доступ к выбранным внутренним пакетам в одном приложении.</td><td>Правила нужно запускать; общий classpath сохраняет технический доступ к public-типам.</td></tr>
+          <tr><td>Maven/Gradle-модули</td><td>Явные зависимости сборки и состав classpath.</td><td>После подключения JAR его public-типы обычно доступны целиком.</td></tr>
+          <tr><td>JPMS</td><td><code>requires</code> и <code>exports</code> задают читаемость модулей и доступ к пакетам.</td><td>Для глубокой рефлексии нужны подходящие <code>opens</code>; эта граница требует работы с module path.</td></tr>
+          <tr><td>Отдельный сервис</td><td>Отдельный процесс, выпуск и сетевой протокол.</td><td>Добавляются задержки, отказы, совместимость сообщений и распределённые операции.</td></tr>
+        </tbody>
+      </table>
+      <p>Логический модуль не обязан становиться микросервисом. Одна транзакция может вызывать два модуля монолита, если сценарий этого требует. Агрегат задаёт границу согласованного изменения предметной модели; модуль собирает связанную возможность приложения и может содержать несколько агрегатов. Bounded context задаёт границу языка и модели. Эти границы стоит согласовать, но они отвечают на разные вопросы — подробнее в <a href="ddd.html">DDD</a> и <a href="app-architecture.html">Application Architecture</a>.</p>
+      <p>Уведомления могут выполнить SQL к таблице платежей без импорта их типов. Граф станет чище, зависимость от чужой схемы останется. Поэтому нужны правила доступа к данным, проверки контрактов и интеграционные тесты. При обмене событиями добавляются совместимость формата, обработка повторов и срок, за который сосед увидит изменение.</p>
+      <p>Небольшому CRUD-сервису достаточно пакетов, явного API и пары правил. Отдельные артефакты для каждого класса преждевременно усложняют сборку. Постоянные совместные правки требуют пересмотреть разделение; обращения к внутренностям — улучшить API. Метрики находят такие места, история изменений помогает выбрать решение.</p>
+    </section>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="component-cohesion" data-freq="2">
+      <h3>Как REP, CCP и CRP помогают выбрать состав компонента?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я смотрю на три вещи. REP требует понятного выпуска для повторно используемого кода: потребитель получает совместимый набор одной версии. CCP собирает то, что меняется по одной причине. CRP разделяет то, что нужно разным потребителям, чтобы им не приходилось тянуть лишние зависимости. В платежах запросы банка и перевод его ошибок меняются вместе; Money для отчётов не должен приносить весь SDK банка.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Компромисс меняется со временем: ранний проект выигрывает от быстрых локальных правок, библиотека с десятками потребителей — от узкого API и контролируемых выпусков.</li>
+          <li>Повторное использование и совместное изменение — разные свидетельства. Общий код, который две команды постоянно хотят менять по-разному, может быть выгоднее разделить, чем навязывать им один выпуск.</li>
+          <li>Проверяю изменения из истории Git и зависимости потребителей. Число классов или общий технический суффикс не объясняют границу.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="component-cycles" data-freq="2">
+      <h3>Как разорвать цикл модулей через DIP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала выясняю, что означает каждая стрелка. Если платежи знают BankClient, а BankClient знает PaymentService, есть цикл типов. Выделяю нужную платежам операцию в BankGateway внутри платежей. PaymentService работает через свой порт, а BankClient реализует его. При выполнении платежи вызывают банк как раньше, но зависимость исходного кода теперь идёт из банка в платежи. Соединяет объекты внешняя конфигурация.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Если два модуля всё время правятся совместно, цикл может указывать на искусственное разделение. Слияние иногда лучше нового порта.</li>
+          <li>Третий компонент подходит для самостоятельного общего понятия. Перенос интерфейса в технический <code>common</code> без владельца оставляет согласование обеим сторонам.</li>
+          <li>Цикл создания бинов, цикл вызовов во время выполнения и цикл зависимостей компонентов — разные графы. Настройка контейнера исправляет только тот граф, на который она действует.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="component-metrics" data-freq="2">
+      <h3>Что показывают SDP, SAP и метрики I, A, D?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>SDP направляет зависимости к более устойчивой части. Устойчивость здесь связана с числом потребителей: менять общий API трудно. I=Ce/(Ca+Ce) показывает долю исходящих связей, A — долю абстрактных типов. SAP предлагает устойчивой части точки расширения через абстракции. D=|A+I−1| показывает отклонение от баланса: устойчивый конкретный код может попасть в зону боли. Метрики помогают искать опасные связи; высокий D сам по себе не требует переписывать модуль.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Область измерения меняет числа: добавление внешних библиотек или тестов может изменить I без единой правки рабочего кода. Сравниваю отчёты с одинаковыми правилами подсчёта.</li>
+          <li>ArchUnit считает межкомпонентные связи и только публичные типы для A. Результат нужно читать с учётом этих соглашений.</li>
+          <li>Стабильные конкретные значения, DTO и схемы данных бывают полезны при A=0. Интерфейс не отменяет несовместимое изменение метода или смысла данных.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="component-enforcement" data-freq="2">
+      <h3>Как проверить границы модулей в Java и Spring?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я собираю код по возможностям, выбираю публичные типы и закрываю внутренние пакеты архитектурным тестом. ArchUnit проверяет зависимости по байткоду: отдельно циклы, отдельно доступ к внутренностям и разрешённые направления. Spring Modulith умеет вывести модули из структуры пакетов и проверить ту же дисциплину через ApplicationModules.of(Application.class).verify(). Maven-модули ограничивают зависимости сборки, а JPMS может дополнительно закрыть неэкспортируемые пакеты.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Сначала проверяю, что тест импортирует все нужные классы. Недостающий потребитель делает его нарушения невидимыми.</li>
+          <li>В Modulith именованный интерфейс открывает выбранный пакет; список allowedDependencies ограничивает, какие API может использовать модуль. Устранение цикла не заменяет ни одно из этих правил.</li>
+          <li>Строковые ссылки, общие таблицы и сетевые сообщения требуют других проверок. Чистый граф типов ещё не гарантирует самостоятельность команды и выпуска.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью">
+        <summary>Циклов нет, тест зелёный. Можно ли считать границу payments защищённой?</summary>
+        <pre><code class="language-java">// В notifications появился импорт:
+import kb.modules.payments.internal.PaymentLedger;
+
+// Единственная архитектурная проверка:
+slices().matching("kb.modules.(*)..").should().beFreeOfCycles().check(classes);</code></pre>
+        <p>Нет: notifications → payments не замыкает цикл. Нужно отдельно запретить внешним модулям зависеть от payments.internal и дать уведомлениям нужный публичный результат. Именно поэтому промежуточный вариант демо проходит cycles и проваливает internal access. Если тест вообще не импортировал notifications, сначала исправляют область проверки.</p>
+      </details></div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li>Robert C. Martin, Clean Architecture, часть IV, главы 12–14 — компоненты, REP/CCP/CRP, ADP/SDP/SAP и главная последовательность; основа урока.</li>
+    <li><a href="https://objectmentor.com/resources/articles/Principles_and_Patterns.pdf">Robert C. Martin: Design Principles and Design Patterns</a> — первоначальный разбор связности, циклов и устойчивых абстракций.</li>
+    <li><a href="https://www.archunit.org/userguide/html/000_Index.html">ArchUnit User Guide</a>, разделы 8.2 и 8.7.2 — проверка циклов, расчёт метрик и отличия подсчёта от исходной формулировки.</li>
+    <li><a href="https://docs.spring.io/spring-modulith/reference/fundamentals.html">Spring Modulith: Fundamentals</a> — границы пакетов, разрешённые зависимости и именованные интерфейсы.</li>
+    <li><a href="https://docs.spring.io/spring-modulith/reference/verification.html">Spring Modulith: Verifying Application Module Structure</a> — что именно проверяет verify().</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
