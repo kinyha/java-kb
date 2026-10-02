@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>HTTP Cache &amp; CDN · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="http-cache">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>HTTP Cache &amp; CDN</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>HTTP-кеш живёт вне приложения: в браузере, в обратном прокси, в CDN. Чем и как долго кешировать, решает сервер заголовком <code>Cache-Control</code>. <code>max-age</code> задаёт, сколько ответ свежий; после этого кеш спрашивает origin с <code>If-None-Match</code> и при неизменном ETag получает 304 без тела. <code>private</code> запрещает общим кешам хранить персональный ответ, <code>no-store</code> — хранить вообще, а <code>no-cache</code> разрешает хранить, но требует проверки перед каждым использованием. <code>Vary</code> добавляет заголовки запроса в ключ кеша. CDN — распределённый общий кеш; изменения доставляют версионированными URL или очисткой.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>CDN показал одному клиенту профиль другого, а новый тариф полчаса не доходил до мобильного приложения</h2>
+      <p>Команда поставила CDN перед API, чтобы снять нагрузку со справочников. Через день пришла жалоба: пользователь открыл «Мой профиль» и увидел чужое имя. Ответ <code>/me</code> не имел <code>Cache-Control</code>, CDN по своим правилам закешировал его, а ключ кеша — только адрес, без пользователя. В тот же день бизнес поменял тариф, и мобильное приложение ещё полчаса показывало старый: ответ был закеширован на полчаса, и CDN честно отдавал его до истечения.</p>
+      <p>Тема разбирает HTTP-кеширование с точки зрения бэкенда: что означают директивы, как общий кеш выбирает между HIT, ревалидацией и запросом к origin, чем опасны персональные ответы и как CDN доставляет изменения. Семантика методов и базовый механизм ETag и 304 — в <a href="http.html">HTTP</a>, кеширование данных в приложении — в <a href="caching.html">Caching Strategies</a>. Демо <a href="../examples/http-cache/HttpCacheDemo.java">HttpCacheDemo.java</a> поднимает origin на JDK, а перед ним в Docker стоит nginx 1.31 с <code>proxy_cache</code> в роли CDN; заголовок <code>X-Cache</code> показывает решение кеша.</p>
+    </section>
+
+    <section class="step" id="directives">
+      <h2>Cache-Control говорит кешам, кто может хранить ответ и как долго он свежий</h2>
+      <table class="mx">
+        <thead><tr><th>Директива</th><th>Смысл</th></tr></thead>
+        <tbody>
+          <tr><td><code>max-age=60</code></td><td>Ответ свежий 60 секунд; в это время кеш отдаёт его без обращения к origin</td></tr>
+          <tr><td><code>s-maxage=300</code></td><td>То же, но только для общих кешей (CDN, прокси); перекрывает max-age для них</td></tr>
+          <tr><td><code>public</code> / <code>private</code></td><td>Можно хранить в общих кешах / только в кеше браузера одного пользователя</td></tr>
+          <tr><td><code>no-cache</code></td><td>Хранить можно, но перед каждым использованием проверять у origin</td></tr>
+          <tr><td><code>no-store</code></td><td>Не хранить нигде: для чувствительных данных</td></tr>
+          <tr><td><code>must-revalidate</code></td><td>После истечения нельзя отдавать устаревшее, даже если origin недоступен</td></tr>
+          <tr><td><code>stale-while-revalidate=30</code></td><td>30 секунд после истечения можно отдавать старое, обновляя в фоне</td></tr>
+          <tr><td><code>immutable</code></td><td>Ответ не изменится никогда: браузер не проверяет его даже при перезагрузке</td></tr>
+        </tbody>
+      </table>
+      <p>Частая путаница — <code>no-cache</code> и <code>no-store</code>. <code>no-cache</code> не запрещает кеширование, а запрещает отдавать без проверки: с ETag это дешёвые 304 вместо полных ответов. Запрет хранения — только <code>no-store</code>. И отсутствие <code>Cache-Control</code> не означает «не кешировать»: если в ответе есть <code>Last-Modified</code>, кеши вправе вычислить свежесть эвристически, обычно как десятую часть возраста документа. Поэтому у каждого ответа API заголовок кеширования должен быть явным.</p>
+    </section>
+
+    <section class="step" id="shared">
+      <h2>Общий кеш отдаёт свежее сам, а истёкшее проверяет у origin по ETag</h2>
+      <p>Origin отдаёт тарифы с <code>Cache-Control: public, max-age=3</code> и ETag версии. Демо делает запросы через nginx, ждёт истечения и меняет версию тарифа:</p>
+      <pre class="out">== public, max-age=3
+GET /tariffs              -&gt; 200 MISS        tariff v1
+GET /tariffs              -&gt; 200 HIT         tariff v1
+GET /tariffs              -&gt; 200 REVALIDATED tariff v1
+GET /tariffs              -&gt; 200 HIT         tariff v1
+GET /tariffs              -&gt; 200 EXPIRED     tariff v2</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 190" role="img" aria-label="Шкала времени запросов к /tariffs. MISS в начале: кеш загружает ответ. HIT в течение трёх секунд. Через 4,5 секунды ответ истёк, кеш спрашивает origin с If-None-Match, получает 304 и снова считает ответ свежим. Тариф меняется на v2, но кеш ещё три секунды отдаёт v1. После истечения ETag не совпал, origin отдаёт 200 с v2.">
+            <text x="20" y="22" class="dg-cap">ОДИН КЛЮЧ /tariffs ВО ВРЕМЕНИ</text>
+            <rect x="60" y="40" width="160" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="250" y="40" width="160" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="440" y="40" width="160" height="34" rx="5" class="dg-cell hit"/>
+            <text x="140" y="62" class="dg-n" text-anchor="middle">свежий v1</text>
+            <text x="330" y="62" class="dg-n" text-anchor="middle">свежий v1 после 304</text>
+            <text x="520" y="62" class="dg-n" text-anchor="middle">свежий v2</text>
+            <path d="M20 100 L 700 100" class="dg-line"/>
+            <text x="60" y="122" class="dg-n" text-anchor="middle">MISS</text>
+            <text x="110" y="122" class="dg-ok" text-anchor="middle">HIT</text>
+            <text x="250" y="122" class="dg-n" text-anchor="middle">REVALIDATED</text>
+            <text x="250" y="140" class="dg-n" text-anchor="middle">If-None-Match → 304</text>
+            <text x="300" y="160" class="dg-bad" text-anchor="middle">HIT v1, а в origin уже v2</text>
+            <text x="440" y="122" class="dg-n" text-anchor="middle">EXPIRED</text>
+            <text x="440" y="140" class="dg-n" text-anchor="middle">ETag другой → 200</text>
+            <text x="20" y="184" class="dg-s">Свежий ответ отдаётся без вопросов к origin, даже если там уже другое значение.</text>
+          </svg>
+        </div>
+        <figcaption>max-age — это обещание устарелости: в его пределах кеш не узнает об изменении. Выбирают его по тому, сколько старых данных допустимо увидеть клиенту.</figcaption>
+      </figure>
+      <p>Первый запрос — MISS: кеш пуст и сходил в origin. Второй — HIT без обращения к origin. Третий пришёл после истечения: nginx отправил origin условный запрос с <code>If-None-Match</code>, получил 304 без тела и снова считает ответ свежим на 3 секунды. Затем тариф сменился на v2, но четвёртый запрос всё равно получил v1 — ответ свежий, и кеш об изменении не спрашивает. Это ситуация с мобильным приложением, только с max-age в 30 минут. Пятый пришёл после истечения, ETag уже другой, и origin отдал новое тело. Всего три обращения к origin на пять запросов.</p>
+    </section>
+
+    <section class="step" id="private">
+      <h2>Персональный ответ без private может попасть в общий кеш и уйти другому пользователю</h2>
+      <pre class="out">== private, max-age=60
+GET /me      (user anna)  -&gt; 200 MISS        profile of anna
+GET /me      (user boris) -&gt; 200 MISS        profile of boris</pre>
+      <p>С <code>private</code> nginx не сохранил ответ: каждый пользователь получил свой профиль от origin. Ключ общего кеша по умолчанию — метод и URL; ни <code>Authorization</code>, ни cookie, ни кастомный заголовок пользователя в него не входят. Если бы <code>/me</code> пришёл с <code>public, max-age=60</code>, Борис получил бы профиль Анны. По стандарту общий кеш не хранит ответы на запросы с <code>Authorization</code>, если ответ явно не разрешает, но аутентификация cookie или своим заголовком такой защиты не даёт.</p>
+      <p>Персональные ответы помечают <code>private</code> или <code>no-store</code>, а данные, которые нельзя оставлять даже в браузере на общем компьютере, — <code>no-store</code>. Отдельная атака — web cache deception: CDN настроен кешировать всё, что выглядит как статика (<code>*.css</code>), а приложение отвечает на <code>/me/profile.css</code> профилем пользователя. Защита — кешировать по явным заголовкам origin, а не по расширению в адресе.</p>
+    </section>
+
+    <section class="step" id="vary">
+      <h2>Vary добавляет заголовки запроса в ключ кеша</h2>
+      <pre class="out">== Vary: Accept-Language
+GET /terms   (ru)         -&gt; 200 MISS        terms in ru
+GET /terms   (en)         -&gt; 200 MISS        terms in en
+GET /terms   (ru)         -&gt; 200 HIT         terms in ru</pre>
+      <p>Условия обслуживания зависят от языка, и origin отвечает <code>Vary: Accept-Language</code>. Кеш хранит отдельную копию на каждое значение заголовка: русская и английская версии — разные записи, и повторный русский запрос получил HIT. Без <code>Vary</code> первый пришедший язык достался бы всем. Цена — дробление кеша: <code>Vary: Accept-Language</code> при сотнях вариантов строк вида <code>ru-RU,ru;q=0.9,en;q=0.8</code> почти обнуляет попадания, поэтому CDN нормализуют заголовок до нескольких значений. <code>Vary: Cookie</code> или <code>Vary: *</code> делают ответ практически некешируемым в общем кеше.</p>
+    </section>
+
+    <section class="step" id="cdn">
+      <h2>CDN доставляет изменения через версии в URL, очистку или stale-while-revalidate</h2>
+      <p>CDN — сеть общих кешей близко к пользователям. В модели pull узел CDN при промахе сам забирает ответ у origin и кеширует по его заголовкам; в модели push контент заранее загружают в CDN, и origin в обслуживании не участвует. Для API почти всегда pull, для больших файлов и релизов — бывает push.</p>
+      <p>Изменения доставляют тремя способами. Версионированные URL — <code>app.3f9a1c.js</code> или <code>/v2/tariffs?rev=42</code>: содержимое по адресу не меняется никогда, ему ставят <code>max-age=31536000, immutable</code>, а новая версия — новый адрес. Очистка (purge) по API CDN удаляет конкретные адреса или теги; она асинхронна и занимает секунды на сотнях узлов. И короткий <code>max-age</code> со <code>stale-while-revalidate</code>, когда устарелость в секунды допустима, а ожидание — нет:</p>
+      <pre class="out">== stale-while-revalidate=30, max-age=1
+GET /rates                -&gt; 200 MISS        rates 958
+GET /rates                -&gt; 200 STALE       rates 958
+GET /rates                -&gt; 200 HIT         rates 583</pre>
+      <p>После истечения <code>max-age=1</code> кеш сразу отдал старый ответ (STALE) и параллельно обновил его у origin; следующий запрос получил уже новое значение. Клиент не ждал origin ни разу, а origin получил один запрос на обновление, а не по запросу на клиента. Похожая директива <code>stale-if-error</code> разрешает отдавать устаревшее, если origin отвечает ошибкой, — CDN продолжает обслуживать справочники, пока origin лежит.</p>
+      <div class="trap">
+        <p class="myth">Cache-Control: no-cache запрещает кешировать ответ.</p>
+        <p class="fact">no-cache разрешает хранить ответ, но требует проверять его у origin перед каждым использованием; с ETag это 304 без тела. Запрещает хранение только no-store. А ответ вовсе без Cache-Control кеши вправе закешировать эвристически.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>max-age — допустимая устарелость: в демо кеш отдавал v1, когда в origin уже был v2.</li>
+        <li>После истечения кеш спрашивает origin с If-None-Match: 304 без тела продлевает свежесть.</li>
+        <li>private и no-store для персональных ответов: ключ общего кеша — только метод и URL.</li>
+        <li>Vary разделяет варианты, но дробит кеш; Vary: Cookie делает ответ почти некешируемым.</li>
+        <li>CDN: версионированные URL с immutable, purge по API, stale-while-revalidate и stale-if-error.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="httpcache-directives" data-freq="3">
+      <h3>Чем no-cache отличается от no-store, а private от public?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>no-store запрещает хранить ответ где-либо. no-cache разрешает хранить, но перед каждым использованием кеш проверяет ответ у origin условным запросом; при неизменном ETag приходит 304 без тела. private разрешает хранить только в кеше одного пользователя — браузере, public — и в общих кешах: прокси, CDN.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>s-maxage задаёт срок только для общих кешей.</li>
+            <li>Без Cache-Control кеши могут вычислить свежесть эвристически по Last-Modified.</li>
+            <li>must-revalidate запрещает отдавать устаревшее при недоступном origin; stale-if-error — наоборот, разрешает.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="httpcache-leak" data-freq="2">
+      <h3>Как CDN может отдать чужие данные и как это предотвратить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ключ общего кеша по умолчанию — метод и URL, без cookie и пользовательских заголовков. Если персональный ответ закешировать как public или CDN кеширует по своим правилам, следующий пользователь по тому же адресу получит чужой ответ. Персональные ответы помечают private или no-store, а CDN настраивают уважать заголовки origin.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Web cache deception: CDN кеширует по расширению, а приложение отдаёт профиль на /me/x.css.</li>
+            <li>Ответы на запросы с Authorization общий кеш не хранит без явного разрешения, но cookie-аутентификацию это не защищает.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с заголовками этих ответов?</summary>
+          <pre><code class="language-text">GET /api/me              → Cache-Control: public, max-age=300
+GET /api/tariffs         → (без Cache-Control), Last-Modified: ...
+GET /static/app.js       → Cache-Control: max-age=31536000</code></pre>
+          <p>Профиль помечен public: CDN закеширует его по URL и отдаст другим пользователям; нужен private или no-store. Тарифы без Cache-Control кеши закешируют эвристически на непредсказуемое время; нужен явный max-age по допустимой устарелости. app.js на год без версии в имени: после релиза пользователи год получают старый скрипт; нужен отпечаток в имени файла и immutable.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="httpcache-cdn" data-freq="2">
+      <h3>Как обновить контент, закешированный в CDN?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Лучше всего — версионированные URL: статика с хешем содержимого в имени кешируется навсегда с immutable, а новая версия получает новый адрес. Для остального — purge через API CDN по адресу или тегу и разумный max-age. Если устарелость в секунды допустима, stale-while-revalidate позволяет отдавать старое и обновлять в фоне.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Purge асинхронный и распространяется по узлам секунды; на него не полагаются для мгновенной согласованности.</li>
+            <li>Pull CDN забирает у origin при промахе, push — заранее загруженный контент.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9111">RFC 9111: HTTP Caching</a> — основа урока: свежесть, ревалидация, директивы, общие кеши и Authorization.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc5861">RFC 5861: stale-while-revalidate и stale-if-error</a>.</li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching">MDN: HTTP caching</a> — практическое руководство.</li>
+      <li><a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cache">nginx: proxy_cache</a> — настройки кеша из демо.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
