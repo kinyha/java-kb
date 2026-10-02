@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JWT · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jwt">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>JWT</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>JWT — три части через точку: заголовок, утверждения и подпись, каждая в base64url. Содержимое читает кто угодно, подпись лишь доказывает, кто его выпустил. HS256 подписывает общим секретом, поэтому любой проверяющий может и выпускать токены; RS256 и ES256 подписывают закрытым ключом издателя. Проверка опасна, если алгоритм берётся из самого токена: тогда проходят <code>alg: none</code> и HS256 с публичным ключом вместо секрета. Сервер фиксирует алгоритм и проверяет издателя, аудиторию и срок. Отозвать JWT нельзя, поэтому access-токен живёт минуты, а refresh-токен ротируется при каждом использовании.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Подделанный токен с ролью admin прошёл проверку, хотя подпись никто не взламывал</h2>
+      <p>Платёжный сервис принимает JWT от своего сервера авторизации. Проверку написали сами: разобрать заголовок, взять алгоритм, проверить подпись. На пентесте токен с <code>"role": "admin"</code> и пустой подписью прошёл. Второй, подписанный публичным ключом сервера, который лежит в открытом доступе, — тоже. Ни один ключ не украли, криптографию не взламывали: ошибка в том, кто выбирает правила проверки.</p>
+      <p>Тема разбирает JWT как формат и как протокол: что подписывается, чем отличаются алгоритмы, какие атаки на проверку известны, что делать с отзывом и где хранить токен на клиенте. Как Spring Security проверяет JWT в resource server и строит права из claims, разобрано в <a href="spring-oauth2.html">OAuth2 &amp; JWT</a>. Демо <a href="../examples/security-basics/JwtAttacksDemo.java">JwtAttacksDemo.java</a> собирает токены вручную на JDK, без библиотек, чтобы были видны подписываемые байты: <code>java JwtAttacksDemo.java</code>. Значения <code>exp</code> зависят от времени запуска.</p>
+    </section>
+
+    <section class="step" id="structure">
+      <h2>Токен — это открытый JSON и подпись над его base64-формой</h2>
+      <pre class="out">== token
+header:  {"alg":"RS256","typ":"JWT"}
+payload: {"iss":"https://id.pay.example","sub":"anna","aud":"payments","role":"user","exp":1790955636}
+length:  504 chars</pre>
+      <p>Токен — <code>base64url(header) . base64url(payload) . base64url(signature)</code>. Подписываются не JSON-объекты, а ровно ASCII-строка из первых двух частей с точкой между ними: проверяющий не разбирает и не пересобирает JSON до проверки подписи. Base64url — кодировка, и любой, у кого есть токен, читает утверждения. Поэтому в JWT не кладут ничего секретного: ни номера карт, ни персональных данных сверх необходимого. Если содержимое нужно скрыть, используют зашифрованный JWE, но это редкость.</p>
+      <table class="mx">
+        <thead><tr><th>Claim</th><th>Смысл</th><th>Что проверяет сервер</th></tr></thead>
+        <tbody>
+          <tr><td><code>iss</code></td><td>Кто выпустил</td><td>Совпадает с доверенным издателем</td></tr>
+          <tr><td><code>sub</code></td><td>О ком токен</td><td>Используется как id пользователя</td></tr>
+          <tr><td><code>aud</code></td><td>Для кого выпущен</td><td>Содержит имя этого сервиса</td></tr>
+          <tr><td><code>exp</code>, <code>nbf</code>, <code>iat</code></td><td>Срок, начало действия, время выпуска</td><td>Текущее время в окне с небольшим допуском</td></tr>
+          <tr><td><code>jti</code></td><td>Уникальный id токена</td><td>Для списка отзыва и защиты от повтора</td></tr>
+        </tbody>
+      </table>
+      <p>Токен в 500 символов уходит в каждом запросе. Если сложить в него все роли, группы и права пользователя, он вырастет до нескольких килобайт и упрётся в лимиты заголовков прокси, обычно 8 КБ на все заголовки. Права, которые часто меняются, лучше хранить на сервере, а в токене оставить идентичность и крупные роли.</p>
+    </section>
+
+    <section class="step" id="algorithms">
+      <h2>HS256 позволяет выпускать токены каждому, кто может их проверить</h2>
+      <p><b>HS256</b> — HMAC-SHA256 общим секретом. Один и тот же ключ подписывает и проверяет. Если токены проверяют пять сервисов, секрет есть у всех пяти, и утечка из любого позволяет выпускать токены от имени издателя. HS256 уместен, когда издатель и проверяющий — один сервис.</p>
+      <p><b>RS256</b> и <b>ES256</b> — подпись RSA и ECDSA. Издатель подписывает закрытым ключом, а сервисы проверяют публичным, которым подписать нельзя. Публичные ключи издатель публикует как JWKS — JSON со списком ключей по адресу вроде <code>/.well-known/jwks.json</code>, а в заголовке токена указывает <code>kid</code>, каким ключом подписан. Это позволяет менять ключи без простоя: опубликовать новый ключ рядом со старым, начать подписывать новым, а старый убрать, когда истекут все выпущенные им токены. ES256 даёт подписи короче, чем RS256: 64 байта против 256 у RSA-2048.</p>
+      <p>Проверяющий кеширует JWKS и перечитывает его, когда встречает незнакомый <code>kid</code>, но не чаще чем раз в некоторое время: иначе поток токенов с выдуманными <code>kid</code> превратится в поток запросов к серверу авторизации.</p>
+    </section>
+
+    <section class="step" id="verify">
+      <h2>Алгоритм проверки выбирает сервер, а не заголовок токена</h2>
+      <p>Демо выпускает пять токенов: настоящий, два поддельных с ролью admin, настоящий для другого сервиса и просроченный. Наивная проверка берёт алгоритм из заголовка и проверяет только подпись:</p>
+      <pre><code class="language-java">String alg = claim(header, "alg");                    // Алгоритм выбирает токен.
+boolean ok = switch (alg) {
+    case "none"  -&gt; true;
+    case "HS256" -&gt; isEqual(hmac(publicPem, input), signature); // «Ключ проверки» — публичный PEM.
+    case "RS256" -&gt; rsVerify(issuer, input, signature);
+    default      -&gt; false;
+};</code></pre>
+      <pre class="out">== naive verifier: trusts header alg, checks only signature
+valid                  -&gt; accepted, role=user
+alg=none               -&gt; accepted, role=admin
+HS256 with public key  -&gt; accepted, role=admin
+aud=reports            -&gt; accepted, role=user
+expired 2 min ago      -&gt; accepted, role=user</pre>
+      <p><code>alg: none</code> — легальный по спецификации «токен без подписи», и библиотека, которая его поддерживает, принимает пустую подпись. Подмена алгоритма хитрее. Сервер настроен проверять RS256 ключом издателя. Атакующий ставит в заголовок HS256 и подписывает токен HMAC, используя как секрет публичный ключ — он ведь публичный. Если библиотека берёт «ключ проверки» и применяет к нему алгоритм из заголовка, HMAC сходится. Так ломались реальные библиотеки, в том числе с CVE.</p>
+      <p>Ещё две строки прошли без всякой подделки. Токен для сервиса отчётов подписан тем же издателем, и без проверки <code>aud</code> его можно предъявить платёжному сервису. Просроченный токен прошёл, потому что срок не смотрели. Строгая проверка закрывает все пять случаев:</p>
+      <pre><code class="language-java">if (!"RS256".equals(alg)) return "rejected: alg";                       // Список алгоритмов — у сервера.
+if (!rsVerify(issuer, input, signature)) return "rejected: signature";
+if (!"https://id.pay.example".equals(iss)) return "rejected: iss";
+if (!"payments".equals(aud)) return "rejected: aud";
+if (exp + 60 &lt; now) return "rejected: exp";                            // Допуск 60 с на рассинхрон часов.</code></pre>
+      <pre class="out">== strict verifier: RS256 only, iss, aud, exp with 60 s skew
+valid                  -&gt; accepted, role=user
+alg=none               -&gt; rejected: alg
+HS256 with public key  -&gt; rejected: alg
+aud=reports            -&gt; rejected: aud
+expired 2 min ago      -&gt; rejected: exp</pre>
+      <p>В Java проверку не пишут сами: Nimbus JOSE + JWT, jjwt и Spring Security явно привязывают ключ к алгоритму. Но настроить их всё равно нужно: Spring resource server по умолчанию проверяет подпись, срок и издателя, а аудиторию — только если её указать. Заголовки <code>jku</code> и <code>x5u</code>, предлагающие адрес ключа, игнорируют: иначе токен сам скажет, каким ключом его проверять.</p>
+    </section>
+
+    <section class="step" id="refresh">
+      <h2>Короткий access-токен и ротация refresh-токена заменяют отзыв</h2>
+      <p>JWT нельзя отозвать: подписанный токен действителен, пока не истёк срок. Поэтому access-токен живёт 5–15 минут — столько длится окно, в котором украденный токен работает. Чтобы пользователь не входил заново каждые 15 минут, вместе с ним выдают refresh-токен — долгоживущий, непрозрачный и хранящийся на сервере авторизации. Его можно отозвать как обычную сессию.</p>
+      <p>Refresh-токен ценнее access-токена, поэтому его ротируют: каждое использование выдаёт новый, а старый становится использованным. Если старый приходит второй раз, значит, у него две копии — у клиента и у вора, — и сервер отзывает всё семейство токенов:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Вор украл rt-1 и первым обменял его на rt-2. Настоящий клиент приходит с rt-1, сервер видит повторное использование и отзывает всё семейство. Когда вор приходит с rt-2, он получает 401.">
+            <defs>
+              <marker id="rf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rf-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="30" width="150" height="50" rx="9" class="dg-box"/>
+            <rect x="20" y="120" width="150" height="50" rx="9" class="dg-box"/>
+            <rect x="420" y="30" width="280" height="140" rx="9" class="dg-box"/>
+            <g text-anchor="middle">
+              <text x="95" y="60" class="dg-in">вор</text>
+              <text x="95" y="150" class="dg-in">клиент</text>
+              <text x="560" y="52" class="dg-in">семейство f-anna</text>
+            </g>
+            <rect x="436" y="66" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="1-" x="568" y="66" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="2-" x="436" y="66" width="252" height="30" rx="5" class="dg-cell miss"/>
+            <text data-s="1" x="446" y="86" class="dg-n">rt-1 использован</text>
+            <text data-s="1" x="578" y="86" class="dg-n">rt-2 активен</text>
+            <text data-s="2-" x="446" y="86" class="dg-bad">всё семейство отозвано</text>
+            <path data-s="1" d="M170 55 L 416 55" class="dg-line" marker-end="url(#rf-n)"/>
+            <text data-s="1" x="186" y="47" class="dg-n">rt-1 → 200, rt-2</text>
+            <path data-s="2" d="M170 145 L 416 145" class="dg-line bad" marker-end="url(#rf-bad)"/>
+            <text data-s="2" x="186" y="137" class="dg-bad">rt-1 снова → reuse</text>
+            <path data-s="3" d="M170 65 L 416 110" class="dg-line bad" marker-end="url(#rf-bad)"/>
+            <text data-s="3" x="200" y="104" class="dg-bad">rt-2 → 401</text>
+            <text data-s="2-" x="436" y="126" class="dg-n">клиент входит заново,</text>
+            <text data-s="2-" x="436" y="144" class="dg-n">вор теряет доступ</text>
+            <text data-s="1" x="20" y="200" class="dg-t">Вор успел первым и получил новую пару.</text>
+            <text data-s="2" x="20" y="200" class="dg-bad">Второе использование rt-1 выдаёт кражу.</text>
+            <text data-s="3" x="20" y="200" class="dg-t">Токен вора принадлежит отозванному семейству.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Вор украл rt-1 и обменял его первым: сервер отметил rt-1 использованным и выдал rt-2.</li>
+          <li>Настоящий клиент приходит с rt-1. Сервер не знает, кто из двоих вор, но знает, что копий две, и отзывает всё семейство.</li>
+          <li>Токен rt-2 у вора теперь бесполезен. Клиент входит заново и получает новое семейство.</li>
+        </ol>
+      </figure>
+      <pre class="out">== refresh rotation
+thief  uses rt-1   -&gt; 200 new access + rt-2
+client uses rt-1   -&gt; 401 reuse detected, family f-anna revoked
+thief  uses rt-2   -&gt; 401</pre>
+      <p>Если нужно отозвать доступ немедленно — блокировка аккаунта, смена пароля, — короткого срока мало. Тогда сервис хранит список отозванных <code>jti</code> до истечения их срока или номер версии сессии пользователя, который сравнивается с claim в токене. Оба способа возвращают обращение к хранилищу; это осознанная цена, которую платят только за критичные операции.</p>
+    </section>
+
+    <section class="step" id="storage">
+      <h2>В браузере токен безопаснее держать на сервере, чем в localStorage</h2>
+      <p>Мобильное приложение хранит токены в защищённом хранилище ОС: Keychain или Keystore. В браузере выбор хуже. <code>localStorage</code> доступен любому JavaScript на странице, и одна XSS-уязвимость или скомпрометированный npm-пакет выносит токены. Переменная в памяти переживает XSS чуть лучше, но теряется при перезагрузке. HttpOnly-cookie JavaScript не прочитает, но тогда возвращается защита от CSRF из <a href="auth.html">Authentication Basics</a>.</p>
+      <p>Поэтому для браузерных приложений рекомендуют паттерн BFF — backend for frontend. Браузер общается только со своим бэкендом через сессию в HttpOnly-cookie, а токены хранит и обновляет бэкенд; в JavaScript они не попадают вовсе. Это возвращение к сессиям, но токены продолжают работать между сервисами, где они действительно нужны.</p>
+      <div class="trap">
+        <p class="myth">JWT безопаснее сессий, потому что подписан и не хранится на сервере.</p>
+        <p class="fact">Подпись защищает от подделки, но не от кражи: украденный JWT работает до конца срока, и отозвать его нельзя без хранилища. Сессия отзывается мгновенно. JWT выигрывает в распределённой проверке между сервисами, а не в безопасности.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>JWT — открытые header и payload в base64url плюс подпись над их строкой; секретов в нём не хранят.</li>
+        <li>HS256 — общий секрет, проверяющий может выпускать токены; RS256 и ES256 — закрытый ключ у издателя, JWKS с kid для ротации.</li>
+        <li>Алгоритм фиксирует сервер: наивная проверка в демо приняла alg=none и HS256 с публичным ключом.</li>
+        <li>Обязательно проверяют iss, aud и exp с небольшим допуском.</li>
+        <li>Access-токен на минуты, refresh-токен ротируется; повторное использование отзывает семейство.</li>
+        <li>В браузере — BFF и HttpOnly-cookie, а не localStorage.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="jwt-what" data-freq="3">
+      <h3>Как устроен JWT и что гарантирует подпись?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Три части через точку: заголовок с алгоритмом, payload с утверждениями — iss, sub, aud, exp, роли — и подпись. Первые две — base64url от JSON, их читает кто угодно. Подпись вычисляется над строкой header.payload и доказывает, что токен выпустил владелец ключа и что содержимое не менялось. Она не скрывает данные, поэтому секретов в JWT не кладут.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>HS256 — общий секрет у всех проверяющих; RS256 и ES256 — публичный ключ из JWKS, выпускать может только издатель.</li>
+            <li>kid в заголовке выбирает ключ и позволяет ротацию без простоя.</li>
+            <li>Большой токен упирается в лимиты заголовков; часто меняющиеся права держат на сервере.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="jwt-attacks" data-freq="2">
+      <h3>Какие ошибки проверки JWT приводят к подделке токенов?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Доверие алгоритму из заголовка: alg=none с пустой подписью и подмена RS256 на HS256, когда HMAC вычисляется публичным ключом как секретом. Отсутствие проверки aud — токен для другого сервиса того же издателя принимается. Отсутствие проверки exp и iss.</p>
+          <p>Сервер задаёт допустимые алгоритмы и ключи сам и проверяет iss, aud, exp с небольшим допуском на рассинхрон часов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Заголовки jku и x5u игнорируют: токен не должен указывать, каким ключом его проверять.</li>
+            <li>Незнакомый kid перечитывает JWKS не чаще заданного интервала.</li>
+            <li>Spring resource server не проверяет aud, пока её не настроить.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой проверкой?</summary>
+          <pre><code class="language-java">DecodedJWT jwt = JWT.decode(token);
+Algorithm alg = switch (jwt.getAlgorithm()) {
+    case "HS256" -&gt; Algorithm.HMAC256(publicKeyPem);
+    default      -&gt; Algorithm.RSA256(publicKey, null);
+};
+alg.verify(jwt);
+return jwt.getClaim("role").asString();</code></pre>
+          <p>Алгоритм выбирается по заголовку токена, и для HS256 секретом становится публичный ключ, который знают все: атакующий подписывает HMAC этим ключом любой payload. Нужен один заранее заданный алгоритм RS256 и верификатор с проверкой издателя, аудитории и срока; verify здесь проверяет только подпись.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="jwt-revoke" data-freq="3">
+      <h3>Как отозвать JWT и зачем нужен refresh-токен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сам JWT отозвать нельзя: он действителен до exp. Поэтому access-токен делают коротким, на 5–15 минут, а для продления выдают refresh-токен, который хранится на сервере авторизации и отзывается как сессия. Для немедленного отзыва ведут список отозванных jti до их истечения или версию сессии пользователя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Refresh-токен ротируют: каждый обмен выдаёт новый, повтор старого отзывает всё семейство.</li>
+            <li>Список отзыва возвращает обращение к хранилищу на каждый запрос; его применяют там, где мгновенный отзыв критичен.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="jwt-storage" data-freq="2">
+      <h3>Где хранить JWT в браузере?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>localStorage доступен любому скрипту, и XSS крадёт токен. HttpOnly-cookie скрипт не прочитает, но нужна защита от CSRF: SameSite и CSRF-токен. Лучший вариант для SPA — BFF: браузер держит только сессию в HttpOnly-cookie со своим бэкендом, а токены хранит и обновляет бэкенд.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Мобильные приложения хранят токены в Keychain или Keystore.</li>
+            <li>Токен в памяти страницы теряется при перезагрузке и всё равно доступен XSS во время работы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc8725">RFC 8725: JSON Web Token Best Current Practices</a> — основа урока о проверке: фиксация алгоритмов, aud, атаки на заголовок.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc7519">RFC 7519: JSON Web Token</a> — формат и зарегистрированные claims.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9700">RFC 9700: OAuth 2.0 Security Best Current Practice</a> — ротация refresh-токенов и обнаружение повторного использования.</li>
+      <li><a href="https://datatracker.ietf.org/doc/html/draft-ietf-oauth-browser-based-apps">OAuth 2.0 for Browser-Based Applications</a> — BFF и хранение токенов в браузере.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

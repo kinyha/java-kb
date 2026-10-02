@@ -141,7 +141,7 @@ window.KB_TREE = [
       { id: 'security', title: 'Security', source: 'roadmap.sh/backend: Authentication, Web Security; OWASP Top 10', items: [
         { id: 'auth', freq: 2, status: 'draft', title: 'Authentication Basics',
           scope: 'сессии и cookie, Basic, API-ключи, stateful и stateless аутентификация' },
-        { id: 'jwt', freq: 3, status: 'empty', title: 'JWT',
+        { id: 'jwt', freq: 3, status: 'draft', title: 'JWT',
           scope: 'структура токена, подпись HS256 и RS256, access и refresh token, отзыв токена, где хранить на клиенте' },
         { id: 'oauth2', freq: 3, status: 'empty', title: 'OAuth 2.0 & OIDC',
           scope: 'роли, authorization code и PKCE, client credentials, scopes, OpenID Connect и id token, SSO, SAML' },
