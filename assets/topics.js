@@ -267,7 +267,7 @@ window.KB_TREE = [
       { id: 'nosql', title: 'NoSQL', items: [
         { id: 'nosql', freq: 2, status: 'empty', title: 'Overview',
           scope: 'key-value, документные, колоночные, графовые, time series, SQL или NoSQL' },
-        { id: 'mongodb', freq: 1, status: 'empty', title: 'MongoDB',
+        { id: 'mongodb', freq: 1, status: 'draft', title: 'MongoDB',
           scope: 'документы, индексы, replica set, шардинг' },
         { id: 'cassandra', freq: 1, status: 'empty', title: 'Cassandra',
           scope: 'wide column, partition key, consistency level, запись и компакция' },

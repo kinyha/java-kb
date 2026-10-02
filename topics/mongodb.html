@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MongoDB · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="mongodb">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>MongoDB</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>MongoDB хранит документы — вложенные структуры в формате BSON — и делает атомарным изменение одного документа. Поэтому модель данных строят вокруг того, что меняется и читается вместе: связанные данные вкладывают в документ, а не раскладывают по коллекциям. Индексы похожи на B-tree в реляционных базах, и порядок полей в составном индексе подчиняется правилу ESR: равенство, сортировка, диапазон. Надёжность записи задаёт write concern: подтверждение одного узла или большинства реплика-сета. Транзакции на несколько документов есть, но дороже, чем в реляционной базе, и при хорошей модели нужны редко.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Возвраты по платежу превысили сумму платежа, а подтверждённая запись исчезла после смены primary</h2>
+      <p>Сервис возвратов хранит платежи в MongoDB. Чтобы вернуть деньги, он читает платёж, проверяет, что сумма возвратов не превысит сумму платежа, и записывает новый возврат. Два параллельных возврата по 300 на платёж в 500 прошли оба. Другой сервис писал события с подтверждением одного узла; после переключения primary часть подтверждённых событий пропала. А лента платежей магазина работала медленно, хотя составной индекс по всем трём полям запроса был.</p>
+      <p>Тема разбирает модель документов, атомарность, индексы, write concern и транзакции MongoDB. Обзор NoSQL-моделей — в <a href="nosql.html">Overview</a>, индексы в реляционной базе — в <a href="indexes.html">Indexes</a>, репликация и потеря подтверждённых записей в PostgreSQL — в <a href="replication.html">Replication</a>. Демо <a href="../examples/mongodb/MongoDemo.java">MongoDemo.java</a> работает с реплика-сетом из трёх узлов MongoDB 8.2 в Docker (скрипт <code>setup.sh</code>) через Java-драйвер 5.13. Образ <code>mongo:8</code> не запустился на ядре 6.19 в Docker VM из-за известной несовместимости, поэтому версия закреплена.</p>
+    </section>
+
+    <section class="step" id="documents">
+      <h2>Атомарен один документ, поэтому то, что меняется вместе, кладут в один документ</h2>
+      <pre><code class="language-java">// Возврат проходит, только если вместе с прошлыми не превысит сумму платежа (500).
+payments.updateOne(and(eq("_id", "p-1"), lte("refunded", 500 - 200)),
+        combine(push("refunds", new Document("id", "r-1").append("amount", 200)), inc("refunded", 200)));
+payments.updateOne(and(eq("_id", "p-1"), lte("refunded", 500 - 350)),
+        combine(push("refunds", new Document("id", "r-2").append("amount", 350)), inc("refunded", 350)));</code></pre>
+      <pre class="out">== refund 200: matched 1; refund 350 more: matched 0
+   {"_id": "p-1", "merchant": 7, "amount": 500, "refunded": 200, "refunds": [{"id": "r-1", "amount": 200}]}</pre>
+      <p>Возвраты вложены в документ платежа, и вместе с ними хранится сумма уже возвращённого. Проверка «не превысит ли» и запись идут одной командой: условие в фильтре, изменение в обновлении. MongoDB выполняет обновление одного документа атомарно, поэтому параллельный второй возврат увидит уже обновлённое <code>refunded</code> и не совпадёт с фильтром — второй возврат на 350 отклонён. Чтение, проверка в коде и отдельная запись, как в истории выше, гонку не закрывают — это то же потерянное обновление, что в <a href="db-tx.html">ACID &amp; Isolation</a>.</p>
+      <p>Вкладывать стоит то, что читается и меняется вместе с родителем и растёт ограниченно: возвраты платежа, позиции заказа, адреса клиента. Ссылки через id — для того, что живёт отдельно, нужно многим родителям или растёт без предела: все платежи магазина нельзя вложить в документ магазина, у документа предел 16 МБ, и каждое изменение переписывает его целиком. Схема в MongoDB не обязательна, но для важных коллекций её задают валидатором <code>$jsonSchema</code>, чтобы отсутствующее поле не ломало условия, как случилось в первой версии этого демо, где фильтр по несуществующему <code>refunded</code> ничего не находил.</p>
+    </section>
+
+    <section class="step" id="indexes">
+      <h2>Порядок полей в индексе — равенство, сортировка, диапазон</h2>
+      <pre><code class="language-java">c.find(and(eq("merchant", 42), gt("amount", 2500))).sort(descending("createdAt")).limit(10).explain();</code></pre>
+      <pre class="out">== no index:                            docsExamined 200000, keysExamined      0, in-memory SORT true, COLLSCAN
+== index (merchant, amount, createdAt): docsExamined     10, keysExamined     80, in-memory SORT true, IXSCAN
+== index (merchant, createdAt, amount): docsExamined     10, keysExamined     22, in-memory SORT false, IXSCAN</pre>
+      <p>Без индекса MongoDB прочитала все 200 тысяч документов (COLLSCAN) и отсортировала в памяти. Индекс в порядке полей запроса — <code>(merchant, amount, createdAt)</code> — сузил поиск, но из-за диапазона по <code>amount</code> ключи внутри него не упорядочены по времени, и понадобилась сортировка в памяти по 80 ключам. Индекс <code>(merchant, createdAt, amount)</code> отдаёт ключи магазина уже по времени, сортировка не нужна, и чтение остановилось после 22 ключей ради 10 результатов. Это правило ESR: Equality, Sort, Range. Сортировка в памяти ограничена 100 МБ и на больших выборках падает или уходит на диск, поэтому SORT в плане — сигнал проверить индекс.</p>
+    </section>
+
+    <section class="step" id="write-concern">
+      <h2>Write concern решает, сколько узлов должно подтвердить запись</h2>
+      <p>Реплика-сет — primary и secondary, которые копируют журнал операций (oplog) асинхронно. Write concern определяет, когда драйвер получит подтверждение: <code>w:1</code> — когда запись принял primary, <code>w:majority</code> — когда большинство узлов. Демо останавливает обе secondary:</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 190" role="img" aria-label="Клиент пишет на primary. С w:1 подтверждение приходит сразу после записи на primary. С w:majority — после того, как запись получила хотя бы одна secondary из двух, то есть большинство из трёх узлов.">
+            <defs><marker id="wc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="60" width="130" height="56" rx="9" class="dg-box"/><text x="85" y="92" class="dg-in" text-anchor="middle">клиент</text>
+            <rect x="260" y="60" width="150" height="56" rx="9" class="dg-box"/><text x="335" y="84" class="dg-in" text-anchor="middle">primary</text><text x="335" y="104" class="dg-n" text-anchor="middle">oplog</text>
+            <rect x="540" y="20" width="160" height="50" rx="9" class="dg-box"/><text x="620" y="50" class="dg-in" text-anchor="middle">secondary 1</text>
+            <rect x="540" y="110" width="160" height="50" rx="9" class="dg-box"/><text x="620" y="140" class="dg-in" text-anchor="middle">secondary 2</text>
+            <path d="M150 80 L 256 80" class="dg-line" marker-end="url(#wc-n)"/>
+            <path d="M410 76 L 536 50" class="dg-line" marker-end="url(#wc-n)"/>
+            <path d="M410 100 L 536 132" class="dg-line" marker-end="url(#wc-n)"/>
+            <text x="440" y="56" class="dg-n">oplog</text>
+            <path d="M256 104 L 154 104" class="dg-line ok" marker-end="url(#wc-n)"/>
+            <text x="160" y="128" class="dg-ok">w:1 — сразу</text>
+            <text x="160" y="146" class="dg-n">w:majority — после</text>
+            <text x="160" y="162" class="dg-n">primary + 1 secondary</text>
+            <text x="20" y="186" class="dg-s">Большинство из трёх — два узла: запись, подтверждённая им, переживёт смену primary.</text>
+          </svg>
+        </div>
+        <figcaption>Новый primary выбирается из узлов, у которых есть записи большинства, поэтому w:majority не откатывается, а w:1 может.</figcaption>
+      </figure>
+      <pre class="out">-- docker stop mongo-2
+-- docker stop mongo-3
+== two secondaries down, w:1 insert -&gt; acknowledged
+== w:majority insert -&gt; WriteConcernTimeout: waiting for replication timed out
+   documents on primary now: 2</pre>
+      <p>С <code>w:1</code> запись подтверждена — но она есть только на primary. Если он упадёт, новый primary из оставшихся узлов её не знает, а старый при возвращении откатит её в файл rollback: подтверждённое событие пропадёт, как в истории выше. С <code>w:majority</code> драйвер ждал подтверждения большинства и через 2 секунды получил таймаут. Важная деталь: документов на primary два — запись с таймаутом не отменена, она просто не подтверждена большинством. Приложение не знает, сохранится ли она, и повтор должен быть идемпотентным.</p>
+      <p>С MongoDB 5.0 умолчание — <code>w:majority</code>. Для чтения парный параметр — read concern: <code>majority</code> возвращает только данные, подтверждённые большинством и не способные откатиться. Чтение с secondary (<code>readPreference=secondary</code>) может вернуть устаревшие данные, как чтение с асинхронной реплики PostgreSQL.</p>
+    </section>
+
+    <section class="step" id="transactions">
+      <h2>Транзакции на несколько документов есть, но их стараются не требовать</h2>
+      <pre><code class="language-java">session.withTransaction(() -&gt; {
+    acc.updateOne(session, eq("_id", "a"), inc("balance", -70));
+    acc.updateOne(session, eq("_id", "b"), inc("balance", 70));
+    return null;
+});</code></pre>
+      <pre class="out">== transfer in a transaction: [{"_id": "a", "balance": 30}, {"_id": "b", "balance": 70}]</pre>
+      <p>С версии 4.0 MongoDB поддерживает транзакции на несколько документов в реплика-сете, с 4.2 — и в шардированном кластере. Перевод между счетами выполнился атомарно. <code>withTransaction</code> сам повторяет транзакцию при временных ошибках — <code>TransientTransactionError</code> — и коммит при неизвестном результате. Транзакции дороже одиночных операций, держат изменения в памяти и по умолчанию прерываются через 60 секунд, поэтому модель данных стараются строить так, чтобы инварианты жили в одном документе, а транзакции оставались исключением.</p>
+      <p>Масштабирование записи — шардирование коллекции по shard key: данные делятся на диапазоны (chunks), а балансировщик переносит их между шардами. Ключ выбирают по тем же правилам, что в <a href="sharding.html">Sharding</a>: он должен быть в основных запросах и давать равномерную нагрузку; запросы без него рассылаются на все шарды. С версии 5.0 ключ можно сменить командой <code>reshardCollection</code>, но это тяжёлая операция с копированием всех данных.</p>
+      <div class="trap">
+        <p class="myth">MongoDB не поддерживает транзакции, поэтому для денег не подходит.</p>
+        <p class="fact">Атомарно обновление одного документа, а с 4.0 — и транзакции на несколько документов: в демо перевод прошёл транзакцией. Проблемы с деньгами возникают от модели «прочитать, проверить в коде, записать» и от w:1, а не от отсутствия транзакций. Условное обновление одного документа и w:majority закрывают гонку и потерю.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Атомарен один документ: условие и изменение в одном updateOne отклонили превышающий возврат.</li>
+        <li>Вкладывают то, что меняется вместе и растёт ограниченно; документ до 16 МБ; схему задают валидатором.</li>
+        <li>ESR: (merchant, createdAt, amount) — 22 ключа без сортировки, (merchant, amount, createdAt) — 80 ключей и SORT в памяти.</li>
+        <li>w:1 подтверждает запись одного узла, которая откатится при failover; w:majority с таймаутом не отменяет записанное.</li>
+        <li>Транзакции есть с 4.0, но дороже; шардирование по shard key с балансировщиком.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="mongo-model" data-freq="2">
+      <h3>Когда вкладывать документы, а когда ссылаться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Вкладывают данные, которые читаются и меняются вместе с родителем и растут ограниченно: позиции заказа, возвраты платежа. Тогда чтение — один документ, а изменение — атомарное обновление одного документа. Ссылаются на то, что живёт отдельно, нужно многим или растёт без предела: платежи магазина, пользователи.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Предел документа 16 МБ; растущий массив переписывает документ при каждом изменении.</li>
+            <li>Инвариант в одном документе проверяется условием в фильтре обновления без транзакции.</li>
+            <li>$lookup соединяет коллекции, но дороже соединения в реляционной базе.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему возвраты могут превысить сумму платежа?</summary>
+          <pre><code class="language-java">Document p = payments.find(eq("_id", id)).first();
+int refunded = p.getInteger("refunded");
+if (refunded + amount &gt; p.getInteger("amount")) throw new RefundExceeded();
+payments.updateOne(eq("_id", id), combine(inc("refunded", amount), push("refunds", refund)));</code></pre>
+          <p>Проверка в коде и запись разделены: два параллельных возврата прочитают одно refunded, оба пройдут проверку и оба запишутся. Условие нужно перенести в фильтр обновления — and(eq("_id", id), lte("refunded", total - amount)) — и проверять matchedCount: 0 означает отказ. Атомарность одного документа закроет гонку без транзакции.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mongo-wc" data-freq="2">
+      <h3>Что такое write concern и read concern?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Write concern — сколько узлов реплика-сета должно подтвердить запись: w:1 — только primary, w:majority — большинство. С w:1 подтверждённая запись может откатиться при смене primary. Read concern — какие данные можно читать: majority возвращает только подтверждённые большинством, local — всё, что есть на узле.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С 5.0 умолчание w:majority.</li>
+            <li>Таймаут w:majority не отменяет запись: документ остаётся на primary, повтор должен быть идемпотентным.</li>
+            <li>Причинная согласованность — causal consistency в сессии.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="mongo-esr" data-freq="2">
+      <h3>Как строить составные индексы в MongoDB?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По правилу ESR: сначала поля с условием равенства, потом поле сортировки, потом поля с диапазоном. Тогда индекс отдаёт документы в нужном порядке, и не нужна сортировка в памяти. Проверяют через explain: COLLSCAN, SORT, totalKeysExamined и totalDocsExamined против nReturned.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Сортировка в памяти ограничена 100 МБ.</li>
+            <li>Покрытый запрос читает только индекс, если проекция содержит лишь индексированные поля без _id.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.mongodb.com/docs/manual/data-modeling/">MongoDB: Data Modeling</a> — основа урока: вложение, ссылки, атомарность одного документа.</li>
+      <li><a href="https://www.mongodb.com/docs/manual/tutorial/equality-sort-range-guideline/">MongoDB: The ESR Guideline</a>.</li>
+      <li><a href="https://www.mongodb.com/docs/manual/reference/write-concern/">Write Concern</a> и <a href="https://www.mongodb.com/docs/manual/core/replica-set-rollbacks/">Rollbacks During Replica Set Failover</a>.</li>
+      <li><a href="https://www.mongodb.com/docs/manual/core/transactions/">Transactions</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
