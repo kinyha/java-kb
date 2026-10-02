@@ -521,7 +521,7 @@ window.KB_TREE = [
       { id: 'boot', title: 'Boot', source: 'Spring Boot Reference: Developing with Spring Boot, Core Features, Production-ready Features', items: [
         { id: 'spring-boot', freq: 3, status: 'draft', title: 'Auto-configuration',
           scope: '@SpringBootApplication, @Conditional, стартеры, AutoConfiguration.imports, как отключить автоконфигурацию' },
-        { id: 'spring-config', freq: 2, status: 'empty', title: 'Configuration & Profiles',
+        { id: 'spring-config', freq: 2, status: 'draft', title: 'Configuration & Profiles',
           scope: 'порядок источников настроек, application.yml, @ConfigurationProperties и @Value, профили, секреты' },
         { id: 'boot-startup', freq: 2, status: 'empty', title: 'Startup & Packaging',
           scope: 'что происходит в SpringApplication.run, embedded Tomcat, fat jar и JarLauncher, graceful shutdown, AOT и native image' },

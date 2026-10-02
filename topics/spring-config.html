@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spring Boot: Configuration &amp; Profiles · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="spring-config">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Spring Boot: Configuration &amp; Profiles</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёжный сервис получает настройки из нескольких мест: файла в приложении, файлов окружения и параметров запуска. Boot загружает их в Environment и для каждого ключа выбирает значение из источника с большим приоритетом. Затем связывает нужную группу настроек с объектом, который получает сервис. Профиль меняет участвующие файлы и бины, а проверка настроек останавливает запуск, если сервис собран неправильно. При неожиданном поведении сначала найди источник значения, затем проверь, что попало в объект настроек.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Один сервис получает разные настройки из нескольких источников</h2>
+      <p>Платёжный сервис ждёт ответ банка. На локальной машине можно подождать две секунды. В проде общий бюджет запроса меньше, поэтому команда записала в <code>application-prod.yaml</code> таймаут <code>600ms</code>. После деплоя часть платежей всё равно обрывается уже через <code>250ms</code>.</p>
+      <p>Код и файл правильные. В параметрах контейнера остался аргумент <code>--payments.bank.timeout=250ms</code> от прошлого эксперимента. Он перекрыл профильный файл. Изменение ещё одного YAML не исправит ситуацию: сервис берёт значение из другого места.</p>
+      <p>Настройки позволяют запускать один и тот же артефакт в разных окружениях. Но теперь важно понимать две вещи: <b>какое значение выбрано</b> и <b>как оно попало в работающий объект</b>. Эти вопросы связаны, хотя решаются на разных этапах. Сначала Boot загружает источники, затем контейнер создаёт сервисы и связывает их настройки.</p>
+      <p>Сквозной пример — настройки банка: адрес, таймаут, число попыток и каналы платежей. Демо использует JDK 21, Spring Boot 4.1.1 и Spring Framework 7.0.9. Полный код и файлы лежат в <a href="../examples/boot/ConfigDemo.java">ConfigDemo.java</a> и <a href="../examples/boot/README.md">examples/boot</a>. Банк не вызывается: мы наблюдаем настройки, с которыми сервис начал бы работу.</p>
+    </section>
+
+    <section class="step" id="precedence">
+      <h2>Environment выбирает победителя по приоритету источника</h2>
+      <p><code>Environment</code> хранит упорядоченные источники свойств, <code>PropertySource</code>. При запросе ключа оно ищет значение в порядке приоритета. Первый источник, который даёт значение, определяет результат. Значения из остальных источников остаются доступны для диагностики, но для этого запроса они уже проиграли.</p>
+      <p>Это выбор <em>по каждому ключу</em>. Переменная окружения с таймаутом не заменяет весь YAML. Адрес банка может прийти из файла, таймаут — из переменной, число попыток — из профильного файла. Так один объект настроек собирается из нескольких слоёв.</p>
+      <table class="mx">
+        <thead><tr><th>От меньшего приоритета к большему</th><th>Что это даёт</th></tr></thead>
+        <tbody>
+          <tr><td><code>SpringApplication.setDefaultProperties</code></td><td>Запасные значения, которые перекрывает любой обычный источник</td></tr>
+          <tr><td><code>@PropertySource</code></td><td>Источник пользовательской конфигурации; появляется во время refresh</td></tr>
+          <tr><td>Config Data: YAML, properties, imports</td><td>Настройки приложения и окружения</td></tr>
+          <tr><td><code>random.*</code></td><td>Случайные значения для ключей этого пространства</td></tr>
+          <tr><td>Переменные ОС</td><td>Например, <code>PAYMENTS_BANK_TIMEOUT=900ms</code></td></tr>
+          <tr><td>Системные свойства JVM</td><td>Например, <code>-Dpayments.bank.timeout=750ms</code></td></tr>
+          <tr><td>Источники servlet-контейнера</td><td>По возрастанию: JNDI, параметры ServletContext, параметры ServletConfig</td></tr>
+          <tr><td><code>SPRING_APPLICATION_JSON</code></td><td>Разобранный JSON становится отдельным источником</td></tr>
+          <tr><td>Аргументы <code>--key=value</code></td><td>Последнее обычное переопределение при запуске</td></tr>
+        </tbody>
+      </table>
+      <p>Почему JSON побеждает переменную окружения, хотя сам может быть записан в переменной? Boot отдельно разбирает <code>SPRING_APPLICATION_JSON</code> и помещает его свойства в источник с большим приоритетом. Значение <code>payments.bank.timeout</code> из этого источника побеждает обычную <code>PAYMENTS_BANK_TIMEOUT</code>. Аргументы запуска находятся ещё выше.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 282" role="img" aria-label="Запрос payments.bank.timeout идёт к упорядоченным источникам Environment. Сверху аргумент 250ms, ниже JSON 500ms, переменная ОС 900ms и профильный файл 600ms. Первое найденное значение 250ms возвращается, нижние значения не участвуют в ответе.">
+            <defs>
+              <marker id="cp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- Источники представлены как упорядоченные ячейки, поиск останавливается сверху. -->
+            <rect x="20" y="126" width="190" height="52" rx="8" class="dg-box"/>
+            <rect x="240" y="32" width="252" height="212" rx="10" class="dg-sep" fill="none"/>
+            <rect x="254" y="54" width="224" height="38" rx="7" class="dg-cell hit"/>
+            <rect x="254" y="100" width="224" height="38" rx="7" class="dg-cell"/>
+            <rect x="254" y="146" width="224" height="38" rx="7" class="dg-cell"/>
+            <rect x="254" y="192" width="224" height="38" rx="7" class="dg-cell"/>
+            <rect x="538" y="48" width="162" height="60" rx="8" class="dg-cell hit"/>
+            <path d="M210 152 C232 152, 228 73, 250 73" class="dg-line" marker-end="url(#cp-n)"/>
+            <path d="M478 73 L534 73" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <text x="240" y="20" class="dg-cap">ENVIRONMENT</text>
+            <g text-anchor="middle">
+              <text x="115" y="148" class="dg-in">payments.bank</text>
+              <text x="115" y="166" class="dg-in">.timeout?</text>
+              <text x="366" y="78" class="dg-in">CLI: 250ms</text>
+              <text x="366" y="124" class="dg-in">JSON: 500ms</text>
+              <text x="366" y="170" class="dg-in">ОС: 900ms</text>
+              <text x="366" y="216" class="dg-in">prod YAML: 600ms</text>
+              <text x="619" y="73" class="dg-in">"250ms"</text>
+              <text x="619" y="96" class="dg-n">найдено первым</text>
+            </g>
+            <text x="20" y="116" class="dg-s">запрос одного ключа</text>
+            <text x="254" y="264" class="dg-n">Сверху приоритет выше. Поиск уже завершён.</text>
+          </svg>
+        </div>
+        <figcaption>Если убрать аргумент, победит JSON. Если убрать и JSON, сервис получит значение переменной ОС. Редактирование нижнего YAML не изменит эти результаты.</figcaption>
+      </figure>
+      <p>В демо профильный файл задаёт <code>600ms</code>. Проверим три запуска. Ниже из каждого настоящего вывода оставлены строки <code>timeout</code> и <code>origin</code>: последнее поле показывает происхождение победившего значения.</p>
+      <pre><code class="language-bash">cd examples/boot
+PAYMENTS_BANK_TIMEOUT=900ms ./run.sh ConfigDemo --spring.profiles.active=prod
+# Обычная переменная побеждает профильный файл.</code></pre>
+      <pre class="out">timeout=900ms
+origin=System Environment Property "PAYMENTS_BANK_TIMEOUT"</pre>
+      <pre><code class="language-bash">PAYMENTS_BANK_TIMEOUT=900ms \
+SPRING_APPLICATION_JSON='{"payments":{"bank":{"timeout":"500ms"}}}' \
+./run.sh ConfigDemo --spring.profiles.active=prod
+# JSON разобран в отдельный источник с большим приоритетом.</code></pre>
+      <pre class="out">timeout=500ms
+origin=System Environment Property "SPRING_APPLICATION_JSON"</pre>
+      <pre><code class="language-bash">PAYMENTS_BANK_TIMEOUT=900ms \
+SPRING_APPLICATION_JSON='{"payments":{"bank":{"timeout":"500ms"}}}' \
+./run.sh ConfigDemo --spring.profiles.active=prod --payments.bank.timeout=250ms
+# Аргумент перекрывает и обычную переменную, и JSON.</code></pre>
+      <pre class="out">timeout=250ms
+origin="payments.bank.timeout" from property source "commandLineArgs"</pre>
+      <p>Boot по умолчанию добавляет аргументы <code>--</code> в Environment. Приложение может выключить это через <code>setAddCommandLineProperties(false)</code>. JSON со значением <code>null</code> также не стирает нижнее значение: при разрешении свойства <code>null</code> считается отсутствием. В тестах есть дополнительные источники с ещё большим приоритетом; их порядок разобран в <a href="spring-testing.html">Spring Testing</a>.</p>
+    </section>
+
+    <section class="step" id="profiles">
+      <h2>Профиль добавляет конфигурацию, а не отдельное приложение</h2>
+      <p>Профиль — именованное условие для загрузки настроек и регистрации бинов. При <code>prod</code> остаётся то же приложение и тот же контейнер, но Boot дополнительно читает профильные файлы. Аннотация <code>@Profile</code> позволяет тем же именем включить нужную реализацию бина. Эти два применения профиля работают вместе, хотя сам профиль не создаёт новый контекст.</p>
+      <p>Сначала загружаются обычные файлы внутри артефакта, затем профильные внутри него. Выше стоят обычные внешние файлы, ещё выше — внешние профильные. Поэтому внешний <code>application.yaml</code> способен перекрыть <code>application-prod.yaml</code> из jar. У нескольких активных профилей в пределах одной группы расположений выигрывает последний: <code>prod,live</code> даёт файлу <code>live</code> перекрыть <code>prod</code>.</p>
+      <p>Обычный поиск включает корень classpath и его <code>/config</code>, текущую директорию, <code>./config/</code> и непосредственные подпапки <code>./config/*/</code>. Демо задаёт своё расположение <code>classpath:/config-demo/</code>, чтобы не зависеть от файлов на твоей машине. В этих опытах classpath играет ту же роль, что файлы внутри упакованного приложения.</p>
+      <pre><code class="language-yaml"># config-demo/application.yaml: базовые настройки.
+payments:
+  bank:
+    url: https://bank.test
+    timeout: 2s
+    max-attempts: 2
+    channels: [card, sbp]
+    rules:
+      card: 2
+      sbp: 1
+--- # В том же физическом файле начинается второй документ.
+spring:
+  config:
+    activate:
+      on-profile: sandbox # Документ участвует только при активном sandbox.
+payments:
+  bank:
+    url: https://sandbox.bank.test
+    timeout: 100ms</code></pre>
+      <p>YAML разворачивается в ключи вроде <code>payments.bank.timeout</code>. В многодокументном файле каждый документ добавляется отдельно; нижний активный документ перекрывает предыдущий. Условие <code>spring.config.activate.on-profile</code> выбирает документ по уже активным профилям. Оно само профиль не включает.</p>
+      <pre><code class="language-yaml"># config-demo/application-prod.yaml: добавляется поверх обычного файла.
+payments:
+  bank:
+    timeout: 600ms
+    max-attempts: 3
+    channels: [card] # Список заменяется целиком: sbp исчезнет из channels.
+    rules:
+      card: 5 # Map объединяется по ключам: старое правило sbp остаётся.</code></pre>
+      <pre><code class="language-bash">./run.sh ConfigDemo --spring.profiles.active=prod
+# Ни переменная таймаута, ни JSON в этом запуске не заданы.</code></pre>
+      <pre class="out">profiles=[prod]
+url=https://bank.test
+timeout=600ms
+maxAttempts=3
+channels=[card]
+rules={card=5, sbp=1}</pre>
+      <p>Здесь видно различие между перекрытием списка и map. В новой конфигурации список каналов состоит только из <code>card</code>. В map правило <code>card</code> изменилось, а <code>sbp</code> осталось из базового файла. Эти правила связывания коллекций важны при профилях и при любом переопределении с большим приоритетом.</p>
+      <pre><code class="language-bash">./run.sh ConfigDemo --spring.profiles.active=sandbox
+# Подключается второй документ обычного YAML, файл prod не участвует.</code></pre>
+      <pre class="out">profiles=[sandbox]
+url=https://sandbox.bank.test
+timeout=100ms</pre>
+      <pre><code class="language-yaml"># config-demo/external/application.yaml: файл на диске вне classpath.
+payments:
+  bank:
+    timeout: 800ms</code></pre>
+      <pre><code class="language-bash">./run.sh ConfigDemo --spring.profiles.active=prod \
+  --spring.config.additional-location=file:./config-demo/external/
+# Добавленная внешняя директория перекрывает classpath, включая его prod-файл.</code></pre>
+      <pre class="out">timeout=800ms
+origin=URL [file:config-demo/external/application.yaml] - 3:14</pre>
+      <h3>Включение профилей и расположение файлов решают разные задачи</h3>
+      <p><code>spring.profiles.active</code> задаёт активные профили и перекрывается по обычному приоритету. <code>spring.profiles.include</code> добавляет общие профили; они включаются перед явно активными. <code>spring.profiles.group.production: [prod, audit]</code> позволяет включить связанный набор одним именем <code>production</code>. Если активных профилей нет, действует набор по умолчанию с именем <code>default</code>; его можно изменить через <code>spring.profiles.default</code>.</p>
+      <div class="trap">
+        <p class="myth">В документе с on-profile: prod можно включить audit через spring.profiles.include.</p>
+        <p class="fact">active, default, include и group задают в обычном документе. Они запрещены в profile-specific файле и в документе, активируемом через on-profile. Набор профилей определяет, какие документы читать; активируемый документ не должен одновременно переопределять этот набор.</p>
+      </div>
+      <p><code>spring.config.location</code> заменяет стандартные расположения поиска. <code>spring.config.additional-location</code> дополняет их, а <code>spring.config.import</code> подключает конкретный ресурс. Директорию в location записывают с завершающим <code>/</code>. Эти настройки нужны до чтения файлов, поэтому место поиска передают через аргумент, системное свойство JVM или переменную ОС.</p>
+      <p>Импортированный файл перекрывает документ, который его подключил. Несколько imports обрабатываются по порядку; поздний перекрывает ранний. В примере <code>override.yaml</code> содержит <code>payments.bank.timeout: 700ms</code>; его подключение даёт следующий результат.</p>
+      <pre><code class="language-bash">./run.sh ConfigDemo --spring.config.import=classpath:/config-demo/override.yaml
+# Базовый таймаут 2s перекрыт импортируемым файлом.</code></pre>
+      <pre class="out">timeout=700ms
+origin=class path resource [config-demo/override.yaml] - 3:14</pre>
+      <details class="deep">
+        <summary>Под капотом: группы расположений и приоритет форматов</summary>
+        <p>В сложном <code>spring.config.location</code> запятая отделяет последовательные группы расположений, а точка с запятой объединяет расположения на одном уровне. От этого зависит, как чередуются файлы нескольких профилей. Правило «последний профиль победит» применяют внутри одной группы, а затем учитывают приоритет следующей группы.</p>
+        <p>Если в одном расположении лежат и <code>application.properties</code>, и YAML, приоритет выше у properties. Выбери один формат для приложения: скрытое дублирование файлов затрудняет расследование. Обычный <code>@PropertySource</code> не загружает YAML и многодокументный Config Data тем же способом; для них используй механизм Boot.</p>
+      </details>
+    </section>
+
+    <section class="step" id="binding">
+      <h2>ConfigurationProperties связывает настройки в проверяемый объект</h2>
+      <p>Сервису нужен таймаут типа <code>Duration</code>, а не строка с неопределённой единицей. Адрес банка удобно хранить как <code>URI</code>, число попыток — как <code>int</code>. <code>@ConfigurationProperties</code> объединяет эти поля под одним префиксом. Binder читает выбранные значения, преобразует типы и создаёт объект настроек.</p>
+      <p>У record с единственным конструктором Boot использует связывание через конструктор. Аннотация сама по себе не регистрирует бин. В демо он подключён через <code>@EnableConfigurationProperties(PaymentSettings.class)</code>; в приложении можно использовать <code>@ConfigurationPropertiesScan</code>. Обычное создание record через component scan направило бы его параметры в механизм DI, поэтому для такого объекта нужен именно способ регистрации настроек.</p>
+      <pre><code class="language-java">@Validated // Запускает Bean Validation после связывания.
+@ConfigurationProperties("payments.bank") // Берём только эту группу ключей.
+public record PaymentSettings(
+        @NotNull URI url,
+        @NotNull Duration timeout,
+        @Min(1) int maxAttempts, // Ноль попыток запрещён при запуске.
+        List&lt;String&gt; channels,
+        Map&lt;String, Integer&gt; rules) {}
+
+@SpringBootConfiguration(proxyBeanMethods = false)
+@EnableConfigurationProperties(PaymentSettings.class) // Регистрирует record и связывание.
+@Import(ScalarValues.class) // Отдельный пример @Value ниже.
+class Application {}
+
+var settings = context.getBean(PaymentSettings.class);
+System.out.println("timeout=" + settings.timeout().toMillis() + "ms");
+System.out.println("maxAttempts=" + settings.maxAttempts());</code></pre>
+      <p>Демо запускает этот класс через <code>SpringApplication</code>, задаёт <code>spring.config.location=classpath:/config-demo/</code> и передаёт аргументы запуска. Веб-сервер здесь не нужен. YAML читает SnakeYAML; валидацию выполняет Hibernate Validator. Зависимости зафиксированы через BOM Boot в <a href="../examples/boot/pom.xml">pom.xml</a>.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 308" role="img" aria-label="Environment даёт строки timeout 250ms и max-attempts 3. Binder сопоставляет имя maxAttempts, преобразует строки в Duration и int, вызывает конструктор record. Валидация проверяет готовый объект, и платёжный сервис получает его только после успешной проверки.">
+            <defs>
+              <marker id="cb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cb-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- Значения, параметры конструктора, готовый record и получатель разделены. -->
+            <rect x="20" y="44" width="186" height="72" rx="8" class="dg-box"/>
+            <rect x="240" y="28" width="240" height="168" rx="10" class="dg-sep" fill="none"/>
+            <rect x="254" y="60" width="212" height="64" rx="7" class="dg-cell"/>
+            <rect data-s="3-" x="254" y="60" width="212" height="64" rx="7" class="dg-cell hit"/>
+            <rect data-s="4-" x="530" y="44" width="170" height="106" rx="8" class="dg-cell"/>
+            <rect x="240" y="224" width="240" height="44" rx="8" class="dg-box"/>
+            <rect data-s="5" x="240" y="224" width="240" height="44" rx="8" class="dg-cell hit"/>
+            <rect data-s="5" x="20" y="224" width="186" height="44" rx="8" class="dg-cell hit"/>
+            <path data-s="2" d="M206 80 L250 80" class="dg-line" marker-end="url(#cb-n)"/>
+            <path data-s="4" d="M466 90 L526 90" class="dg-line" marker-end="url(#cb-n)"/>
+            <path data-s="5" d="M615 150 C615 246, 560 246, 484 246" class="dg-line" marker-end="url(#cb-n)"/>
+            <path data-s="5" d="M240 246 L210 246" class="dg-line ok" marker-end="url(#cb-ok)"/>
+            <text x="20" y="30" class="dg-cap">ENVIRONMENT</text>
+            <text x="254" y="46" class="dg-cap">BINDER</text>
+            <g text-anchor="middle">
+              <text x="113" y="72" class="dg-in">timeout="250ms"</text>
+              <text x="113" y="98" class="dg-in">max-attempts="3"</text>
+              <text data-s="1" x="360" y="96" class="dg-n">параметры пусты</text>
+              <g data-s="2"><text x="360" y="85" class="dg-in">timeout: "250ms"</text><text x="360" y="109" class="dg-in">maxAttempts: "3"</text></g>
+              <g data-s="3-"><text x="360" y="85" class="dg-in">Duration: 250ms</text><text x="360" y="109" class="dg-in">int: 3</text></g>
+              <text x="360" y="158" class="dg-n">имена → типы → конструктор</text>
+              <g data-s="4-"><text x="615" y="69" class="dg-in">PaymentSettings</text><text x="615" y="97" class="dg-in">250ms, 3</text></g>
+              <text data-s="4" x="615" y="128" class="dg-n">ещё проверяется</text>
+              <text data-s="5" x="615" y="128" class="dg-ok">готовый бин</text>
+              <text data-s="1-4" x="360" y="252" class="dg-in">Bean Validation</text>
+              <text data-s="5" x="360" y="252" class="dg-ok">@Min(1): 3 подходит</text>
+              <text data-s="5" x="113" y="252" class="dg-in">PaymentService</text>
+            </g>
+            <text data-s="1" x="20" y="292" class="dg-t">Источники уже выбраны. Объекта настроек ещё нет.</text>
+            <text data-s="2" x="20" y="292" class="dg-t">Имена сопоставлены. Значения пока строки.</text>
+            <text data-s="3" x="20" y="292" class="dg-t">Преобразование завершилось: Duration и int.</text>
+            <text data-s="4" x="20" y="292" class="dg-t">Конструктор record получил типизированные параметры.</text>
+            <text data-s="5" x="20" y="292" class="dg-ok">Проверка успешна. Сервис получает один объект настроек.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Environment уже выбрало значения двух ключей: 250ms и 3. Самого PaymentSettings пока нет.</li>
+          <li>Binder сопоставляет max-attempts из конфигурации с параметром maxAttempts конструктора. Отличие написания не создаёт новое свойство.</li>
+          <li>Строки преобразуются в Duration и int. Ошибка вроде timeout=oops прерывает связывание здесь; проверять ограничения ещё нечего.</li>
+          <li>Конструктор создаёт record из преобразованных значений. На этом шаге правильные типы уже есть, но число попыток ещё нужно проверить.</li>
+          <li>Bean Validation принимает 3 по правилу Min(1). Готовые настройки доступны сервису. При maxAttempts=0 проверка сорвала бы запуск до передачи зависимости.</li>
+        </ol>
+      </figure>
+      <p>Binder поддерживает <b>relaxed binding</b>: Java-параметр <code>maxAttempts</code> связывается с <code>max-attempts</code> в YAML. В файлах и параметрах запуска используй каноническое имя с маленькими буквами и дефисами. Для переменной ОС точки заменяют на подчёркивания, дефисы убирают и имя переводят в верхний регистр: <code>payments.bank.max-attempts</code> становится <code>PAYMENTS_BANK_MAXATTEMPTS</code>.</p>
+      <p>Для <code>Duration</code> удобнее явно писать единицу: <code>250ms</code>, <code>2s</code> или ISO-форму <code>PT2S</code>. Число без единицы по умолчанию означает миллисекунды. <code>@DurationUnit</code> меняет единицу для таких чисел. В нашем record этой аннотации нет, поэтому следующий аргумент означает четверть секунды.</p>
+      <pre><code class="language-bash">./run.sh ConfigDemo --payments.bank.timeout=250
+# Без суффикса Binder использует миллисекунды.</code></pre>
+      <pre class="out">timeout=250ms</pre>
+      <h3>Value разрешает отдельное выражение, Properties собирает структуру</h3>
+      <p><code>@Value</code> удобно для одного значения или выражения SpEL. Оно тоже умеет преобразовать значение в нужный тип. Но набор связанных параметров, вложенные структуры, проверки и подсказки IDE проще держать в <code>@ConfigurationProperties</code>. Его Binder поддерживает структуру и relaxed binding; SpEL в значениях настроек он не вычисляет.</p>
+      <pre><code class="language-java">class ScalarValues {
+    @Value("${payments.bank.max-attempts:-1}")
+    int canonical; // Каноническое имя видит YAML с max-attempts.
+
+    @Value("${payments.bank.maxAttempts:-1}")
+    int camel; // Для этого placeholder YAML с max-attempts не подходит.
+}
+
+// В базовом YAML max-attempts=2. ScalarValues зарегистрирован через @Import.
+var values = context.getBean(ScalarValues.class);
+System.out.println("value canonical=" + values.canonical + ", camel=" + values.camel);</code></pre>
+      <pre><code class="language-bash">./run.sh ConfigDemo # Базовый YAML, без активных профилей.</code></pre>
+      <pre class="out">value canonical=2, camel=-1</pre>
+      <p>У <code>@Value</code> есть ограниченная поддержка разных написаний в Boot, поэтому утверждение «оно вообще не знает relaxed binding» слишком грубое. Канонический placeholder даёт ожидаемую совместимость. Значение <code>-1</code> здесь — запасное из выражения, а не результат чтения YAML. Для обязательной настройки незаметный запасной параметр способен скрыть опечатку.</p>
+      <p>Чтобы IDE подсказывала имена, типы и описание полей, при сборке подключают <code>spring-boot-configuration-processor</code>. Он генерирует <code>META-INF/spring-configuration-metadata.json</code> из классов настроек. Например, в Maven процессор можно явно указать в <code>annotationProcessorPaths</code> компилятора:</p>
+      <pre><code class="language-xml">&lt;annotationProcessorPaths&gt;
+  &lt;path&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-configuration-processor&lt;/artifactId&gt;
+    &lt;version&gt;4.1.1&lt;/version&gt; &lt;!-- Та же версия, что у Boot приложения. --&gt;
+  &lt;/path&gt;
+&lt;/annotationProcessorPaths&gt;</code></pre>
+      <p>Метаданные помогают человеку написать конфигурацию. Во время запуска Binder работает по типам класса настроек; сгенерированный файл не включает валидацию и не регистрирует бин. Для стороннего изменяемого объекта можно поставить <code>@ConfigurationProperties</code> на метод <code>@Bean</code>: его уже созданные поля связываются через доступные свойства.</p>
+    </section>
+
+    <section class="step" id="diagnostics">
+      <h2>Настройка не применилась: сначала найди, откуда пришло значение</h2>
+      <p>Сервис всё ещё ждёт две секунды, хотя ты записал <code>250ms</code>. Сначала проверь активные профили и сам ключ в Environment. Если там старое значение, ищи загрузку файла, написание ключа и перекрывающий источник. Если Environment уже видит новое значение, а объект настроек держит старое, смотри момент связывания и объект, который реально получил сервис.</p>
+      <p>В демо поле <code>origin</code> читается из того же порядка источников, который использует связывание настроек. Для файла Boot хранит ресурс и строку. Для аргумента и переменной ОС — источник. Это помогает отделить «файл не прочитан» от «файл прочитан и проиграл».</p>
+      <pre><code class="language-java">var name = ConfigurationPropertyName.of("payments.bank.timeout");
+for (var source : ConfigurationPropertySources.get(context.getEnvironment())) {
+    var property = source.getConfigurationProperty(name);
+    if (property != null) {
+        System.out.println("origin=" + property.getOrigin()); // Файл и строка либо параметр запуска.
+        break; // Первое найденное значение победило, как при связывании.
+    }
+}</code></pre>
+      <p>В реальном сервисе <code>/actuator/env</code> помогает исследовать источники, а <code>/actuator/configprops</code> — связанные объекты настроек. Отчёт <code>--debug</code> объясняет условия автоконфигураций: почему конкретный бин включён или выключен. Это другая часть расследования. Доступ к диагностическим endpoints и скрытие значений разобраны в <a href="actuator.html">Actuator</a>.</p>
+      <h3>Ошибка преобразования и неправильный допустимый тип — разные сбои</h3>
+      <p>Строка <code>oops</code> не превращается в <code>Duration</code>. Здесь Binder останавливается на преобразовании. Значение <code>0</code> превращается в <code>int</code> без проблем, но нарушает <code>@Min(1)</code>. Здесь запуск останавливает Bean Validation. Приложение в обоих случаях собрано неправильно, но исправлять нужно разные причины.</p>
+      <pre><code class="language-bash">./run.sh ConfigDemo --payments.bank.timeout=oops
+# Конвертер не смог получить Duration.</code></pre>
+      <pre class="out">startup=ConfigurationPropertiesBindException
+binding=conversion</pre>
+      <pre><code class="language-bash">./run.sh ConfigDemo --payments.bank.max-attempts=0
+# Тип int получен, затем нарушено ограничение Min(1).</code></pre>
+      <pre class="out">startup=ConfigurationPropertiesBindException
+binding=validation
+maxAttempts: must be greater than or equal to 1</pre>
+      <p>Демо перехватывает ожидаемые ошибки и печатает их вид. Сервис с такими настройками запуск не завершил; успешный код завершения учебной программы означает только, что она показала сбой. В открытом коде record видны все ограничения, которые объясняют результат.</p>
+      <p>Валидация начинается с <code>@Validated</code> на классе настроек и доступного провайдера Bean Validation. Для проверки вложенного объекта ставят <code>@Valid</code>. Одного правильного типа мало: <code>@NotNull Duration</code> допускает отрицательное время, <code>@NotNull URI</code> допускает неподходящую схему адреса. Такие бизнес-ограничения добавляют отдельными проверками, в том числе проверками отношений между полями.</p>
+      <p>По умолчанию <code>@ConfigurationProperties</code> игнорирует неизвестные поля, а ошибки преобразования — нет. Поэтому лишний <code>payments.bank.timout</code> может остаться незамеченным. Для группы с чётко определённым набором ключей можно задать <code>ignoreUnknownFields=false</code>. Значения для обязательных полей и проверку диапазонов всё равно задают отдельно.</p>
+      <div class="note warn">
+        <p><code>@PropertySource</code> появляется во время refresh. Это слишком поздно для выбора <code>logging.*</code> и многих <code>spring.main.*</code>, которые читаются раньше. Укажи такие настройки в Config Data или источнике запуска. Если свойство влияет на поиск файлов, оно должно быть доступно ещё до загрузки Config Data.</p>
+      </div>
+      <details class="deep">
+        <summary>Когда ключ сложнее обычного имени поля</summary>
+        <p>Для списка индекс в переменной ОС отделяют подчёркиваниями: <code>payments.bank.channels[0]</code> связывается из <code>PAYMENTS_BANK_CHANNELS_0_</code>. Для map со специальными символами в ключе используй запись в квадратных скобках; в YAML такой ключ дополнительно заключают в кавычки. Иначе Binder может изменить его или трактовать как путь вложенного свойства.</p>
+        <p>Имена переменных ОС при связывании map переводятся в нижний регистр. Поэтому переменные неудобны для словаря, где регистр ключа имеет смысл. YAML или JSON точнее передают такую структуру. Значение переменной при этом не переводится в нижний регистр.</p>
+      </details>
+    </section>
+
+    <section class="step" id="secrets-refresh">
+      <h2>Секреты и изменение настроек требуют своего жизненного цикла</h2>
+      <p>Адрес и таймаут можно хранить в базовом файле приложения. Ключ доступа к банку приходит из окружения деплоя. Его не стоит размножать по профильным файлам в git: смена ключа тогда требует пересборки артефакта, а доступ к репозиторию становится доступом к банковскому секрету.</p>
+      <p>В контейнере секрет удобно смонтировать отдельным файлом. Через <code>configtree:</code> Boot превращает имена файлов в имена свойств, содержимое — в значения. Если в <code>/run/secrets/</code> лежит файл <code>payments.bank.api-key</code>, следующий import делает его содержимое доступным под этим ключом:</p>
+      <pre><code class="language-yaml">spring:
+  config:
+    import: "configtree:/run/secrets/" # Наличие каталога обязательно для этого приложения.</code></pre>
+      <p>Префикс <code>optional:</code> меняет смысл отсутствия ресурса. Он позволяет продолжить запуск, если ресурса нет; синтаксическую ошибку в существующем YAML и плохое значение он не скрывает. Если без ресурса приложение не должно работать, оставь import обязательным и проверяй наличие конкретного секрета через настройки. Пустой существующий каталог и отсутствующий каталог — разные ситуации: обязательный import проверяет загрузку ресурса, а обязательное поле — нужное значение.</p>
+      <pre><code class="language-bash">./run.sh ConfigDemo --spring.config.import=classpath:/config-demo/missing.yaml
+# Файла нет: без optional старт прекращается до создания сервисов.</code></pre>
+      <pre class="out">startup=ConfigDataResourceNotFoundException</pre>
+      <pre><code class="language-bash">./run.sh ConfigDemo --spring.config.import=optional:classpath:/config-demo/missing.yaml
+# Файла нет: продолжаем с базовым YAML. Ниже строки timeout и origin.</code></pre>
+      <pre class="out">timeout=2000ms
+origin=class path resource [config-demo/application.yaml] - 4:14</pre>
+      <p>Обычный Boot загружает Config Data и связывает <code>@ConfigurationProperties</code> при запуске. Изменение YAML, файла секрета или переменной окружения снаружи процесса само по себе не пересоздаёт готовый record. Даже если новый источник уже появился внутри Environment, существующий объект настроек автоматически не пересвязывается.</p>
+      <pre><code class="language-java">var settings = context.getBean(PaymentSettings.class); // Record создан из базовых 2s.
+System.out.println("before=" + settings.timeout().toMillis() + "ms");
+
+context.getEnvironment().getPropertySources().addFirst(
+        new MapPropertySource("live-change", Map.of("payments.bank.timeout", "99ms")));
+// Сам Environment теперь действительно даёт новое значение.
+System.out.println("environment=" + context.getEnvironment().getProperty("payments.bank.timeout"));
+System.out.println("after=" + settings.timeout().toMillis() + "ms"); // Старый объект уже связан.</code></pre>
+      <pre><code class="language-bash">./run.sh ConfigDemo snapshot # Явно меняем Environment работающего контекста.</code></pre>
+      <pre class="out">before=2000ms
+environment=99ms
+after=2000ms</pre>
+      <p>Сервис, который получил <code>PaymentSettings</code> в конструкторе, продолжит использовать старое время. Уже настроенный HTTP-клиент или пул подключений также не изменится от нового свойства. Для обновления нужен управляемый перезапуск либо отдельный механизм, который заново проверяет настройки и безопасно применяет их к ресурсам. Возможности Spring Cloud разобраны в <a href="spring-cloud.html">Spring Cloud</a>; наличие одного Boot не включает обновление на лету.</p>
+      <p>Для платёжного сервиса заранее реши, какие настройки фиксируются до следующего деплоя, а какие требуют ротации без простоя. У клиента банка смена секрета и смена таймаута могут иметь разные правила. При диагностике показывай отдельные безопасные поля и происхождение ключа; печать всего record вместе с секретом превращает удобный объект настроек в источник утечки через логи.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Значение выбирается по ключу и приоритету источника. JSON выше обычных переменных ОС, аргументы запуска выше JSON.</li>
+        <li>Профильный файл перекрывает обычный на своём уровне. Внешние файлы перекрывают файлы внутри приложения.</li>
+        <li>ConfigurationProperties собирает структуру и преобразует типы. Валидация проверяет пригодность значений для сервиса.</li>
+        <li>При сбое сравнивай Environment, Origin и готовый объект настроек: источник и связывание — разные этапы.</li>
+        <li>optional разрешает отсутствие ресурса. Готовые настройки и использующие их ресурсы обычный Boot на лету не пересобирает.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="property-order" data-freq="3">
+      <h3>Если настройка есть в YAML, переменной окружения и аргументе, что победит?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В обычном Boot аргумент запуска побеждает переменную окружения, а переменная — Config Data из файла. Это поиск по упорядоченным источникам в Environment: для каждого ключа берётся первое найденное значение. Остальные ключи могут прийти из других источников.</p>
+          <p>Например, адрес банка останется из YAML, а --payments.bank.timeout=250ms перекроет профильный таймаут. Я смотрю итоговое значение и его Origin, чтобы найти реальный источник. Редактировать нижний файл до этого бессмысленно.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>SPRING_APPLICATION_JSON разбирается в отдельный источник выше обычных переменных ОС. Аргументы выше JSON; null в JSON не стирает нижнее значение.</li>
+            <li>System properties JVM выше переменных ОС. Приложение может выключить добавление аргументов через setAddCommandLineProperties(false).</li>
+            <li>Источники тестов стоят ещё выше обычных аргументов. При расследовании теста учитываю его свойства отдельно от правил продового запуска.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="profiles-files" data-freq="3">
+      <h3>Что делают профили и как Boot выбирает профильные файлы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Профили включают дополнительные настройки и бины в том же приложении. Если активен prod, Boot читает обычный application.yaml и application-prod.yaml. Профильный файл перекрывает обычный на своём уровне, а внешний файл может перекрыть файл внутри jar.</p>
+          <p>В одном YAML можно сделать несколько документов и активировать нужный через spring.config.activate.on-profile. Это условие документа, а сам набор профилей задаю через spring.profiles.active, include или группу. Если активных профилей нет, используется default.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>active, default, include и group задают только в непрофильных документах. Поместить include внутрь документа on-profile — ошибка конфигурации.</li>
+            <li>У нескольких профилей действует правило последнего в пределах группы расположений. Запятая и точка с запятой в location могут изменить такие группы.</li>
+            <li>При переопределении список заменяется целиком. Map объединяет ключи, а одинаковый ключ получает значение из более приоритетного источника.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>В jar есть application-prod.yaml с 600ms, рядом с jar — application.yaml с 800ms. Активен prod, других настроек нет. Какой таймаут получит сервис?</summary>
+          <p>800ms. При стандартном поиске внешний обычный файл стоит выше профильного файла внутри jar. Профильное имя не даёт файлу абсолютный приоритет над внешней конфигурацией. Именно такой результат получен в демо с additional-location.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="properties-value" data-freq="3">
+      <h3>Когда ты выберешь ConfigurationProperties, а когда Value?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для группы настроек банка я выберу ConfigurationProperties: один объект с адресом, Duration, попытками и коллекциями. Его проще проверить при запуске и передать сервису целиком. Для одного значения или выражения SpEL подходит Value.</p>
+          <p>Properties связывает разные написания имени с полем Java. У Value эта поддержка ограничена, поэтому placeholder пишу в каноническом kebab-case. В нашем опыте max-attempts дал 2, а placeholder maxAttempts взял запасное -1.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Record регистрирую через EnableConfigurationProperties или ConfigurationPropertiesScan. Его параметры должен связывать Binder; обычная регистрация как компонента направляет конструктор в DI.</li>
+            <li>Validated и провайдер Bean Validation проверяют ограничения после преобразования. Вложенные объекты требуют Valid, а проверка типов ещё не проверяет диапазоны и отношения между полями.</li>
+            <li>Configuration processor создаёт метаданные для IDE при сборке. Он не заменяет регистрацию настроек, не выполняет runtime-валидацию и не включает SpEL в Binder.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="config-diagnosis" data-freq="2">
+      <h3>Ты поменял настройку, а сервис ведёт себя по-старому. Как будешь разбираться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала проверю активный профиль и итоговое значение ключа в Environment. По Origin найду источник: возможно, файл проиграл аргументу или вообще не был загружен. Затем сравню значение с полем объекта ConfigurationProperties, который получил сервис.</p>
+          <p>Если в Environment значение новое, а в record старое, смотрю момент создания объекта. Обычный Boot не пересвязывает его после изменения файла или источника. Если запуск упал, отдельно различаю ошибку преобразования и нарушение валидации: строка oops и число попыток 0 ломаются на разных этапах.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>У configuration properties неизвестные поля по умолчанию игнорируются. Опечатка может оставить старое или запасное значение; строгий набор ключей поддерживает ignoreUnknownFields=false.</li>
+            <li>PropertySource во время refresh слишком поздний для некоторых ранних свойств, в том числе logging и spring.main. Проверяю, когда настройка впервые читается.</li>
+            <li>env показывает источники, configprops — связанные объекты, отчёт --debug — решения автоконфигураций. Выбираю инструмент под конкретный вопрос.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="secrets-reload" data-freq="2">
+      <h3>Как передать секрет банку и что произойдёт, если файл секрета поменяется?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я передам секрет из окружения деплоя, например смонтирую файл и подключу его через configtree. Имя файла станет именем свойства, содержимое — значением. Для обязательного ресурса import оставлю без optional и проверю само поле настроек.</p>
+          <p>Простая смена файла не пересоберёт уже созданный объект настроек и клиента банка в обычном Boot. Для ротации нужен перезапуск или отдельный механизм обновления. При этом новое значение должно пройти проверку до переключения рабочего клиента.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>optional относится к отсутствию ресурса. Существующий пустой каталог не гарантирует наличие нужного секрета; это проверяет обязательное поле.</li>
+            <li>Изменённый Environment и обновлённый HTTP-клиент — разные состояния. Даже заново связанные свойства нужно применить к ресурсам с их правилами закрытия и переключения.</li>
+            <li>Не печатаю весь record, если в нём есть секрет. Для диагностики достаточно происхождения и отдельных безопасных полей; доступ к endpoints ограничиваю отдельно.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/external-config.html">Spring Boot Reference: Externalized Configuration</a> — основа урока: порядок источников, Config Data, imports, связывание, коллекции, валидация и configtree.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/profiles.html">Spring Boot Reference: Profiles</a> — active, include, group, default и ограничения профильных документов.</li>
+      <li><a href="https://docs.spring.io/spring-boot/api/java/org/springframework/boot/context/properties/ConfigurationProperties.html">ConfigurationProperties</a> и <a href="https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/value-annotations.html">Spring Framework: Using Value</a> — типы связывания, неизвестные поля, placeholders и SpEL.</li>
+      <li><a href="https://docs.spring.io/spring-boot/specification/configuration-metadata/annotation-processor.html">Generating Configuration Metadata</a> — подключение процессора и назначение метаданных для IDE.</li>
+      <li>Craig Walls, Spring in Action, 6-е изд., глава 6 — организация настроек приложения по группам и окружениям; демонстрации этой страницы используют Boot 4.1.1.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
