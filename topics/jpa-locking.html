@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>JPA Locking &amp; Caching · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jpa-locking">
+<main class="page">
+  <header class="topic-head"><h1>JPA Locking &amp; Caching</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Два платежа способны прочитать один баланс и затем затереть изменения друг друга. Версия entity позволяет заметить такой конфликт, блокировка строки — выстроить операции в очередь. Кеш сокращает чтение, но сам по себе не защищает финансовое правило. Во всех случаях следи, какое состояние сейчас есть у Java-объекта, какую строку видит база и когда изменения действительно фиксируются.</p>
+    </div>
+
+    <section class="step" id="lost-update">
+      <h2>Две успешные транзакции способны потерять одно списание</h2>
+      <p>На счёте 100 учебных денежных единиц. Первый платёж списывает 10, второй — 20. Оба прочитали исходное значение до первого commit. У каждого свой persistence context и свой объект счёта, поэтому Java-поля стали 90 и 80. Без проверки конкуренции второй UPDATE записывает 80 поверх 90. Правильный итог 70 так и не появился.</p>
+      <p>Транзакция делает каждое списание атомарным, но не обнаруживает, что объект второго запроса устарел. Это <b>lost update</b>: изменение первой операции заменилось вычислением по старому состоянию. Варианты защиты — условный SQL, версия entity или блокировка строки до чтения. Выбор зависит от того, что именно нужно проверить перед списанием.</p>
+      <p>Ниже два открытых <code>Session</code> Hibernate работают как независимые контексты. В <code>PlainAccount</code> есть <code>@Id</code> и баланс, а поля <code>@Version</code> нет. Полный опыт — в <a href="../examples/data/LockingDemo.java">LockingDemo.java</a>; он использует JDK 21, Hibernate 7.4.5.Final, Jakarta Persistence 3.2 и H2 2.4.240. Зависимости управляются BOM Boot 4.1.1.</p>
+      <pre><code class="language-java">@Entity
+class PlainAccount {
+    @Id Long id;
+    int balance; // Версии нет: UPDATE проверит только id.
+}
+
+first.beginTransaction();
+second.beginTransaction();
+var a = first.find(PlainAccount.class, 1L); // 100
+var b = second.find(PlainAccount.class, 1L); // Тоже 100, в другом контексте.
+a.balance -= 10;
+b.balance -= 20;
+first.getTransaction().commit(); // Сохранили 90.
+second.getTransaction().commit(); // Сохранили 80 поверх 90.
+
+// Итог читаем из новой транзакции, а не из старого объекта a или b.
+factory.inTransaction(s -&gt;
+        System.out.println("final balance=" + s.find(PlainAccount.class, 1L).balance));</code></pre>
+      <pre><code class="language-bash">cd examples/data
+./run.sh LockingDemo lost</code></pre>
+      <pre class="out">final balance=80</pre>
+      <p>Если операция сводится к арифметике, база может выполнить её без промежуточного чтения: <code>UPDATE account SET balance = balance - :amount WHERE id = :id AND balance &gt;= :amount</code>. Число изменённых строк сообщает, удалось ли списание. Когда решение зависит от нескольких полей загруженной entity, удобно проверить, что с момента чтения она не изменилась.</p>
+    </section>
+
+    <section class="step" id="optimistic-version">
+      <h2>Version отвергает запись, рассчитанную по старому состоянию</h2>
+      <p><code>@Version</code> добавляет к состоянию entity номер изменения. Hibernate запоминает версию при загрузке. При flush он отправляет UPDATE с условием по id и старой версии, а в новое состояние записывает следующую. Если другой запрос уже изменил строку, условие не совпадёт: обновлено ноль строк, возникнет <code>OptimisticLockException</code>.</p>
+      <pre><code class="language-java">@Entity
+class Account {
+    @Id Long id;
+    int balance;
+    @Version long version; // Начальную и следующую версии назначает Hibernate.
+}
+
+// Смысл UPDATE для первого платежа при версии 0.
+// UPDATE account SET balance=90, version=1 WHERE id=1 AND version=0
+
+first.beginTransaction();
+second.beginTransaction();
+var a = first.find(Account.class, 1L);
+var b = second.find(Account.class, 1L);
+System.out.printf("loaded versions=%d,%d%n", a.version, b.version);
+a.balance -= 10;
+b.balance -= 20;
+first.getTransaction().commit(); // База: 90, version=1.
+try { second.getTransaction().commit(); } // Старое условие version=0 не совпало.
+catch (PersistenceException error) {
+    System.out.println("second exception=" + error.getClass().getSimpleName());
+    if (second.getTransaction().isActive()) second.getTransaction().rollback();
+}
+// Оба старых контекста закрываем. В полном демо печатаем состояние из новой транзакции.
+
+factory.inTransaction(s -&gt; s.find(Account.class, 1L).balance -= 20);
+// Повтор загрузил 90/version=1, а не перенёс устаревшие 80/version=0.</code></pre>
+      <pre><code class="language-bash">./run.sh LockingDemo optimistic</code></pre>
+      <pre class="out">loaded versions=0,0
+second exception=OptimisticLockException
+after conflict: balance=90, version=1
+after retry: balance=70, version=2</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="Два контекста прочитали баланс 100 с версией 0. Первый сохраняет 90 и версию 1. Второй пытается сохранить 80 с условием версии 0 и получает конфликт. Повтор в новом контексте читает 90 с версией 1 и сохраняет 70 с версией 2.">
+            <defs>
+              <marker id="jlv-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="jlv-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="jlv-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="20" y="40" width="206" height="76" rx="9" class="dg-box"/>
+            <rect x="20" y="155" width="206" height="76" rx="9" class="dg-box"/>
+            <rect x="450" y="78" width="250" height="108" rx="9" class="dg-cell"/>
+            <text x="32" y="63" class="dg-t">контекст A: −10</text>
+            <text x="32" y="178" class="dg-t">контекст B: −20</text>
+            <text x="464" y="101" class="dg-t">строка account, id=1</text>
+            <g data-s="1"><text x="32" y="94" class="dg-in">100, version=0</text><text x="32" y="209" class="dg-in">100, version=0</text><text x="464" y="140" class="dg-in">100, version=0</text></g>
+            <g data-s="2"><text x="32" y="94" class="dg-in">90, version=0</text><text x="32" y="209" class="dg-in">80, version=0</text><text x="464" y="140" class="dg-in">100, version=0</text></g>
+            <g data-s="3"><text x="32" y="94" class="dg-ok">90, version=1</text><text x="32" y="209" class="dg-in">80, version=0</text><text x="464" y="140" class="dg-ok">90, version=1</text><path d="M226 91 C332 91, 342 124, 446 124" class="dg-line ok" marker-end="url(#jlv-ok)"/><text x="262" y="77" class="dg-n">WHERE version=0: 1 строка</text></g>
+            <g data-s="4"><text x="32" y="94" class="dg-ok">90, version=1</text><text x="32" y="209" class="dg-bad">откат B</text><text x="464" y="140" class="dg-ok">90, version=1</text><path d="M226 196 C332 196, 342 151, 446 151" class="dg-line bad" marker-end="url(#jlv-bad)"/><text x="252" y="223" class="dg-n">WHERE version=0: 0 строк</text></g>
+            <g data-s="5">
+              <text x="32" y="94" class="dg-ok">A завершён</text>
+              <text x="32" y="209" class="dg-ok">повтор: 70, v=2</text>
+              <text x="464" y="140" class="dg-ok">70, version=2</text>
+              <path d="M226 220 C360 220, 360 178, 446 178" class="dg-line ok" marker-end="url(#jlv-ok)"/>
+              <text x="252" y="241" class="dg-n">WHERE version=1: 1 строка</text>
+            </g>
+            <g data-s="1"><text x="20" y="262" class="dg-s">оба запроса стартовали с одного состояния</text></g>
+            <g data-s="2"><text x="20" y="262" class="dg-s">изменены Java-поля; база ещё не изменилась</text></g>
+            <g data-s="3"><text x="20" y="262" class="dg-s">A сохранился и сдвинул версию</text></g>
+            <g data-s="4"><text x="20" y="262" class="dg-bad">B не перезапишет изменение A</text></g>
+            <g data-s="5"><text x="20" y="262" class="dg-s">повтор пересчитывает результат в новой транзакции</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Два контекста загрузили 100/version=0. Пока конфликта нет.</li>
+          <li>В Java рассчитаны 90 и 80. Оба объекта ещё помнят версию 0.</li>
+          <li>Первый UPDATE совпал с version=0. База сохранила 90 и увеличила версию до 1.</li>
+          <li>Второй UPDATE ищет version=0. Строки нет, операция откатывается с OptimisticLockException.</li>
+          <li>Повтор начинает новую транзакцию, читает 90/version=1 и сохраняет 70/version=2.</li>
+        </ol>
+        <figcaption>Версия проверяет исходные данные вычисления. Сам факт двух одновременных чтений не является ошибкой.</figcaption>
+      </figure>
+      <p>Optimistic locking подходит, когда конфликт редок и повтор дешёв. Он не держит блокировку с момента чтения, но обычный UPDATE всё равно использует блокировки СУБД. Проверка может произойти при явном flush или при commit. После конфликта откатывай всю операцию и начинай новый контекст: повтор одного UPDATE с устаревшим объектом теряет смысл проверки.</p>
+      <p>Перед повтором снова проверяй бизнес-условия. Нового баланса может уже не хватать. Повторы ограничивай; сетевое списание нельзя слепо выполнить второй раз. Все способы записи должны соблюдать версию: SQL <code>WHERE id=:id</code> без version обходит защиту entity. Bulk JPQL UPDATE также не применяет проверку и увеличение версии автоматически.</p>
+      <details class="deep">
+        <summary>Под капотом: версия защищает entity, а не произвольный инвариант</summary>
+        <p><code>OPTIMISTIC</code> запрашивает проверку версии, в том числе для прочитанной entity без обычного изменения. <code>OPTIMISTIC_FORCE_INCREMENT</code> дополнительно требует увеличение версии. Это полезно, когда изменение зависимых данных должно конфликтовать через общий объект-координатор.</p>
+        <p>Две операции способны изменить разные versioned entity и нарушить общий лимит, не столкнувшись по версии ни одной строки. Для инварианта нескольких счетов нужна общая точка проверки: блокировка нужных строк, условная запись, объект с общей версией или подходящий уровень изоляции. Поле version не меняй вручную в бизнес-коде.</p>
+      </details>
+    </section>
+
+    <section class="step" id="pessimistic-lock">
+      <h2>Блокировка строки удерживает очередь до завершения транзакции</h2>
+      <p>Если операции постоянно конфликтуют, повторные вычисления становятся дорогими. <code>PESSIMISTIC_WRITE</code> просит базу получить блокировку при загрузке счёта, до изменения Java-поля. Второй запрос с несовместимой блокировкой ждёт освобождения строки либо получает ошибку ожидания. Первый держит блокировку до commit или rollback.</p>
+      <p>JPA задаёт режим, а диалект Hibernate выбирает SQL для СУБД, например <code>SELECT ... FOR UPDATE</code>. Это не Java-monitor и не блокировка одного JVM-объекта. Конкурирующий сервис на другой машине обращается к той же базе и попадает под её правила. Обычное чтение в MVCC-базе при этом способно читать снимок без ожидания; обещать блокировку «всех SELECT» нельзя.</p>
+      <pre><code class="language-java">// H2 настроена через URL: LOCK_TIMEOUT=1500 (миллисекунды).
+first.beginTransaction();
+second.beginTransaction();
+var account = first.find(Account.class, 1L, LockModeType.PESSIMISTIC_WRITE);
+System.out.println("first locked balance=" + account.balance);
+try {
+    second.find(Account.class, 1L, LockModeType.PESSIMISTIC_WRITE);
+    // Первая транзакция всё ещё держит строку, поэтому вторая не получит её вовремя.
+} catch (PersistenceException error) {
+    System.out.println("second exception=" + error.getClass().getSimpleName());
+} finally {
+    if (second.getTransaction().isActive()) second.getTransaction().rollback();
+}
+account.balance -= 10;
+first.getTransaction().commit(); // Блокировка освобождается только здесь.
+
+factory.inTransaction(session -&gt; {
+    var fresh = session.find(Account.class, 1L, LockModeType.PESSIMISTIC_WRITE);
+    System.out.println("after release: locked balance=" + fresh.balance);
+    fresh.balance -= 20; // Прочитан уже сохранённый результат первого платежа.
+});</code></pre>
+      <pre><code class="language-bash">./run.sh LockingDemo pessimistic</code></pre>
+      <pre class="out">first locked balance=100
+second exception=LockTimeoutException
+after release: locked balance=90
+final balance=70</pre>
+      <p>Точные исключения и поддержка таймаутов зависят от базы и драйвера. JPA различает <code>LockTimeoutException</code> для сбоя на уровне выражения и <code>PessimisticLockException</code> для отката транзакции. В сервисе такую ошибку лучше обрабатывать за внешней границей с новой транзакцией. Hint <code>jakarta.persistence.lock.timeout</code> выражает запрос на срок ожидания, но его поддержку проверяют у выбранного диалекта.</p>
+      <p><code>PESSIMISTIC_READ</code> запрашивает разделяемую блокировку, а <code>PESSIMISTIC_WRITE</code> — более строгую защиту от конкурентной записи; база вправе использовать более сильный доступный режим. <code>PESSIMISTIC_FORCE_INCREMENT</code> дополнительно увеличивает version. <code>@Version</code> полезно оставить и при pessimistic locking: оно защищает остальные пути изменения этой entity.</p>
+      <div class="note warn">
+        <p>Для перевода между счетами бери строки в одном порядке, например по id. Иначе первая операция держит счёт 1 и ждёт счёт 2, а вторая держит счёт 2 и ждёт счёт 1: база обнаружит deadlock и отменит одну из них. Не держи блокировку во время HTTP-вызова банка. Срок ожидания строки, срок SQL и срок всей транзакции — разные настройки.</p>
+      </div>
+    </section>
+
+    <section class="step" id="first-level-cache">
+      <h2>Persistence context сохраняет идентичность объекта, а не свежесть строки</h2>
+      <p>Кеш первого уровня, L1, — часть persistence context. В одном контексте одному ключу entity соответствует один managed-объект. Повторный <code>find(Account.class, 1L)</code> вернёт ту же ссылку. Это нужно не только для скорости: dirty checking и связи должны работать с единым состоянием счёта внутри операции.</p>
+      <p>L1 не перечитывает строку каждый раз, когда где-то произошло изменение. Даже прямой SQL на том же подключении способен поменять базу, оставив Java-поле старым. <code>refresh()</code> загружает состояние базы в существующий managed-объект. <code>clear()</code> отсоединяет все объекты контекста; следующий <code>find()</code> создаст новый.</p>
+      <pre><code class="language-java">factory.inTransaction(session -&gt; {
+    var first = session.find(Account.class, 1L);
+    var same = session.find(Account.class, 1L);
+    System.out.printf("same reference=%s, prepared statements=%d%n",
+            first == same, factory.getStatistics().getPrepareStatementCount());
+
+    session.doWork(connection -&gt; {
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate("update account set balance=80 where id=1");
+            // Обошли ORM: managed-объект всё ещё хранит 100.
+        }
+    });
+    System.out.println("after SQL: find balance="
+            + session.find(Account.class, 1L).balance);
+    session.refresh(first); // Перечитали строку в тот же объект.
+    System.out.println("after refresh: balance=" + first.balance);
+    session.clear(); // Отсоединили объекты; данные базы остаются.
+    var fresh = session.find(Account.class, 1L);
+    System.out.printf("after clear: same reference=%s, balance=%d%n",
+            first == fresh, fresh.balance);
+});</code></pre>
+      <pre><code class="language-bash">./run.sh LockingDemo l1</code></pre>
+      <pre class="out">same reference=true, prepared statements=1
+after SQL: find balance=100
+after refresh: balance=80
+after clear: same reference=false, balance=80</pre>
+      <p>В этом режиме L2 отключён; счётчик Hibernate обнулён после подготовки данных. Прямой JDBC не включается в счётчик подготовленных ORM-выражений. Опыт показывает именно состояние объекта: база уже содержит 80, повторный <code>find()</code> видит прежние 100, а <code>refresh()</code> возвращает его к состоянию строки.</p>
+      <div class="trap">
+        <p class="myth">Кеш первого уровня избавляет от любого повторного SELECT в транзакции.</p>
+        <p class="fact">find по известному ключу способен взять объект из L1. JPQL-запрос всё ещё должен найти строки в базе. При сборке результата Hibernate переиспользует уже managed-объекты с теми же ключами, поэтому SQL возможен без обновления их полей.</p>
+      </div>
+      <p>Перед <code>clear()</code> явно отправь нужные изменения через <code>flush()</code>: отсоединённые объекты больше не участвуют в dirty checking. <code>refresh()</code> заменяет состояние объекта и способен потерять несохранённые локальные правки. Эти методы управляют контекстом, а не служат универсальной кнопкой исправления конфликтов. После optimistic conflict безопасная граница — rollback и новый контекст.</p>
+    </section>
+
+    <section class="step" id="second-level-cache">
+      <h2>Общий кеш хранит состояние между контекстами и требует правил согласованности</h2>
+      <p>Persistence context заканчивается вместе с операцией. Для часто читаемого тарифа можно добавить кеш второго уровня, L2, общий для <code>SessionFactory</code>. Он обычно хранит разобранное состояние entity, а не её managed-ссылку. Новый контекст получает данные из региона кеша и создаёт свой объект. Два контекста остаются независимыми.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 288" role="img" aria-label="Два persistence context внутри одной SessionFactory содержат разные объекты Tariff с id1. Они используют общий L2 с данными тарифа. После промаха L2 читает базу, следующий контекст получает данные из L2 и создаёт новый объект. Внешний SQL меняет базу, не отправляя событие очистки кеша.">
+            <defs>
+              <marker id="jlc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="jlc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="jlc-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <rect x="14" y="26" width="500" height="218" rx="11" class="dg-sep" fill="none"/>
+            <rect x="30" y="55" width="220" height="75" rx="8" class="dg-box"/>
+            <rect x="278" y="55" width="220" height="75" rx="8" class="dg-box"/>
+            <rect x="148" y="174" width="246" height="53" rx="8" class="dg-cell hit"/>
+            <rect x="560" y="173" width="140" height="54" rx="8" class="dg-box"/>
+            <rect x="560" y="54" width="140" height="47" rx="8" class="dg-box"/>
+            <path d="M160 130 L160 170" class="dg-line" marker-end="url(#jlc-n)"/>
+            <path d="M380 174 L380 134" class="dg-line ok" marker-end="url(#jlc-ok)"/>
+            <path d="M394 202 L556 202" class="dg-line" marker-end="url(#jlc-n)"/>
+            <path d="M630 101 L630 169" class="dg-line bad" marker-end="url(#jlc-bad)"/>
+            <text x="30" y="18" class="dg-cap">SESSIONFACTORY</text>
+            <text x="42" y="78" class="dg-t">контекст A, свой L1</text>
+            <text x="42" y="106" class="dg-in">Tariff #1: объект a</text>
+            <text x="290" y="78" class="dg-t">контекст B, свой L1</text>
+            <text x="290" y="106" class="dg-in">Tariff #1: объект b</text>
+            <text x="160" y="195" class="dg-t">L2: данные Tariff #1</text>
+            <text x="160" y="216" class="dg-in">fee=100, version=0</text>
+            <text x="572" y="195" class="dg-t">база</text>
+            <text x="572" y="216" class="dg-in">fee=200</text>
+            <text x="572" y="82" class="dg-t">внешний SQL</text>
+            <text x="173" y="154" class="dg-n" text-anchor="start">промах</text>
+            <text x="393" y="154" class="dg-n" text-anchor="start">попадание</text>
+            <text x="414" y="191" class="dg-n">чтение при промахе</text>
+            <text x="643" y="141" class="dg-n" text-anchor="start">UPDATE</text>
+            <text x="30" y="272" class="dg-s">a != b; SQL вне ORM не очищает L2 автоматически</text>
+          </svg>
+        </div>
+        <figcaption>L1 хранит конкретный объект, L2 — данные для другого контекста. Согласованность с внешней записью надо обеспечивать отдельно.</figcaption>
+      </figure>
+      <p>Без провайдера регионов Hibernate не включает L2. В демо добавлены <code>hibernate-jcache</code> и локальный Caffeine JCache; кеширование разрешено только для тарифа. <code>@Cacheable</code> говорит о возможности кеширования entity, а Hibernate-аннотация <code>@Cache</code> выбирает стратегию региона. Для баланса, который постоянно меняется, выгода может оказаться меньше цены согласования.</p>
+      <pre><code class="language-java">@Entity
+@Cacheable
+@Cache(usage = CacheConcurrencyStrategy.READ_WRITE)
+class Tariff {
+    @Id Long id;
+    int fee;
+    @Version long version;
+}
+
+// Настройки SessionFactory; зависимости указаны в examples/data/pom.xml.
+config.setProperty("hibernate.cache.use_second_level_cache", "true");
+config.setProperty("hibernate.cache.region.factory_class", "jcache");
+config.setProperty("hibernate.javax.cache.provider",
+        "com.github.benmanes.caffeine.jcache.spi.CaffeineCachingProvider");
+config.setProperty("hibernate.javax.cache.missing_cache_strategy", "create");
+config.setProperty("hibernate.cache.use_query_cache", "false"); // Это другой кеш.
+
+factory.getCache().evictAllRegions(); // Начинаем измерение с пустого L2.
+factory.getStatistics().clear();
+var first = tariff(factory); // Каждый tariff() открывает/закрывает новый Session.
+var second = tariff(factory); // Получит данные L2, но создаст другой объект.
+
+for (int i = 0; i &lt; 2; i++) factory.inTransaction(session -&gt;
+        session.createSelectionQuery("from Tariff", Tariff.class).getResultList());
+// Обычный JPQL выполнится дважды, хотя entity разрешено кешировать.
+
+factory.inTransaction(session -&gt; session.doWork(connection -&gt; {
+    try (var statement = connection.createStatement()) {
+        statement.executeUpdate("update tariff set fee=200 where id=1");
+        // Эта запись минует механизм обновления/инвалидации L2.
+    }
+}));
+System.out.println("after external SQL: fee=" + tariff(factory).fee);
+factory.getCache().evictEntityData(Tariff.class, 1L); // Убрали конкретную запись региона.
+System.out.println("after eviction: fee=" + tariff(factory).fee);</code></pre>
+      <pre><code class="language-bash">./run.sh LockingDemo l2</code></pre>
+      <pre class="out">first: SQL=1, L2 misses=1
+second: same reference=false, SQL=1, L2 hits=1
+two JPQL queries: SQL=2
+after external SQL: fee=100
+after eviction: fee=200</pre>
+      <p><code>SQL=1</code> во второй строке — накопленный счётчик Hibernate: второй <code>find()</code> не добавил выражения. Полный файл печатает статистику и сравнение ссылок. Прямой JDBC UPDATE моделирует другого писателя: L2 остался с fee=100. Eviction убрал устаревшую запись; следующий контекст загрузил 200 из базы.</p>
+      <table class="mx">
+        <thead><tr><th>Стратегия Hibernate</th><th>Для каких данных</th><th>Цена и граница</th></tr></thead>
+        <tbody>
+          <tr><td><code>READ_ONLY</code></td><td>Неизменяемый справочник</td><td>Изменение кешируемой entity через ORM недопустимо</td></tr>
+          <tr><td><code>NONSTRICT_READ_WRITE</code></td><td>Редкие изменения, краткая устарелость допустима</td><td>Инвалидация не даёт строгого согласования конкурентных чтений</td></tr>
+          <tr><td><code>READ_WRITE</code></td><td>Изменяемые versioned entity</td><td>Координация региона и soft lock; это не row lock базы</td></tr>
+          <tr><td><code>TRANSACTIONAL</code></td><td>Кеш с поддержкой соответствующего транзакционного протокола</td><td>Нужен подходящий провайдер и интеграция; одной аннотации мало</td></tr>
+        </tbody>
+      </table>
+      <p>Кеш результатов запросов включается отдельно и по умолчанию выключен. Запрос тоже надо пометить кешируемым. Его ключ включает запрос и параметры; состав сохранённого результата зависит от версии и настройки Hibernate, поэтому сводить его всегда к «списку id» неверно. Смотри стоимость заполнения, инвалидации и чтения, а не только число попаданий.</p>
+      <div class="note warn">
+        <p>Caffeine в демо живёт в одном процессе. Два пода с локальными регионами не получают общую инвалидацию автоматически. SQL другого приложения тоже не уведомляет Hibernate. Для изменяемых данных нужен согласованный провайдер, явная инвалидация либо отказ от L2. @Version обнаруживает устаревшую запись при UPDATE, если все писатели соблюдают изменение версии. Чтение кеша при этом всё равно может вернуть старые данные.</p>
+      </div>
+    </section>
+
+    <section class="step" id="batch-writes">
+      <h2>Batch сокращает отправку SQL, а flush и clear ограничивают память</h2>
+      <p>Импорт квитанций через <code>persist()</code> создаёт managed-объект и удерживает его до очистки контекста. Большой импорт растит память для объектов, снимков и очереди изменений. JDBC batching решает другую часть задачи: группирует совместимые SQL-операции вместо отдельной отправки каждой записи. Поэтому размер batch и размер контекста надо ограничивать отдельно.</p>
+      <p>У Hibernate <code>hibernate.jdbc.batch_size</code> по умолчанию равен 0: batching выключен. В учебном варианте зададим 3 и после каждых трёх квитанций выполним <code>flush()</code>, затем <code>clear()</code>. Ключ квитанции известен заранее; все INSERT имеют одинаковую форму. В реальном импорте размер группы выбирают по памяти, драйверу и замерам, а не копируют учебное число.</p>
+      <pre><code class="language-java">@Entity
+class Receipt {
+    @Id Long id; // Известный ключ позволяет отложить INSERT до batch.
+    int amount;
+}
+
+config.setProperty("hibernate.jdbc.batch_size", "3"); // batch; в batch-off задано 0.
+factory.getStatistics().clear();
+factory.inTransaction(session -&gt; {
+    for (int i = 1; i &lt;= 6; i++) {
+        session.persist(new Receipt(i, 10));
+        if (i % 3 == 0) {
+            System.out.println("before clear: managed=" + session.getStatistics().getEntityCount());
+            session.flush(); // Выполнили SQL. Вся транзакция ещё не зафиксирована.
+            session.clear(); // Убрали managed-объекты и их снимки.
+            System.out.println("after clear: managed=" + session.getStatistics().getEntityCount());
+        }
+    }
+}); // Commit всех шести записей вместе.
+System.out.printf("inserted=%d, prepared statements=%d%n",
+        factory.getStatistics().getEntityInsertCount(),
+        factory.getStatistics().getPrepareStatementCount());</code></pre>
+      <pre><code class="language-bash">./run.sh LockingDemo batch
+./run.sh LockingDemo batch-off</code></pre>
+      <pre class="out"># batch
+before clear: managed=3
+after clear: managed=0
+before clear: managed=3
+after clear: managed=0
+inserted=6, prepared statements=2
+# batch-off
+before clear: managed=3
+after clear: managed=0
+before clear: managed=3
+after clear: managed=0
+inserted=6, prepared statements=6</pre>
+      <p>Заголовки <code>#</code> добавлены к stdout. При batching подготовлено два ORM-выражения для двух групп, без него — шесть. Это счётчик подготовки statements, а не универсальное измерение сетевых пакетов или времени. Число сохранённых entity одинаковое, а контекст в обоих вариантах освобождается каждые три объекта.</p>
+      <h3>IDENTITY меняет момент INSERT</h3>
+      <p>При <code>GenerationType.IDENTITY</code> ключ выдаёт выполненный INSERT. Hibernate вынужден получить его сразу и отключает JDBC batching таких вставок. Сам параметр batch_size может оставаться положительным; это не доказывает, что все таблицы пишутся пачками.</p>
+      <pre><code class="language-java">@Entity
+class IdentityReceipt {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY) Long id;
+    int amount;
+}
+
+// Вместо Receipt(i, 10) в том же цикле и при batch_size=3:
+session.persist(new IdentityReceipt(10)); // Для назначения id нужен отдельный INSERT.</code></pre>
+      <pre><code class="language-bash">./run.sh LockingDemo identity</code></pre>
+      <pre class="out">before clear: managed=3
+after clear: managed=0
+before clear: managed=3
+after clear: managed=0
+inserted=6, prepared statements=6</pre>
+      <p>Для генерации ключей с batching часто выбирают sequence и подходящий размер выделения id. <code>hibernate.order_inserts</code> и <code>hibernate.order_updates</code> помогают собрать совместимые выражения, но добавляют сортировку. SQL-лог с шестью INSERT ещё не доказывает отсутствие JDBC batch: смотри статистику и работу драйвера. <code>default_batch_fetch_size</code> относится к чтению связей и не включает batch-запись.</p>
+      <p><code>flush()</code> — не commit, <code>clear()</code> — не освобождение блокировок базы. Одна длинная транзакция после очистки контекста всё ещё держит подключение и уже полученные блокировки. Если данные допустимо сохранять частями, дели импорт на короткие транзакции с контрольной точкой и безопасным повтором. Для простого массового SQL без жизненного цикла entity JDBC batch может оказаться яснее ORM. Bulk JPQL, в свою очередь, обходит managed-состояние и требует продуманной очистки контекста.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Version проверяет исходное состояние вычисления через WHERE по старой версии. Конфликт требует новой транзакции и повторной проверки бизнес-условий.</li>
+        <li>PESSIMISTIC_WRITE получает блокировку строки до изменения объекта и держит её до завершения транзакции. Не выполняй под ней сетевую работу.</li>
+        <li>L1 сохраняет идентичность managed-объекта. Повторный find не обещает свежую строку; refresh и clear меняют состояние контекста.</li>
+        <li>L2 переносит данные между контекстами, а не общий Java-объект. Другие писатели и несколько процессов требуют отдельного согласования кеша.</li>
+        <li>Batch группирует SQL, flush отправляет изменения, clear отсоединяет объекты. Ни один из них не заменяет commit и не снимает блокировки.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="optimistic-locking" data-freq="3">
+      <h3>Как работает optimistic locking и что делать после OptimisticLockException?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я добавляю @Version. При чтении Hibernate запоминает версию, а при UPDATE проверяет старую в WHERE и записывает следующую. Если другой платёж уже изменил счёт, обновлено ноль строк и возникнет OptimisticLockException. Чужое изменение не затрётся. Я откатываю операцию и при допустимом повторе начинаю новую транзакцию, читаю актуальное состояние и снова проверяю условия.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Проверка происходит при flush/commit; чистый выход из Java-метода ещё не доказывает успех. Повтор должен окружать завершённую границу транзакции.</li>
+            <li>Bulk JPQL и SQL других писателей способны обойти версию. Все пути изменения строки должны следовать общей стратегии.</li>
+            <li>Версии разных entity не защищают автоматически общий лимит. Нужна точка координации инварианта.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>После конфликта можно просто повторить merge того же объекта?</summary>
+          <p>У него остались прежние данные и версия. Такой повтор либо снова конфликтует, либо при ручной подмене версии затирает чужой результат. Повторяй смысл операции по новым данным, а не перенос старого снимка. После неуспешной транзакции старый persistence context закрывают.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pessimistic-vs-optimistic" data-freq="3">
+      <h3>Когда выбрать pessimistic locking, а когда @Version?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При редких конфликтах я беру optimistic locking: читаю без ранней блокировки и проверяю версию на записи. Если конфликт частый или повтор дорог, PESSIMISTIC_WRITE позволяет взять строку до вычисления и выстроить конкурирующие операции в очередь. Цена — ожидание, занятые подключения и риск deadlock. Блокировка живёт до commit или rollback, поэтому операция должна быть короткой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Блокировка базы работает между процессами; synchronized на объекте entity защищает только один JVM-объект.</li>
+            <li>MVCC позволяет обычному SELECT читать снимок несмотря на блокировку записи. Точный SQL и режим ожидания задаёт СУБД/диалект.</li>
+            <li>При нескольких счетах беру блокировки в одном порядке. Ошибку ожидания обрабатываю снаружи транзакции, а не продолжаю её вслепую.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cache-levels" data-freq="2">
+      <h3>Чем отличаются кеш первого уровня, второго уровня и кеш запросов?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>L1 — persistence context с единственным managed-объектом на ключ. Он обеспечивает идентичность и dirty checking. L2 общий для SessionFactory и хранит данные, из которых новый контекст создаёт свой объект. Для него нужны провайдер и выбор кешируемых entity. Кеш результатов запросов включается отдельно; @Cacheable на entity не отменяет выполнение любого JPQL.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Повторный JPQL может выполнить SQL и вернуть прежний объект L1. Для явного обновления есть refresh, для отсоединения всех объектов — clear.</li>
+            <li>READ_WRITE координирует регион кеша, но не заменяет row lock и не уведомляется о любом внешнем SQL.</li>
+            <li>Локальный Caffeine не даёт автоматической инвалидации между подами. TTL ограничивает срок устарелости, а не обеспечивает мгновенную согласованность.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="batch-writing" data-freq="2">
+      <h3>Как организовать большую batch-запись и почему batch_size бывает недостаточно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я включаю JDBC batching для совместимых SQL и ограничиваю размер persistence context через flush, затем clear. Flush отправляет изменения, clear отсоединяет объекты и их снимки. Commit остаётся отдельной границей. При IDENTITY Hibernate нужен выполненный INSERT для получения ключа, поэтому batching таких вставок отключён, даже если batch_size положительный.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Очистка контекста уменьшает память JVM, но не отдаёт подключение и блокировки незавершённой транзакции.</li>
+            <li>Сортировка inserts/updates повышает шанс собрать batch и сама стоит времени. Проверяю статистику и драйвер вместо вывода по одному SQL-логу.</li>
+            <li>Транзакции по частям требуют контрольной точки и идемпотентного повтора. Если жизненный цикл entity не нужен, рассматриваю JDBC batch.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.hibernate.org/orm/7.4/userguide/html_single/">Hibernate ORM 7.4 User Guide</a> — основа урока: главы Locking, Batching и Caching; проверка версии, регионы кеша и статистика.</li>
+      <li><a href="https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2">Jakarta Persistence 3.2</a> — optimistic/pessimistic lock modes, Version, исключения блокировки, refresh и работа persistence context.</li>
+      <li><a href="https://docs.hibernate.org/orm/7.4/userguide/html_single/#batch">Hibernate: Batching</a> — batch_size по умолчанию 0, ограничения IDENTITY, порядок flush и clear.</li>
+      <li><a href="https://docs.hibernate.org/orm/7.4/userguide/html_single/#caching">Hibernate: Caching</a> — L2, стратегии конкурентного доступа, отдельный query cache и инвалидация.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

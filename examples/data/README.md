@@ -109,3 +109,28 @@ fetch читает один и тот же список через LAZY, fetch j
 использует соединение текущей транзакции. Эскизы наследования, составного
 ключа и двухэтапной пагинации на странице показывают отображение и подход;
 отдельных режимов с их выводом в демо нет.
+
+## JPA Locking & Caching
+
+```bash
+./run.sh LockingDemo lost
+./run.sh LockingDemo optimistic
+./run.sh LockingDemo pessimistic
+./run.sh LockingDemo l1
+./run.sh LockingDemo l2
+./run.sh LockingDemo batch
+./run.sh LockingDemo batch-off
+./run.sh LockingDemo identity
+```
+
+LockingDemo запускает изолированные опыты Hibernate/H2. lost показывает
+затёртое списание; optimistic — конфликт @Version и повтор в новой транзакции;
+pessimistic — ожидание строки до явно заданного H2 LOCK_TIMEOUT=1500ms.
+l1 сравнивает find, прямой SQL, refresh и clear. l2 включает Hibernate JCache
+с локальным Caffeine и показывает устаревшие данные после SQL вне ORM.
+Этот SQL не меняет version: все писатели должны следовать общему протоколу.
+
+batch, batch-off и identity сравнивают число подготовленных ORM-выражений
+и очищают контекст каждые три объекта. Каждый запуск создаёт новую H2.
+Статистика показывает механизм; число statements не измеряет сетевые пакеты
+или скорость на целевой СУБД. Распределённый кеш и PostgreSQL не используются.

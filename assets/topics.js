@@ -551,7 +551,7 @@ window.KB_TREE = [
           scope: 'entity, persistence context, состояния entity, dirty checking, flush' },
         { id: 'jpa-relations', freq: 3, status: 'draft', title: 'Relations & Fetching',
           scope: 'связи и owning side, lazy и eager, N+1, fetch join, EntityGraph, маппинг наследования, составные ключи' },
-        { id: 'jpa-locking', freq: 2, status: 'empty', title: 'Locking & Caching',
+        { id: 'jpa-locking', freq: 2, status: 'draft', title: 'Locking & Caching',
           scope: 'optimistic и pessimistic locking, @Version, кеш первого и второго уровня, batch-запись' },
         { id: 'spring-data', freq: 2, status: 'empty', title: 'Spring Data',
           scope: 'репозитории, derived queries, @Query, проекции, пагинация, Spring Data JDBC' },
