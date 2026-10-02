@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Design: Structural Patterns · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="patterns-structural">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Design: Structural Patterns</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Структурные паттерны отвечают на вопрос, как собрать объекты вместе, не переписывая их. Adapter переводит чужой интерфейс в твой. Decorator оборачивает объект тем же интерфейсом и добавляет одно поведение, и порядок обёрток меняет результат. Proxy устроен так же, но контролирует доступ, и именно его Spring создаёт вокруг бинов. Facade даёт простой вход в сложную подсистему. Composite позволяет работать с деревом как с одним объектом. Главная путаница на собеседовании — декоратор и прокси, у которых одинаковая структура и разное назначение.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>SDK банка говорит на чужом языке, а вокруг каждого вызова нужны лог и повтор</h2>
+      <p>Платёжному сервису достался SDK старого банка. Он принимает сумму в рублях типа <code>double</code>, бросает свои исключения и называет списание <code>pay</code>. Вокруг каждого вызова нужно писать лог, повторять запрос при таймауте и мерить время. А комиссия складывается из дерева правил: эквайринг, фиксированная часть банка, надбавка за 3-D Secure.</p>
+      <p>Можно вписать всё в один класс: перевод единиц, лог, повтор и расчёт комиссии. Тогда SDK нельзя поменять без правки бизнес-кода, повтор нельзя выключить в тестах, а новое правило комиссии требует правки общего метода. Структурные паттерны разносят эти задачи по маленьким объектам, которые соединяются через общий интерфейс. Демо <a href="../examples/design/StructuralDemo.java">StructuralDemo.java</a> запускается командой <code>java StructuralDemo.java</code> на JDK 21.</p>
+    </section>
+
+    <section class="step" id="adapter">
+      <h2>Adapter переводит чужой интерфейс в тот, которого ждёт твой код</h2>
+      <pre><code class="language-java">interface BankGateway {                       // Язык платёжного сервиса.
+    String charge(String id, long cents);
+}
+
+class LegacyBankSdk {                          // Чужой язык: рубли в double.
+    String pay(String reference, double rubles) { … }
+}
+
+class LegacyBankAdapter implements BankGateway {
+    private final LegacyBankSdk sdk;
+
+    public String charge(String id, long cents) {
+        // Копейки в рубли через BigDecimal: потеря точности только на границе SDK.
+        double rubles = BigDecimal.valueOf(cents).movePointLeft(2).doubleValue();
+        return sdk.pay(id, rubles);
+    }
+}</code></pre>
+      <p>Сервис платежей знает только <code>BankGateway</code> и копейки в <code>long</code>. Всё, что относится к SDK, — единицы, имена методов, его исключения, его коды ошибок — живёт в одном классе. Когда банк выпустит новую версию SDK или его заменят, правится адаптер. Это DIP из <a href="design-principles.html">SOLID</a> в действии: интерфейс принадлежит сервису, адаптер подстраивается под него.</p>
+      <p>Адаптер может быть объектным — хранит ссылку на адаптируемый объект, как здесь, — или классовым, через наследование. В Java почти всегда используют объектный: наследование открывает весь API SDK и привязывает к его реализации. На уровне целого сервиса та же идея называется anti-corruption layer: слой, который не пускает модель чужой системы в твою. В Spring адаптеры повсюду: <code>HandlerAdapter</code> вызывает контроллер любого вида одинаковым способом, а <code>MessageListenerAdapter</code> превращает обычный метод в слушателя сообщений.</p>
+    </section>
+
+    <section class="step" id="decorator">
+      <h2>Decorator добавляет поведение обёрткой, и порядок обёрток меняет результат</h2>
+      <p>Декоратор реализует тот же интерфейс, что и оборачиваемый объект, хранит ссылку на него и добавляет одно поведение до или после вызова. Лог и повтор — два декоратора, а не два наследника адаптера. Наследование дало бы класс на каждую комбинацию: с логом, с повтором, с логом и повтором.</p>
+      <pre><code class="language-java">class Logging implements BankGateway {
+    private final BankGateway next;
+    public String charge(String id, long cents) {
+        System.out.println("log: charge " + id);
+        return next.charge(id, cents);       // Передаём вызов дальше по цепочке.
+    }
+}
+
+class Retrying implements BankGateway {
+    private final BankGateway next;
+    public String charge(String id, long cents) {
+        try { return next.charge(id, cents); }
+        catch (IllegalStateException e) {    // SDK падает с таймаутом на первой попытке.
+            System.out.println("retry after: " + e.getMessage());
+            return next.charge(id, cents);
+        }
+    }
+}
+
+BankGateway a = new Retrying(new Logging(new LegacyBankAdapter(sdk)));
+BankGateway b = new Logging(new Retrying(new LegacyBankAdapter(sdk)));</code></pre>
+      <pre class="out">== adapter + decorators: Retrying(Logging(adapter))
+  log: charge p-1
+  retry after: timeout
+  log: charge p-1
+  result: OK p-1 123.45
+== decorators reversed: Logging(Retrying(adapter))
+  log: charge p-2
+  retry after: timeout
+  result: OK p-2 123.45</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Слева Retrying снаружи, внутри Logging, внутри адаптер: повтор проходит через логирование, и лог пишется на каждую попытку, две строки. Справа Logging снаружи, внутри Retrying, внутри адаптер: лог пишется один раз на весь вызов, а повтор происходит внутри и в лог не попадает.">
+            <path d="M360 24 L 360 212" class="dg-sep"/>
+            <text x="20" y="22" class="dg-cap">RETRYING(LOGGING(ADAPTER))</text>
+            <text x="374" y="22" class="dg-cap">LOGGING(RETRYING(ADAPTER))</text>
+            <!-- слева -->
+            <rect x="20" y="36" width="320" height="140" rx="12" class="dg-box"/>
+            <rect x="40" y="66" width="280" height="96" rx="10" class="dg-cell"/>
+            <rect x="60" y="100" width="240" height="48" rx="8" class="dg-cell hit"/>
+            <!-- справа -->
+            <rect x="374" y="36" width="326" height="140" rx="12" class="dg-cell"/>
+            <rect x="394" y="66" width="286" height="96" rx="10" class="dg-box"/>
+            <rect x="414" y="100" width="246" height="48" rx="8" class="dg-cell hit"/>
+            <text x="34" y="56" class="dg-in">Retrying</text>
+            <text x="54" y="88" class="dg-in">Logging</text>
+            <text x="74" y="129" class="dg-in">LegacyBankAdapter</text>
+            <text x="388" y="56" class="dg-in">Logging</text>
+            <text x="408" y="88" class="dg-in">Retrying</text>
+            <text x="428" y="129" class="dg-in">LegacyBankAdapter</text>
+            <text x="230" y="56" class="dg-n">2 попытки</text>
+            <text x="246" y="88" class="dg-bad">лог × 2</text>
+            <text x="600" y="56" class="dg-ok">лог × 1</text>
+            <text x="590" y="88" class="dg-n">2 попытки</text>
+            <text x="20" y="200" class="dg-s">Каждая попытка видна в логе.</text>
+            <text x="374" y="200" class="dg-s">Повтор спрятан внутри одного вызова.</text>
+          </svg>
+        </div>
+        <figcaption>Внешняя обёртка видит вызов один раз, внутренняя — столько раз, сколько её вызывает внешняя. Поэтому то, что должно считать попытки, ставят внутрь повтора, а то, что считает вызовы бизнеса, — снаружи.</figcaption>
+      </figure>
+      <p>Тот же вопрос порядка возникает в Resilience4j и Spring: circuit breaker снаружи повтора видит одну неудачу на весь вызов, внутри — каждую попытку. Метрика времени снаружи повтора покажет полную задержку для клиента, внутри — длительность одной попытки банка. Об этом стоит думать при каждой цепочке обёрток.</p>
+      <p>Классический пример декораторов — потоки ввода-вывода: <code>new BufferedReader(new InputStreamReader(new FileInputStream(file), UTF_8))</code>. Каждый слой добавляет одно: буфер, декодирование байтов в символы. <code>Collections.synchronizedList</code> и <code>unmodifiableList</code> — тоже декораторы над любым списком.</p>
+    </section>
+
+    <section class="step" id="proxy">
+      <h2>Proxy устроен как декоратор, но контролирует доступ и обычно создаётся фреймворком</h2>
+      <p>Структурно прокси не отличается от декоратора: тот же интерфейс, ссылка на настоящий объект, код до и после вызова. Отличается назначение. Декоратор добавляет поведение, и клиент сам решает, что во что обернуть. Прокси стоит на месте объекта и управляет доступом к нему: проверяет права, откладывает создание, открывает транзакцию, ходит по сети. Клиент обычно не знает, что работает с прокси.</p>
+      <p>В Java прокси можно создать во время работы, не написав класс. <code>java.lang.reflect.Proxy</code> генерирует класс, реализующий интерфейсы, и направляет все вызовы в один обработчик:</p>
+      <pre><code class="language-java">BankGateway target = (id, cents) -&gt; "charged " + id;
+BankGateway timed = (BankGateway) Proxy.newProxyInstance(
+        BankGateway.class.getClassLoader(), new Class&lt;?&gt;[] {BankGateway.class},
+        (proxy, method, params) -&gt; {
+            System.out.println("intercepted " + method.getName()); // До вызова цели.
+            return method.invoke(target, params);                   // Вызов настоящего объекта.
+        });
+timed.getClass().getName();
+timed.charge("p-3", 100);
+timed.toString(); // Тоже идёт через обработчик.</code></pre>
+      <pre class="out">  proxy class: $Proxy0
+  intercepted charge
+  result: charged p-3
+  intercepted toString
+  toString is target's: true</pre>
+      <p>Класс <code>$Proxy0</code> сгенерирован JVM. Через обработчик идут не только методы интерфейса, но и <code>toString</code>, <code>equals</code> и <code>hashCode</code>. Обработчик, который не учитывает их, ломает логи и коллекции: прокси, положенный в <code>HashSet</code>, будет сравниваться так, как решит обработчик.</p>
+      <p>Spring строит на прокси свой AOP: <code>@Transactional</code>, <code>@Cacheable</code>, <code>@Async</code>, <code>@PreAuthorize</code>. Для бинов с интерфейсами он может использовать JDK-прокси, как здесь, а для классов — CGLIB-подкласс. У обоих одно ограничение: прокси перехватывает только вызовы снаружи. Вызов через <code>this</code> внутри объекта идёт мимо, и транзакция, кеш или проверка прав не срабатывают. Подробно — в <a href="spring-aop.html">AOP &amp; Proxies</a>.</p>
+      <div class="trap">
+        <p class="myth">Декоратор и прокси — это одно и то же, просто разные названия.</p>
+        <p class="fact">Структура одна, назначение разное. Декоратор добавляет поведение, и цепочку явно собирает клиент. Прокси замещает объект и контролирует доступ к нему: лениво создаёт, проверяет права, оборачивает в транзакцию; клиент о нём обычно не знает. На собеседовании ждут именно этого различия.</p>
+      </div>
+    </section>
+
+    <section class="step" id="facade">
+      <h2>Facade даёт один простой вход в подсистему из многих классов</h2>
+      <p>Чтобы провести оплату, контроллеру нужно проверить антифрод, посчитать комиссию, списать деньги, записать проводку и отправить уведомление. Если контроллер вызывает пять сервисов сам, он знает порядок шагов, обработку ошибок каждого и что делать при частичном успехе. Это знание копируется во второй контроллер, в обработчик очереди, в админку.</p>
+      <pre><code class="language-java">@Service
+class CheckoutFacade {                  // Один вход: сценарий оплаты.
+    Receipt checkout(Order order) {
+        fraud.check(order);
+        long fee = fees.calculate(order);
+        String bankRef = bank.charge(order.id(), order.cents() + fee);
+        ledger.record(order, fee, bankRef);
+        notifier.paid(order);
+        return new Receipt(order.id(), bankRef, fee);
+    }
+}</code></pre>
+      <p>Фасад не запрещает работать с подсистемой напрямую: админка по-прежнему может вызвать <code>ledger</code>. Он даёт короткий путь для частого сценария. Разница с адаптером: адаптер переводит один интерфейс в другой, а фасад упрощает множество интерфейсов до одного нового. <code>JdbcTemplate</code> — фасад над JDBC: соединение, statement, ResultSet и исключения скрыты за <code>query</code> и <code>update</code>, как разобрано в <a href="jdbc.html">JDBC &amp; Connection Pools</a>.</p>
+      <p>Опасность фасада — он притягивает всё. Каждый новый сценарий добавляет в него метод, и через год это класс на две тысячи строк, который меняют все команды. Фасад на сценарий или на группу близких сценариев держит его небольшим.</p>
+    </section>
+
+    <section class="step" id="composite">
+      <h2>Composite позволяет работать с деревом правил как с одним правилом</h2>
+      <p>Комиссия по карте складывается из процента эквайринга и комиссии банка, а комиссия банка — из фиксированной части и надбавки за 3-D Secure. Правила вкладываются друг в друга, и каждое должно уметь посчитать свою часть. Composite даёт листьям и группам один интерфейс, так что вызывающий не различает, считает он одно правило или целое дерево.</p>
+      <pre><code class="language-java">interface FeeRule { long fee(long cents); }
+
+record Percent(String name, int basisPoints) implements FeeRule {
+    public long fee(long cents) { return cents * basisPoints / 10_000; } // 150 = 1.5%
+}
+record Fixed(String name, long cents) implements FeeRule {
+    public long fee(long amount) { return cents; }
+}
+record AllOf(String name, List&lt;FeeRule&gt; rules) implements FeeRule { // Группа — тоже правило.
+    public long fee(long cents) { return rules.stream().mapToLong(r -&gt; r.fee(cents)).sum(); }
+}
+
+FeeRule card = new AllOf("card", List.of(
+        new Percent("acquiring 1.5%", 150),
+        new AllOf("bank", List.of(new Fixed("fixed 10", 10), new Percent("3ds 0.1%", 10)))));
+card.fee(10_000);</code></pre>
+      <pre class="out">  card[acquiring 1.5%, bank[fixed 10, 3ds 0.1%]]
+  fee for 10000: 170</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Дерево правил для платежа в 10000 копеек. Корень card суммирует 150 от acquiring 1.5% и 20 от группы bank. Группа bank суммирует 10 от fixed и 10 от 3ds 0.1%. Итого 170.">
+            <defs>
+              <marker id="cm-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <rect x="250" y="20" width="220" height="44" rx="9" class="dg-box"/>
+            <rect x="60" y="96" width="220" height="44" rx="8" class="dg-cell hit"/>
+            <rect x="440" y="96" width="220" height="44" rx="9" class="dg-box"/>
+            <rect x="330" y="164" width="160" height="40" rx="8" class="dg-cell hit"/>
+            <rect x="530" y="164" width="170" height="40" rx="8" class="dg-cell hit"/>
+            <path d="M310 64 C 280 80, 190 80, 170 92" class="dg-line" marker-end="url(#cm-n)"/>
+            <path d="M410 64 C 440 80, 530 80, 550 92" class="dg-line" marker-end="url(#cm-n)"/>
+            <path d="M500 140 C 480 150, 420 150, 410 160" class="dg-line" marker-end="url(#cm-n)"/>
+            <path d="M600 140 L 610 160" class="dg-line" marker-end="url(#cm-n)"/>
+            <g text-anchor="middle">
+              <text x="360" y="40" class="dg-in">AllOf card</text>
+              <text x="360" y="56" class="dg-ok">170</text>
+              <text x="170" y="116" class="dg-in">Percent 1.5%</text>
+              <text x="170" y="132" class="dg-n">10000 × 1.5% = 150</text>
+              <text x="550" y="116" class="dg-in">AllOf bank</text>
+              <text x="550" y="132" class="dg-n">10 + 10 = 20</text>
+              <text x="410" y="182" class="dg-in">Fixed 10</text>
+              <text x="410" y="197" class="dg-n">10</text>
+              <text x="615" y="182" class="dg-in">Percent 0.1%</text>
+              <text x="615" y="197" class="dg-n">10</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>Вызывающий вызывает fee у корня и получает 170. Новый уровень правил — ещё один AllOf, код расчёта не меняется.</figcaption>
+      </figure>
+      <p>Composite хорош, когда структура действительно древовидная и операции одинаковы для листа и группы: посчитать, вывести, проверить. Если у группы появляются свои операции, которых нет у листа (добавить правило, удалить), их либо поднимают в общий интерфейс и бросают исключение в листе — нарушая LSP, — либо держат только в группе и теряют единообразие. В Spring композиты служат для объединения однотипных стратегий: <code>CompositePropertySource</code>, <code>HandlerMethodArgumentResolverComposite</code>, составные индикаторы health из <a href="actuator.html">Actuator</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Adapter переводит чужой API в интерфейс, которым владеет твой код; изменения SDK остаются в одном классе.</li>
+        <li>Decorator добавляет одно поведение обёрткой того же интерфейса; порядок обёрток меняет, сколько раз каждая видит вызов.</li>
+        <li>Proxy структурно как декоратор, но контролирует доступ; Spring AOP — прокси, и вызов через this его обходит.</li>
+        <li>Facade упрощает подсистему до одного входа для частого сценария; следи, чтобы он не стал god-классом.</li>
+        <li>Composite даёт листу и группе один интерфейс, и дерево считается как одно правило.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="structural-decorator-proxy" data-freq="3">
+      <h3>Чем декоратор отличается от прокси?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Структура одинаковая: тот же интерфейс, ссылка на настоящий объект, код до и после вызова. Разница в назначении. Декоратор добавляет поведение, и цепочку собирает сам клиент: BufferedReader поверх InputStreamReader, логирование поверх повтора. Прокси замещает объект и управляет доступом к нему: ленивое создание, проверка прав, транзакция, удалённый вызов; клиент обычно не знает о нём.</p>
+          <p>Spring AOP — прокси: @Transactional и @Cacheable работают через объект, который контейнер подставил вместо бина.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JDK-прокси генерируется для интерфейсов во время работы; через обработчик идут и equals, hashCode, toString.</li>
+            <li>CGLIB-прокси — подкласс, поэтому не работает с final-классами и методами.</li>
+            <li>И декоратор, и прокси видят только внешние вызовы; this внутри объекта их обходит.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="structural-adapter-facade" data-freq="2">
+      <h3>Чем adapter отличается от facade?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Adapter переводит один существующий интерфейс в другой, которого ждёт клиент: SDK банка с рублями в double — в BankGateway с копейками. Набор возможностей тот же, меняется форма. Facade создаёт новый упрощённый интерфейс над несколькими классами подсистемы: checkout вместо пяти вызовов антифрода, банка, проводок и уведомлений.</p>
+          <p>Адаптер нужен для совместимости, фасад — для удобства и сокрытия сложности.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>На уровне сервисов адаптер к чужой системе называют anti-corruption layer.</li>
+            <li>Фасад притягивает всё подряд; делят его по сценариям, чтобы он не стал god-классом.</li>
+            <li>В Spring: HandlerAdapter — адаптер, JdbcTemplate — фасад над JDBC.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="structural-order" data-freq="2">
+      <h3>В каком порядке ставить повтор, логирование и circuit breaker вокруг вызова?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Внешняя обёртка видит вызов один раз, внутренняя — столько раз, сколько её вызвала внешняя. Если лог внутри повтора, в логе каждая попытка; если снаружи — один вызов бизнеса. В демо при Retrying(Logging(...)) лог появился дважды, при Logging(Retrying(...)) — один раз.</p>
+          <p>Обычно circuit breaker ставят снаружи повтора, чтобы при открытом breaker повторы не выполнялись вовсе, а метрику длительности для клиента — снаружи всего.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Breaker внутри повтора считает каждую попытку отдельной ошибкой и открывается быстрее.</li>
+            <li>В Spring порядок прокси задаёт @Order аспектов или явная конфигурация Resilience4j.</li>
+            <li>Таймаут на одну попытку ставят внутри повтора, общий срок — снаружи.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему метрика ошибок банка показывает втрое больше отказов, чем видят клиенты?</summary>
+          <pre><code class="language-java">BankGateway bank = new Retrying(3,
+        new Metrics(registry,            // Считает ошибки вызовов банка.
+            new TinkoffAdapter(sdk)));</code></pre>
+          <p>Metrics стоит внутри повтора и считает каждую попытку. Клиент, у которого третья попытка прошла, получил успех, а метрика записала две ошибки. Это может быть нужно, если метрика про здоровье банка. Для метрики пользовательских отказов обёртку ставят снаружи повтора, а иногда держат обе.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="structural-in-spring" data-freq="2">
+      <h3>Где структурные паттерны встречаются в JDK и Spring?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Декоратор — потоки ввода-вывода: BufferedReader поверх InputStreamReader поверх FileInputStream; Collections.synchronizedList. Прокси — java.lang.reflect.Proxy и весь Spring AOP: транзакции, кеш, безопасность. Адаптер — HandlerAdapter в Spring MVC и MessageListenerAdapter. Фасад — JdbcTemplate и RestClient. Composite — CompositePropertySource и составные индикаторы health.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>BeanPostProcessor — точка, где Spring заменяет бин прокси или декоратором.</li>
+            <li>FilterChain сервлета — цепочка декораторов вокруг запроса, разобранная в теме про Tomcat.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Gamma, Helm, Johnson, Vlissides, Design Patterns, глава 4 — основа урока: adapter, decorator, proxy, facade, composite.</li>
+      <li><a href="https://refactoring.guru/design-patterns/structural-patterns">Refactoring.Guru: Structural Patterns</a> — сравнение декоратора и прокси, схемы.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/Proxy.html">java.lang.reflect.Proxy javadoc</a> — какие методы попадают в обработчик.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/aop/proxying.html">Spring Framework Reference: Proxying Mechanisms</a> — JDK и CGLIB прокси, self-invocation.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
