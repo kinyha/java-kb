@@ -145,7 +145,7 @@ window.KB_TREE = [
           scope: 'структура токена, подпись HS256 и RS256, access и refresh token, отзыв токена, где хранить на клиенте' },
         { id: 'oauth2', freq: 3, status: 'draft', title: 'OAuth 2.0 & OIDC',
           scope: 'роли, authorization code и PKCE, client credentials, scopes, OpenID Connect и id token, SSO, SAML' },
-        { id: 'web-security', freq: 2, status: 'empty', title: 'Web Vulnerabilities',
+        { id: 'web-security', freq: 2, status: 'draft', title: 'Web Vulnerabilities',
           scope: 'OWASP Top 10, SQL injection, XSS, CSRF, CORS, CSP' },
         { id: 'crypto', freq: 2, status: 'empty', title: 'Cryptography',
           scope: 'хеширование паролей, соль, bcrypt, HMAC, симметричное и асимметричное шифрование, подпись' },
