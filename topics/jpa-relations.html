@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Relations &amp; Fetching · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="jpa-relations">
+<main class="page">
+  <header class="topic-head"><h1>Relations &amp; Fetching</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>У платежа есть магазин и возвраты. В Java это ссылки и коллекции; в базе — внешние ключи и строки. Hibernate переводит одно представление в другое, но направление записи и план чтения ты выбираешь сам. Сначала определи, какое поле управляет внешним ключом. Затем реши, какие данные нужны конкретной операции и сколькими SQL-запросами она их получит.</p>
+    </div>
+
+    <section class="step" id="owning-side">
+      <h2>Внешний ключ меняет владелец связи, а Java-граф согласует сервис</h2>
+      <p>Платёж №17 ошибочно привязали к магазину №1. Сервис добавляет его в <code>merchant2.payments</code> и выполняет commit. На следующем запросе платёж снова у первого магазина: коллекция изменилась, но <code>payments.merchant_id</code> определяет поле <code>Payment.merchant</code>.</p>
+      <p>В двунаправленной связи одна сторона — <b>owning side</b>, владелец записи отношения. Вторая — обратная сторона с <code>mappedBy</code>, именем Java-поля владельца. Для <code>ManyToOne / OneToMany</code> владельцем служит сторона «многие»: там находится внешний ключ. <code>mappedBy = "merchant"</code> — это имя атрибута, а не имя SQL-колонки.</p>
+      <pre><code class="language-java">@Entity(name = "Merchant") @Table(name = "merchants")
+class Merchant {
+    @Id Long id;
+    String name;
+    @OneToMany(mappedBy = "merchant") // Эта коллекция не записывает merchant_id.
+    List&lt;Payment&gt; payments = new ArrayList&lt;&gt;();
+    public List&lt;Payment&gt; getPayments() { return payments; }
+}
+
+@Entity(name = "Payment") @Table(name = "payments")
+class Payment {
+    @Id Long id;
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "merchant_id") // Владелец записи внешнего ключа.
+    Merchant merchant;
+
+    void moveTo(Merchant next) {
+        if (merchant != null) merchant.getPayments().remove(this);
+        merchant = next; // Эта строка определяет изменение FK в базе.
+        if (next != null &amp;&amp; !next.getPayments().contains(this))
+            next.getPayments().add(this); // Согласуем обратную сторону в Java.
+    }
+}</code></pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 248" role="img" aria-label="Merchant 1 содержит Payment 17 в обратной коллекции. Payment 17 ссылается на Merchant 1 как владелец связи. Из поля Payment merchant Hibernate записывает merchant_id=1 в строку payments; коллекция mappedBy не управляет этой колонкой.">
+            <defs><marker id="jr-owner" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="22" y="48" width="200" height="132" rx="9" class="dg-box"/>
+            <rect x="40" y="96" width="162" height="52" rx="6" class="dg-cell"/>
+            <rect x="280" y="74" width="174" height="84" rx="8" class="dg-cell hit"/>
+            <rect x="524" y="74" width="174" height="84" rx="8" class="dg-box"/>
+            <path d="M202 113 L276 103" class="dg-line" marker-end="url(#jr-owner)"/>
+            <path d="M280 136 C255 160, 250 167, 226 166" class="dg-line" marker-end="url(#jr-owner)"/>
+            <path d="M454 116 L520 116" class="dg-line ok" marker-end="url(#jr-owner)"/>
+            <text x="36" y="73" class="dg-t">Merchant #1</text>
+            <text x="50" y="117" class="dg-in">payments: [17]</text><text x="50" y="136" class="dg-n">mappedBy=merchant</text>
+            <text x="292" y="97" class="dg-t">Payment #17</text><text x="292" y="123" class="dg-in">merchant → #1</text><text x="292" y="144" class="dg-n">owning side</text>
+            <text x="538" y="97" class="dg-t">payments</text><text x="538" y="123" class="dg-in">id=17</text><text x="538" y="144" class="dg-in">merchant_id=1</text>
+            <text x="476" y="99" class="dg-s" text-anchor="middle">SQL</text>
+            <text x="34" y="220" class="dg-s">Две ссылки в Java описывают один внешний ключ в базе.</text>
+          </svg>
+        </div>
+        <figcaption>Коллекция удобна для обхода графа, но внешний ключ записывает Payment.merchant. Hibernate не исправляет обе стороны вместо твоего кода.</figcaption>
+      </figure>
+      <p>Полный <a href="../examples/data/RelationsDemo.java">RelationsDemo.java</a> запускается через общий <a href="../examples/data/run.sh">run.sh</a>. Стек: JDK 21.0.11, Hibernate 7.4.5.Final, Jakarta Persistence 3.2, H2 2.4.240; версии задаёт BOM Boot 4.1.1 в <a href="../examples/data/pom.xml">pom.xml</a>. Ниже — три отдельные транзакции режима <code>owning</code>. Внешний ключ читается напрямую через JDBC на том же соединении после flush.</p>
+      <pre><code class="language-java">// 1. Платёж исходно принадлежит магазину 1.
+next.getPayments().add(p); // next — магазин 2; меняем только mappedBy.
+em.flush();
+System.out.println("inverse-only: fk=" + merchantId(em));
+
+// 2. Новый контекст: загружаем обе коллекции, затем меняем только владельца.
+old.getPayments().size(); next.getPayments().size();
+p.merchant = next;
+em.flush();
+System.out.println("owning-only: fk=" + merchantId(em)
+        + ", old.contains=" + old.getPayments().contains(p)
+        + ", new.contains=" + next.getPayments().contains(p));
+
+// 3. Новый контекст: возвращаем платёж из магазина 2 в магазин 1.
+p.moveTo(next); // next теперь магазин 1; метод меняет обе стороны.
+em.flush();
+System.out.println("helper: fk=" + merchantId(em)
+        + ", old.contains=" + old.getPayments().contains(p)
+        + ", new.contains=" + next.getPayments().contains(p));</code></pre>
+      <pre><code class="language-bash">./run.sh RelationsDemo owning</code></pre>
+      <pre class="out">inverse-only: fk=1
+owning-only: fk=2, old.contains=true, new.contains=false
+helper: fk=1, old.contains=false, new.contains=true</pre>
+      <p>Во втором варианте SQL правильный, но чтение старой коллекции приведёт к ошибке бизнес-правила. Методы add, remove и moveTo должны согласовывать обе стороны.</p>
+      <h3>Где лежит отношение для остальных связей</h3>
+      <table class="mx">
+        <thead><tr><th>Связь</th><th>Хранение</th><th>Что учесть</th></tr></thead>
+        <tbody>
+          <tr><td>ManyToOne</td><td>FK в таблице многих</td><td>Несколько платежей ссылаются на один магазин.</td></tr>
+          <tr><td>OneToOne</td><td>FK с UNIQUE либо общий первичный ключ</td><td>Без UNIQUE база разрешит несколько связанных строк. Общий ключ выражают через MapsId.</td></tr>
+          <tr><td>ManyToMany</td><td>Таблица двух FK</td><td>Если у отношения есть сумма, дата или роль, выдели отдельную entity связи.</td></tr>
+          <tr><td>Однонаправленная OneToMany</td><td>Join table либо явно заданный FK</td><td>Без обратного поля план записи отличается от обычной двунаправленной связи.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="cascade-orphans">
+      <h2>Каскад распространяет операцию, а orphanRemoval удаляет зависимый объект</h2>
+      <p>Возврат принадлежит одному платежу, магазин существует независимо. Эта разница определяет каскад: какие операции над родителем распространяются на связанные объекты. Каскад не выбирает владельца FK или план чтения.</p>
+      <pre><code class="language-java">// На Payment: возвраты — зависимые части его жизненного цикла.
+@OneToMany(mappedBy = "payment", cascade = CascadeType.ALL, orphanRemoval = true)
+List&lt;Refund&gt; refunds = new ArrayList&lt;&gt;();
+
+// На Refund: именно эта ссылка задаёт payment_id.
+@ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "payment_id")
+Payment payment;
+
+void addRefund(Refund refund) {
+    refunds.add(refund); refund.payment = this; // Согласуем обе стороны перед persist.
+}
+void removeRefund(Refund refund) {
+    refunds.remove(refund); refund.payment = null; // Объект больше не часть платежа.
+}
+
+Payment p = new Payment(17L, merchant);
+p.addRefund(new Refund(101L));
+em.persist(p); // PERSIST проходит к Refund; Merchant сохраняется отдельно.</code></pre>
+      <p><code>PERSIST</code> распространяет создание, <code>MERGE</code> — перенос состояния, <code>REMOVE</code> — удаление. <code>ALL</code> включает также DETACH и REFRESH. Поэтому ALL должен описывать реальный общий жизненный цикл. На ссылке <code>Payment.merchant</code> каскад REMOVE означал бы попытку удалить магазин вместе с одним платежом; это ошибка модели.</p>
+      <p><code>orphanRemoval = true</code> действует и при разрыве отношения: удаляем возврат из коллекции управляемого платежа, и Hibernate выполнит DELETE при синхронизации, хотя <code>em.remove(refund)</code> явно не вызван. Если удаляем сам платёж, orphanRemoval также распространяет удаление на зависимые возвраты; отдельно добавлять REMOVE для этого не требуется. Каскад REMOVE без orphanRemoval распространяет удаление родителя, но простое исключение возврата из коллекции его не удаляет.</p>
+      <pre><code class="language-java">tx(factory, em -&gt; {
+    Payment p = em.find(Payment.class, 17L);
+    System.out.println("before remove: refunds=" + p.refunds.size());
+    p.removeRefund(p.refunds.getFirst()); // Разрыв связи плюс orphanRemoval.
+    em.flush();
+    long count = em.createQuery(
+            "select count(r) from Refund r where r.id = 101", Long.class)
+        .getSingleResult();
+    System.out.println("after orphan flush: rows=" + count);
+});</code></pre>
+      <pre><code class="language-bash">./run.sh RelationsDemo orphan</code></pre>
+      <pre class="out">before remove: refunds=1
+after orphan flush: rows=0</pre>
+      <p>OrphanRemoval подходит зависимому владению. Перенос в другой агрегат требует отдельного решения: отвязывание уже запланировало удаление. Для аудита возвраты часто переводят в другое состояние вместо физического удаления.</p>
+      <div class="trap">
+        <p class="myth">JPA-каскад — то же самое, что ON DELETE CASCADE в базе.</p>
+        <p class="fact">JPA распространяет операции над объектами. ON DELETE CASCADE работает при SQL в базе, включая SQL другого приложения, и не исправляет загруженный Java-граф. Согласуй оба механизма со схемой, аудитом и кешами; не считай их взаимозаменяемыми.</p>
+      </div>
+    </section>
+
+    <section class="step" id="lazy-boundary">
+      <h2>Lazy переносит чтение до обращения, eager требует данные заранее</h2>
+      <p>Экран списка не всегда показывает реквизиты магазина и возвраты. Загрузка всего графа тратит время на ненужные данные. Lazy оставляет связь незагруженной до обращения; конкретный запрос задаёт нужное чтение.</p>
+      <table class="mx">
+        <thead><tr><th>Аннотация</th><th>Fetch по умолчанию в JPA 3.2</th><th>Практический выбор</th></tr></thead>
+        <tbody>
+          <tr><td>ManyToOne, OneToOne</td><td>EAGER</td><td>Часто задают LAZY явно и загружают нужное конкретным запросом.</td></tr>
+          <tr><td>OneToMany, ManyToMany</td><td>LAZY</td><td>Не раскрывать большие коллекции без плана чтения.</td></tr>
+        </tbody>
+      </table>
+      <p>Eager — требование загрузить состояние, а не команда «один JOIN». Провайдер может получить связь отдельным SELECT. Lazy по спецификации — подсказка: провайдер вправе загрузить раньше. Значит, аннотация на поле задаёт исходную политику, но число запросов всё равно проверяют для реального пути использования.</p>
+      <p>Hibernate часто использует прокси с известным id и обёртки коллекций. Метод, которому нужны остальные поля, запускает чтение через контекст. Прямое чтение поля прокси не равно вызову getter; в демо имя читается через <code>getName()</code>.</p>
+      <pre><code class="language-java">// На Payment: ленивое чтение магазина задано явно.
+@ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "merchant_id")
+Merchant merchant;
+
+Payment p;
+try (EntityManager em = factory.createEntityManager()) {
+    p = em.find(Payment.class, 17L); // Получили платёж, магазин ещё не прочитан.
+} // Контекст закрылся, загружать магазин через него больше нельзя.
+try {
+    System.out.println(p.merchant.getName());
+} catch (LazyInitializationException e) {
+    System.out.println("after close: " + e.getClass().getSimpleName());
+}</code></pre>
+      <pre><code class="language-bash">./run.sh RelationsDemo closed</code></pre>
+      <pre class="out">after close: LazyInitializationException</pre>
+      <p>Переход всех связей в EAGER загрузит ненужное в остальных операциях. Собери нужный DTO внутри сервиса. Уже прочитанную связь можно использовать после закрытия контекста; ошибка относится к ещё не загруженному состоянию.</p>
+      <details class="deep">
+        <summary>Под капотом: почему OneToOne бывает трудно оставить ленивой</summary>
+        <p>У ManyToOne есть FK для прокси. У обратной необязательной OneToOne надо выяснить, существует ли строка в другой таблице. Это требует чтения даже при LAZY; bytecode enhancement помогает с некоторыми такими отображениями.</p>
+        <p>Equals, hashCode, toString и JSON тоже способны раскрыть ленивые ссылки. Не включай весь граф в сгенерированные методы entity.</p>
+      </details>
+    </section>
+
+    <section class="step" id="n-plus-one">
+      <h2>План чтения для списка убирает N+1 без смены всей модели</h2>
+      <p>Список содержит три платежа трёх разных магазинов. Сначала Hibernate читает платежи одним SELECT. Затем преобразование в ответ обращается к названию каждого магазина и запускает ещё три SELECT. Получилось N+1: один запрос к корням плюс дополнительные запросы при обходе связей. Если в списке 100 разных магазинов, число сетевых обращений растёт вместе со списком.</p>
+      <p>Eager тоже способен дать N+1. Несколько платежей одного магазина используют общий объект, поэтому дополнительные запросы зависят от числа разных FK. В опыте магазины разные, L2-кеш выключен, контекст для каждого варианта свежий.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 294" role="img" aria-label="Один SELECT загружает платежи 17, 18 и 19 с ленивыми ссылками на магазины 1, 2 и 3. Обращения к названиям по очереди отправляют ещё три SELECT и заполняют объекты магазинов. Итог четыре запроса.">
+            <defs><marker id="jr-fetch" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="22" y="24" class="dg-cap">СПИСОК ПЛАТЕЖЕЙ</text><text x="296" y="24" class="dg-cap">МАГАЗИНЫ</text>
+            <rect x="22" y="44" width="174" height="46" rx="7" class="dg-cell"/>
+            <rect x="22" y="116" width="174" height="46" rx="7" class="dg-cell"/>
+            <rect x="22" y="188" width="174" height="46" rx="7" class="dg-cell"/>
+            <rect x="296" y="44" width="156" height="46" rx="7" class="dg-sep" fill="none"/>
+            <rect x="296" y="116" width="156" height="46" rx="7" class="dg-sep" fill="none"/>
+            <rect x="296" y="188" width="156" height="46" rx="7" class="dg-sep" fill="none"/>
+            <rect data-s="2-" x="296" y="44" width="156" height="46" rx="7" class="dg-cell hit"/>
+            <rect data-s="3-" x="296" y="116" width="156" height="46" rx="7" class="dg-cell hit"/>
+            <rect data-s="4" x="296" y="188" width="156" height="46" rx="7" class="dg-cell hit"/>
+            <rect x="548" y="91" width="148" height="96" rx="8" class="dg-box"/>
+            <path d="M196 67 L292 67" class="dg-line" marker-end="url(#jr-fetch)"/>
+            <path d="M196 139 L292 139" class="dg-line" marker-end="url(#jr-fetch)"/>
+            <path d="M196 211 L292 211" class="dg-line" marker-end="url(#jr-fetch)"/>
+            <g data-s="1"><path d="M548 176 C504 257, 116 263, 110 238" class="dg-line" marker-end="url(#jr-fetch)"/><text x="392" y="254" class="dg-s">SELECT payments</text></g>
+            <g data-s="2"><path d="M452 67 C505 67, 499 112, 544 112" class="dg-line" marker-end="url(#jr-fetch)"/><text x="480" y="61" class="dg-n">SELECT #2</text></g>
+            <g data-s="3"><path d="M452 139 L544 139" class="dg-line" marker-end="url(#jr-fetch)"/><text x="493" y="128" class="dg-n" text-anchor="middle">SELECT #3</text></g>
+            <g data-s="4"><path d="M452 211 C505 211, 499 166, 544 166" class="dg-line" marker-end="url(#jr-fetch)"/><text x="480" y="226" class="dg-n">SELECT #4</text></g>
+            <text x="34" y="73" class="dg-in">Payment 17</text><text x="34" y="145" class="dg-in">Payment 18</text><text x="34" y="217" class="dg-in">Payment 19</text>
+            <text data-s="1" x="308" y="73" class="dg-in">proxy #1</text><text data-s="2-" x="308" y="73" class="dg-in">shop-1</text>
+            <text data-s="1-2" x="308" y="145" class="dg-in">proxy #2</text><text data-s="3-" x="308" y="145" class="dg-in">shop-2</text>
+            <text data-s="1-3" x="308" y="217" class="dg-in">proxy #3</text><text data-s="4" x="308" y="217" class="dg-in">shop-3</text>
+            <text x="562" y="115" class="dg-t">база</text><text x="562" y="140" class="dg-s">payments</text><text x="562" y="163" class="dg-s">merchants</text>
+            <text data-s="1" x="22" y="280" class="dg-in">SELECT: 1; названия ещё не прочитаны</text>
+            <text data-s="2" x="22" y="280" class="dg-in">SELECT: 2; прочитан первый магазин</text>
+            <text data-s="3" x="22" y="280" class="dg-in">SELECT: 3; прочитан второй магазин</text>
+            <text data-s="4" x="22" y="280" class="dg-in">SELECT: 4; список готов</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Один SELECT возвращает три платежа и ключи магазинов. Ленивые ссылки ещё не содержат их названий.</li>
+          <li>При построении ответа читаем имя магазина первого платежа. Прокси отправляет SELECT магазина №1 и заполняется.</li>
+          <li>У второго платежа другой магазин: контекст не может использовать первый объект. Нужен ещё один SELECT.</li>
+          <li>Чтение третьего имени выполняет четвёртый SELECT. На странице всего три платежа, а сеть уже обслужила четыре отдельных запроса.</li>
+        </ol>
+      </figure>
+      <h3>Fetch join и EntityGraph задают нужный граф конкретному запросу</h3>
+      <p><code>join fetch</code> в JPQL требует загрузить связанную сущность вместе с корневой. Обычный <code>join</code> нужен для условий и соединения, но сам по себе не обещает инициализацию Java-связи. Для необязательной связи выбирай <code>left join fetch</code>, иначе INNER JOIN исключит платёж без магазина.</p>
+      <pre><code class="language-java">// Во всех вариантах перед запросом: новый EntityManager, sql.clear().
+// Считаем SELECT через StatementInspector; L2-кеш выключен.
+
+// lazy: одна выборка платежей, затем чтение трёх магазинов.
+List&lt;Payment&gt; payments = em.createQuery(
+        "select p from Payment p order by p.id", Payment.class).getResultList();
+List&lt;String&gt; names = payments.stream().map(p -&gt; p.merchant.getName()).toList();
+System.out.println("lazy: names=" + names + ", selects=" + sql.selects());
+
+// join: запрос сразу требует связанный магазин.
+List&lt;Payment&gt; payments = em.createQuery(
+        "select p from Payment p join fetch p.merchant order by p.id", Payment.class)
+    .getResultList();
+List&lt;String&gt; names = payments.stream().map(p -&gt; p.merchant.getName()).toList();
+System.out.println("join: names=" + names + ", selects=" + sql.selects());
+
+// graph: тот же JPQL, но с отдельным описанием нужного графа.
+EntityGraph&lt;Payment&gt; graph = em.createEntityGraph(Payment.class);
+graph.addAttributeNodes("merchant");
+List&lt;Payment&gt; payments = em.createQuery(
+        "select p from Payment p order by p.id", Payment.class)
+    .setHint("jakarta.persistence.fetchgraph", graph).getResultList();
+List&lt;String&gt; names = payments.stream().map(p -&gt; p.merchant.getName()).toList();
+System.out.println("graph: names=" + names + ", selects=" + sql.selects());</code></pre>
+      <pre><code class="language-bash">./run.sh RelationsDemo fetch # Три варианта в трёх свежих контекстах.</code></pre>
+      <pre class="out">lazy: names=[shop-1, shop-2, shop-3], selects=4
+join: names=[shop-1, shop-2, shop-3], selects=1
+graph: names=[shop-1, shop-2, shop-3], selects=1</pre>
+      <p><code>fetchgraph</code> трактует указанные атрибуты как EAGER, остальные — как LAZY. <code>loadgraph</code> добавляет указанные атрибуты к исходным правилам отображения. Провайдер вправе прочитать дополнительные данные; граф не обещает ровно один SQL во всех случаях. Один SELECT в выводе — проверенное поведение нашего отображения и Hibernate.</p>
+      <p>EntityGraph назначают аннотацией, программно или через <code>@EntityGraph</code> в Spring Data. Для вложенных связей есть subgraph. Включение всех уровней превращает экран в выгрузку домена.</p>
+    </section>
+
+    <section class="step" id="fetch-limits">
+      <h2>Загрузить весь граф одним JOIN часто дороже, чем сделать два точных запроса</h2>
+      <p>Связь «один магазин на платёж» не размножает строки платежа. Коллекция возвратов размножает: платёж с пятью возвратами появляется в SQL-результате пять раз. Hibernate собирает повторные строки в один объект, но база, сеть и сборка графа уже оплатили их объём. Устранить N+1 — не значит минимизировать только число запросов.</p>
+      <p>Две коллекции одного платежа усиливают проблему. Пять возвратов и четыре попытки банка дают до 20 комбинаций строк на один платёж. Несколько bag-коллекций Hibernate может вообще отказать загружать вместе с <code>MultipleBagFetchException</code>. Замена List на Set иногда снимает конкретный запрет, но не убирает декартово произведение и не делает запрос дешёвым.</p>
+      <h3>Страница корней и страница строк JOIN — разные страницы</h3>
+      <p>Если применить LIMIT к JOIN платежей и возвратов, он ограничит строки, а не количество платежей, и способен обрезать коллекцию. Hibernate для collection fetch с пагинацией может загрузить результат целиком и ограничить его в памяти. В проде полезно включить <code>hibernate.query.fail_on_pagination_over_collection_fetch=true</code>, чтобы такое решение стало явной ошибкой, а не случайной полной выгрузкой.</p>
+      <pre><code class="language-java">// Эскиз двух этапов: сначала страница ключей с устойчивой сортировкой.
+List&lt;Long&gt; ids = em.createQuery(
+        "select p.id from Payment p order by p.id", Long.class)
+    .setFirstResult(offset).setMaxResults(size).getResultList();
+
+// Затем полный нужный граф только для выбранных ключей, без LIMIT на JOIN.
+List&lt;Payment&gt; page = ids.isEmpty() ? List.of() : em.createQuery(
+        "select p from Payment p left join fetch p.refunds where p.id in :ids",
+        Payment.class).setParameter("ids", ids).getResultList();
+// IN не сохраняет порядок ids: упорядочи результат по исходной странице.</code></pre>
+      <p>Это эскиз запроса для страницы, а не отдельный режим демо. Между двумя SELECT данные могут измениться; требуемую согласованность выбирают через транзакцию и изоляцию. Для больших таблиц вместо глубокого OFFSET рассматривают keyset-пагинацию. Для одного экрана проще бывает DTO-проекция: выбрать только сумму и название магазина, вообще не строя управляемый граф.</p>
+      <table class="mx">
+        <thead><tr><th>Приём</th><th>Когда полезен</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>Fetch join to-one</td><td>Нужен магазин каждого платежа</td><td>Шире строка; необязательную связь учитывать LEFT JOIN.</td></tr>
+          <tr><td>Fetch одной коллекции</td><td>Небольшой известный набор корней</td><td>Повторные строки; размер коллекций надо знать.</td></tr>
+          <tr><td>Batch fetching</td><td>Дочитываем несколько ленивых ссылок</td><td>Несколько SELECT с IN; это чтение, не JDBC batch-запись.</td></tr>
+          <tr><td>DTO-проекция</td><td>Список, отчёт, внешний ответ</td><td>Отдельный запрос и явная форма результата.</td></tr>
+        </tbody>
+      </table>
+      <p><code>@BatchSize</code> и <code>hibernate.default_batch_fetch_size</code> позволяют Hibernate загрузить несколько ещё не прочитанных ссылок одной порцией. Это сокращает N+1 без большого JOIN. Размер порции выбирают по ограничениям базы и фактическому SQL. Не путай этот приём с <code>hibernate.jdbc.batch_size</code>, который группирует записи и разобран в Locking &amp; Caching.</p>
+    </section>
+
+    <section class="step" id="mapping-choices">
+      <h2>Наследование и составной ключ выбирают по форме данных и запросов</h2>
+      <p>Платёж картой и перевод имеют общую сумму, но разные реквизиты. Наследование Java должно превратиться в таблицы. Выбор определяет ограничения и цену общей выборки, а не только красоту классов.</p>
+      <table class="mx">
+        <thead><tr><th>Отображение</th><th>Таблицы</th><th>Компромисс</th></tr></thead>
+        <tbody>
+          <tr><td>SINGLE_TABLE</td><td>Одна таблица для всей иерархии, колонка типа</td><td>Простая общая выборка; поля подтипов часто nullable. Ограничения по типу задают отдельно.</td></tr>
+          <tr><td>JOINED</td><td>Общая таблица и таблицы подтипов с тем же PK</td><td>Меньше пустых колонок, сильнее структура; чтение подтипов и общих списков требует соединений.</td></tr>
+          <tr><td>TABLE_PER_CLASS</td><td>Каждый конкретный тип имеет свою таблицу с общими полями</td><td>Полиморфное чтение объединяет таблицы; общий ключ и связи сложнее.</td></tr>
+          <tr><td>MappedSuperclass</td><td>Поля наследуются в таблицы потомков, собственной entity нет</td><td>Удобно для id и аудита; запрос к этому базовому типу как entity невозможен.</td></tr>
+        </tbody>
+      </table>
+      <p>Для entity-иерархии JPA использует SINGLE_TABLE по умолчанию. Стратегию лучше указать явно на корне. Discriminator помогает провайдеру определить подтип строки. Для MappedSuperclass дискриминатора и общей полиморфной выборки нет: это повторное использование отображения полей.</p>
+      <pre><code class="language-java">// Эскиз отображения; демонстрация SELECT выше использует обычный Payment.
+@Entity
+@Inheritance(strategy = InheritanceType.SINGLE_TABLE)
+@DiscriminatorColumn(name = "payment_kind")
+abstract class PaymentBase {
+    @Id Long id;
+    long amount;
+    protected PaymentBase() {}
+}
+@Entity @DiscriminatorValue("CARD")
+class CardPayment extends PaymentBase {
+    String maskedCard; // В одной таблице рядом живут и поля банковского перевода.
+    protected CardPayment() {}
+}
+@Entity @DiscriminatorValue("TRANSFER")
+class BankTransfer extends PaymentBase {
+    String bankReference;
+    protected BankTransfer() {}
+}</code></pre>
+      <p>Если отличается в основном поведение, композиция проще: entity хранит способ оплаты, сервис выбирает стратегию. Иерархия базы не обязана копировать бизнес-код.</p>
+      <h3>Составной ключ — одна идентичность из нескольких колонок</h3>
+      <p>Проводку можно идентифицировать парой «платёж и номер строки». <code>@EmbeddedId</code> объединяет эту пару в отдельный объект ключа. <code>@IdClass</code> оставляет поля ключа на entity и описывает соответствующий класс отдельно. В обоих случаях имена и типы должны соответствовать отображению, а equals/hashCode ключа — равенству колонок.</p>
+      <pre><code class="language-java">@Embeddable
+public static class EntryId implements java.io.Serializable {
+    Long paymentId;
+    int lineNo;
+    protected EntryId() {}
+    // equals/hashCode учитывают paymentId и lineNo; ключ не меняем после persist.
+}
+
+@Entity
+class LedgerEntry {
+    @EmbeddedId EntryId id;
+    @MapsId("paymentId") // Связь использует ту же колонку, что часть ключа.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "payment_id")
+    Payment payment;
+    long amount;
+    protected LedgerEntry() {}
+}</code></pre>
+      <p>Здесь MapsId связывает идентичность дочерней записи с ключом платежа: одна колонка участвует и в ключе, и в связи. Не меняй первичный ключ управляемой entity, чтобы «перенести проводку»: это другая идентичность. Составные ключи усложняют внешние ключи и API; отдельный технический id плюс UNIQUE на бизнес-пару часто удобнее, если предметная модель не требует именно составного PK.</p>
+      <p>Отображение должно обслуживать реальные операции. Огромный двунаправленный граф трудно читать и обновлять. Однонаправленная связь или id другой части системы помогают удержать границу.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Владелец связи записывает FK; mappedBy лишь указывает обратную сторону. Обе ссылки в Java согласует твой метод.</li>
+        <li>Каскад описывает распространение операции. OrphanRemoval описывает удаление зависимого объекта при разрыве связи.</li>
+        <li>EAGER требует данные, но не обещает один JOIN. LAZY переносит чтение и требует доступного контекста для незагруженного состояния.</li>
+        <li>N+1 исправляют планом конкретного чтения. Fetch join, EntityGraph, порции и DTO решают разные задачи.</li>
+        <li>Collection fetch размножает SQL-строки. Пагинацию корней и загрузку коллекций часто лучше разделить.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="relations-owning" data-freq="3">
+      <h3>Что такое owning side? Почему изменение коллекции не сохранилось?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В двунаправленной связи одна сторона определяет запись отношения в базу. В ManyToOne/OneToMany это сторона «многие» с внешним ключом. MappedBy на коллекции указывает поле владельца, здесь Payment.merchant. Я меняю его для SQL и одновременно согласую коллекции магазинов для корректного Java-графа.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Owning side не равен владельцу агрегата в бизнес-модели: запись FK и жизненный цикл — разные решения.</li>
+            <li>OneToOne требует UNIQUE или общего PK на уровне базы. Аннотация без миграции ограничения не защищает реальные данные.</li>
+            <li>ManyToMany с атрибутами отношения лучше превратить в отдельную entity связи; тогда её поля, ключ и жизненный цикл становятся явными.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="relations-n-plus-one" data-freq="3">
+      <h3>Что такое N+1 и как ты его исправляешь?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Один запрос получает список платежей, а обращение к связям запускает дополнительные SELECT. Я проверяю SQL полного сценария, включая преобразование в ответ. Затем задаю нужный граф конкретному запросу: fetch join, EntityGraph или DTO-проекцию.</p>
+          <p>Перевод всех полей в EAGER не решает проблему: eager тоже способен выполнять отдельные запросы. И один огромный JOIN не всегда лучше нескольких — коллекции размножают строки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Тест на одном платеже не показывает N+1. Нужны несколько разных FK и свежий контекст; кеши иначе скрывают дополнительные SELECT.</li>
+            <li>Batch fetching дочитывает несколько ленивых ссылок через порции IN. Это отличается от JDBC batch-записи.</li>
+            <li>Fetchgraph меняет правила указанных и неуказанных атрибутов, loadgraph дополняет исходные. Ни один не даёт общей гарантии «всегда один SQL».</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Запрос сделал один SELECT, но экран всё равно медленный. Что проверишь?</summary>
+          <p>Число SQL-строк после соединения коллекций, ширину результата, объём данных и работу сборки графа. Один платёж с пятью возвратами и четырьмя попытками даёт до двадцати строк. Разделение чтения или DTO может ускорить экран даже при большем числе SQL-запросов.</p>
+        </details>
+      </div>
+    </article>
+    <article class="q" id="relations-lazy-eager" data-freq="3">
+      <h3>Чем lazy отличается от eager? Как исправить LazyInitializationException?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Eager требует загрузить данные заранее, lazy позволяет отложить до обращения. Это не выбор между JOIN и SELECT: SQL определяет провайдер и план запроса. Незагруженная ссылка после закрытия её контекста не сможет прочитаться, и Hibernate выдаст LazyInitializationException.</p>
+          <p>Я загружаю нужные данные в сервисной операции и возвращаю DTO. Тогда JSON не раскрывает граф случайно. Общий переход на EAGER только разносит цену этой проблемы по всем запросам.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Lazy — подсказка спецификации, eager — требование. Обратная необязательная OneToOne бывает сложнее для ленивого чтения, потому что у неё нет своего FK.</li>
+            <li>ToString, equals и сериализация способны вызвать скрытую загрузку. Контекст доступен — ещё не значит, что обход графа был запланирован.</li>
+            <li>Open EntityManager in View продлевает контекст, но не делает весь веб-запрос одной транзакцией и маскирует SQL после сервиса.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="relations-cascade-orphan" data-freq="3">
+      <h3>Чем cascade REMOVE отличается от orphanRemoval?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каскад REMOVE распространяет удаление родителя на связанные сущности. OrphanRemoval удаляет зависимый объект, когда его убрали из отношения, даже без удаления родителя. Для возврата внутри платежа это может подходить, а магазин живёт независимо и не должен удаляться вместе с одним платежом.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>ON DELETE CASCADE работает в базе, JPA-каскад работает через операции объектов. Внешний SQL не выполняет доменные методы и не согласует граф в памяти.</li>
+            <li>OrphanRemoval предполагает зависимое владение. Перенос объекта между родителями и аудит удаления надо проектировать отдельно.</li>
+            <li>Массовый JPQL DELETE обходит обычный жизненный цикл сущностей; рассчитывать на те же каскады и callbacks нельзя.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="relations-pagination" data-freq="3">
+      <h3>Можно ли сделать fetch коллекции вместе с пагинацией?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Collection fetch размножает строки корня. LIMIT тогда ограничивает строки JOIN, а не число платежей, поэтому страницу корней часто выбираю отдельно от их коллекций. Несколько коллекций дают декартово произведение; одного запроса может оказаться слишком много.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ошибка Hibernate при нескольких bags и цена декартова произведения — разные проблемы. Замена List на Set не лечит объём SQL-результата.</li>
+            <li>После запроса по IN восстанавливаю порядок страницы. Между этапами возможно изменение данных, поэтому выбираю нужную изоляцию.</li>
+            <li>Запрещаю случайную пагинацию collection fetch настройкой fail_on_pagination_over_collection_fetch. Для экрана рассматриваю DTO или keyset.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="relations-inheritance-keys" data-freq="2">
+      <h3>Как выбираешь отображение наследования и составного ключа?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>SINGLE_TABLE проще читать, JOINED разделяет поля ценой соединений, TABLE_PER_CLASS усложняет полиморфную выборку. Я выбираю по запросам и ограничениям схемы. Для составного ключа использую EmbeddedId или IdClass с правильными equals/hashCode; общую колонку связи выражаю через MapsId.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>MappedSuperclass наследует отображение, но не создаёт entity для полиморфного запроса. Его выбирают для общих полей, а не общей таблицы.</li>
+            <li>Составной PK переносится во все ссылающиеся FK. Технический id плюс UNIQUE на бизнес-пару может упростить схему и API.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.hibernate.org/orm/7.4/userguide/html_single/">Hibernate ORM 7.4 User Guide</a> — основа урока: Associations, Fetching, Inheritance и Identifiers; план чтения и ограничения collection fetch.</li>
+      <li><a href="https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2">Jakarta Persistence 3.2</a> — разделы 2.4, 2.11–2.14, 3.8: составные ключи, владельцы отношений, наследование и семантика EntityGraph.</li>
+      <li><a href="https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html">Spring Data JPA: Query Methods</a> — назначение EntityGraph конкретному методу репозитория.</li>
+      <li><a href="https://www.manning.com/books/java-persistence-with-hibernate-second-edition">Java Persistence with Hibernate, 2-е издание</a> — объектные связи, жизненный цикл зависимых сущностей и выбор плана загрузки.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

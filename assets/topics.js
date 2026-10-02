@@ -549,7 +549,7 @@ window.KB_TREE = [
           scope: '@Transactional через прокси, propagation, isolation, rollback rules, readOnly, self-invocation' },
         { id: 'jpa', freq: 3, status: 'draft', title: 'JPA Basics',
           scope: 'entity, persistence context, состояния entity, dirty checking, flush' },
-        { id: 'jpa-relations', freq: 3, status: 'empty', title: 'Relations & Fetching',
+        { id: 'jpa-relations', freq: 3, status: 'draft', title: 'Relations & Fetching',
           scope: 'связи и owning side, lazy и eager, N+1, fetch join, EntityGraph, маппинг наследования, составные ключи' },
         { id: 'jpa-locking', freq: 2, status: 'empty', title: 'Locking & Caching',
           scope: 'optimistic и pessimistic locking, @Version, кеш первого и второго уровня, batch-запись' },
