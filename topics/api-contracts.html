@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>API: OpenAPI &amp; Contracts · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="api-contracts">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>API: OpenAPI &amp; Contracts</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Контракт API — машиночитаемое описание того, что API принимает и возвращает. OpenAPI описывает пути, параметры, схемы тел и коды ответов в одном файле. Его можно получить из кода (code-first) или написать раньше кода и генерировать по нему сервер и клиентов (contract-first). Главная польза контракта — автоматическая проверка: сравнение двух версий в CI ловит ломающие изменения до релиза, а контрактные тесты потребителей проверяют то, что клиенты реально используют. Контракт полезен ровно настолько, насколько он точен.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>«Небольшой рефакторинг» сломал трёх клиентов, и ни один тест не упал</h2>
+      <p>Разработчик переименовал поле <code>amount</code> в <code>amountMinor</code>, чтобы было понятно, что сумма в копейках. Заодно сделал фильтр по магазину обязательным и добавил статус <code>REFUND_PENDING</code>. Тесты сервиса зелёные: сервис согласован сам с собой. После релиза сломались мобильное приложение, партнёрская выгрузка и сервис сверки — каждый по своей причине.</p>
+      <p>Тесты сервиса проверяют, что он делает то, что задумал автор. Они не проверяют, что он делает то, на что рассчитывают клиенты. Для этого нужен контракт — описание API, отдельное от кода, — и проверки, которые сравнивают изменения с ним. Демо <a href="../examples/api-contracts/ContractDemo.java">ContractDemo.java</a> поднимает две версии контроллера на Spring Boot 4.1 со springdoc 3.1 и сохраняет их OpenAPI-описания, а утилита oasdiff в Docker сравнивает их, как в CI: <code>./run.sh ContractDemo</code>, затем <code>docker run tufin/oasdiff breaking</code>.</p>
+    </section>
+
+    <section class="step" id="openapi">
+      <h2>OpenAPI описывает API в одном файле, который читают люди и программы</h2>
+      <p>Спецификация OpenAPI — документ YAML или JSON: пути и методы, параметры, схемы тел запросов и ответов на JSON Schema, коды ответов, способы аутентификации. По ней строится документация в Swagger UI, генерируются клиенты на любом языке, настраиваются шлюзы и моки. Демо получает её из кода — springdoc строит описание по аннотациям Spring MVC и типам Java:</p>
+      <pre><code class="language-java">record CreatePayment(@Positive long amount, String currency) {}
+
+@PostMapping("/payments")
+ResponseEntity&lt;Payment&gt; create(@RequestBody CreatePayment r) {
+    return ResponseEntity.created(URI.create("/payments/p-1")).body(...); // Возвращает 201.
+}</code></pre>
+      <pre class="out">v1.json: 1380 bytes
+  CreatePayment: {"type":"object","properties":{"amount":{"type":"integer","format":"int64","exclusiveMinimum":0},"currency":{"type":"string"}}}
+  POST /payments responses: {"200":{"description":"OK","content":{"*/*":{"schema":{"$ref":"#/components/schemas/Payment"}}}}}</pre>
+      <p>Из <code>long</code> получился <code>integer int64</code>, из <code>@Positive</code> — <code>exclusiveMinimum: 0</code>. Но в описании две ошибки, которые незаметны, пока не начнёшь его читать. Ответ POST описан кодом 200, хотя метод возвращает 201: springdoc не видит, что вернёт <code>ResponseEntity.created</code> во время работы. И ни одно поле не помечено обязательным: в record нет способа сказать это без аннотаций, а поле без отметки по схеме можно не присылать. Клиент, сгенерированный по такому описанию, будет считать все поля nullable.</p>
+      <p>Ещё одна деталь из лога запуска: springdoc предупреждает, что <code>/v3/api-docs</code> включён по умолчанию. Публичное описание внутреннего API — подарок атакующему, поэтому в проде его закрывают или выключают <code>springdoc.api-docs.enabled=false</code>.</p>
+    </section>
+
+    <section class="step" id="first">
+      <h2>Code-first описывает то, что получилось, contract-first — то, что договорились сделать</h2>
+      <p>При <b>code-first</b> контракт — побочный продукт кода. Это быстро и всегда синхронно с реализацией, но описание точно настолько, насколько подробно размечен код аннотациями <code>@Schema</code>, <code>@ApiResponse</code>, <code>@NotNull</code>. Изменение контракта происходит незаметно, вместе с рефакторингом, как в нашей аварии.</p>
+      <p>При <b>contract-first</b> сначала пишут и обсуждают спецификацию: с командой мобильного приложения, с партнёром. По ней генерируют серверные интерфейсы и клиентов, например <code>openapi-generator</code> с генератором <code>spring</code> и опцией <code>interfaceOnly</code>. Сервер реализует сгенерированный интерфейс, и разойтись с контрактом невозможно: изменение начинается с правки спецификации, которую видят на ревью все стороны. Цена — ещё один артефакт и шаг сборки, а сгенерированный код бывает неудобным.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Code-first</th><th>Contract-first</th></tr></thead>
+        <tbody>
+          <tr><td>Источник правды</td><td>Код и аннотации</td><td>Файл спецификации</td></tr>
+          <tr><td>Изменение контракта</td><td>Неявно, при правке кода</td><td>Явно, ревью спецификации</td></tr>
+          <tr><td>Точность</td><td>Зависит от аннотаций: коды, обязательность</td><td>Как написали</td></tr>
+          <tr><td>Когда подходит</td><td>Внутренние API, быстрый старт</td><td>Партнёры, много клиентов, параллельная разработка</td></tr>
+        </tbody>
+      </table>
+      <p>Сгенерированные клиентские модели не стоит пропускать вглубь своего кода. Класс <code>PaymentResponse</code> из генератора меняется вместе с чужим API, поэтому его переводят в свою модель на границе — в адаптере, как в <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a>.</p>
+    </section>
+
+    <section class="step" id="diff">
+      <h2>Сравнение двух версий контракта в CI ловит ломающие изменения до релиза</h2>
+      <p>Если описание API хранится или генерируется на каждой сборке, его можно сравнить с описанием последнего релиза. Демо сохранило две версии, и oasdiff нашёл в «небольшом рефакторинге» вот что:</p>
+      <pre><code class="language-bash">./run.sh ContractDemo                     # out/v1.json и out/v2.json
+docker run --rm -v "$PWD/out":/specs:ro tufin/oasdiff breaking /specs/v1.json /specs/v2.json</code></pre>
+      <pre class="out">5 changes: 4 error, 1 warning, 0 info
+error	[request-parameter-became-required] at /specs/v2.json
+	in API GET /payments
+		the `query` request parameter `merchant` became required
+
+error	[response-property-enum-value-added] at /specs/v2.json
+	in API GET /payments/{id}
+		added the new `REFUND_PENDING` enum value to the `status` response property for the response status `200`
+
+warning	[request-property-removed] at /specs/v2.json
+	in API POST /payments
+		removed the request property `amount`</pre>
+      <p>Показаны три из пяти находок; ещё две — тот же новый статус в ответах двух других методов. Обязательный параметр и новое значение enum — ошибки: старые клиенты получат 400 или упадут на незнакомом статусе. Переименование поля инструмент видит как удаление <code>amount</code> и добавление <code>amountMinor</code>. Для запроса это только предупреждение, а удаление поля из ответа он не отметил вовсе: в схеме поле необязательное, значит, клиенту и так разрешено его не получить. Неточный контракт ослепляет и проверку.</p>
+      <p>Если набор значений по замыслу растёт, его объявляют расширяемым (<code>x-extensible-enum</code>), и клиенты обязаны быть к этому готовы. С флагом <code>--fail-on ERR</code> oasdiff возвращает ненулевой код, и CI останавливает сборку. Сравнение схем ловит структурные поломки, но не смысловые: если поле <code>amount</code> осталось, а единицы поменялись с рублей на копейки, схема одинакова. Для этого нужны контрактные тесты.</p>
+    </section>
+
+    <section class="step" id="cdc">
+      <h2>Контрактные тесты потребителей проверяют то, что клиенты действительно используют</h2>
+      <p>Схема говорит, что API может вернуть. Потребитель знает, что ему нужно на самом деле: какие поля, какие значения, в каких сценариях. Consumer-driven contracts переворачивают проверку: каждый клиент в своих тестах записывает ожидания от API, а провайдер в своей сборке проверяет, что выполняет ожидания всех клиентов.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Тест мобильного клиента работает с заглушкой и записывает ожидания в файл контракта. Контракт публикуется в брокер. Сборка платёжного сервиса забирает контракты всех клиентов и проверяет их на настоящем сервисе. Перед деплоем проверка can-i-deploy спрашивает брокер, совместимы ли версии.">
+            <defs>
+              <marker id="cd-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cd-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">ПОТРЕБИТЕЛЬ</text>
+            <text x="290" y="22" class="dg-cap">БРОКЕР</text>
+            <text x="520" y="22" class="dg-cap">ПРОВАЙДЕР</text>
+            <rect x="20" y="36" width="200" height="60" rx="9" class="dg-box"/>
+            <rect x="20" y="126" width="200" height="56" rx="9" class="dg-cell"/>
+            <rect x="290" y="80" width="150" height="60" rx="9" class="dg-box"/>
+            <rect x="520" y="36" width="180" height="60" rx="9" class="dg-box"/>
+            <rect x="520" y="126" width="180" height="56" rx="9" class="dg-cell hit"/>
+            <path d="M120 96 L 120 122" class="dg-line" marker-end="url(#cd-n)"/>
+            <path d="M220 154 C 255 154, 255 120, 286 120" class="dg-line" marker-end="url(#cd-n)"/>
+            <path d="M440 100 C 480 100, 480 66, 516 66" class="dg-line" marker-end="url(#cd-n)"/>
+            <path d="M610 96 L 610 122" class="dg-line ok" marker-end="url(#cd-ok)"/>
+            <path d="M520 166 C 480 166, 480 132, 444 132" class="dg-line ok" marker-end="url(#cd-ok)"/>
+            <g text-anchor="middle">
+              <text x="120" y="60" class="dg-in">тест мобильного</text>
+              <text x="120" y="78" class="dg-n">против заглушки</text>
+              <text x="120" y="150" class="dg-in">контракт</text>
+              <text x="120" y="168" class="dg-n">поля, статусы, сценарии</text>
+              <text x="365" y="106" class="dg-in">все контракты</text>
+              <text x="365" y="124" class="dg-n">версии сторон</text>
+              <text x="610" y="60" class="dg-in">payments-сервис</text>
+              <text x="610" y="78" class="dg-n">сборка провайдера</text>
+              <text x="610" y="150" class="dg-ok">проверка</text>
+              <text x="610" y="168" class="dg-n">на настоящем коде</text>
+            </g>
+            <text x="20" y="204" class="dg-s">Перед деплоем: «можно ли выкатить эту версию провайдера с версиями клиентов в проде?»</text>
+          </svg>
+        </div>
+        <figcaption>Провайдер узнаёт о поломке клиента в своей сборке, а не после релиза. Ломается только то, что кто-то действительно использует; всё остальное можно менять свободно.</figcaption>
+      </figure>
+      <p>Инструменты — Pact и Spring Cloud Contract. Pact хранит контракты в брокере и отвечает на вопрос «можно ли выкатить эту версию» по матрице проверенных пар версий. Контракт проверяет смысл: если мобильному приложению нужна сумма в рублях, его тест упадёт при переходе на копейки, даже если имя поля не изменилось.</p>
+      <p>У подхода есть цена: каждый клиент должен писать и поддерживать контрактные тесты, а это работает только когда клиенты — свои команды. С внешними партнёрами вместо контрактных тестов остаются строгая спецификация, сравнение схем, версионирование и период поддержки старой версии из <a href="api-practices.html">API Design</a>.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Контракт полезен, пока он точен и проверяется автоматически</h2>
+      <p>Спецификация, которую никто не проверяет, расходится с реализацией за несколько релизов: документация обещает одно, сервер делает другое, и клиенты перестают ей верить. Контракт держат точным три вещи. Он генерируется или проверяется на каждой сборке. В CI сравнивается с последним релизом. И его точность проверяют тесты: ответы сервиса валидируют по схеме, например в интеграционных тестах, чтобы поймать 201, описанный как 200.</p>
+      <p>Контракт не описывает всё. В нём нет поведения под нагрузкой, лимитов, порядка событий, семантики «сумма в копейках». Эти договорённости записывают в описание полей и в документацию, а самые важные — в контрактные тесты.</p>
+      <div class="trap">
+        <p class="myth">Если у API есть OpenAPI-спецификация, клиенты защищены от поломок.</p>
+        <p class="fact">Спецификация защищает, только если она точна и с ней сравнивают изменения. Сгенерированная из кода без аннотаций, она отмечает все поля необязательными и неверно описывает коды ответов, и сравнение версий пропускает удаление полей из ответа.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>OpenAPI описывает пути, параметры, схемы и коды; по нему строят документацию, клиентов и проверки.</li>
+        <li>Code-first описывает то, что получилось: в демо 201 описан как 200, а все поля необязательные. Contract-first делает изменение контракта явным.</li>
+        <li>oasdiff в CI нашёл обязательный параметр и новый enum как ошибки, переименование — только как предупреждение.</li>
+        <li>Контрактные тесты потребителей проверяют реальное использование и смысл, но требуют, чтобы клиенты были своими.</li>
+        <li>Сгенерированные модели переводят в свои на границе; /v3/api-docs в проде закрывают.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="contracts-first" data-freq="2">
+      <h3>Contract-first или code-first: что выбрать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Code-first — спецификацию генерирует библиотека вроде springdoc из кода. Быстро и всегда синхронно, но точность зависит от аннотаций, а изменение контракта происходит незаметно при рефакторинге. Contract-first — сначала пишут и согласуют спецификацию, по ней генерируют интерфейсы сервера и клиентов. Изменение контракта видно на ревью всем сторонам.</p>
+          <p>Для внутренних API с одним-двумя клиентами хватает code-first с проверкой в CI. Для партнёров и множества клиентов лучше contract-first.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Code-first без аннотаций описывает все поля необязательными и не видит реальных кодов ответа: в демо 201 описан как 200.</li>
+            <li>Сгенерированные клиентские модели переводят в свою модель на границе, чтобы чужой API не протекал в домен.</li>
+            <li>Точность спецификации проверяют валидацией реальных ответов по схеме в тестах.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="contracts-breaking" data-freq="2">
+      <h3>Как не выпустить ломающее изменение API?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сравнивать спецификацию с последним релизом в CI, например oasdiff с --fail-on ERR. Он находит удалённые поля и эндпоинты, новые обязательные параметры, сменённые типы и новые значения enum. Для смысловых изменений и реального использования нужны контрактные тесты потребителей: Pact или Spring Cloud Contract.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Переименование поля для инструмента — удаление и добавление; в ответе с необязательными полями удаление может не считаться ломающим.</li>
+            <li>Растущие наборы значений объявляют как x-extensible-enum и требуют от клиентов терпимого чтения.</li>
+            <li>can-i-deploy в Pact проверяет совместимость конкретных версий провайдера и клиентов перед выкаткой.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему проверка совместимости в CI пропустила удаление поля из ответа?</summary>
+          <pre><code class="language-java">record Payment(String id, long amount, String currency, Status status) {} // v1
+record Payment(String id, long amountMinor, String currency, Status status) {} // v2
+// springdoc генерирует схему, CI сравнивает: ошибок по ответу нет.</code></pre>
+          <p>В сгенерированной схеме ни одно поле не обязательное, поэтому amount в ответе формально можно не присылать, и его удаление инструмент не считает ломающим. Клиенты при этом рассчитывали на поле. Нужно отмечать обязательные поля (например, @Schema(requiredMode = REQUIRED)) и проверять реальные ответы по схеме в тестах.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="contracts-cdc" data-freq="1">
+      <h3>Что такое consumer-driven contracts?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждый потребитель в своих тестах описывает, что ему нужно от API: запросы, поля и значения ответов. Эти контракты публикуются в брокер, а сборка провайдера проверяет, что настоящий сервис их выполняет. Провайдер узнаёт о поломке клиента до релиза и может свободно менять то, что никто не использует.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Проверяют смысл, а не только структуру: смена единиц суммы ломает контракт при том же имени поля.</li>
+            <li>Работают, когда клиенты — свои команды; с внешними партнёрами остаются спецификация и версионирование.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://spec.openapis.org/oas/latest.html">OpenAPI Specification</a> — основа урока: пути, параметры, схемы, коды ответов.</li>
+      <li><a href="https://www.oasdiff.com/">oasdiff</a> — проверки совместимости и список ломающих изменений.</li>
+      <li><a href="https://springdoc.org/">springdoc-openapi</a> — генерация описания из Spring MVC, аннотации @Schema и @ApiResponse.</li>
+      <li><a href="https://docs.pact.io/">Pact</a> и <a href="https://martinfowler.com/articles/consumerDrivenContracts.html">Martin Fowler: Consumer-Driven Contracts</a> — контрактные тесты потребителей.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

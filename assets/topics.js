@@ -133,7 +133,7 @@ window.KB_TREE = [
           scope: 'пагинация, фильтрация и сортировка, версионирование, формат ошибок RFC 9457, обратная совместимость' },
         { id: 'api-styles', freq: 2, status: 'draft', title: 'gRPC, GraphQL, SOAP',
           scope: 'когда что выбирать, Protobuf и стриминг в gRPC, схема и N+1 в GraphQL, WSDL' },
-        { id: 'api-contracts', freq: 2, status: 'empty', title: 'OpenAPI & Contracts',
+        { id: 'api-contracts', freq: 2, status: 'draft', title: 'OpenAPI & Contracts',
           scope: 'contract-first и code-first, генерация клиентов, проверка совместимости контракта' },
         { id: 'realtime', freq: 1, status: 'empty', title: 'Real-time',
           scope: 'short и long polling, SSE, WebSocket' },
