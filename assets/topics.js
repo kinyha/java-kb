@@ -325,7 +325,7 @@ window.KB_TREE = [
           scope: 'chatty I/O, busy database, extraneous fetching, noisy neighbor, synchronous I/O' },
       ] },
       { id: 'architecture', title: 'Architecture', source: 'microservices.io; Azure Cloud Design Patterns', items: [
-        { id: 'microservices', freq: 3, status: 'empty', title: 'Monolith & Microservices',
+        { id: 'microservices', freq: 3, status: 'draft', title: 'Monolith & Microservices',
           scope: 'модульный монолит, границы сервисов, database per service, распил монолита, 12 factor' },
         { id: 'service-communication', freq: 2, status: 'empty', title: 'Service Communication',
           scope: 'синхронные вызовы и сообщения, REST и gRPC между сервисами, цепочки вызовов, API composition' },
