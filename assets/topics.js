@@ -289,7 +289,7 @@ window.KB_TREE = [
           scope: 'вертикальное и горизонтальное масштабирование, stateless, latency и throughput' },
         { id: 'availability', freq: 2, status: 'empty', title: 'Availability & SLO',
           scope: 'SLA, SLO, SLI, девятки, fail-over, резервирование, active-active и active-passive' },
-        { id: 'cap', freq: 3, status: 'empty', title: 'CAP & Consistency',
+        { id: 'cap', freq: 3, status: 'draft', title: 'CAP & Consistency',
           scope: 'CAP, PACELC, сильная и eventual consistency, read-your-writes, кворумы' },
       ] },
       { id: 'blocks', title: 'Building Blocks', source: 'System Design Interview т. 1, гл. 4–7; System Design Primer', items: [
