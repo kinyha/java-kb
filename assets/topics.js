@@ -609,7 +609,7 @@ window.KB_TREE = [
           scope: 'rolling update, blue-green, canary, feature flags, совместимость миграций БД с откатом' },
       ] },
       { id: 'run', title: 'Observability', source: 'Google SRE Book: Monitoring Distributed Systems; OpenTelemetry Documentation', items: [
-        { id: 'observability', freq: 3, status: 'empty', title: 'Overview',
+        { id: 'observability', freq: 3, status: 'draft', title: 'Overview',
           scope: 'логи, метрики и трейсы, централизованные логи, correlation id, golden signals' },
         { id: 'metrics', freq: 2, status: 'empty', title: 'Metrics',
           scope: 'Prometheus и pull-модель, counter, gauge и histogram, RED и USE, Grafana' },

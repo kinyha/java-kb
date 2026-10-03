@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Observability Overview · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="observability">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Observability Overview</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Наблюдаемость — способность понять по внешним сигналам, что происходит внутри системы, включая проблемы, которых не ждали. Три вида сигналов отвечают на разные вопросы: метрики — «что-то не так и насколько» (дёшево, агрегированно, для алертов), логи — «что именно случилось с этим запросом» (подробно и дорого), трассы — «где по пути через сервисы ушло время». Связывает их сквозной идентификатор запроса: без него ошибку в третьем сервисе не сопоставить с запросом пользователя, в демо по её идентификатору находятся только строки самого упавшего сервиса. MDC в Java живёт в потоке и теряется при переходе в пул — 200 асинхронных строк из 200 остались без идентификатора. Для алертов и SLO смотрят на четыре золотых сигнала и перцентили: средняя задержка 35 мс скрыла p99 в 440 мс.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Пользователь пишет «платёж не прошёл», а в логах тысячи строк</h2>
+      <p>Поддержка пересылает жалобу: у клиента не прошёл платёж в 14:32. Логи трёх сервисов собраны в одно хранилище, за минуту в нём десятки тысяч строк. В сервисе платежей есть ошибка «issuer unavailable», но к какому запросу пользователя она относится — неизвестно: каждый сервис пишет свой идентификатор, и связать строки шлюза, заказов и платежей можно только по времени, а в минуту таких запросов тысячи.</p>
+      <p>Тема — обзор: какие сигналы собирать, как связать их между сервисами и на что смотреть. Метрики подробно — в <a href="metrics.html">Metrics</a>, трассировка — в <a href="tracing.html">Tracing</a>, алерты и инциденты — в <a href="incidents.html">Alerting &amp; Incidents</a>, логирование в Java — в <a href="logging.html">Logging</a>. Демо <a href="../examples/observability/ObservabilityDemo.java">ObservabilityDemo.java</a> запускает три сервиса на JDK HttpServer — gateway, orders, payments — с SLF4J, Logback и JSON-логами через logstash-logback-encoder в общий файл; каждый 50-й платёж медленный, запрос 137 падает.</p>
+    </section>
+
+    <section class="step" id="signals">
+      <h2>Метрики, логи и трассы отвечают на разные вопросы</h2>
+      <table class="mx">
+        <thead><tr><th>Сигнал</th><th>Вопрос</th><th>Стоимость</th><th>Инструменты</th></tr></thead>
+        <tbody>
+          <tr><td>Метрики</td><td>Что-то не так? Насколько? С какого момента?</td><td>Дёшево: числа, агрегированные во времени</td><td>Micrometer, Prometheus, Grafana</td></tr>
+          <tr><td>Логи</td><td>Что именно случилось с этим запросом?</td><td>Дорого: каждое событие, хранение по объёму</td><td>Logback JSON, Loki, Elasticsearch</td></tr>
+          <tr><td>Трассы</td><td>Где по пути через сервисы ушло время?</td><td>Средне: обычно выборка запросов</td><td>OpenTelemetry, Jaeger, Tempo</td></tr>
+        </tbody>
+      </table>
+      <p>Типичный путь расследования идёт от дешёвого к подробному: алерт по метрике показывает, что выросла доля ошибок оплаты; трасса медленного или упавшего запроса показывает, в каком сервисе и на каком вызове; логи этого запроса по его идентификатору показывают, что именно произошло. Для этого сигналы должны быть связаны: идентификатор трассы и запроса — в каждой строке лога, метки сервиса и версии — в метриках, ссылки из метрик на примеры трасс (exemplars).</p>
+      <p>Мониторинг отвечает на заранее известные вопросы: «доля 5xx выше 1 %?». Наблюдаемость — на вопросы, которых не было при проектировании: «почему падают платежи только для карт одного банка и только с мобильного приложения?». Для второго нужны высокодетальные данные — структурированные логи и трассы с атрибутами, по которым можно резать.</p>
+    </section>
+
+    <section class="step" id="correlation">
+      <h2>Сквозной идентификатор: без него ошибку не связать с запросом</h2>
+<pre><code class="language-java">String incoming = ex.getRequestHeaders().getFirst("X-Request-Id");
+// Без передачи каждый сервис придумывает свой идентификатор.
+MDC.put("requestId", propagate &amp;&amp; incoming != null ? incoming : UUID.randomUUID().toString().substring(0, 8));
+...
+var b = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/" + n));
+if (propagate) b.header("X-Request-Id", MDC.get("requestId"));   // передать следующему сервису</code></pre>
+      <pre class="out">== without request id propagation
+   lines in the shared log: 801
+   error: [payments] java.lang.IllegalStateException: card processor returned 91: issuer unavailable
+   lines with its requestId d5c88136:
+     payments request failed
+     payments GET /137 -> 500 in 2 ms
+   async 'analytics event sent' lines without requestId: 200 of 200
+== with X-Request-Id propagated and copied to the async thread
+   lines in the shared log: 801
+   error: [payments] java.lang.IllegalStateException: card processor returned 91: issuer unavailable
+   lines with its requestId 79b4ac9d:
+     orders   analytics event sent
+     payments request failed
+     payments GET /137 -> 500 in 0 ms
+     orders   GET /137 -> 500 in 0 ms
+     gateway  GET /137 -> 500 in 0 ms</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Запрос проходит gateway, orders и payments. Без передачи у каждого сервиса свой идентификатор, и по идентификатору ошибки находятся только строки payments. С передачей у всех строк один идентификатор, и путь запроса восстанавливается целиком.">
+            <defs><marker id="ob-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="40" width="160" height="56" rx="9" class="dg-box"/>
+            <text x="100" y="64" class="dg-in" text-anchor="middle">gateway</text>
+            <rect x="280" y="40" width="160" height="56" rx="9" class="dg-box"/>
+            <text x="360" y="64" class="dg-in" text-anchor="middle">orders</text>
+            <rect x="540" y="40" width="160" height="56" rx="9" class="dg-box"/>
+            <text x="620" y="64" class="dg-in" text-anchor="middle">payments</text>
+            <path d="M180 68 L 278 68" class="dg-line" marker-end="url(#ob-a)"/>
+            <path d="M440 68 L 538 68" class="dg-line" marker-end="url(#ob-a)"/>
+            <text data-s="1" x="100" y="84" class="dg-n" text-anchor="middle">id 3f1a…</text>
+            <text data-s="1" x="360" y="84" class="dg-n" text-anchor="middle">id 9c27…</text>
+            <text data-s="1" x="620" y="84" class="dg-bad" text-anchor="middle">id d5c8… ERROR</text>
+            <text data-s="2" x="100" y="84" class="dg-ok" text-anchor="middle">id 79b4…</text>
+            <text data-s="2" x="360" y="84" class="dg-ok" text-anchor="middle">id 79b4…</text>
+            <text data-s="2" x="620" y="84" class="dg-ok" text-anchor="middle">id 79b4… ERROR</text>
+            <text data-s="2" x="229" y="60" class="dg-n" text-anchor="middle">X-Request-Id</text>
+            <text data-s="2" x="489" y="60" class="dg-n" text-anchor="middle">X-Request-Id</text>
+            <rect x="20" y="120" width="680" height="40" rx="8" class="dg-cell"/>
+            <text data-s="1" x="360" y="145" class="dg-bad" text-anchor="middle">поиск по d5c8…: 2 строки payments — какой пользователь, неизвестно</text>
+            <text data-s="2" x="360" y="145" class="dg-ok" text-anchor="middle">поиск по 79b4…: строки всех трёх сервисов — весь путь запроса</text>
+            <text x="20" y="190" class="dg-s">Все строки лежат в одном хранилище; связывает их только общий идентификатор.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Каждый сервис генерирует свой идентификатор. Ошибка в payments помечена своим id, и по нему находятся только две строки самого payments: какой запрос шлюза к ней привёл, не видно.</li>
+          <li>Шлюз создаёт идентификатор и передаёт его заголовком; каждый сервис кладёт полученный id в MDC и передаёт дальше. По id ошибки находятся строки всех трёх сервисов — путь запроса восстановлен.</li>
+        </ol>
+      </figure>
+      <p>Идентификатор создаёт первый сервис, к которому пришёл запрос, — шлюз или балансировщик, — и каждый следующий передаёт его дальше в заголовке, в сообщениях брокера и в задачах фоновой обработки. В современных системах эту роль играет идентификатор трассы из заголовка W3C <code>traceparent</code>, который OpenTelemetry передаёт автоматически и добавляет в MDC, как в <a href="tracing.html">Tracing</a>. Логи пишут структурированно — JSON с полями, а не строкой: тогда фильтр по <code>requestId</code>, сервису или коду ответа работает в хранилище логов, а не регулярными выражениями.</p>
+    </section>
+
+    <section class="step" id="mdc">
+      <h2>MDC живёт в потоке и теряется в пуле</h2>
+<pre><code class="language-java">// MDC живёт в ThreadLocal: в другой поток его надо перенести вручную.
+static Runnable withMdc(Runnable r) {
+    Map&lt;String, String&gt; ctx = MDC.getCopyOfContextMap();
+    return () -&gt; { MDC.setContextMap(ctx); try { r.run(); } finally { MDC.clear(); } };
+}
+CompletableFuture.runAsync(copyMdc ? withMdc(sendEvent) : sendEvent, analytics);</code></pre>
+      <pre class="out">   async 'analytics event sent' lines without requestId: 0 of 200</pre>
+      <p>Сервис orders отправляет событие аналитики в отдельном пуле потоков. В первом прогоне все 200 строк «analytics event sent» записаны без идентификатора: MDC хранится в <code>ThreadLocal</code> потока, обработавшего запрос, а задача выполнялась в потоке пула, где MDC пуст. Обёртка, копирующая контекст при создании задачи и восстанавливающая его в потоке пула, вернула идентификатор во все 200 строк. В Spring это делает <code>TaskDecorator</code> у пула; в реактивном коде и с виртуальными потоками — context propagation из Micrometer или OpenTelemetry. Очистка <code>MDC.clear()</code> в <code>finally</code> обязательна: поток пула, не очистивший MDC, пометит чужим идентификатором следующую задачу — это хуже, чем отсутствие идентификатора.</p>
+    </section>
+
+    <section class="step" id="golden">
+      <h2>Золотые сигналы: перцентили, а не средние</h2>
+      <pre class="out">== golden signals from gateway logs
+   traffic 200 requests, errors 1 (0.5%)
+   latency avg 35 ms, p50 29 ms, p95 31 ms, p99 440 ms, max 441 ms</pre>
+      <p>Четыре золотых сигнала Google SRE для сервиса: трафик (запросов в секунду), ошибки (доля неуспешных), задержка (распределение времени ответа) и насыщение (насколько заполнены ресурсы: пулы, очереди, CPU). Для сервисов, обрабатывающих запросы, то же называют RED — rate, errors, duration; для ресурсов — USE: utilization, saturation, errors, как в <a href="metrics.html">Metrics</a>.</p>
+      <p>Задержку смотрят перцентилями. Средняя — 35 мс — выглядит нормально, медиана — 29 мс, p95 — 31 мс, а p99 — 440 мс: каждый 50-й запрос, у которого платёж медленный. Средняя смешала 196 быстрых запросов с 4 медленными и не показала ни тех, ни других. Перцентили считают по распределению — в метриках гистограммой, а не усреднением перцентилей разных экземпляров, которое математически бессмысленно. Задержку успешных и неуспешных запросов разделяют: быстрые ошибки улучшают среднюю задержку и прячут проблему.</p>
+      <div class="trap">
+        <p class="myth">Достаточно писать в лог идентификатор запроса в обработчике — в остальном коде он подставится сам.</p>
+        <p class="fact">MDC привязан к потоку. В демо все 200 строк, записанных в пуле асинхронных задач, остались без идентификатора. Контекст надо переносить в пулы (TaskDecorator, обёртка задачи), в сообщения брокера и в вызовы других сервисов, а в потоках пула — очищать после задачи.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Метрики — обнаружить и измерить, трассы — найти место, логи — понять, что случилось; сигналы связаны идентификаторами.</li>
+        <li>Без сквозного id ошибка в payments нашлась только с двумя своими строками; с X-Request-Id — путь через три сервиса.</li>
+        <li>MDC в ThreadLocal: 200 из 200 асинхронных строк без id; копирование контекста в задачу — 0 из 200, очистка в finally.</li>
+        <li>Логи — структурированные (JSON), в одном хранилище, с полями для фильтрации.</li>
+        <li>Золотые сигналы — трафик, ошибки, задержка, насыщение; средние 35 мс скрыли p99 440 мс.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ob-pillars" data-freq="3">
+      <h3>Чем отличаются логи, метрики и трассы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Метрики — числовые ряды во времени: дёшево хранить, удобно строить графики и алерты, но без деталей отдельного запроса. Логи — отдельные события с подробностями: дорого хранить, удобно разбирать конкретный случай. Трассы — путь одного запроса через сервисы с длительностью каждого шага: показывают, где ушло время. Используются вместе: алерт по метрике, затем трасса, затем логи по идентификатору.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Связь сигналов: trace id в логах, exemplars в метриках.</li>
+            <li>Наблюдаемость — ответы на непредусмотренные вопросы; нужны детальные атрибуты.</li>
+            <li>Трассы обычно с выборкой, ошибки — сохранять всегда.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ob-correlation" data-freq="3">
+      <h3>Как связать логи одного запроса в разных сервисах?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сквозным идентификатором: его создаёт первый сервис, передаёт заголовком дальше, каждый сервис кладёт его в MDC, и он попадает в каждую строку лога. Логи структурированные и собраны в одно хранилище, где фильтр по идентификатору даёт путь запроса. Сейчас обычно используют trace id из W3C traceparent, который передаёт OpenTelemetry.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>MDC — ThreadLocal: переносить в пулы и асинхронный код, очищать в finally.</li>
+            <li>Передавать и в сообщения брокера, и в фоновые задачи.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему в логах у части строк чужой requestId?</summary>
+          <pre><code class="language-java">ExecutorService pool = Executors.newFixedThreadPool(8);
+void handle(Request r) {
+    MDC.put("requestId", r.id());
+    pool.submit(() -&gt; {
+        MDC.put("requestId", r.id());
+        log.info("enrich started");
+        enrich(r);                                   // может бросить исключение
+        MDC.remove("requestId");
+    });
+}</code></pre>
+          <p>Если <code>enrich</code> бросает исключение, <code>MDC.remove</code> не выполняется, и поток пула остаётся с идентификатором старого запроса. Следующая задача в этом потоке, которая не ставит свой id или пишет лог до установки, получит чужой идентификатор. Очистку делают в <code>finally</code>, а перенос контекста — одной обёрткой для пула (TaskDecorator), а не вручную в каждой задаче. Кроме того, MDC в потоке обработчика не очищается вовсе.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ob-golden" data-freq="2">
+      <h3>Что такое золотые сигналы и почему задержку смотрят перцентилями?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Трафик, ошибки, задержка и насыщение — минимальный набор для понимания здоровья сервиса. Задержку смотрят перцентилями, потому что средняя смешивает быстрые и медленные запросы: в демо средняя 35 мс при p99 440 мс. p99 показывает опыт каждого сотого пользователя, а у активного пользователя за сессию сотни запросов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Перцентили не усредняют между экземплярами — считают по гистограмме.</li>
+            <li>Задержку ошибок отделяют от задержки успешных запросов.</li>
+            <li>RED для сервисов, USE для ресурсов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://sre.google/sre-book/monitoring-distributed-systems/">Google SRE Book: Monitoring Distributed Systems</a> — золотые сигналы.</li>
+      <li>Charity Majors, Liz Fong-Jones, George Miranda, «Observability Engineering».</li>
+      <li><a href="https://github.com/logfellow/logstash-logback-encoder">logstash-logback-encoder</a> — JSON-логи и MDC.</li>
+      <li><a href="https://www.w3.org/TR/trace-context/">W3C Trace Context</a> — заголовок traceparent.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
