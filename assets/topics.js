@@ -63,7 +63,7 @@ window.KB_TREE = [
           scope: 'окно фиксированного размера, окно переменной длины, подсчёт в окне, подстроки без повторов' },
         { id: 'stack-tasks', freq: 2, status: 'draft', title: 'Stack',
           scope: 'скобки, монотонный стек, следующий больший элемент, вычисление выражений' },
-        { id: 'searching', freq: 2, status: 'empty', title: 'Binary Search',
+        { id: 'searching', freq: 2, status: 'draft', title: 'Binary Search',
           scope: 'поиск в отсортированном массиве, левая и правая граница, поиск по ответу, повёрнутый массив' },
         { id: 'prefix-sums', freq: 2, status: 'empty', title: 'Prefix Sums',
           scope: 'сумма на отрезке за O(1), подмассивы с заданной суммой, префиксы и HashMap' },

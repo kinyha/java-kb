@@ -1,0 +1,1103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Binary Search · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="searching">
+<main class="page">
+  <header class="topic-head"><h1>Binary Search</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Бинарный поиск полезен, когда одна проверка позволяет окончательно исключить половину ещё возможных ответов. В отсортированных суммах сравнение с серединой показывает, где искать дальше. В задаче о вместимости проверка показывает, какие меньшие ответы уже не подойдут. Главная работа — доказать этот порядок, выбрать смысл обеих границ и сохранить возможный ответ при их движении. После этого цикл становится коротким, а ошибки на пустом входе и повторах — объяснимыми.</p>
+    </div>
+
+    <section class="step" id="discard-half">
+      <h2>Сравнение с серединой исключает половину возможных позиций</h2>
+      <p>Сверка получила отсортированные суммы платежей [10, 20, 30, 30, 30, 50, 80]. Нужно найти операцию на 80. Линейный поиск проверяет все семь позиций. Сортировка уже сообщает больше: если в середине 30, все значения левее тоже не больше 30 и точно не равны 80.</p>
+      <p>Храним область [left, right], оба края включены. Инвариант: если target вообще есть, хотя бы одна его копия остаётся внутри этой области. В середине меньше target — исключаем всё до middle включительно. Больше — исключаем всё от middle включительно. Равенство даёт готовый ответ, но пока не обещает первую копию.</p>
+      <p>Фрагменты <a href="../examples/searching/SortedDemo.java">SortedDemo.java</a>, JDK 21. Счётчик считает сравнения с серединой, диагностическая печать не входит в оценку времени:</p>
+      <pre><code class="language-java">record Search(int index, int checks) {}
+
+static Search linear(int[] values, int target) {
+    int checks = 0;
+    for (int i = 0; i &lt; values.length; i++) {
+        checks++;
+        if (values[i] == target) return new Search(i, checks);
+    }
+    return new Search(-1, checks);
+}
+
+static Search exact(int[] values, int target, boolean trace) {
+    int left = 0, right = values.length - 1, checks = 0;
+    while (left &lt;= right) { // Оба края входят в область ещё возможного ответа.
+        int middle = left + (right - left) / 2;
+        checks++;
+        if (trace) System.out.println(&quot;exact [&quot; + left + &quot;, &quot; + right + &quot;] middle=&quot; + middle + &quot; value=&quot; + values[middle]);
+        if (values[middle] == target) return new Search(middle, checks);
+        if (values[middle] &lt; target) left = middle + 1; // middle уже проверен, исключаем его тоже.
+        else right = middle - 1;
+    }
+    return new Search(-1, checks);
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== exact value ==&quot;);
+int[] amounts = {10, 20, 30, 30, 30, 50, 80};
+Search slow = linear(amounts, 80);
+System.out.println(&quot;linear index=&quot; + slow.index() + &quot; checks=&quot; + slow.checks());
+Search found = exact(amounts, 80, true);
+System.out.println(&quot;binary index=&quot; + found.index() + &quot; checks=&quot; + found.checks());
+System.out.println(&quot;absent=&quot; + exact(amounts, 25, false).index());
+</code></pre>
+      <pre class="out">== exact value ==
+linear index=6 checks=7
+exact [0, 6] middle=3 value=30
+exact [4, 6] middle=5 value=50
+exact [6, 6] middle=6 value=80
+binary index=6 checks=3
+absent=-1</pre>
+      <p>После неуспешной проверки осталось не больше половины прежних элементов. Для непустого массива максимум ⌊log₂ n⌋ + 1 проверок: в нашем входе три вместо семи. Память O(1). Пустой массив задаёт right = −1, цикл не начинается и возвращается −1.</p>
+      <h3>Середина должна остаться внутри области</h3>
+      <p>Формула (left + right) / 2 сначала складывает int. Сумма может переполниться ещё до деления. Для неотрицательных индексов left ≤ right безопасно left + (right − left) / 2: разность помещается, а результат не больше right. Сам массив для демонстрации ошибки не нужен:</p>
+      <pre><code class="language-java">System.out.println(&quot;== middle can overflow without an array ==&quot;);
+int left = 1_600_000_000, right = 2_000_000_000;
+System.out.println(&quot;naive middle=&quot; + ((left + right) / 2));
+System.out.println(&quot;safe middle=&quot; + (left + (right - left) / 2));
+</code></pre>
+      <pre class="out">== middle can overflow without an array ==
+naive middle=-347483648
+safe middle=1800000000</pre>
+      <p>Отрицательная середина не просто меняет точность поиска: чтение по такому индексу упадёт. Формула через разность безопасна здесь благодаря диапазону индексов. Если числовые границы могут пересекать весь диапазон отрицательных и положительных long, разность тоже требует проверки или более широкого представления.</p>
+      <div class="trap"><p class="myth">При слишком маленьком значении достаточно left = middle.</p><p class="fact">middle уже не является ответом. Если осталось два элемента, нижняя середина равна left; такая запись оставит область прежней и цикл зависнет. Исключение middle через +1 или −1 следует из доказательства, а не из привычки.</p></div>
+    </section>
+
+    <section class="step" id="boundary-not-equality">
+      <h2>Первую и последнюю копию находят через две границы</h2>
+      <p>Для суммы 30 простое равенство может вернуть индекс 3, хотя первая копия имеет индекс 2. Поиск соседних равных после первого совпадения превращается в O(n) на длинной серии дублей. Вместо этого ищем переход между «ещё меньше 30» и «уже не меньше 30».</p>
+      <p><b>Lower bound</b> — первая позиция со значением ≥ target. <b>Upper bound</b> — первая позиция со значением &gt; target. Их ответ находится среди n + 1 позиций, включая позицию после последнего элемента. Равные значения занимают полуинтервал [lower, upper), их число upper − lower. Если обе границы совпали, target отсутствует.</p>
+      <p>Для lower bound храним ещё не классифицированные элементы в [left, right). Перед итерацией все индексы меньше left имеют значения &lt; target, а все индексы от right — значения ≥ target. Проверка середины расширяет одну из этих доказанных частей. Когда неизвестная часть пуста, left = right разделяет их.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 310" role="img" aria-label="Поиск первого значения не меньше 30 в 10,20,30,30,30,50,80. Неизвестная область [0,7) сужается до [0,3), затем [2,3), затем пустой [2,2). Граница 2 отделяет значения меньше 30 от остальных.">
+      <defs>
+      <marker id="bl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="bl-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="bl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">ПЕРВЫЙ ЭЛЕМЕНТ ≥ 30: ГРАНИЦА МОЖЕТ БЫТЬ n</text>
+      <g data-s="1">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">80</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <path d="M300 40 L300 64" class="dg-line" marker-end="url(#bl-n)"/>
+      <text x="310" y="53" class="dg-n" text-anchor="start">mid=3</text>
+      <path d="M24 174 L24 116" class="dg-line" marker-end="url(#bl-n)"/>
+      <text x="34" y="156" class="dg-n" text-anchor="start">left=0</text>
+      <path d="M584 212 L584 116" class="dg-line ok" marker-end="url(#bl-ok)"/>
+      <text x="594" y="194" class="dg-n" text-anchor="start">right=7</text>
+      <text x="28" y="248" class="dg-in" text-anchor="start">ещё не классифицировано: [0, 7)</text>
+      <text x="28" y="284" class="dg-s" text-anchor="start">левее left: &lt; 30; от right: ≥ 30</text>
+      </g>
+      <g data-s="2">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">80</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <path d="M140 40 L140 64" class="dg-line" marker-end="url(#bl-n)"/>
+      <text x="150" y="53" class="dg-n" text-anchor="start">mid=1</text>
+      <path d="M24 174 L24 116" class="dg-line" marker-end="url(#bl-n)"/>
+      <text x="34" y="156" class="dg-n" text-anchor="start">left=0</text>
+      <path d="M264 212 L264 116" class="dg-line ok" marker-end="url(#bl-ok)"/>
+      <text x="274" y="194" class="dg-n" text-anchor="start">right=3</text>
+      <text x="28" y="248" class="dg-in" text-anchor="start">ещё не классифицировано: [0, 3)</text>
+      <text x="28" y="284" class="dg-s" text-anchor="start">левее left: &lt; 30; от right: ≥ 30</text>
+      </g>
+      <g data-s="3">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">80</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <path d="M220 40 L220 64" class="dg-line" marker-end="url(#bl-n)"/>
+      <text x="230" y="53" class="dg-n" text-anchor="start">mid=2</text>
+      <path d="M184 174 L184 116" class="dg-line" marker-end="url(#bl-n)"/>
+      <text x="194" y="156" class="dg-n" text-anchor="start">left=2</text>
+      <path d="M264 212 L264 116" class="dg-line ok" marker-end="url(#bl-ok)"/>
+      <text x="274" y="194" class="dg-n" text-anchor="start">right=3</text>
+      <text x="28" y="248" class="dg-in" text-anchor="start">ещё не классифицировано: [2, 3)</text>
+      <text x="28" y="284" class="dg-s" text-anchor="start">левее left: &lt; 30; от right: ≥ 30</text>
+      </g>
+      <g data-s="4">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">80</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <path d="M184 202 L184 116" class="dg-line ok" marker-end="url(#bl-ok)"/>
+      <text x="194" y="172" class="dg-n" text-anchor="start">left=right=2</text>
+      <text x="28" y="248" class="dg-in" text-anchor="start">ещё не классифицировано: [2, 2)</text>
+      <text x="28" y="284" class="dg-s" text-anchor="start">левее left: &lt; 30; от right: ≥ 30</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>left = 0, right = 7. В середине индекс 3 со значением 30. Оно подходит, но левее может быть ещё одно подходящее. Следующая правая граница станет 3.</li>
+    <li>Область [0, 3), середина 1 со значением 20. Все элементы до 1 включительно меньше 30. Следующая левая граница станет 2.</li>
+    <li>Область [2, 3), середина 2 со значением 30. Оно подходит; новая правая граница станет 2.</li>
+    <li>left = right = 2. Неизвестных элементов больше нет. Слева все значения меньше 30, начиная с 2 — не меньше 30. Возвращаем границу 2.</li>
+  </ol>
+  <figcaption>Зелёная часть уже удовлетворяет условию, пунктирная — точно нет. Возвращается позиция раздела, поэтому при полностью неподходящем входе ответом станет n.</figcaption>
+</figure>
+      <pre><code class="language-java">static int firstAtLeast(int[] values, int target, boolean trace) {
+    int left = 0, right = values.length;
+    while (left &lt; right) { // Неисследованные элементы находятся в [left, right).
+        int middle = left + (right - left) / 2;
+        if (trace) System.out.println(&quot;lower [&quot; + left + &quot;, &quot; + right + &quot;) middle=&quot; + middle + &quot; value=&quot; + values[middle]);
+        if (values[middle] &lt; target) left = middle + 1;
+        else right = middle; // Равный элемент может быть первым: сохраняем его как границу.
+    }
+    return left; // Может оказаться n — это позиция, а не читаемый элемент.
+}
+
+static int firstGreater(int[] values, int target) {
+    int left = 0, right = values.length;
+    while (left &lt; right) {
+        int middle = left + (right - left) / 2;
+        if (values[middle] &lt;= target) left = middle + 1; // Проходим всю серию равных.
+        else right = middle;
+    }
+    return left;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== boundaries, not just equality ==&quot;);
+int lower = firstAtLeast(amounts, 30, true);
+int upper = firstGreater(amounts, 30);
+System.out.println(&quot;equal range=[&quot; + lower + &quot;, &quot; + upper + &quot;) count=&quot; + (upper - lower));
+int insert = firstAtLeast(amounts, 25, false);
+System.out.println(&quot;target 25 lower=&quot; + insert + &quot; present=&quot; + (insert &lt; amounts.length &amp;&amp; amounts[insert] == 25));
+System.out.println(&quot;target 5 lower=&quot; + firstAtLeast(amounts, 5, false));
+System.out.println(&quot;target 90 lower=&quot; + firstAtLeast(amounts, 90, false));
+System.out.println(&quot;empty lower=&quot; + firstAtLeast(new int[0], 30, false));
+int[] biggest = {Integer.MAX_VALUE, Integer.MAX_VALUE};
+System.out.println(&quot;MAX upper=&quot; + firstGreater(biggest, Integer.MAX_VALUE));
+System.out.println(&quot;MAX lower(target + 1)=&quot; + firstAtLeast(biggest, Integer.MAX_VALUE + 1, false));
+</code></pre>
+      <pre class="out">== boundaries, not just equality ==
+lower [0, 7) middle=3 value=30
+lower [0, 3) middle=1 value=20
+lower [2, 3) middle=2 value=30
+equal range=[2, 5) count=3
+target 25 lower=2 present=false
+target 5 lower=0
+target 90 lower=7
+empty lower=0
+MAX upper=2
+MAX lower(target + 1)=0</pre>
+      <p>При равенстве lower bound двигает right в middle: эта позиция ещё может стать первой подходящей. Сам middle больше не входит в неизвестные элементы, но остаётся возможной позицией границы. Upper bound пропускает равенства через left = middle + 1. Смысл правого края отличается от точного поиска: здесь right начинается с n, а цикл использует left &lt; right.</p>
+      <p>Найденная позиция вставки не означает наличие target. Для 25 вернулся индекс 2, но там лежит 30. Для 90 вернулся n = 7, который вообще нельзя читать. Чтобы проверить наличие, сначала сравни границу с длиной, затем значение с target; порядок этих проверок защищает выход за массив.</p>
+      <div class="trap"><p class="myth">Upper bound можно получить как lower bound от target + 1.</p><p class="fact">В полном диапазоне int это ломается на Integer.MAX_VALUE: +1 превращается в Integer.MIN_VALUE. В демо правильная верхняя граница равна 2, а такой обходной путь возвращает 0. Сравнение ≤ target сохраняет смысл без арифметического преобразования цели.</p></div>
+      <h3>Arrays.binarySearch возвращает другой результат</h3>
+      <p>При наличии дублей <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Arrays.html#binarySearch(int%5B%5D,int)">Arrays.binarySearch</a> возвращает индекс одной найденной копии; выбор первой или последней не гарантирован. При отсутствии он возвращает −(insertionPoint + 1). Поэтому −1 означает позицию вставки 0, а не единственный код «не найдено». В перегрузке с диапазоном fromIndex включён, toIndex исключён, найденный или декодированный индекс относится ко всему исходному массиву:</p>
+      <pre><code class="language-java">System.out.println(&quot;== Arrays.binarySearch contract ==&quot;);
+int duplicate = Arrays.binarySearch(amounts, 30);
+System.out.println(&quot;JDK duplicate index=&quot; + duplicate + &quot; first=&quot; + lower);
+int encoded = Arrays.binarySearch(amounts, 25);
+System.out.println(&quot;target 25 encoded=&quot; + encoded + &quot; insertion=&quot; + (-encoded - 1));
+int tail = Arrays.binarySearch(amounts, 90);
+System.out.println(&quot;target 90 encoded=&quot; + tail + &quot; insertion=&quot; + (-tail - 1));
+int range = Arrays.binarySearch(amounts, 2, 5, 20); // Ищем только среди трёх тридцаток.
+System.out.println(&quot;range [2, 5) encoded=&quot; + range + &quot; absolute insertion=&quot; + (-range - 1));
+</code></pre>
+      <pre class="out">== Arrays.binarySearch contract ==
+JDK duplicate index=3 first=2
+target 25 encoded=-3 insertion=2
+target 90 encoded=-8 insertion=7
+range [2, 5) encoded=-3 absolute insertion=2</pre>
+      <p>Индекс 3 — наблюдение этого запуска на JDK 21, не обещание для всех массивов и реализаций. Отрицательный ответ сначала проверяется по знаку, затем декодируется как −result − 1. Для диапазона [2, 5) вставка 20 оказалась в абсолютной позиции 2. При равенстве компаратора у объектов поиск тоже не обязан совпадать с equals: сортировка и поиск должны использовать один порядок.</p>
+    </section>
+
+    <section class="step" id="search-answer">
+      <h2>Достаточно монотонной проверки, сам вход сортировать не нужно</h2>
+      <p>Сервис отправляет пакеты данных в порядке [7, 2, 5, 10, 8]. За один день канал выдерживает не больше C единиц, завершить передачу нужно максимум за два дня. Пакеты нельзя дробить или переставлять. Какую минимальную дневную вместимость выбрать? Возможных значений много, но допустимость упорядочена: если C уже хватает, любое большее значение тоже хватит.</p>
+      <p>Это <b>поиск по ответу</b>. Предикат fits(C) сначала false, после некоторой границы становится true и больше не меняется обратно. Условие «ровно два дня» не нужно: если хватило одного, это тоже допустимо. Веса пакетов не отсортированы; упорядоченным является пространство вместимостей.</p>
+      <p>Проверяем C одним проходом. Добавляем очередной пакет в текущий день, пока он помещается. При превышении открываем следующий день. Неотрицательные веса позволяют жадно брать максимально длинный префикс: любое допустимое решение за первый день возьмёт не больше такого префикса, значит, жадная граница не отстаёт. По той же причине на каждом следующем дне жадный способ использует минимальное число дней для выбранного C.</p>
+      <p>Фрагменты <a href="../examples/searching/CapacityDemo.java">CapacityDemo.java</a>. −1 из daysNeeded означает, что даже отдельный пакет не помещается:</p>
+      <pre><code class="language-java">static int daysNeeded(int[] weights, long capacity) {
+    if (weights.length == 0) return 0;
+    int used = 1;
+    long load = 0;
+    for (int weight : weights) {
+        if (weight &gt; capacity) return -1; // Даже отдельный пакет не помещается.
+        if (load + weight &gt; capacity) { used++; load = 0; }
+        load += weight; // Порядок пакетов сохраняется, ничего не переставляем.
+    }
+    return used;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== capacity predicate ==&quot;);
+int[] weights = {7, 2, 5, 10, 8};
+for (long capacity : new long[]{10, 15, 17, 18, 21, 32}) {
+    int used = daysNeeded(weights, capacity);
+    System.out.println(&quot;capacity=&quot; + capacity + &quot; days=&quot; + used + &quot; fits in 2=&quot; + (used &gt;= 0 &amp;&amp; used &lt;= 2));
+}
+</code></pre>
+      <pre class="out">== capacity predicate ==
+capacity=10 days=4 fits in 2=false
+capacity=15 days=3 fits in 2=false
+capacity=17 days=3 fits in 2=false
+capacity=18 days=2 fits in 2=true
+capacity=21 days=2 fits in 2=true
+capacity=32 days=1 fits in 2=true</pre>
+      <p>Нижняя граница — максимальный вес пакета, верхняя — сумма всех весов. Верхняя точно допустима: все пакеты можно передать за один день. Теперь минимальный ответ лежит в <b>включённом числовом диапазоне</b> [left, right]. Это не диапазон элементов массива из прошлого шага. Допустимая середина остаётся возможным ответом, недопустимая исключается вместе со всеми меньшими.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 302" role="img" aria-label="Минимальная вместимость для пакетов 7,2,5,10,8 за два дня. Границы 10 и 32. Проверки 21 подходит, 15 не подходит, 18 подходит, 17 не подходит сходятся в 18. Пунктир — доказанно недопустимые ответы, зелёная часть — доказанно допустимые.">
+      <defs>
+      <marker id="bc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="bc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="bc-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">ПЕРВЫЙ ДОПУСТИМЫЙ ОТВЕТ В [10, 32]</text>
+      <g data-s="1">
+      <rect x="60" y="153" width="594" height="14" rx="6" class="dg-cell"/>
+      <path d="M60 160 L654 160" class="dg-line"/>
+      <text x="68" y="190" class="dg-n" text-anchor="start">10</text>
+      <text x="284" y="190" class="dg-n" text-anchor="start">18</text>
+      <text x="662" y="190" class="dg-n" text-anchor="start">32</text>
+      <path d="M60 92 L60 149" class="dg-line" marker-end="url(#bc-n)"/>
+      <text x="28" y="82" class="dg-n" text-anchor="start">left=10</text>
+      <path d="M654 238 L654 171" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="582" y="220" class="dg-n" text-anchor="start">right=32</text>
+      <text x="28" y="274" class="dg-s" text-anchor="start">начало: 32 допустимо, ниже 10 нельзя</text>
+      </g>
+      <g data-s="2">
+      <rect x="60" y="153" width="297" height="14" rx="6" class="dg-cell"/>
+      <rect x="357" y="153" width="297" height="14" rx="6" class="dg-cell hit"/>
+      <path d="M60 160 L654 160" class="dg-line"/>
+      <text x="68" y="190" class="dg-n" text-anchor="start">10</text>
+      <text x="284" y="190" class="dg-n" text-anchor="start">18</text>
+      <text x="662" y="190" class="dg-n" text-anchor="start">32</text>
+      <path d="M60 92 L60 149" class="dg-line" marker-end="url(#bc-n)"/>
+      <text x="28" y="82" class="dg-n" text-anchor="start">left=10</text>
+      <path d="M357 238 L357 171" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="285" y="220" class="dg-n" text-anchor="start">right=21</text>
+      <path d="M357 54 L357 149" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="367" y="68" class="dg-n" text-anchor="start">mid=21</text>
+      <text x="28" y="274" class="dg-s" text-anchor="start">после проверки 21: fits=true, ответ в [10, 21]</text>
+      </g>
+      <g data-s="3">
+      <rect x="60" y="153" width="162" height="14" rx="6" class="dg-cell miss"/>
+      <rect x="222" y="153" width="135" height="14" rx="6" class="dg-cell"/>
+      <rect x="357" y="153" width="297" height="14" rx="6" class="dg-cell hit"/>
+      <path d="M60 160 L654 160" class="dg-line"/>
+      <text x="68" y="190" class="dg-n" text-anchor="start">10</text>
+      <text x="284" y="190" class="dg-n" text-anchor="start">18</text>
+      <text x="662" y="190" class="dg-n" text-anchor="start">32</text>
+      <path d="M222 92 L222 149" class="dg-line" marker-end="url(#bc-n)"/>
+      <text x="232" y="132" class="dg-n" text-anchor="start">left=16</text>
+      <path d="M357 238 L357 171" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="285" y="220" class="dg-n" text-anchor="start">right=21</text>
+      <path d="M195 54 L195 149" class="dg-line bad" marker-end="url(#bc-bad)"/>
+      <text x="141" y="68" class="dg-n" text-anchor="start">mid=15</text>
+      <text x="28" y="274" class="dg-s" text-anchor="start">после проверки 15: fits=false, ответ в [16, 21]</text>
+      </g>
+      <g data-s="4">
+      <rect x="60" y="153" width="162" height="14" rx="6" class="dg-cell miss"/>
+      <rect x="222" y="153" width="54" height="14" rx="6" class="dg-cell"/>
+      <rect x="276" y="153" width="378" height="14" rx="6" class="dg-cell hit"/>
+      <path d="M60 160 L654 160" class="dg-line"/>
+      <text x="68" y="190" class="dg-n" text-anchor="start">10</text>
+      <text x="284" y="190" class="dg-n" text-anchor="start">18</text>
+      <text x="662" y="190" class="dg-n" text-anchor="start">32</text>
+      <path d="M222 92 L222 149" class="dg-line" marker-end="url(#bc-n)"/>
+      <text x="150" y="82" class="dg-n" text-anchor="start">left=16</text>
+      <path d="M276 238 L276 171" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="204" y="220" class="dg-n" text-anchor="start">right=18</text>
+      <path d="M276 54 L276 149" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="286" y="68" class="dg-n" text-anchor="start">mid=18</text>
+      <text x="28" y="274" class="dg-s" text-anchor="start">после проверки 18: fits=true, ответ в [16, 18]</text>
+      </g>
+      <g data-s="5">
+      <rect x="60" y="153" width="216" height="14" rx="6" class="dg-cell miss"/>
+      <rect x="276" y="153" width="378" height="14" rx="6" class="dg-cell hit"/>
+      <path d="M60 160 L654 160" class="dg-line"/>
+      <text x="68" y="190" class="dg-n" text-anchor="start">10</text>
+      <text x="284" y="190" class="dg-n" text-anchor="start">18</text>
+      <text x="662" y="190" class="dg-n" text-anchor="start">32</text>
+      <path d="M276 238 L276 171" class="dg-line ok" marker-end="url(#bc-ok)"/>
+      <text x="286" y="224" class="dg-n" text-anchor="start">left=right=18</text>
+      <path d="M249 54 L249 149" class="dg-line bad" marker-end="url(#bc-bad)"/>
+      <text x="259" y="68" class="dg-n" text-anchor="start">mid=17</text>
+      <text x="28" y="274" class="dg-s" text-anchor="start">после проверки 17: fits=false, ответ в [18, 18]</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>Нижняя граница 10: самый тяжёлый пакет должен помещаться. Верхняя 32: сумма всех весов, она точно подходит даже за один день.</li>
+    <li>Проверили 21: хватило двух дней. Минимум может быть меньше или равен 21, поэтому правая граница стала 21.</li>
+    <li>Проверили 15: нужны три дня. Ответ должен быть больше 15, поэтому левая граница стала 16.</li>
+    <li>Проверили 18: хватило двух дней. Правая граница стала 18; допустимый ответ всё ещё сохраняется внутри области.</li>
+    <li>Проверили 17: нужны три дня. Левая граница стала 18 и совпала с правой. Меньшие ответы исключены, 18 допустимо — это минимум.</li>
+  </ol>
+  <figcaption>Маркер mid показывает только что проверенную вместимость, границы — состояние после этой проверки. Числа на оси расположены пропорционально своим значениям.</figcaption>
+</figure>
+      <pre><code class="language-java">static long minimum(int[] weights, int days, boolean trace) {
+    if (days &lt; 1) throw new IllegalArgumentException(&quot;days must be positive&quot;);
+    long left = 0, right = 0;
+    for (int weight : weights) {
+        if (weight &lt; 0) throw new IllegalArgumentException(&quot;negative weight&quot;);
+        left = Math.max(left, weight); // Меньше самого большого пакета нельзя.
+        right += weight; // Всё помещается за один день, значит, эта граница допустима.
+    }
+    while (left &lt; right) { // Минимальный допустимый ответ лежит в [left, right].
+        long middle = left + (right - left) / 2;
+        int used = daysNeeded(weights, middle);
+        boolean fits = used &gt;= 0 &amp;&amp; used &lt;= days;
+        if (trace) System.out.println(&quot;[&quot; + left + &quot;, &quot; + right + &quot;] middle=&quot; + middle + &quot; days=&quot; + used + &quot; fits=&quot; + fits);
+        if (fits) right = middle; // Допустимый middle остаётся возможным минимумом.
+        else left = middle + 1;
+    }
+    return left;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== first feasible capacity ==&quot;);
+System.out.println(&quot;minimum=&quot; + minimum(weights, 2, true));
+System.out.println(&quot;input=&quot; + Arrays.toString(weights));
+</code></pre>
+      <pre class="out">== first feasible capacity ==
+[10, 32] middle=21 days=2 fits=true
+[10, 21] middle=15 days=3 fits=false
+[16, 21] middle=18 days=2 fits=true
+[16, 18] middle=17 days=3 fits=false
+minimum=18
+input=[7, 2, 5, 10, 8]</pre>
+      <p>Для C = 18 первая отправка содержит 7 + 2 + 5 = 14, вторая 10 + 8 = 18. При C = 17 второй блок уже приходится разбить и получается три дня. Поэтому минимум действительно 18. Каждая проверка стоит O(n), число проверок O(log(S − M + 1)), где S — сумма, M — максимальный вес. Вместе с начальным проходом время O(n · (1 + log(S − M + 1))), дополнительная память O(1).</p>
+      <pre><code class="language-java">System.out.println(&quot;== answer wider than int ==&quot;);
+int[] heavy = {Integer.MAX_VALUE, Integer.MAX_VALUE};
+System.out.println(&quot;int total=&quot; + (heavy[0] + heavy[1]));
+System.out.println(&quot;one day=&quot; + minimum(heavy, 1, false));
+System.out.println(&quot;two days=&quot; + minimum(heavy, 2, false));
+System.out.println(&quot;empty=&quot; + minimum(new int[0], 2, false));
+System.out.println(&quot;zeros=&quot; + minimum(new int[]{0, 0}, 1, false));
+</code></pre>
+      <pre class="out">== answer wider than int ==
+int total=-2
+one day=4294967294
+two days=2147483647
+empty=0
+zeros=0</pre>
+      <p>Границы, текущая нагрузка и ответ считаются в long: сумма двух максимальных int уже больше int. Пустому входу нужна вместимость 0; нулевые веса допустимы и не ломают монотонность. Отрицательные веса изменили бы смысл проверки: максимальный префикс мог бы сначала превысить вместимость, а потом уменьшиться. В этой задаче они исключены.</p>
+      <div class="note warn"><p>Если верхняя граница не известна как допустимая, её нужно получить до поиска. Например, последовательно удваивать пробную величину до первого true с контролем переполнения и конечного предела. Иначе цикл может вернуть верхнюю границу, хотя подходящего ответа в рассматриваемом диапазоне вообще нет.</p></div>
+    </section>
+
+    <section class="step" id="rotated-order">
+      <h2>В повёрнутом массиве порядок нужно доказать для одной половины</h2>
+      <p>Отсортированный массив циклически сдвинут: [40, 50, 60, 70, 10, 20, 30]. Обычное сравнение target с серединой уже не указывает сторону поиска: 10 меньше 70, но находится справа. При различных значениях внутри области есть не больше одного разрыва порядка. Поэтому хотя бы одна из половин [left, middle] или [middle, right] отсортирована.</p>
+      <p>Если a[left] ≤ a[middle], левая половина отсортирована. Проверяем не только сравнение с серединой, а принадлежность цели всему её диапазону. Цель в [a[left], a[middle]) — оставляем левую часть без уже проверенной середины. Иначе исключаем левую половину. Если она не отсортирована, симметрично проверяем (a[middle], a[right]] справа.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="Поиск 10 в повёрнутом массиве 40,50,60,70,10,20,30. Середина 70 показывает отсортированную левую половину, 10 в неё не входит. В области 10,20,30 середина 20, слева лежит 10. Финальная область содержит только индекс 4.">
+      <defs>
+      <marker id="br-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="br-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="br-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">РАЗРЫВ ПОРЯДКА ОДИН: ОДНА ПОЛОВИНА ОТСОРТИРОВАНА</text>
+      <g data-s="1">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">40</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">60</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">70</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <path d="M60 178 L60 120" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="70" y="156" class="dg-n" text-anchor="start">left=0</text>
+      <path d="M540 216 L540 120" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="550" y="196" class="dg-n" text-anchor="start">right=6</text>
+      <text x="28" y="252" class="dg-s" text-anchor="start">target = 10; область [0, 6]</text>
+      </g>
+      <g data-s="2">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">40</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">60</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">70</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <rect x="24" y="64" width="312" height="52" rx="8" class="dg-line ok" fill="none"/>
+      <path d="M300 40 L300 60" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="310" y="53" class="dg-n" text-anchor="start">mid=3</text>
+      <path d="M60 178 L60 120" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="70" y="156" class="dg-n" text-anchor="start">left=0</text>
+      <path d="M540 216 L540 120" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="550" y="196" class="dg-n" text-anchor="start">right=6</text>
+      <text x="28" y="252" class="dg-s" text-anchor="start">[40, 70] слева отсортировано; 10 туда не входит</text>
+      </g>
+      <g data-s="3">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">40</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">60</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">70</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <rect x="344" y="64" width="152" height="52" rx="8" class="dg-line ok" fill="none"/>
+      <path d="M460 40 L460 60" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="470" y="53" class="dg-n" text-anchor="start">mid=5</text>
+      <path d="M380 178 L380 120" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="390" y="156" class="dg-n" text-anchor="start">left=4</text>
+      <path d="M540 216 L540 120" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="550" y="196" class="dg-n" text-anchor="start">right=6</text>
+      <text x="28" y="252" class="dg-s" text-anchor="start">[10, 20] слева отсортировано; 10 входит в [10, 20)</text>
+      </g>
+      <g data-s="4">
+      <rect x="28" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="60" y="92" class="dg-in" text-anchor="middle">40</text>
+      <text x="60" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="108" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="140" y="92" class="dg-in" text-anchor="middle">50</text>
+      <text x="140" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="188" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="220" y="92" class="dg-in" text-anchor="middle">60</text>
+      <text x="220" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="268" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="300" y="92" class="dg-in" text-anchor="middle">70</text>
+      <text x="300" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <rect x="348" y="68" width="64" height="44" rx="6" class="dg-cell hit"/>
+      <text x="380" y="92" class="dg-in" text-anchor="middle">10</text>
+      <text x="380" y="107" class="dg-n" text-anchor="middle">i=4</text>
+      <rect x="428" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="460" y="92" class="dg-in" text-anchor="middle">20</text>
+      <text x="460" y="107" class="dg-n" text-anchor="middle">i=5</text>
+      <rect x="508" y="68" width="64" height="44" rx="6" class="dg-cell miss"/>
+      <text x="540" y="92" class="dg-in" text-anchor="middle">30</text>
+      <text x="540" y="107" class="dg-n" text-anchor="middle">i=6</text>
+      <path d="M380 40 L380 60" class="dg-line" marker-end="url(#br-n)"/>
+      <text x="390" y="53" class="dg-n" text-anchor="start">mid=4</text>
+      <path d="M380 202 L380 120" class="dg-line ok" marker-end="url(#br-ok)"/>
+      <text x="390" y="174" class="dg-n" text-anchor="start">left=right=4</text>
+      <text x="28" y="252" class="dg-s" text-anchor="start">a[4] = 10: ответ найден</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>Массив состоит из двух возрастающих частей с одним разрывом. Ответ, если он есть, пока находится в [0, 6].</li>
+    <li>Середина 3 содержит 70. Левая половина [0, 3] отсортирована от 40 до 70. Цель 10 вне её диапазона, исключаем эту половину.</li>
+    <li>Теперь область [4, 6], середина 5 содержит 20. Левая половина от 10 до 20 отсортирована; цель 10 меньше середины и входит в эту часть. Исключаем середину и правую часть.</li>
+    <li>Осталась позиция 4, её значение 10. Найден исходный индекс 4, сортировать или разворачивать вход не понадобилось.</li>
+  </ol>
+  <figcaption>Рамка отмечает половину, для которой доказан обычный порядок. Проверка принадлежности цели её диапазону определяет, какую половину исключить.</figcaption>
+</figure>
+      <p>Фрагменты <a href="../examples/searching/RotatedDemo.java">RotatedDemo.java</a>. Предусловие distinct — все значения различны, массив получен одним циклическим сдвигом возрастающего массива:</p>
+      <pre><code class="language-java">static int distinct(int[] values, int target, boolean trace) {
+    int left = 0, right = values.length - 1;
+    while (left &lt;= right) {
+        int middle = left + (right - left) / 2;
+        if (trace) System.out.println(&quot;[&quot; + left + &quot;, &quot; + right + &quot;] middle=&quot; + middle + &quot; value=&quot; + values[middle]);
+        if (values[middle] == target) return middle;
+        if (values[left] &lt;= values[middle]) { // Левая половина отсортирована.
+            if (values[left] &lt;= target &amp;&amp; target &lt; values[middle]) right = middle - 1;
+            else left = middle + 1;
+        } else { // Отсортирована правая половина.
+            if (values[middle] &lt; target &amp;&amp; target &lt;= values[right]) left = middle + 1;
+            else right = middle - 1;
+        }
+    }
+    return -1;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== rotated distinct values ==&quot;);
+int[] values = {40, 50, 60, 70, 10, 20, 30};
+System.out.println(&quot;target 10 index=&quot; + distinct(values, 10, true));
+System.out.println(&quot;target 99 index=&quot; + distinct(values, 99, false));
+System.out.println(&quot;empty=&quot; + distinct(new int[0], 10, false));
+</code></pre>
+      <pre class="out">== rotated distinct values ==
+[0, 6] middle=3 value=70
+[4, 6] middle=5 value=20
+[4, 4] middle=4 value=10
+target 10 index=4
+target 99 index=-1
+empty=-1</pre>
+      <p>Равенство a[left] = a[middle] здесь означает половину из одного элемента, поэтому ≤ важно и для массива из двух элементов. До проверки порядка сначала проверяем сам middle на target. За итерацию исключаем половину области: O(log n) времени и O(1) памяти. Исходные позиции сохраняются.</p>
+      <h3>Одинаковые края могут скрыть место разрыва</h3>
+      <p>Для [1, 0, 1, 1, 1] середина и оба края равны 1. Из этого нельзя заключить, что левая половина [1, 0, 1] отсортирована. Если цель не равна середине, одинаковые края точно не являются ответом; их можно убрать по одному. Это сохраняет корректность, но больше не сокращает область вдвое.</p>
+      <pre><code class="language-java">record Search(int index, int checks) {}
+
+static Search withDuplicates(int[] values, int target) {
+    int left = 0, right = values.length - 1, checks = 0;
+    while (left &lt;= right) {
+        int middle = left + (right - left) / 2;
+        checks++;
+        if (values[middle] == target) return new Search(middle, checks);
+        if (values[left] == values[middle] &amp;&amp; values[middle] == values[right]) {
+            left++; right--; // Края точно не target, но сторону разрыва различить нельзя.
+        } else if (values[left] &lt;= values[middle]) {
+            if (values[left] &lt;= target &amp;&amp; target &lt; values[middle]) right = middle - 1;
+            else left = middle + 1;
+        } else {
+            if (values[middle] &lt; target &amp;&amp; target &lt;= values[right]) left = middle + 1;
+            else right = middle - 1;
+        }
+    }
+    return new Search(-1, checks);
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== duplicates hide the sorted half ==&quot;);
+int[] repeated = {1, 0, 1, 1, 1};
+System.out.println(&quot;distinct-only on duplicates=&quot; + distinct(repeated, 0, false));
+Search correct = withDuplicates(repeated, 0);
+System.out.println(&quot;duplicate-aware index=&quot; + correct.index());
+Search same = withDuplicates(new int[]{1, 1, 1, 1, 1, 1, 1, 1, 1}, 0);
+System.out.println(&quot;all equal, absent index=&quot; + same.index() + &quot; checks=&quot; + same.checks());
+</code></pre>
+      <pre class="out">== duplicates hide the sorted half ==
+distinct-only on duplicates=-1
+duplicate-aware index=1
+all equal, absent index=-1 checks=5</pre>
+      <p>Версия только для различных значений пропустила существующий 0. Версия с обработкой неоднозначности нашла индекс 1. Для девяти одинаковых единиц и отсутствующего 0 она сделала пять проверок, снимая по два края. В общем случае худшая оценка O(n): единственное отличающееся значение может скрываться в ещё не проверенной части среди повторов. Обещать O(log n) для такого входа нельзя.</p>
+      <p>Другой путь при различных значениях — сначала найти место разрыва, затем искать в одной отсортированной части. Асимптотика останется O(log n). Выбор реализации зависит от того, нужен ли сам индекс минимального элемента для дальнейших операций; для одного поиска достаточно разобранной проверки половин.</p>
+    </section>
+
+    <section class="step" id="proof-and-limits">
+      <h2>Сначала объясни границы и цену проверки, затем обещай логарифм</h2>
+      <p>На собеседовании начни с пространства ответов. Для позиции это массив, для вместимости — числа от максимального пакета до общей суммы. Скажи, почему одна проверка упорядочивает остальные варианты. Затем выбери, ищешь ли точное равенство, первый true или последний допустимый ответ. Это определит, какая середина сохраняется и какой край возвращается.</p>
+      <table class="mx">
+        <thead><tr><th>Вариант</th><th>Смысл границ</th><th>Действие на совпадении</th></tr></thead>
+        <tbody>
+          <tr><td>Точное значение</td><td>[left, right] — возможные элементы</td><td>Вернуть middle; первая копия не обещана</td></tr>
+          <tr><td>Lower bound</td><td>[left, right) — неизвестные элементы; позиция границы в [left, right]</td><td>right = middle, продолжаем влево</td></tr>
+          <tr><td>Upper bound</td><td>Слева значения ≤ target, справа &gt; target</td><td>left = middle + 1, продолжаем вправо</td></tr>
+          <tr><td>Минимальный допустимый ответ</td><td>[left, right] — числовые ответы; right уже допустим</td><td>При true сохраняем middle как правую границу</td></tr>
+        </tbody>
+      </table>
+      <p>Докажи, что ответ остаётся внутри, а область строго уменьшается. В полуинтервале при left &lt; right середина всегда меньше right. Поэтому right = middle уменьшает правый край, left = middle + 1 увеличивает левый. При попытке искать последний true с left = middle нужна верхняя середина или иной шаблон, иначе короткая область перестанет уменьшаться. Шаблоны можно выбирать разные; их границы и обновления должны принадлежать одному доказательству.</p>
+      <p>Число проверок O(log n) ещё не означает такое же время. У массива чтение a[middle] стоит O(1). У связного списка поиск middle может сам идти по узлам. В поиске по ответу проверка часто проходит все данные, как в задаче о вместимости. У запроса к внешнему сервису сравнение может ждать сеть; к тому же меняющаяся во время поиска проверка нарушит устойчивость раздела false/true.</p>
+      <p>Перед циклом сортировать вход ради единственного запроса стоит O(n log n), а линейный поиск стоил бы O(n). Для множества запросов сортировка или подходящий индекс могут окупиться. Если исходные позиции важны, сортируй пары «значение, исходный индекс» или используй другую структуру: найденная позиция в отсортированной копии не является номером исходной операции.</p>
+      <p>Пустой вход, одна позиция, два соседних значения, все равные, цель меньше минимума и больше максимума проверяют края цикла. Границы int проверяют арифметику середины, суммы и преобразования цели. Для бинарного предиката отдельно проверь случаи «всё false» и «всё true», а также обоснование допустимой верхней границы. Для поиска по вещественным числам понадобятся заданная точность и правило завершения; int-обновления через ±1 к ним не относятся.</p>
+      <p>В проде полезно сначала проверить стабильность порядка: одним компаратором ли сортируется и ищется, сохраняется ли содержимое во время поиска, действительно ли предикат меняется в нужную сторону. Бинарный поиск ускоряет уже доказанную структуру задачи. Для произвольного порядка и немонотонного условия половину пространства исключать нечем.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Одна проверка должна окончательно исключать половину области; сортировка или монотонность дают это доказательство.</li>
+        <li>Точное равенство и граница — разные результаты. Равные значения занимают [lower, upper), но позиция вставки ещё не доказывает наличие.</li>
+        <li>Не смешивай включённый диапазон и полуинтервал. Правило сохранения middle следует из смысла ответа.</li>
+        <li>Поиск по ответу использует монотонную допустимость числовых ответов. Его время включает цену каждой проверки.</li>
+        <li>Повторы в повёрнутом массиве могут скрыть упорядоченную половину и ухудшить поиск до O(n).</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>Задачи</h2>
+    <article class="q" id="integer-square-root" data-freq="2" data-type="task">
+  <h3>Найти целый корень без вычислений с double</h3>
+  <div class="task">
+    <p>Дан неотрицательный int value. Верни наибольший неотрицательный int r, для которого r² ≤ value. Math.sqrt, pow и перебор всех возможных r использовать нельзя. Работай с целочисленными сравнениями, время O(log(value + 1)).</p>
+    <pre class="io">20 → 4
+8 → 2
+0 → 0
+2147483647 → 46340</pre>
+    <p class="src"><a href="https://leetcode.com/problems/sqrtx/">LeetCode 69 · easy · бинарный поиск по числовому ответу</a></p>
+    <details><summary>Заготовка: IntegerRoot.java</summary>
+      <pre><code class="language-java">public class IntegerRoot {
+    static int solve(int value) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+
+    public static void main(String[] args) {
+        test(0, 0);
+        test(1, 1);
+        test(2, 1);
+        test(4, 2);
+        test(8, 2);
+        test(9, 3);
+        test(20, 4);
+        test(2_147_395_600, 46_340);
+        test(Integer.MAX_VALUE, 46_340);
+    }
+
+    static void test(int value, int want) {
+        int got = solve(value);
+        check(got, want);
+        if ((long) got * got &gt; value || (long) (got + 1) * (got + 1) &lt;= value) throw new AssertionError(&quot;not floor root&quot;);
+    }
+
+    static void check(int got, int want) {
+        if (got != want) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Условие m² &gt; value сначала false, потом true. Корень — число прямо перед первой позицией true.</p></details>
+    <details><summary>Подсказка 2</summary><p>Возьми left = 0, right = (long) value + 1. При слишком большом квадрате сохраняй middle как правую границу, иначе двигай left в middle + 1. Квадрат считай в long.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Ищем первый недопустимый квадрат, а не точное равенство. Такая граница есть даже для нуля: m = 1 уже слишком велик. После схождения left стоит на первом недопустимом m, поэтому r = left − 1.</p>
+      <figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 288" role="img" aria-label="Для x=20 числа 3 и 4 имеют квадраты 9 и 16, а 5,6,7 — 25,36,49. Первый квадрат больше 20 находится при m=5. Целый корень округляется вниз: предыдущий m=4.">
+      <defs>
+      <marker id="bs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="bs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="bs-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">x = 20: КОРЕНЬ ПЕРЕД ПЕРВЫМ СЛИШКОМ БОЛЬШИМ КВАДРАТОМ</text>
+      <rect x="56" y="76" width="96" height="62" rx="6" class="dg-cell hit"/>
+      <text x="104" y="101" class="dg-in" text-anchor="middle">m=3</text>
+      <text x="104" y="124" class="dg-n" text-anchor="middle">m²=9</text>
+      <rect x="172" y="76" width="96" height="62" rx="6" class="dg-cell hit"/>
+      <text x="220" y="101" class="dg-in" text-anchor="middle">m=4</text>
+      <text x="220" y="124" class="dg-n" text-anchor="middle">m²=16</text>
+      <rect x="288" y="76" width="96" height="62" rx="6" class="dg-cell miss"/>
+      <text x="336" y="101" class="dg-in" text-anchor="middle">m=5</text>
+      <text x="336" y="124" class="dg-n" text-anchor="middle">m²=25</text>
+      <rect x="404" y="76" width="96" height="62" rx="6" class="dg-cell miss"/>
+      <text x="452" y="101" class="dg-in" text-anchor="middle">m=6</text>
+      <text x="452" y="124" class="dg-n" text-anchor="middle">m²=36</text>
+      <rect x="520" y="76" width="96" height="62" rx="6" class="dg-cell miss"/>
+      <text x="568" y="101" class="dg-in" text-anchor="middle">m=7</text>
+      <text x="568" y="124" class="dg-n" text-anchor="middle">m²=49</text>
+      <path d="M276 188 L276 142" class="dg-line ok" marker-end="url(#bs-ok)"/>
+      <text x="286" y="174" class="dg-n" text-anchor="start">граница = 5</text>
+      <text x="28" y="226" class="dg-in" text-anchor="start">m² &gt; 20: false false | true true true</text>
+      <text x="28" y="262" class="dg-ok" text-anchor="start">последний допустимый m = 5 − 1 = 4</text>
+    </svg>
+  </div>
+  <figcaption>Ищем переход false → true для условия m² > x. Требуемый ответ расположен на одну позицию раньше найденной границы.</figcaption>
+</figure>
+      <pre><code class="language-java">static int solve(int value) {
+    long left = 0, right = (long) value + 1; // Граница может не поместиться в int.
+    while (left &lt; right) {
+        long middle = left + (right - left) / 2;
+        if (middle * middle &gt; value) right = middle; // Первый недопустимый квадрат.
+        else left = middle + 1;
+    }
+    return (int) (left - 1); // Предыдущая позиция — последний допустимый корень.
+}
+</code></pre>
+      <pre class="out">OK 0
+OK 1
+OK 1
+OK 2
+OK 2
+OK 3
+OK 4
+OK 46340
+OK 46340</pre>
+      <p>O(log(value + 1)) шагов при value > 0, для нуля постоянное время, память O(1). Внутри цикла middle ≤ value; квадрат неотрицательного int помещается в long. Правая граница расширяется до сложения +1.</p>
+    </div>
+    <div data-level="senior"><p>Граница Integer.MAX_VALUE важна дважды: value + 1 не помещается в int, а квадрат середины переполнит int задолго до конца поиска. В проверках дополнительно проверено само математическое свойство ответа: r² ≤ value < (r + 1)².</p></div>
+  </details>
+</article>
+
+<article class="q" id="first-last-position" data-freq="2" data-type="task">
+  <h3>Вернуть первый и последний индекс заданной суммы</h3>
+  <div class="task">
+    <p>Дан int[] values, отсортированный по возрастанию с допустимыми повторами, и target. Верни первый и последний включённые индексы target. Если его нет, верни [-1, -1]. Вход сохранить, полный диапазон int допустим. Пустой массив допустим, null вне условия. Время O(log n), без линейного прохода по дублям.</p>
+    <pre class="io">[10, 20, 30, 30, 30, 50, 80], target = 30 → [2, 4]
+[30, 30, 30], target = 30 → [0, 2]
+[], target = 30 → [-1, -1]</pre>
+    <p class="src"><a href="https://leetcode.com/problems/find-first-and-last-position-of-element-in-sorted-array/">LeetCode 34 · medium · две границы</a></p>
+    <details><summary>Заготовка: EqualRange.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class EqualRange {
+    static int[] solve(int[] values, int target) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+
+    static int boundary(int[] values, int target, boolean upper) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+
+    public static void main(String[] args) {
+        test(new int[]{10, 20, 30, 30, 30, 50, 80}, 30, new int[]{2, 4});
+        test(new int[]{30, 30, 30}, 30, new int[]{0, 2});
+        test(new int[]{1}, 1, new int[]{0, 0});
+        test(new int[]{1}, 0, new int[]{-1, -1});
+        test(new int[0], 1, new int[]{-1, -1});
+        test(new int[]{1, 2, 4}, 3, new int[]{-1, -1});
+        test(new int[]{1, 2, 4}, 9, new int[]{-1, -1});
+        test(new int[]{Integer.MIN_VALUE, Integer.MIN_VALUE, 0}, Integer.MIN_VALUE, new int[]{0, 1});
+        test(new int[]{0, Integer.MAX_VALUE, Integer.MAX_VALUE}, Integer.MAX_VALUE, new int[]{1, 2});
+    }
+
+    static void test(int[] input, int target, int[] want) {
+        int[] before = input.clone();
+        check(solve(input, target), want);
+        if (!Arrays.equals(input, before)) throw new AssertionError(&quot;input changed&quot;);
+    }
+
+    static void check(int[] got, int[] want) {
+        if (!Arrays.equals(got, want)) throw new AssertionError(&quot;got &quot; + Arrays.toString(got) + &quot;, want &quot; + Arrays.toString(want));
+        System.out.println(&quot;OK &quot; + Arrays.toString(got));
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Равные элементы занимают [lower, upper). Для ответа с включённым последним индексом нужна позиция upper − 1.</p></details>
+    <details><summary>Подсказка 2</summary><p>Один помощник может искать оба перехода: &lt; target для lower и ≤ target для upper. После lower сначала проверь длину, затем равенство. target + 1 не требуется.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Первый проход находит lower, где значения перестают быть меньше target. Если там нет target, ответа нет. Второй проход находит upper, где значения становятся строго больше. Равные значения лежат между этими границами, последний включённый индекс равен upper − 1.</p>
+
+      <pre><code class="language-java">static int[] solve(int[] values, int target) {
+    int first = boundary(values, target, false);
+    if (first == values.length || values[first] != target) return new int[]{-1, -1};
+    return new int[]{first, boundary(values, target, true) - 1}; // Последний индекс включён.
+}
+
+static int boundary(int[] values, int target, boolean upper) {
+    int left = 0, right = values.length;
+    while (left &lt; right) {
+        int middle = left + (right - left) / 2;
+        // Только upper пропускает равные значения: ищет первый строго больший элемент.
+        if (values[middle] &lt; target || (upper &amp;&amp; values[middle] == target)) left = middle + 1;
+        else right = middle;
+    }
+    return left;
+}
+</code></pre>
+      <pre class="out">OK [2, 4]
+OK [0, 2]
+OK [0, 0]
+OK [-1, -1]
+OK [-1, -1]
+OK [-1, -1]
+OK [-1, -1]
+OK [0, 1]
+OK [1, 2]</pre>
+      <p>Два прохода по O(log n) дают O(log n) времени, O(1) дополнительной памяти без учёта массива ответа из двух индексов. На пустом входе граница равна 0, проверка длины защищает обращение к элементу.</p>
+    </div>
+    <div data-level="senior"><p>Если нужны только количество или полуинтервал, upper − lower и [lower, upper) уже готовы. Для массива объектов признак равенства надо согласовать с компаратором. Сортировка и поиск должны использовать одинаковый порядок, иначе раздел на две монотонные части исчезнет.</p></div>
+  </details>
+</article>
+
+<article class="q" id="rotated-distinct-search" data-freq="2" data-type="task">
+  <h3>Найти операцию в повёрнутом отсортированном массиве</h3>
+  <div class="task">
+    <p>Дан int[] values, полученный циклическим сдвигом строго возрастающего массива. Все значения различны, сдвиг может быть нулевым. Верни исходный индекс target или -1. Вход сохранить, пустой массив допустим, null вне условия. Время O(log n), память O(1).</p>
+    <pre class="io">[40, 50, 60, 70, 10, 20, 30], target = 10 → 4
+[3, 1], target = 1 → 1
+[40, 50, 60, 70, 10, 20, 30], target = 99 → -1</pre>
+    <p class="src"><a href="https://leetcode.com/problems/search-in-rotated-sorted-array/">LeetCode 33 · medium · версия с пустым входом</a></p>
+    <details><summary>Заготовка: RotatedSearch.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class RotatedSearch {
+    static int solve(int[] values, int target) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+
+    public static void main(String[] args) {
+        test(new int[]{40, 50, 60, 70, 10, 20, 30}, 10, 4);
+        test(new int[]{40, 50, 60, 70, 10, 20, 30}, 50, 1);
+        test(new int[]{40, 50, 60, 70, 10, 20, 30}, 99, -1);
+        test(new int[]{1, 2, 3, 4}, 4, 3);
+        test(new int[]{3, 1}, 1, 1);
+        test(new int[]{3, 1}, 3, 0);
+        test(new int[]{3}, 3, 0);
+        test(new int[]{3}, 1, -1);
+        test(new int[0], 1, -1);
+        test(new int[]{Integer.MAX_VALUE, Integer.MIN_VALUE, 0}, Integer.MIN_VALUE, 1);
+    }
+
+    static void test(int[] input, int target, int want) {
+        int[] before = input.clone();
+        check(solve(input, target), want);
+        if (!Arrays.equals(input, before)) throw new AssertionError(&quot;input changed&quot;);
+    }
+
+    static void check(int got, int want) {
+        if (got != want) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Обычное сравнение target с серединой не даёт сторону, но хотя бы одна половина отсортирована.</p></details>
+    <details><summary>Подсказка 2</summary><p>Сначала проверь middle. Если values[left] ≤ values[middle], проверь, входит ли target в [values[left], values[middle]). Иначе проверь правый диапазон (values[middle], values[right]].</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Массив имеет не больше одного разрыва порядка. Проверка концов левой половины позволяет определить отсортированную сторону. Принадлежность цели её диапазону сохраняет ровно одну половину с возможным ответом.</p>
+
+      <pre><code class="language-java">static int solve(int[] values, int target) {
+    int left = 0, right = values.length - 1;
+    while (left &lt;= right) {
+        int middle = left + (right - left) / 2;
+        if (values[middle] == target) return middle;
+        if (values[left] &lt;= values[middle]) { // Левая половина упорядочена, включая один элемент.
+            if (values[left] &lt;= target &amp;&amp; target &lt; values[middle]) right = middle - 1;
+            else left = middle + 1;
+        } else { // Правая половина упорядочена; ищем цель в её диапазоне.
+            if (values[middle] &lt; target &amp;&amp; target &lt;= values[right]) left = middle + 1;
+            else right = middle - 1;
+        }
+    }
+    return -1;
+}
+</code></pre>
+      <pre class="out">OK 4
+OK 1
+OK -1
+OK 3
+OK 1
+OK 0
+OK 0
+OK -1
+OK -1
+OK 1</pre>
+      <p>O(log n) времени, O(1) дополнительной памяти. После неуспешного сравнения middle исключается через ±1. Равенство в проверке левой стороны нужно для половины из одного элемента.</p>
+    </div>
+    <div data-level="senior"><p>Дубли меняют предусловие доказательства: одинаковые left, middle, right не указывают, где разрыв. Удаление одинаковых краёв сохранит корректность, но худшее время станет O(n). Если нужен сам pivot для нескольких последующих операций, можно сначала найти его и работать с двумя обычными отсортированными частями.</p></div>
+  </details>
+</article>
+
+<article class="q" id="minimum-capacity" data-freq="2" data-type="task">
+  <h3>Выбрать минимальную вместимость для последовательных пакетов</h3>
+  <div class="task">
+    <p>Даны неотрицательные int-веса weights и положительное int days. За день можно передать непрерывный следующий блок пакетов общей массы не больше C. Пакеты нельзя делить и переставлять. Верни минимальную long-вместимость C, при которой все пакеты уйдут не более чем за days дней. Вход сохранить. Пустому входу нужна вместимость 0, null вне условия.</p>
+    <pre class="io">weights = [7, 2, 5, 10, 8], days = 2 → 18
+weights = [5, 5, 5], days = 5 → 5
+weights = [2147483647, 2147483647], days = 1 → 4294967294</pre>
+    <p class="src"><a href="https://leetcode.com/problems/capacity-to-ship-packages-within-d-days/">LeetCode 1011 · medium · версия с пустым входом, нулями и ответом long</a></p>
+    <details><summary>Заготовка: ShipCapacity.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class ShipCapacity {
+    static long solve(int[] weights, int days) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+
+    static boolean canShip(int[] weights, int days, long capacity) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+
+    public static void main(String[] args) {
+        test(new int[]{7, 2, 5, 10, 8}, 2, 18);
+        test(new int[]{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 5, 15);
+        test(new int[]{3, 2, 2, 4, 1, 4}, 3, 6);
+        test(new int[]{1, 2, 3, 1, 1}, 4, 3);
+        test(new int[]{5, 5, 5}, 5, 5);
+        test(new int[0], 2, 0);
+        test(new int[]{0, 0}, 1, 0);
+        test(new int[]{Integer.MAX_VALUE, Integer.MAX_VALUE}, 1, 4294967294L);
+        test(new int[]{Integer.MAX_VALUE, Integer.MAX_VALUE}, 2, Integer.MAX_VALUE);
+        test(new int[]{1, Integer.MAX_VALUE}, 1, 2147483648L);
+    }
+
+    static void test(int[] input, int days, long want) {
+        int[] before = input.clone();
+        check(solve(input, days), want);
+        if (!Arrays.equals(input, before)) throw new AssertionError(&quot;input changed&quot;);
+    }
+
+    static void check(long got, long want) {
+        if (got != want) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Предикат «хватит ли C» монотонен: увеличение вместимости сохраняет допустимость. Минимум не меньше максимального веса и не больше общей суммы.</p></details>
+    <details><summary>Подсказка 2</summary><p>Проверка берёт максимально длинный очередной блок за день. Ищи первый true: при успехе right = middle, при неуспехе left = middle + 1. Границы и накопленная масса должны быть long.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Жадная проверка при выбранной вместимости не оставляет места, куда ещё поместился бы следующий пакет. Поэтому она использует минимальное число дней. Бинарный поиск выбирает первую вместимость, для которой это число не больше лимита; успешная середина остаётся возможным минимумом.</p>
+
+      <pre><code class="language-java">static long solve(int[] weights, int days) {
+    long left = 0, right = 0;
+    for (int weight : weights) {
+        left = Math.max(left, weight);
+        right += weight; // Верхняя граница допустима: всё уйдёт за один день.
+    }
+    while (left &lt; right) {
+        long middle = left + (right - left) / 2;
+        if (canShip(weights, days, middle)) right = middle; // Успешная середина ещё может быть минимумом.
+        else left = middle + 1;
+    }
+    return left;
+}
+
+static boolean canShip(int[] weights, int days, long capacity) {
+    int used = 1;
+    long load = 0;
+    for (int weight : weights) {
+        if (weight &gt; capacity) return false;
+        if (load + weight &gt; capacity) {
+            used++;
+            load = 0; // Следующий пакет начинает новый день, порядок сохраняется.
+            if (used &gt; days) return false;
+        }
+        load += weight;
+    }
+    return true;
+}
+</code></pre>
+      <pre class="out">OK 18
+OK 15
+OK 6
+OK 3
+OK 5
+OK 0
+OK 0
+OK 4294967294
+OK 2147483647
+OK 2147483648</pre>
+      <p>Начальный проход O(n); затем O(log(S − M + 1)) проверок по O(n), где S — сумма весов, M — максимум. Общее время O(n · (1 + log(S − M + 1))), память O(1). При пустом входе возвращаем 0 за постоянное время.</p>
+    </div>
+    <div data-level="senior"><p>Требуется «не больше days», поэтому лишние доступные дни не обязывают повышать или снижать вместимость. Сортировка пакетов решала бы другую задачу: порядок фиксирован. При отрицательных весах жадное разбиение и его доказательство перестают соответствовать этому условию.</p></div>
+  </details>
+</article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://cp-algorithms.com/num_methods/binary_search.html">CP-Algorithms: Binary Search</a> — основа урока: lower/upper bound, монотонный предикат, поиск по ответу и доказательство изменения границ.</li>
+      <li><a href="https://algs4.cs.princeton.edu/11model/BinarySearch.java.html">Sedgewick &amp; Wayne, Algorithms: BinarySearch</a> — обычный поиск по включённому диапазону и сохранение возможной позиции.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Arrays.html">JDK 21: Arrays.binarySearch</a> — отсортированный вход, отсутствие гарантии выбора копии, код вставки и диапазон from/to.</li>
+      <li><a href="https://leetcode.com/problems/find-first-and-last-position-of-element-in-sorted-array/">LeetCode 34: First and Last Position</a> — первая и последняя копия за O(log n), пустой вход и отсутствие цели.</li>
+      <li><a href="https://leetcode.com/problems/capacity-to-ship-packages-within-d-days/">LeetCode 1011: Capacity to Ship</a> — проверка вместимости с сохранением порядка, минимум за ограниченное число дней.</li>
+    </ul>
+  </div>
+</main>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
