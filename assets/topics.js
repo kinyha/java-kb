@@ -71,7 +71,7 @@ window.KB_TREE = [
           scope: 'разворот списка, fast и slow pointers, поиск цикла, слияние списков, dummy head' },
         { id: 'intervals', freq: 2, status: 'draft', title: 'Intervals',
           scope: 'слияние интервалов, пересечения, вставка интервала, meeting rooms' },
-        { id: 'tree-traversal', freq: 2, status: 'empty', title: 'Tree Traversal',
+        { id: 'tree-traversal', freq: 2, status: 'draft', title: 'Tree Traversal',
           scope: 'DFS рекурсивно и через стек, BFS по уровням, глубина, проверка BST, LCA' },
         { id: 'top-k', freq: 1, status: 'empty', title: 'Heap & Top-K',
           scope: 'top-K элементов, K-way merge, медиана потока, две кучи' },
