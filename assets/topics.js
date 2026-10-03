@@ -617,7 +617,7 @@ window.KB_TREE = [
           scope: 'OpenTelemetry, span и trace, передача контекста между сервисами, sampling' },
         { id: 'incidents', freq: 1, status: 'empty', title: 'Alerting & Incidents',
           scope: 'алерты по SLO, дежурства, разбор инцидента, postmortem' },
-        { id: 'performance', freq: 2, status: 'empty', title: 'Load Testing',
+        { id: 'performance', freq: 2, status: 'draft', title: 'Load Testing',
           scope: 'нагрузочное тестирование, JMeter, Gatling и k6, профили нагрузки, поиск узкого места' },
       ] },
     ],

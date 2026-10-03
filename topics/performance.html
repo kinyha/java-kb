@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Load Testing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="performance">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Load Testing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Нагрузочный тест отвечает на вопрос, сколько выдержит сервис и что с ним будет за пределом. Главное — модель нагрузки. В закрытой модели фиксированное число пользователей ждёт ответа перед следующим запросом, и когда сервис тормозит, нагрузка сама падает. В открытой модели запросы приходят с заданной частотой, как от реальных пользователей. Закрытая модель скрывает задержки: при одной и той же паузе сервиса в 2 секунды она показала p99 41 мс, открытая — 1 925 мс. Это coordinated omission — генератор нагрузки ждёт вместе с сервисом и не отправляет запросы, которые пострадали бы. Открытая модель с растущей частотой находит колено: до 300 запросов в секунду p99 — около 30 мс, на 380 — около секунды, а за пределом ёмкости пропускная способность падает.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Тест показал p99 40 мс, а на распродаже — секунды</h2>
+      <p>Перед распродажей команда прогнала нагрузочный тест: 200 виртуальных пользователей в цикле «запрос — ответ — следующий запрос», p99 — 40 мс, сервис готов. На распродаже p99 вырос до нескольких секунд, хотя запросов в секунду было примерно столько же, сколько в тесте. Тест мерил не то: когда сервис замедлялся, виртуальные пользователи тоже замедлялись и посылали меньше запросов, а реальные покупатели продолжали приходить.</p>
+      <p>Тема разбирает модели нагрузки, поиск колена и coordinated omission на настоящем генераторе k6 1.3 в Docker. Цель — <a href="../examples/performance/Service.java">Service.java</a>: 8 рабочих потоков по 20 мс на запрос, теоретически около 400 запросов в секунду, на деле около 355. Запросом <code>/stall</code> демо имитирует паузу сборки мусора: все обработчики стоят 2 секунды. Перегрузка подробно — в <a href="overload.html">Overload</a>, метрики — в <a href="metrics.html">Metrics</a>, оценка мощности — в <a href="sd-estimation.html">Back-of-the-envelope</a>.</p>
+    </section>
+
+    <section class="step" id="knee">
+      <h2>Открытая модель: найти колено</h2>
+<pre><code class="language-javascript">// Открытая модель: запросы приходят с заданной частотой независимо от ответов.
+export const options = {
+  scenarios: { open: { executor: 'constant-arrival-rate', rate: __ENV.RATE, timeUnit: '1s',
+    duration: '20s', preAllocatedVUs: 200, maxVUs: 2000 } },
+};
+export default function () { http.get('http://target:8601/pay'); }</code></pre>
+      <pre class="out">== open model: arrival rate vs latency (capacity ~400 req/s)
+   rate 200/s ->    200 req/s   p50     24 ms   p99     35 ms   dropped 0
+   rate 300/s ->    300 req/s   p50     23 ms   p99     31 ms   dropped 0
+   rate 380/s ->    355 req/s   p50    636 ms   p99    984 ms   dropped 154
+   rate 420/s ->    350 req/s   p50   1206 ms   p99   2289 ms   dropped 588
+   rate 500/s ->    187 req/s   p50   2175 ms   p99   4110 ms   dropped 1368</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="График p99 от частоты запросов: при 200 и 300 запросах в секунду около 30 миллисекунд, при 380 — около секунды, при 420 — 2,3 секунды, при 500 — 4,1 секунды; обработано при 500 только 187 запросов в секунду.">
+            <path d="M80 180 L 680 180" class="dg-line"/>
+            <path d="M80 180 L 80 30" class="dg-line"/>
+            <text x="70" y="184" class="dg-n" text-anchor="end">0</text>
+            <text x="70" y="104" class="dg-n" text-anchor="end">2 с</text>
+            <text x="70" y="34" class="dg-n" text-anchor="end">4 с</text>
+            <text x="200" y="200" class="dg-n" text-anchor="middle">200</text>
+            <text x="320" y="200" class="dg-n" text-anchor="middle">300</text>
+            <text x="416" y="200" class="dg-n" text-anchor="middle">380</text>
+            <text x="464" y="200" class="dg-n" text-anchor="middle">420</text>
+            <text x="560" y="200" class="dg-n" text-anchor="middle">500</text>
+            <text x="620" y="216" class="dg-n" text-anchor="middle">запросов в секунду</text>
+            <path data-s="1-" d="M200 179 L 320 179" class="dg-line ok" style="stroke-width:2.5"/>
+            <circle data-s="1-" cx="200" cy="179" r="4" class="dg-cell hit"/>
+            <circle data-s="1-" cx="320" cy="179" r="4" class="dg-cell hit"/>
+            <text data-s="1" x="260" y="165" class="dg-ok" text-anchor="middle">p99 ≈ 30 мс</text>
+            <path data-s="2" d="M320 179 L 416 141 L 464 94 L 560 26" class="dg-line bad" style="stroke-width:2.5"/>
+            <circle data-s="2" cx="416" cy="141" r="4" class="dg-cell miss"/>
+            <circle data-s="2" cx="464" cy="94" r="4" class="dg-cell miss"/>
+            <circle data-s="2" cx="560" cy="26" r="4" class="dg-cell miss"/>
+            <text data-s="2" x="420" y="134" class="dg-bad" text-anchor="end">984 мс</text>
+            <text data-s="2" x="468" y="88" class="dg-bad" text-anchor="end">2,3 с</text>
+            <text data-s="2" x="552" y="30" class="dg-bad" text-anchor="end">4,1 с, обработано 187/с</text>
+            <path data-s="2" d="M380 30 L 380 180" class="dg-sep"/>
+            <text data-s="2" x="376" y="46" class="dg-n" text-anchor="end">колено</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Пока частота ниже ёмкости, запрос почти не ждёт в очереди: p99 около 30 мс при 200 и 300 запросах в секунду.</li>
+          <li>Между 300 и 380 начинается колено: поток превышает реальную ёмкость (~355/с), очередь растёт всё время теста, и задержка — уже время ожидания в очереди. За пределом пропускная способность падает: при 500 обработано только 187 в секунду.</li>
+        </ol>
+      </figure>
+      <p>Рост частоты шагами даёт кривую «частота → задержка», и важна не точка, где сервис падает, а колено — где задержка начинает расти быстрее нагрузки. Рабочую мощность берут ниже колена с запасом: здесь не 355, а около 300 запросов в секунду на экземпляр, — по ней считают число экземпляров для пика. <code>dropped</code> — запросы, которые k6 не смог отправить вовремя: у него закончились виртуальные пользователи, занятые ожиданием ответов. Это тоже сигнал перегрузки.</p>
+      <p>Падение пропускной способности за пределом ёмкости объясняет <a href="overload.html">Overload</a>: очередь растёт, тысячи открытых соединений требуют ресурсов, и часть работы тратится впустую. Здесь к этому добавляется честная оговорка: генератор и сервис работали на одной машине и конкурировали за процессор, поэтому точки за коленом показывают характер, а не точные числа. Для настоящих тестов генератор запускают на отдельных машинах и проверяют, что сам он не упирается в CPU или сеть.</p>
+    </section>
+
+    <section class="step" id="co">
+      <h2>Coordinated omission: закрытая модель не видит паузу</h2>
+<pre><code class="language-javascript">// Закрытая модель: N виртуальных пользователей, каждый шлёт следующий запрос после ответа.
+export const options = { scenarios: { closed: { executor: 'constant-vus', vus: __ENV.VUS, duration: '20s' } } };</code></pre>
+      <pre class="out">== a 2 s stall at second 10: closed model (10 users) vs open model (200 req/s)
+   closed, 10 VUs   ->    211 req/s   p50     24 ms   p99     41 ms   dropped 0
+   open, 200 req/s  ->    195 req/s   p50     24 ms   p99   1925 ms   dropped 103</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Пауза сервиса 2 секунды. Закрытая модель: 10 пользователей отправили по одному запросу и ждут; за паузу записано только 10 медленных запросов из тысяч. Открытая модель: запросы продолжают приходить по 200 в секунду, около 400 запросов ждут и записываются с задержками до 2 секунд.">
+            <text x="20" y="22" class="dg-cap">ПАУЗА СЕРВИСА 2 С</text>
+            <rect x="240" y="34" width="240" height="140" rx="6" class="dg-cell miss"/>
+            <text x="360" y="52" class="dg-bad" text-anchor="middle">сервис стоит</text>
+            <g data-s="1">
+              <text x="20" y="96" class="dg-in">10 VU</text>
+              <rect x="100" y="84" width="140" height="18" rx="3" class="dg-cell hit"/>
+              <text x="170" y="98" class="dg-n" text-anchor="middle">~211 запр/с</text>
+              <rect x="240" y="84" width="240" height="18" rx="3" class="dg-cell"/>
+              <text x="360" y="98" class="dg-n" text-anchor="middle">10 запросов ждут, новых нет</text>
+              <rect x="480" y="84" width="200" height="18" rx="3" class="dg-cell hit"/>
+              <text x="20" y="200" class="dg-bad">10 медленных из ~4 200 — меньше 1 %: p99 = 41 мс</text>
+            </g>
+            <g data-s="2">
+              <text x="20" y="96" class="dg-in">200/с</text>
+              <rect x="100" y="84" width="140" height="18" rx="3" class="dg-cell hit"/>
+              <rect x="240" y="84" width="240" height="18" rx="3" class="dg-cell miss"/>
+              <text x="360" y="98" class="dg-bad" text-anchor="middle">~400 запросов ждут до 2 с</text>
+              <rect x="480" y="84" width="200" height="18" rx="3" class="dg-cell hit"/>
+              <text x="20" y="200" class="dg-bad">~10 % запросов задеты паузой: p99 = 1 925 мс</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Закрытая модель: каждый из 10 пользователей отправил запрос и ждёт ответа 2 секунды, не отправляя новых. За паузу записано 10 медленных измерений против тысяч быстрых — в p99 они не попадают. Реальные пользователи в эти 2 секунды продолжали бы приходить.</li>
+          <li>Открытая модель продолжает отправлять 200 запросов в секунду: около 400 запросов застают паузу и ждут до 2 секунд. Это 10 % всех запросов теста, и p99 честно показывает 1 925 мс.</li>
+        </ol>
+      </figure>
+      <p>Генератор закрытой модели «координируется» с сервисом: когда тот тормозит, генератор тоже замедляется и пропускает именно те измерения, которые были бы плохими. Отсюда название — coordinated omission (термин Гила Тене). Те же 2 секунды паузы у реального сервиса задели бы всех, кто пришёл в это время, и именно это видит открытая модель. Закрытая модель уместна для систем, где число клиентов действительно ограничено — пул воркеров, пакетная обработка, — но не для пользовательского трафика. В JMeter и Gatling та же разница: thread groups и <code>constantUsersPerSec</code>, а wrk2 и HdrHistogram корректируют пропущенные измерения.</p>
+    </section>
+
+    <section class="step" id="practice">
+      <h2>Профили нагрузки и поиск узкого места</h2>
+      <table class="mx">
+        <thead><tr><th>Профиль</th><th>Вопрос</th><th>Как</th></tr></thead>
+        <tbody>
+          <tr><td>Нагрузочный</td><td>Выдерживает ли ожидаемый пик?</td><td>Частота пика на 20–60 минут</td></tr>
+          <tr><td>Ступенчатый</td><td>Где колено?</td><td>Частота растёт ступенями до деградации</td></tr>
+          <tr><td>Стресс</td><td>Как ломается и как восстанавливается?</td><td>Выше ёмкости, затем снижение</td></tr>
+          <tr><td>Всплеск</td><td>Переживает ли резкий скачок?</td><td>Мгновенно ×5, автоскейлинг, очереди</td></tr>
+          <tr><td>Длительный (soak)</td><td>Есть ли утечки и деградация со временем?</td><td>Обычная нагрузка на часы</td></tr>
+        </tbody>
+      </table>
+      <p>Тест имеет смысл только с наблюдением за сервисом: во время прогона смотрят насыщение ресурсов — загрузку CPU, очереди пулов потоков и соединений, паузы GC, ожидание блокировок в базе. Узкое место — первый ресурс, который заполнился; здесь это пул из 8 потоков, и добавление потоков сдвинуло бы колено, пока не упрёмся в следующее — базу или сеть. Для Java полезны профилировщики под нагрузкой — async-profiler, JFR: они показывают, где тратится время, а не только что его не хватает, как в <a href="jvm-diagnostics.html">Diagnostics</a>.</p>
+      <p>Условия теста должны быть похожи на продакшен: прогретая JVM (первые минуты — интерпретатор и JIT, результаты выбрасывают), реалистичные данные и их объём в базе, смесь запросов как в логах доступа, те же лимиты контейнера. Тест на пустой базе с одним эндпоинтом измеряет что-то, но не сервис.</p>
+      <div class="trap">
+        <p class="myth">Если 200 виртуальных пользователей получили p99 40 мс, сервис выдержит такую же нагрузку от реальных пользователей.</p>
+        <p class="fact">Виртуальные пользователи закрытой модели замедляются вместе с сервисом и не отправляют запросы, которые пострадали бы. В демо пауза в 2 секунды в закрытой модели дала p99 41 мс, в открытой — 1 925 мс. Пользовательский трафик моделируют частотой прихода запросов.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Открытая модель — частота прихода запросов; закрытая — фиксированное число клиентов, ждущих ответа.</li>
+        <li>Колено между 300 и 380 запросами в секунду: p99 с 31 мс до 984 мс; рабочая мощность — ниже колена с запасом.</li>
+        <li>За пределом ёмкости пропускная способность падает: 187 вместо 355 в секунду при 500 входящих.</li>
+        <li>Coordinated omission: пауза 2 с — p99 41 мс в закрытой модели и 1 925 мс в открытой.</li>
+        <li>Тест — с наблюдением за насыщением, прогретой JVM, реалистичными данными и генератором на отдельной машине.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="pf-model" data-freq="2">
+      <h3>Чем открытая модель нагрузки отличается от закрытой?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В закрытой модели фиксированное число пользователей шлёт следующий запрос после ответа: если сервис тормозит, нагрузка падает. В открытой запросы приходят с заданной частотой независимо от ответов, как от реальных пользователей, и очередь при перегрузке растёт. Для пользовательского трафика нужна открытая модель, иначе тест занижает задержки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Coordinated omission: в демо p99 41 мс против 1 925 мс при одной паузе.</li>
+            <li>k6 constant-arrival-rate, Gatling constantUsersPerSec, wrk2.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pf-how" data-freq="2">
+      <h3>Как провести нагрузочный тест и найти узкое место?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Определить цель (пик запросов, SLO по задержке), смесь запросов и данные. Поднимать частоту ступенями в открытой модели и смотреть на задержку, ошибки и насыщение ресурсов. Колено — где задержка растёт быстрее нагрузки; узкое место — ресурс, который заполнился первым: пул потоков, соединения с базой, CPU, GC. Исправить и повторить.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Генератор на отдельных машинах, проверка, что он не упёрся сам.</li>
+            <li>Прогрев JVM, реалистичный объём данных, лимиты контейнера как в продакшене.</li>
+            <li>Профилировщик под нагрузкой — async-profiler, JFR.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим тестом?</summary>
+          <pre><code class="language-javascript">export const options = { vus: 50, duration: '2m' };
+export default function () {
+  http.get('https://staging/api/payments/1');      // один и тот же платёж
+  sleep(1);
+}
+// вывод: сервис держит 50 запросов в секунду с p99 80 мс — запаса хватит</code></pre>
+          <p>Закрытая модель: при замедлении сервиса нагрузка сама падает, и p99 занижен. Один и тот же платёж — всё в кеше, база не нагружена. Две минуты без прогрева — результат смешан с работой интерпретатора. «Держит 50» не измерено: 50 пользователей с паузой в секунду дают не больше 50 запросов в секунду, предел не искали. Нужно: открытая модель со ступенями частоты, разные данные, прогрев, наблюдение за ресурсами.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pf-capacity" data-freq="2">
+      <h3>Как по результатам теста определить, сколько нужно экземпляров?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Найти рабочую частоту на экземпляр ниже колена с запасом, при которой выполняется SLO по задержке, — здесь около 300 запросов в секунду при колене около 355. Число экземпляров — пиковая нагрузка, делённая на эту частоту, плюс запас на отказ экземпляра или зоны и на рост.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Масштабирование нелинейно: общие ресурсы (база, кеш) могут стать узким местом раньше.</li>
+            <li>Проверять горизонтальное масштабирование тестом на нескольких экземплярах.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://grafana.com/docs/k6/latest/using-k6/scenarios/concepts/open-vs-closed/">k6: Open and closed models</a>, <a href="https://grafana.com/docs/k6/latest/using-k6/scenarios/executors/constant-arrival-rate/">constant-arrival-rate</a>.</li>
+      <li>Gil Tene, «How NOT to Measure Latency» — coordinated omission.</li>
+      <li>Brendan Gregg, «Systems Performance» — USE и поиск узкого места.</li>
+      <li><a href="https://github.com/giltene/wrk2">wrk2</a> — генератор с постоянной частотой.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
