@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Java in Kubernetes · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="k8s-java">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Java in Kubernetes</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Java-сервису в Kubernetes нужны три настройки, без которых он работает хуже, чем на виртуальной машине. Память: лимит контейнера покрывает весь процесс, а не только heap, — при <code>MaxRAMPercentage=100</code> ядро убило под (OOMKilled, код 137) без единой строки об ошибке, при 75 % JVM сама бросила <code>OutOfMemoryError</code>. Пробы: readiness решает, получает ли под трафик, liveness — перезапускать ли его; liveness, зависящая от базы, в демо перезапустила все поды 2–3 раза за 30 секунд недоступности базы и ничего не исправила. Остановка: при выкатке под получает SIGTERM одновременно с удалением из Service, и без паузы <code>preStop</code> клиенты получили 7 ошибок, с паузой — одну.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Поды падают с OOMKilled, перезапускаются при сбое базы и роняют запросы при каждом деплое</h2>
+      <p>Платёжный сервис перенесли в Kubernetes: лимит памяти 1 ГБ, <code>-Xmx1g</code>, liveness-проба — тот же <code>/actuator/health</code>, что проверяет базу. Под нагрузкой поды убиваются с OOMKilled без следов в логах. Когда база на минуту ушла на переключение, Kubernetes начал перезапускать все поды сервиса, и после возвращения базы сервис ещё пять минут прогревался. А при каждом деплое мониторинг показывает всплеск 502.</p>
+      <p>Тема разбирает ресурсы, пробы и корректную остановку на кластере k3s 1.34 в Docker. Демо <a href="../examples/k8s-java/k8s-java.sh">k8s-java.sh</a> запускает мини-сервис <a href="../examples/k8s-java/App.java">App.java</a> с эндпоинтами <code>/</code>, <code>/live</code> и <code>/ready</code>, который считает себя готовым, если отвечает «база» — отдельный сервис <code>db</code>. Объекты Kubernetes — в <a href="kubernetes.html">Kubernetes Basics</a>, JVM в контейнере — в <a href="docker.html">Docker</a>, стратегии выкатки — в <a href="deploy-strategies.html">Deployment Strategies</a>.</p>
+    </section>
+
+    <section class="step" id="memory">
+      <h2>Лимит памяти — на весь процесс, а не на heap</h2>
+<pre><code class="language-yaml">resources:
+  requests: { memory: 256Mi, cpu: 100m }   # для планировщика: сколько зарезервировать на узле
+  limits:   { memory: 256Mi }               # потолок: превышение — OOMKilled
+env:
+  - { name: JAVA_TOOL_OPTIONS, value: "-XX:MaxRAMPercentage=75" }</code></pre>
+      <pre class="out">== memory: limit 256Mi, the app fills 300 MB of heap
+   MaxRAMPercentage=100:        maxHeap=247MB, terminated: OOMKilled, exit 137, last log: allocated 200MB
+   MaxRAMPercentage=75:         maxHeap=185MB, terminated: Error, exit 1, last log: Exception in thread "main" java.lang.OutOfMemoryError: Java </pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 190" role="img" aria-label="Лимит контейнера 256 мегабайт. При MaxRAMPercentage 100 heap до 247 мегабайт плюс не-heap-память превышают лимит, и ядро убивает процесс. При 75 процентах heap 185 мегабайт, не-heap помещается, и при нехватке heap JVM бросает OutOfMemoryError.">
+            <text x="20" y="22" class="dg-cap">ЛИМИТ КОНТЕЙНЕРА 256 МБ</text>
+            <path d="M600 34 L 600 100" class="dg-line bad" style="stroke-width:2"/>
+            <text x="606" y="46" class="dg-bad">limit</text>
+            <rect data-s="1" x="20" y="60" width="568" height="34" rx="5" class="dg-cell hit"/>
+            <text data-s="1" x="300" y="82" class="dg-in" text-anchor="middle">heap до 247 МБ</text>
+            <rect data-s="1" x="588" y="60" width="110" height="34" rx="5" class="dg-cell miss"/>
+            <text data-s="1" x="643" y="82" class="dg-bad" text-anchor="middle">не-heap</text>
+            <text data-s="1" x="20" y="124" class="dg-bad">heap + метаспейс + стеки + JIT &gt; лимита: ядро убивает процесс — OOMKilled, код 137</text>
+            <rect data-s="2" x="20" y="60" width="425" height="34" rx="5" class="dg-cell hit"/>
+            <text data-s="2" x="232" y="82" class="dg-in" text-anchor="middle">heap до 185 МБ</text>
+            <rect data-s="2" x="445" y="60" width="110" height="34" rx="5" class="dg-cell"/>
+            <text data-s="2" x="500" y="82" class="dg-in" text-anchor="middle">не-heap</text>
+            <text data-s="2" x="20" y="124" class="dg-ok">heap кончился раньше лимита: JVM бросает OutOfMemoryError — видно в логе</text>
+            <text x="20" y="176" class="dg-s">Ширина пропорциональна памяти; не-heap здесь показан условно.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>При 100 % heap может вырасти до 247 МБ, а метаспейс, стеки потоков, код JIT и буферы — сверху. Процесс превышает 256 МБ, и ядро убивает его: в статусе OOMKilled, последняя строка лога — «allocated 200MB», никакого исключения.</li>
+          <li>При 75 % heap ограничен 185 МБ. Не-heap помещается в остаток, и при нехватке heap JVM бросает <code>OutOfMemoryError</code>: видно в логе, можно включить heap dump при ошибке и разобрать причину.</li>
+        </ol>
+      </figure>
+      <p>Requests — что планировщик резервирует на узле, limits — потолок. Для памяти обычно ставят requests равным limits: под не будет вытеснен из-за того, что узел переполнен соседями, и поведение предсказуемо. Лимит CPU для JVM спорен: при превышении процесс не убивают, а притормаживают (throttling), и паузы сборки мусора или прогрев JIT растягиваются; многие ставят только request по CPU. Число CPU, которое видит JVM, определяется лимитом, а при его отсутствии — числом ядер узла, поэтому пулы потоков и GC иногда настраивают явно (<code>-XX:ActiveProcessorCount</code>).</p>
+    </section>
+
+    <section class="step" id="probes">
+      <h2>Readiness выводит из трафика, liveness перезапускает</h2>
+<pre><code class="language-yaml">readinessProbe: { httpGet: { path: /ready, port: 8080 }, periodSeconds: 2, failureThreshold: 1 }
+livenessProbe:  { httpGet: { path: /live,  port: 8080 }, periodSeconds: 2, failureThreshold: 3 }</code></pre>
+      <pre class="out">== the database is down for 30 s (db scaled to 0)
+   liveness on /live:  ready endpoints during outage: 0, restarts: 0 0 0
+   liveness on /ready: ready endpoints during outage: 0, restarts: 3 2 2 </pre>
+      <p>База недоступна 30 секунд. В обоих вариантах readiness-проба провалилась, и все три пода вышли из endpoints Service — запросы к сервису получают быстрый отказ, а не зависание. Разница в liveness. Если liveness проверяет только, что процесс жив и отвечает (<code>/live</code>), поды переживают сбой без перезапусков и сразу возвращаются в трафик, когда база ожила. Если liveness проверяет базу, Kubernetes каждые 6 секунд считает поды мёртвыми и перезапускает их — 2–3 перезапуска за полминуты. Перезапуск не чинит базу, зато сбрасывает кеши, пулы и прогретый JIT, а при длительном сбое под уходит в CrashLoopBackOff с растущими паузами и возвращается позже, чем база.</p>
+      <p>Правило: liveness проверяет только то, что исправит перезапуск, — процесс завис, deadlock, исчерпан пул потоков самого сервиса. Внешние зависимости — только в readiness, и то осторожно: если все поды одновременно станут неготовы из-за общей зависимости, сервис отдаёт 503 сразу, что лучше зависаний, но не всегда желательно. В Spring Boot Actuator для этого есть группы <code>/actuator/health/liveness</code> и <code>/actuator/health/readiness</code>. Startup probe защищает медленный старт: пока она не прошла, liveness не проверяется, и долго стартующий сервис не убивают в цикле.</p>
+    </section>
+
+    <section class="step" id="shutdown">
+      <h2>Остановка при выкатке: SIGTERM приходит раньше, чем под уходит из Service</h2>
+<pre><code class="language-yaml">spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: app
+      lifecycle:
+        preStop: { exec: { command: ["sleep", "5"] } }   # дать кластеру убрать под из endpoints</code></pre>
+      <pre class="out">== two rollout restarts under load (client: request every 50 ms, timeout 1 s)
+   preStop none:  requests 882, failed 7
+   preStop sleep: requests 917, failed 1</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Удаление пода запускает две параллельные цепочки: kubelet посылает SIGTERM процессу, а контроллер endpoints и kube-proxy убирают под из маршрутизации. Без preStop процесс закрывает порт раньше, чем трафик перестал приходить, и запросы падают. С preStop sleep процесс продолжает обслуживать запросы, пока маршрутизация обновляется, и лишь потом получает SIGTERM.">
+            <text x="20" y="22" class="dg-cap">УДАЛЕНИЕ ПОДА ПРИ ВЫКАТКЕ, ВРЕМЯ →</text>
+            <text x="20" y="62" class="dg-in">kubelet</text>
+            <text x="20" y="112" class="dg-in">маршрутизация</text>
+            <rect x="170" y="94" width="200" height="28" rx="4" class="dg-cell"/>
+            <text x="270" y="113" class="dg-n" text-anchor="middle">под ещё в endpoints</text>
+            <rect x="370" y="94" width="330" height="28" rx="4" class="dg-cell hit"/>
+            <text x="535" y="113" class="dg-n" text-anchor="middle">трафик на под не идёт</text>
+            <rect data-s="1" x="170" y="44" width="40" height="28" rx="4" class="dg-cell miss"/>
+            <text data-s="1" x="190" y="63" class="dg-bad" text-anchor="middle">TERM</text>
+            <rect data-s="1" x="210" y="44" width="160" height="28" rx="4" class="dg-cell miss"/>
+            <text data-s="1" x="290" y="63" class="dg-bad" text-anchor="middle">порт закрыт</text>
+            <text data-s="1" x="20" y="160" class="dg-bad">Запросы, пришедшие в окне между SIGTERM и обновлением маршрутов, падают: 7 из 882.</text>
+            <rect data-s="2" x="170" y="44" width="250" height="28" rx="4" class="dg-cell hit"/>
+            <text data-s="2" x="295" y="63" class="dg-ok" text-anchor="middle">preStop: sleep 5, обслуживает</text>
+            <rect data-s="2" x="420" y="44" width="40" height="28" rx="4" class="dg-cell miss"/>
+            <text data-s="2" x="440" y="63" class="dg-bad" text-anchor="middle">TERM</text>
+            <text data-s="2" x="20" y="160" class="dg-ok">Пока маршруты обновляются, под работает; SIGTERM — когда трафик уже не идёт: 1 из 917.</text>
+            <path d="M170 34 L 170 130" class="dg-sep"/>
+            <text x="170" y="146" class="dg-n" text-anchor="middle">удаление пода</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Удаление пода запускает две независимые цепочки одновременно: kubelet посылает SIGTERM процессу, а контроллер endpoints и kube-proxy на каждом узле убирают под из маршрутизации. Если процесс сразу закрывает порт, запросы, уже направленные к нему, получают отказ.</li>
+          <li><code>preStop</code> выполняется до SIGTERM: пауза в 5 секунд даёт маршрутизации обновиться, а под всё это время продолжает отвечать. Затем приходит SIGTERM, сервис дорабатывает начатые запросы и выходит.</li>
+        </ol>
+      </figure>
+      <p>Демо делает две выкатки под непрерывной нагрузкой: без <code>preStop</code> — 7 неудачных запросов из 882, с паузой — 1 из 917. На одном узле k3s маршруты обновляются быстро; в больших кластерах kube-proxy на десятках узлов обновляет правила с задержкой в секунды, и разница больше. Оставшуюся ошибку дают крайние случаи — соединение, установленное в момент закрытия. Для полной картины нужны все части: <code>preStop</code>-пауза, обработка SIGTERM в приложении (<code>server.shutdown=graceful</code> в Spring Boot — по умолчанию с 3.4), <code>terminationGracePeriodSeconds</code> больше суммы паузы и времени дообработки, стратегия <code>maxUnavailable: 0</code>, чтобы новые поды стали готовы до удаления старых, и java как PID 1, как в <a href="docker.html">Docker</a>. В Kubernetes 1.30+ вместо <code>exec sleep</code> можно использовать встроенное действие <code>preStop: sleep</code>, которому не нужен бинарник sleep в образе.</p>
+      <p>Горизонтальное масштабирование (HPA) добавляет поды по CPU или собственным метрикам. Для JVM у этого две особенности: новый под стартует медленнее и первые минуты работает на непрогретом JIT, поэтому масштабируются заранее или с запасом; а метрика CPU в момент прогрева завышена, что вызывает лишнее масштабирование — его гасят окном стабилизации <code>behavior.scaleUp</code>.</p>
+      <div class="trap">
+        <p class="myth">Liveness-проба должна проверять всё, от чего зависит сервис, — базу, брокер, внешние API.</p>
+        <p class="fact">Liveness перезапускает под, а перезапуск не чинит базу. В демо liveness на проверку базы перезапустила все три пода 2–3 раза за 30 секунд сбоя. Зависимости проверяют в readiness, которая только убирает под из трафика: так поды пережили сбой без перезапусков.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Лимит памяти — на весь процесс: при MaxRAMPercentage=100 — OOMKilled без следов, при 75 — OutOfMemoryError в логе.</li>
+        <li>Requests памяти = limits; лимит CPU даёт throttling, число CPU для JVM — от лимита.</li>
+        <li>Readiness — получать ли трафик; liveness — только то, что лечит перезапуск: liveness на базу дала 2–3 перезапуска за 30 с.</li>
+        <li>Startup probe для медленного старта; группы health в Actuator.</li>
+        <li>preStop-пауза + graceful shutdown + maxUnavailable 0: ошибок при выкатке 7 → 1.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="kj-probes" data-freq="3">
+      <h3>Чем liveness отличается от readiness и startup probe?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Readiness — готов ли под принимать трафик: провал убирает его из endpoints Service. Liveness — жив ли процесс: провал перезапускает контейнер. Startup — закончился ли старт: пока она не прошла, liveness не проверяется. Liveness проверяет только то, что исправит перезапуск; внешние зависимости — в readiness.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Liveness на базу при её сбое перезапускает все поды: в демо 2–3 перезапуска за 30 с, потом CrashLoopBackOff.</li>
+            <li>Actuator: группы liveness и readiness.</li>
+            <li>Тайм-ауты проб — меньше пауз GC, иначе ложные перезапуски.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этими пробами?</summary>
+          <pre><code class="language-yaml">livenessProbe:
+  httpGet: { path: /actuator/health, port: 8080 }   # включает db, redis, kafka
+  initialDelaySeconds: 10
+  timeoutSeconds: 1
+  failureThreshold: 1
+# приложение стартует 40-60 секунд</code></pre>
+          <p>Liveness на общий health включает внешние зависимости: сбой Redis или базы перезапустит все поды. Старт 40–60 секунд при начальной задержке 10 и одном провале — под убьют до старта, и он уйдёт в CrashLoopBackOff. Тайм-аут 1 секунда с порогом 1 — одна долгая пауза GC перезапускает под. Нужно: liveness на <code>/actuator/health/liveness</code>, startup probe с бюджетом на старт, порог 3 и тайм-аут больше типичных пауз, зависимости — в readiness.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="kj-memory" data-freq="3">
+      <h3>Как настроить память JVM в Kubernetes?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Лимит контейнера покрывает весь процесс: heap, метаспейс, стеки, JIT, прямые буферы. Heap задают долей от лимита — <code>-XX:MaxRAMPercentage</code> около 70–75 %, а не жёстким <code>-Xmx</code>, не связанным с лимитом. Requests памяти равны limits. При превышении лимита ядро убивает процесс (OOMKilled), а при нехватке heap JVM бросает OutOfMemoryError.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Native Memory Tracking показывает не-heap; потоки и прямые буферы — частые причины роста.</li>
+            <li>HeapDumpOnOutOfMemoryError в том, который переживёт перезапуск.</li>
+            <li>Лимит CPU — throttling; ActiveProcessorCount при необходимости.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="kj-shutdown" data-freq="2">
+      <h3>Почему при деплое бывают ошибки и как сделать выкатку без потерь?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>При удалении пода SIGTERM и удаление из маршрутизации происходят параллельно; если приложение сразу закрывает порт, запросы, уже направленные к нему, падают. Нужны preStop-пауза на несколько секунд, graceful shutdown в приложении, terminationGracePeriodSeconds с запасом, maxUnavailable 0 и readiness-проба, чтобы новые поды получали трафик только готовыми.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В демо: 7 ошибок без preStop, 1 с паузой.</li>
+            <li>java как PID 1, иначе SIGTERM не дойдёт до приложения.</li>
+            <li>Долгие соединения и потребители Kafka тоже завершать корректно.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/">Kubernetes: Liveness, Readiness and Startup Probes</a>.</li>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination">Kubernetes: Termination of Pods</a> — preStop и SIGTERM.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/actuator/endpoints.html#actuator.endpoints.kubernetes-probes">Spring Boot: Kubernetes probes</a>, <a href="https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html">Graceful shutdown</a>.</li>
+      <li><a href="https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/">Kubernetes: Resource Management for Pods and Containers</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
