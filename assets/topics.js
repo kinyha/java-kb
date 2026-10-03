@@ -587,7 +587,7 @@ window.KB_TREE = [
     source: 'roadmap.sh/devops, Kubernetes Documentation: Concepts, Google SRE Book, OpenTelemetry Documentation',
     items: [
       { id: 'flow', title: 'Workflow', items: [
-        { id: 'git', freq: 2, status: 'empty', title: 'Git',
+        { id: 'git', freq: 2, status: 'draft', title: 'Git',
           scope: 'ветки, merge и rebase, конфликты, cherry-pick, git flow и trunk-based' },
         { id: 'code-review', freq: 2, status: 'empty', title: 'Code Review',
           scope: 'что смотреть, как писать комментарии, размер PR' },

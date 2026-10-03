@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Git · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="git">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Git</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Git хранит историю как граф неизменяемых коммитов, а ветка — лишь указатель на коммит. Отсюда всё остальное. Merge соединяет две линии новым коммитом с двумя родителями и ничего не переписывает. Rebase заново создаёт коммиты ветки поверх другой — с новыми хешами, поэтому его делают только с ещё не опубликованными коммитами. Revert отменяет коммит новым коммитом и безопасен для общей ветки, а reset передвигает указатель и для общей ветки опасен. «Потерянный» после reset коммит не исчезает сразу: reflog помнит, куда указывал HEAD. Bisect находит коммит с регрессией двоичным поиском: среди 32 коммитов — за 5 запусков теста.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>После rebase общей ветки у коллег «пропали» коммиты</h2>
+      <p>Разработчик сделал <code>git rebase main</code> на ветке, где уже работали двое, и <code>git push --force</code>. У коллег локальные копии указывают на старые коммиты, которых в удалённой ветке больше нет; следующий push одного из них возвращает старые коммиты рядом с новыми, и история раздваивается. Другой разработчик, пытаясь откатить неудачный коммит в main, сделал <code>reset --hard</code> и force push — и удалил заодно два чужих коммита. Обе ошибки — от непонимания того, что git хранит и что переписывает.</p>
+      <p>Тема разбирает операции на демо <a href="../examples/git/git.sh">git.sh</a>, которое создаёт временный репозиторий и выполняет каждую операцию; даты коммитов зафиксированы, поэтому хеши в выводе повторяются при каждом запуске. Ревью изменений — в <a href="code-review.html">Code Review</a>, проверки перед слиянием — в <a href="cicd.html">CI/CD</a>.</p>
+    </section>
+
+    <section class="step" id="model">
+      <h2>Коммит — снимок дерева со ссылками на родителей</h2>
+      <pre class="out">== what a commit is: git cat-file -p M
+   tree 02eeaa03e6bc537b3e4e04451fdaf0940db7c014
+   parent ad2636f530a25eb7dfee6b3ec1ceed60c319e5ac
+   parent 317e1b1efe115ec023dc88bd734c44ac3104b77b
+   author dev
+   M: merge feature
+   tree of M: cashback.txt currency.txt fee.txt limit.txt
+   branch file: .git/refs/heads/m -&gt; 3c406aa, HEAD -&gt; ref: refs/heads/m</pre>
+      <p>Коммит M — небольшой текстовый объект: ссылка на дерево (полный снимок всех файлов проекта, а не разница с предыдущим), ссылки на родителей, автор, время и сообщение. У merge-коммита два родителя, у обычного — один, у первого — ни одного. Имя каждого объекта — хеш его содержимого: поменяйте хоть родителя, хоть время, и получится другой объект с другим именем. Поэтому история неизменяема: «изменить» коммит можно, только создав новый.</p>
+      <p>Ветка — файл с хешем одного коммита (<code>.git/refs/heads/m</code>), а HEAD — указатель на текущую ветку. Новый коммит просто передвигает указатель ветки вперёд. Отсюда видно, что делают команды: merge добавляет коммит с двумя родителями, rebase создаёт новые коммиты и переставляет указатель, reset переставляет указатель назад, а сами объекты коммитов остаются в хранилище, пока сборка мусора не удалит недостижимые. Detached HEAD — состояние, когда HEAD указывает на коммит, а не на ветку: новые коммиты в нём ни к какой ветке не привязаны и найдутся только через reflog.</p>
+    </section>
+
+    <section class="step" id="merge-rebase">
+      <h2>Merge соединяет историю, rebase переписывает её</h2>
+      <pre class="out">== merge: history keeps both lines and a merge commit
+   *   M: merge feature
+   |\
+   | * F2: cashback 3%
+   | * F1: cashback
+   * | C: currency
+   |/
+   * B: limit
+   * A: fee 1%
+== rebase: feature commits are re-created on top of main
+   * F2: cashback 3%
+   * F1: cashback
+   * C: currency
+   F1 before rebase 17f8b78, after 8d84bcb: new commits, new hashes</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="От коммита B идут две линии: main с коммитом C и feature с коммитами F1 и F2. Merge добавляет коммит M с двумя родителями. Rebase создаёт новые коммиты F1 штрих и F2 штрих поверх C; старые F1 и F2 остаются, но на них больше не указывает ветка.">
+            <defs><marker id="gt-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <circle cx="60" cy="100" r="18" class="dg-cell"/><text x="60" y="105" class="dg-in" text-anchor="middle">B</text>
+            <circle cx="180" cy="60" r="18" class="dg-cell"/><text x="180" y="65" class="dg-in" text-anchor="middle">C</text>
+            <circle cx="180" cy="150" r="18" class="dg-cell"/><text x="180" y="155" class="dg-in" text-anchor="middle">F1</text>
+            <circle cx="300" cy="150" r="18" class="dg-cell"/><text x="300" y="155" class="dg-in" text-anchor="middle">F2</text>
+            <path d="M162 66 L 78 94" class="dg-line" marker-end="url(#gt-a)"/>
+            <path d="M162 144 L 78 106" class="dg-line" marker-end="url(#gt-a)"/>
+            <path d="M282 150 L 198 150" class="dg-line" marker-end="url(#gt-a)"/>
+            <text x="200" y="40" class="dg-n">main</text>
+            <text data-s="1" x="290" y="185" class="dg-n">feature</text>
+            <g data-s="2">
+              <circle cx="420" cy="100" r="20" class="dg-cell hit"/><text x="420" y="105" class="dg-ok" text-anchor="middle">M</text>
+              <path d="M400 92 L 198 62" class="dg-line ok" marker-end="url(#gt-a)"/>
+              <path d="M400 108 L 318 146" class="dg-line ok" marker-end="url(#gt-a)"/>
+              <text x="450" y="104" class="dg-ok">два родителя</text>
+              <text x="450" y="122" class="dg-n">старые коммиты не тронуты</text>
+            </g>
+            <g data-s="3">
+              <circle cx="300" cy="60" r="18" class="dg-cell hit"/><text x="300" y="65" class="dg-ok" text-anchor="middle">F1'</text>
+              <circle cx="420" cy="60" r="18" class="dg-cell hit"/><text x="420" y="65" class="dg-ok" text-anchor="middle">F2'</text>
+              <path d="M282 60 L 198 60" class="dg-line ok" marker-end="url(#gt-a)"/>
+              <path d="M402 60 L 318 60" class="dg-line ok" marker-end="url(#gt-a)"/>
+              <text x="450" y="64" class="dg-ok">feature после rebase</text>
+              <text x="330" y="190" class="dg-bad">старые F1, F2 без ветки — у коллег они остались</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>От коммита B разошлись две линии: main получил C, feature — F1 и F2. Стрелки показывают на родителя: каждый коммит хранит ссылку на предыдущий.</li>
+          <li>Merge создаёт коммит M с двумя родителями. Ни один существующий коммит не меняется, хеши те же; история честно показывает, что работа шла параллельно.</li>
+          <li>Rebase берёт изменения F1 и F2 и создаёт новые коммиты F1' и F2' поверх C. У них другой родитель, значит, другой хеш: 17f8b78 стал 8d84bcb. Ветка теперь указывает на F2', а старые коммиты остались без ветки — но у всех, кто их уже скачал, они есть.</li>
+        </ol>
+      </figure>
+      <p>Хеш коммита считается от содержимого, родителя, автора и времени, поэтому любое изменение истории порождает новые коммиты. Rebase делает историю линейной и удобной для чтения, но переписывает её; правило — переписывать только то, что ещё не опубликовано, или свою личную ветку, о которой знают, что её переписывают. Для общей ветки после rebase нужен <code>git push --force-with-lease</code>, который откажет, если на сервере появились чужие коммиты, — в отличие от <code>--force</code>, который их просто удалит. Многие команды делают rebase своей ветки на main перед слиянием, а сливают через squash или merge — это выбор стиля истории, а не правильности.</p>
+    </section>
+
+    <section class="step" id="conflict">
+      <h2>Конфликт: git не выбирает за вас</h2>
+      <pre class="out">== conflict: both branches change the same line
+   git status: UU fee.txt
+   &lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD
+   fee = 1.5%
+   =======
+   fee = 2%
+   &gt;&gt;&gt;&gt;&gt;&gt;&gt; fee-2
+   resolved: fee = 2%</pre>
+      <p>Обе ветки изменили одну строку от общего предка: main поставил 1,5 %, ветка fee-2 — 2 %. Git сливает изменения построчно и при пересечении останавливается: файл помечен <code>UU</code> (изменён обеими сторонами), внутри маркеры с обеими версиями. Решение — отредактировать файл, <code>git add</code> и завершить слияние коммитом. Конфликт — это сигнал, что два человека меняли одно и то же решение, и выбирает человек, а не инструмент. Конфликтов меньше, когда ветки живут недолго и сливаются часто: через день конфликт в одной строке, через месяц — в половине файлов.</p>
+    </section>
+
+    <section class="step" id="undo">
+      <h2>Отменить: revert для общей истории, reset для своей, reflog — если ошиблись</h2>
+      <pre class="out">== cherry-pick a fix and revert a bad commit
+   release got: H: hotfix limit 500, limit = 500
+   main after revert: Revert "H: hotfix limit 500", limit = 1000
+== reset --hard loses a commit; reflog finds it
+   after reset: important.txt exists: no
+   reflog: f3df300 found again, important.txt exists: yes</pre>
+      <p>Cherry-pick переносит изменения одного коммита на другую ветку новым коммитом — так хотфикс из main попадает в уже отделившуюся релизную ветку. Revert отменяет коммит новым коммитом с обратными изменениями: история только растёт, и это безопасно для общей ветки, которую уже скачали другие. Reset передвигает указатель ветки назад: коммиты после него исчезают из ветки, и для опубликованной истории это то же переписывание, что и rebase.</p>
+      <p><code>reset --hard</code> убрал коммит I вместе с файлом, но коммит не удалён: reflog хранит, куда указывал HEAD при каждом действии, по умолчанию 90 дней для достижимых записей и 30 дней для недостижимых. Демо нашло потерянный коммит в reflog и вернуло на него ветку. Безвозвратно теряются только незакоммиченные изменения — поэтому перед рискованной операцией лучше закоммитить или сделать <code>git stash</code>.</p>
+    </section>
+
+    <section class="step" id="bisect">
+      <h2>Bisect: двоичный поиск коммита с регрессией</h2>
+<pre><code class="language-sh">git bisect start HEAD HEAD~32                    # плохой коммит, хороший коммит
+git bisect run sh -c '[ "$(grep latency perf.txt | cut -d= -f2)" -lt 50 ]'   # 0 — хорошо, 1 — плохо</code></pre>
+      <pre class="out">== bisect: find the commit that broke the test among 32
+   first bad: P23, test runs: 5</pre>
+      <p>Задержка выросла где-то в последних 32 коммитах. Bisect берёт коммит посередине, запускает проверку и отбрасывает половину диапазона: log₂ 32 = 5 запусков нашли P23. Проверка — любая команда с кодом выхода: тест, бенчмарк, сборка. Для тысячи коммитов хватит 10 запусков. Работает хорошо, если каждый коммит собирается и проходит тесты, — ещё одна причина делать небольшие осмысленные коммиты, а не «wip».</p>
+      <table class="mx">
+        <thead><tr><th>Модель ветвления</th><th>Как живут ветки</th><th>Когда</th></tr></thead>
+        <tbody>
+          <tr><td>Trunk-based</td><td>Короткие ветки на часы–дни, слияние в main ежедневно, незаконченное — за feature flag</td><td>Непрерывная поставка, сервисы</td></tr>
+          <tr><td>GitHub flow</td><td>Ветка на задачу, pull request, слияние в main, выкатка из main</td><td>Большинство веб-сервисов</td></tr>
+          <tr><td>Git flow</td><td>develop, release-, hotfix- и feature-ветки, долгие релизы</td><td>Версионированные продукты с поддержкой нескольких версий</td></tr>
+        </tbody>
+      </table>
+      <p>Git flow придуман для продуктов с явными версиями и долгой поддержкой; для сервиса, который выкатывается несколько раз в день, его ветки develop и release добавляют слияния и конфликты без пользы. Trunk-based development держит main всегда готовым к выкатке, ветки — короткими, а незаконченные функции — выключенными флагами, как в <a href="deploy-strategies.html">Deployment Strategies</a>.</p>
+      <div class="trap">
+        <p class="myth">Rebase и merge дают одинаковый результат, просто история выглядит по-разному.</p>
+        <p class="fact">Содержимое файлов совпадает, но rebase создаёт новые коммиты с новыми хешами: в демо F1 был 17f8b78, стал 8d84bcb. У всех, кто скачал старые коммиты, они остаются, и force push общей ветки раздваивает историю. Merge ничего не переписывает.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Коммит — снимок дерева, родители, автор, время; ветка — файл с хешем; хеш зависит от родителя, поэтому rebase даёт новые коммиты.</li>
+        <li>Merge — коммит с двумя родителями без переписывания; rebase — только для неопубликованного, push с --force-with-lease.</li>
+        <li>Конфликт — правка одной строки с двух сторон; короткие ветки — меньше конфликтов.</li>
+        <li>Revert для общей ветки, reset — для своей; reflog вернул коммит после reset --hard.</li>
+        <li>Bisect: 32 коммита — 5 запусков; trunk-based для сервисов, git flow — для версионированных продуктов.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="gt-merge-rebase" data-freq="3">
+      <h3>Чем merge отличается от rebase?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Merge соединяет две ветки коммитом с двумя родителями; существующие коммиты не меняются, история показывает параллельную работу. Rebase заново применяет коммиты ветки поверх другой: история линейная, но коммиты новые, с новыми хешами. Rebase делают только для коммитов, которые ещё никто не скачал, иначе история раздваивается у коллег.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>force-with-lease вместо force: не удалит чужие коммиты на сервере.</li>
+            <li>Squash-merge: одна задача — один коммит в main.</li>
+            <li>Интерактивный rebase для приведения своих коммитов в порядок перед ревью.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="gt-undo" data-freq="2">
+      <h3>Как отменить неудачный коммит в общей ветке?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>git revert: новый коммит с обратными изменениями, история не переписывается, коллегам ничего не ломается. reset с force push для общей ветки опасен: он удаляет коммиты из ветки, включая чужие, появившиеся позже. Reset уместен для своих неопубликованных коммитов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Revert merge-коммита требует указать родителя (-m 1) и усложняет повторное слияние.</li>
+            <li>Потерянное после reset находится в reflog.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой последовательностью?</summary>
+          <pre><code class="language-sh">git switch main
+git reset --hard HEAD~3        # убрать три неудачных коммита
+git push --force</code></pre>
+          <p>Main — общая ветка: если после этих трёх коммитов кто-то успел запушить свои, <code>--force</code> их удалит с сервера, а у всех, кто скачал main, история разойдётся с удалённой. Нужно отменять через <code>git revert</code> трёх коммитов новым коммитом. Если переписывать всё же необходимо — <code>--force-with-lease</code> и предупреждение команды; на сервере main обычно защищён от force push.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="gt-flow" data-freq="2">
+      <h3>Git flow или trunk-based development?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Git flow — долгие ветки develop, release, hotfix для продуктов с версиями и поддержкой нескольких релизов. Trunk-based — короткие ветки и частое слияние в main, всегда готовый к выкатке; незаконченное прячут за feature flags. Для сервисов с непрерывной поставкой обычно выбирают trunk-based или GitHub flow.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Долгие ветки — большие конфликты и интеграция в конце.</li>
+            <li>Обязательные проверки CI и ревью перед слиянием в main.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://git-scm.com/book/en/v2">Pro Git</a> — главы о ветвлении, rebase и внутреннем устройстве.</li>
+      <li><a href="https://git-scm.com/docs/git-bisect">git-bisect</a>, <a href="https://git-scm.com/docs/git-reflog">git-reflog</a>.</li>
+      <li><a href="https://trunkbaseddevelopment.com/">Trunk Based Development</a>.</li>
+      <li><a href="https://martinfowler.com/articles/branching-patterns.html">Martin Fowler: Patterns for Managing Source Code Branches</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
