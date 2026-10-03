@@ -603,7 +603,7 @@ window.KB_TREE = [
           scope: 'liveness, readiness и startup probes, requests и limits, память JVM в контейнере, graceful shutdown, HPA' },
       ] },
       { id: 'delivery', title: 'Delivery', items: [
-        { id: 'cicd', freq: 2, status: 'empty', title: 'CI/CD',
+        { id: 'cicd', freq: 2, status: 'draft', title: 'CI/CD',
           scope: 'пайплайн, артефакты и registry, проверки перед мержем, GitLab CI и GitHub Actions' },
         { id: 'deploy-strategies', freq: 2, status: 'draft', title: 'Deployment Strategies',
           scope: 'rolling update, blue-green, canary, feature flags, совместимость миграций БД с откатом' },

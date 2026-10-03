@@ -1,0 +1,41 @@
+# Пример конвейера GitHub Actions для Java-сервиса. В демо не запускался: показывает структуру.
+name: ci
+on:
+  pull_request:
+  push: { branches: [main] }
+concurrency:                                   # новый пуш отменяет старый прогон той же ветки
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '21', cache: maven }   # кеш ~/.m2 по хешу pom.xml
+      - name: Build and unit tests
+        run: mvn -B -Dproject.build.outputTimestamp=2026-10-01T00:00:00Z verify
+      - name: Integration tests
+        run: mvn -B -Pintegration verify                      # Testcontainers: нужен Docker на раннере
+      - name: Image tagged with the commit
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker build -t ghcr.io/acme/payments:${{ github.sha }} .
+          docker push ghcr.io/acme/payments:${{ github.sha }}
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: staging
+    steps:
+      - run: echo "kubectl set image deploy/payments app=ghcr.io/acme/payments:${{ github.sha }}"
+
+  deploy-prod:
+    needs: deploy-staging
+    runs-on: ubuntu-24.04
+    environment: production                                   # ручное подтверждение в настройках окружения
+    steps:
+      - run: echo "the same image ghcr.io/acme/payments:${{ github.sha }} goes to prod"
