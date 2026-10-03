@@ -339,7 +339,7 @@ window.KB_TREE = [
           scope: 'баланс и проводки, перевод между счетами, двойная запись, event sourcing, аудит' },
         { id: 'sd-booking', freq: 2, status: 'empty', title: 'Booking System',
           scope: 'резерв и подтверждение, двойное бронирование, блокировки и версии, истечение брони' },
-        { id: 'sd-url-shortener', freq: 2, status: 'empty', title: 'URL Shortener',
+        { id: 'sd-url-shortener', freq: 2, status: 'draft', title: 'URL Shortener',
           scope: 'генерация ключа, хранение, чтение под нагрузкой, аналитика' },
         { id: 'sd-notifications', freq: 1, status: 'empty', title: 'Notification Service',
           scope: 'каналы доставки, очереди, повторы, шаблоны, лимиты' },
