@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tracing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="tracing">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Tracing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Распределённая трасса — дерево спанов одного запроса через все сервисы: у каждого спана имя, время начала, длительность, атрибуты и ссылка на родителя. Связывает спаны разных процессов контекст, который передаётся в заголовке W3C <code>traceparent</code>: идентификатор трассы и идентификатор родительского спана. В демо трасса показала, что из 312 мс оформления 255 мс ушло на ожидание платёжного провайдера. Если хоть один сервис не передаёт заголовок, трасса рвётся на две несвязанные, и путь запроса уже не восстановить. Трассы дорогие, поэтому их выбирают: решение принимает первый сервис, а остальные следуют решению родителя, — тогда сохраняются целые трассы: из 200 запросов при 10 % — 19 полных трасс и ни одного обрывка.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Оформление заказа медленное, а каждый сервис говорит «у меня всё быстро»</h2>
+      <p>p99 оформления заказа — 300 мс при цели 150. Команда шлюза смотрит свои метрики: шлюз отвечает быстро, ждёт заказы. Команда заказов: запрос к базе 35 мс, остальное ждём платежи. Команда платежей: сами мы почти ничего не делаем, ждём провайдера. Каждый прав, а общей картины нет. Трасса показывает одним деревом, кто кого вызвал и сколько ждал.</p>
+      <p>Тема разбирает устройство трассы, передачу контекста и выборку. Демо <a href="../examples/tracing/TracingDemo.java">TracingDemo.java</a> запускает три сервиса на JDK HttpServer, инструментированных OpenTelemetry Java SDK 1.55 вручную, и экспортирует спаны по OTLP в Jaeger 2.10 в Docker. Затем демо забирает трассы через API Jaeger и печатает их деревом. Обзор сигналов — в <a href="observability.html">Observability Overview</a>, метрики — в <a href="metrics.html">Metrics</a>.</p>
+    </section>
+
+    <section class="step" id="trace">
+      <h2>Трасса — дерево спанов, где видно, куда ушло время</h2>
+<pre><code class="language-java">// Сервер: достать контекст из traceparent, открыть серверный span, выполнить работу.
+Context parent = W3C.extract(Context.root(), ex, GETTER);
+Span span = t.spanBuilder("GET " + path).setParent(parent).setSpanKind(SpanKind.SERVER).startSpan();
+try (Scope ignored = span.makeCurrent()) { w.run(path); }
+finally { span.end(); }
+
+// Клиент: клиентский span и traceparent в заголовке исходящего запроса.
+Span span = t.spanBuilder("call " + path).setSpanKind(SpanKind.CLIENT).startSpan();
+try (Scope ignored = span.makeCurrent()) {
+    var b = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path));
+    W3C.inject(Context.current(), b, (req, k, v) -&gt; req.header(k, v));
+    http.send(b.build(), HttpResponse.BodyHandlers.discarding());
+} finally { span.end(); }</code></pre>
+      <pre class="out">== one checkout request, spans from three services
+   trace 09c4b121…, spans: 7
+     GET /checkout                gateway-full  312 ms
+       call /checkout             gateway-full  311 ms
+         GET /checkout            orders        308 ms
+           SELECT orders          orders         35 ms
+           call /checkout         orders        273 ms
+             GET /checkout        payments      255 ms
+               psp.charge         payments      255 ms</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Временная шкала трассы: запрос шлюза 312 мс, внутри вызов orders 308 мс, внутри запрос к базе 35 мс и вызов payments 273 мс, внутри обработка payments 255 мс, почти целиком ожидание провайдера.">
+            <text x="20" y="22" class="dg-cap">ТРАССА ВО ВРЕМЕНИ, 312 МС</text>
+            <rect x="160" y="34" width="530" height="20" rx="4" class="dg-cell"/>
+            <text x="20" y="49" class="dg-n">gateway</text>
+            <text x="425" y="49" class="dg-n" text-anchor="middle">GET /checkout 312 мс</text>
+            <rect x="163" y="64" width="524" height="20" rx="4" class="dg-cell"/>
+            <text x="20" y="79" class="dg-n">orders</text>
+            <text x="425" y="79" class="dg-n" text-anchor="middle">GET /checkout 308 мс</text>
+            <rect data-s="1" x="163" y="94" width="59" height="20" rx="4" class="dg-cell hit"/>
+            <text data-s="1" x="230" y="109" class="dg-n">SELECT 35 мс</text>
+            <rect data-s="2-" x="163" y="94" width="59" height="20" rx="4" class="dg-cell"/>
+            <rect data-s="2-" x="222" y="124" width="463" height="20" rx="4" class="dg-cell"/>
+            <text data-s="2-" x="20" y="139" class="dg-n">orders → payments</text>
+            <text data-s="2-" x="453" y="139" class="dg-n" text-anchor="middle">call 273 мс</text>
+            <rect data-s="2" x="252" y="154" width="433" height="20" rx="4" class="dg-cell miss"/>
+            <text data-s="2" x="20" y="169" class="dg-n">payments</text>
+            <text data-s="2" x="468" y="169" class="dg-bad" text-anchor="middle">psp.charge 255 мс — 82 % трассы</text>
+            <rect data-s="3" x="252" y="154" width="433" height="20" rx="4" class="dg-cell"/>
+            <rect data-s="3" x="222" y="154" width="30" height="20" rx="4" class="dg-cell miss"/>
+            <text data-s="3" x="20" y="169" class="dg-n">payments</text>
+            <text data-s="3" x="260" y="200" class="dg-bad">разрыв клиент–сервер ~18 мс: сеть, соединение, очередь потоков</text>
+            <text data-s="1" x="20" y="212" class="dg-t">Свой код orders: запрос к базе — 35 мс.</text>
+            <text data-s="2" x="20" y="212" class="dg-bad">Основное время — ожидание внешнего провайдера в payments.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Спаны вложены: серверный спан orders внутри клиентского спана шлюза. Собственная работа orders — запрос к базе на 35 мс.</li>
+          <li>Вызов payments занимает 273 мс, из них 255 мс — спан <code>psp.charge</code>, ожидание провайдера. Оптимизировать нужно именно его: тайм-аут, асинхронное подтверждение, другой провайдер.</li>
+          <li>Клиентский спан orders длится 273 мс, а серверный спан payments — 255. Разница в ~18 мс — время вне обработчика: установка соединения, передача, ожидание свободного потока на сервере. Её не видно ни в одном сервисе по отдельности.</li>
+        </ol>
+      </figure>
+      <p>Спан описывает одну операцию: входящий запрос (SERVER), исходящий вызов (CLIENT), запрос к базе, отправку в брокер (PRODUCER и CONSUMER), внутреннюю работу. Атрибуты по семантическим соглашениям OpenTelemetry — <code>http.request.method</code>, <code>db.system</code>, <code>messaging.destination.name</code> — делают трассы разных сервисов сравнимыми. Ошибки пишут в спан как события и статус ERROR. В реальных сервисах вручную спаны почти не создают: Java-агент OpenTelemetry или Micrometer Tracing в Spring Boot инструментирует HTTP-серверы, клиенты, JDBC, Kafka и Redis автоматически, а вручную добавляют только бизнес-операции.</p>
+    </section>
+
+    <section class="step" id="propagation">
+      <h2>Один сервис не передал контекст — трасса разорвалась</h2>
+      <pre class="out">== orders forgot to inject traceparent into the call to payments
+   trace 3922b896…, spans: 5
+     GET /broken                  gateway-full  292 ms
+       call /broken               gateway-full  292 ms
+         GET /broken              orders        291 ms
+           SELECT orders          orders         35 ms
+           call /broken           orders        256 ms
+   trace 5f157452…, spans: 2
+     GET /broken                  payments      253 ms
+       psp.charge                 payments      253 ms</pre>
+<pre><code class="language-http">traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+             ^  ^ trace-id (16 байт)              ^ parent span-id  ^ флаги: 01 = выбрана</code></pre>
+      <p>Сервис orders вызвал payments, не добавив <code>traceparent</code>. Payments не нашёл контекста и начал новую трассу. В Jaeger теперь две трассы: в первой 5 спанов и вызов payments, обрывающийся без продолжения, во второй — 2 спана payments без родителя. По времени их ещё можно сопоставить на тестовом стенде, но в продакшене одновременно идут тысячи запросов. Контекст теряется в самописных HTTP-клиентах, при переходе в другой поток без переноса контекста — как MDC в <a href="observability.html">Observability Overview</a>, — в сообщениях брокера без заголовков и в фоновых задачах. Автоинструментирование закрывает типичные клиенты; самописные места проверяют тестом, который ищет разрывы трасс.</p>
+      <p>Через асинхронные границы контекст передают в заголовках сообщения: продюсер Kafka кладёт <code>traceparent</code> в заголовки записи, потребитель создаёт спан со ссылкой на него. Для пакетной обработки, где одно сообщение порождает работу над сотней других, вместо родителя используют span links — ссылки на несколько трасс.</p>
+    </section>
+
+    <section class="step" id="sampling">
+      <h2>Выборка: решает первый сервис, остальные следуют</h2>
+<pre><code class="language-java">// Решение о выборке принимает первый сервис; остальные следуют решению родителя.
+Tracer gw = tracer("gateway", Sampler.parentBased(Sampler.traceIdRatioBased(0.1)));
+Tracer orders = tracer("orders", Sampler.parentBased(Sampler.alwaysOn()));
+Tracer payments = tracer("payments", Sampler.parentBased(Sampler.alwaysOn()));</code></pre>
+      <pre class="out">== 200 requests, gateway samples 10%, others follow the parent
+   traces stored: 19, complete with all 7 spans: 19
+   payments spans without their gateway trace: 0</pre>
+      <p>Сохранять каждую трассу дорого: на тысячах запросов в секунду трассы занимают больше места, чем логи. Шлюз выбирает 10 % по идентификатору трассы — в этом прогоне 19 из 200, число меняется от запуска к запуску. Решение передаётся флагом в <code>traceparent</code>, и orders и payments с <code>parentBased</code> следуют ему: все 19 трасс полные, по 7 спанов, и ни одного спана payments без своей трассы. Если бы каждый сервис выбирал независимо по 10 %, полной трассой через три сервиса оказалась бы лишь тысячная доля запросов, а остальное — обрывки.</p>
+      <p>Выборка в начале (head sampling) не знает, будет ли запрос интересным: медленный запрос или ошибка с вероятностью 90 % не сохранятся. Выборка в конце (tail sampling) в OpenTelemetry Collector держит спаны трассы в памяти до её завершения и сохраняет все ошибки и медленные трассы плюс долю обычных. Это точнее, но требует коллектора, который видит все спаны трассы. Практичная комбинация — небольшая доля обычных трасс, все ошибки и медленные, и связь с метриками через exemplars: точка на графике p99 ведёт к конкретной трассе.</p>
+      <div class="trap">
+        <p class="myth">Если в каждом сервисе включить выборку 10 %, сохранится 10 % трасс.</p>
+        <p class="fact">Независимая выборка в трёх сервисах сохраняет полной трассу лишь 0,1 % запросов, остальное — обрывки. С parentBased решение первого сервиса наследуется: в демо 19 из 200 трасс, все с 7 спанами, ни одного спана без трассы.</p>
+      </div>
+    </section>
+
+    <section class="step" id="java">
+      <h2>Трассировка в Java-сервисе: агент, Spring Boot и связь с логами</h2>
+<pre><code class="language-bash"># Java-агент OpenTelemetry: инструментирование без изменения кода
+java -javaagent:opentelemetry-javaagent.jar \
+     -Dotel.service.name=orders \
+     -Dotel.exporter.otlp.endpoint=http://otel-collector:4318 \
+     -Dotel.traces.sampler=parentbased_traceidratio -Dotel.traces.sampler.arg=0.1 \
+     -jar orders.jar</code></pre>
+<pre><code class="language-yaml"># Spring Boot 3: Micrometer Tracing с мостом в OpenTelemetry
+management:
+  tracing:
+    sampling:
+      probability: 0.1
+  otlp:
+    tracing:
+      endpoint: http://otel-collector:4318/v1/traces
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "</code></pre>
+      <p>Агент подключается при запуске JVM и через инструментирование байткода создаёт спаны для HTTP-серверов и клиентов, JDBC, Kafka, Redis, gRPC — то, что демо делало руками. Настройки передают системными свойствами или переменными окружения <code>OTEL_*</code>, одинаковыми для всех языков. В Spring Boot 3 трассировку даёт Micrometer Tracing с мостом в OpenTelemetry: он создаёт спаны для входящих запросов, <code>RestClient</code>, <code>WebClient</code>, <code>KafkaTemplate</code> и кладёт <code>traceId</code> и <code>spanId</code> в MDC. Шаблон логов выше добавляет их в каждую строку, и по trace id из Jaeger находятся логи всех сервисов этого запроса.</p>
+      <p>Спаны отправляют не прямо в хранилище, а в OpenTelemetry Collector рядом с сервисами: он буферизует, повторяет отправку, обогащает атрибутами окружения, делает tail sampling и пересылает в Jaeger, Tempo или облачный сервис. Отказ хранилища трасс не должен влиять на сервис: экспорт асинхронный, пачками через <code>BatchSpanProcessor</code>, а при переполнении буфера спаны отбрасываются, а не блокируют запросы.</p>
+      <p>Накладные расходы трассировки — создание объектов спанов, запись атрибутов, сериализация и отправка. Для обычного HTTP-сервиса это доли процента CPU, но спан на каждую итерацию цикла или на каждый вызов кеша в горячем пути заметен и бесполезен. Ручные спаны ставят на операции, длительность которых интересна при разборе: обращение к внешнему провайдеру, тяжёлый расчёт, ожидание блокировки.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Трасса — дерево спанов через сервисы; в демо 255 мс из 312 — ожидание провайдера в payments.</li>
+        <li>Разница клиентского и серверного спана (~18 мс) показывает время в сети и очередях, невидимое сервисам.</li>
+        <li>Контекст передаётся заголовком traceparent; один сервис без него — две несвязанные трассы.</li>
+        <li>Контекст переносят в потоки, сообщения брокера и фоновые задачи; автоинструментирование закрывает типичные клиенты.</li>
+        <li>parentBased-выборка: 19 полных трасс из 200 при 10 %, без обрывков; tail sampling сохраняет ошибки и медленные.</li>
+        <li>В сервисах — Java-агент или Micrometer Tracing, экспорт через Collector, trace id в каждой строке лога.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="tr-how" data-freq="3">
+      <h3>Как работает распределённая трассировка?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждая операция — спан с идентификатором трассы, своим идентификатором, родителем, временем и атрибутами. При исходящем вызове контекст — trace id и id текущего спана — передаётся в заголовке traceparent; принимающий сервис создаёт дочерний спан. Спаны экспортируются в коллектор и хранилище (Jaeger, Tempo), где собираются в дерево. Инструментирование — Java-агент OpenTelemetry или Micrometer Tracing.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Разрывы контекста: самописные клиенты, пулы потоков, сообщения без заголовков.</li>
+            <li>Span links для пакетной обработки.</li>
+            <li>Trace id в логах связывает трассы и логи.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему в Jaeger трасса заказа обрывается на orders?</summary>
+          <pre><code class="language-java">// orders, после сохранения заказа
+executor.submit(() -&gt; {
+    var req = HttpRequest.newBuilder(URI.create(paymentsUrl)).POST(body).build();
+    rawHttpClient.send(req, BodyHandlers.ofString());   // свой HttpClient, без инструментирования
+});</code></pre>
+          <p>Вызов уходит в пул потоков, куда текущий контекст трассы не переносится, и через самописный клиент, который не добавляет <code>traceparent</code>. Payments начинает новую трассу. Нужно обернуть пул в <code>Context.taskWrapping(executor)</code> или использовать инструментированный клиент и при ручном вызове вставлять контекст пропагатором.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="tr-sampling" data-freq="2">
+      <h3>Как выбирать, какие трассы сохранять?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Head sampling: первый сервис решает по доле, решение передаётся флагом в traceparent, остальные следуют родителю — сохраняются целые трассы. Tail sampling в коллекторе: решение после завершения трассы, можно сохранить все ошибки и медленные запросы. Независимая выборка в каждом сервисе даёт обрывки.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Tail sampling требует, чтобы все спаны трассы попали на один экземпляр коллектора.</li>
+            <li>Exemplars связывают точку метрики с конкретной трассой.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="tr-vs" data-freq="2">
+      <h3>Чем трассы полезнее логов и метрик для поиска медленного места?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Метрики показывают, что медленно и где в среднем, но не связывают сервисы в один запрос. Логи подробны, но разбросаны по сервисам. Трасса показывает один запрос целиком: кто кого вызвал, что шло последовательно, что параллельно, сколько ждал каждый вызов, включая время в сети между клиентским и серверным спаном.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Последовательные вызовы, которые можно распараллелить, видны как лестница спанов.</li>
+            <li>N+1 виден как сотни одинаковых спанов к базе под одним запросом.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://opentelemetry.io/docs/concepts/signals/traces/">OpenTelemetry: Traces</a>, <a href="https://opentelemetry.io/docs/concepts/sampling/">Sampling</a>.</li>
+      <li><a href="https://www.w3.org/TR/trace-context/">W3C Trace Context</a> — формат traceparent.</li>
+      <li><a href="https://opentelemetry.io/docs/languages/java/">OpenTelemetry Java</a> — SDK и Java-агент.</li>
+      <li><a href="https://www.jaegertracing.io/docs/2.10/">Jaeger 2 documentation</a>.</li>
+      <li>Benjamin Sigelman и др., «Dapper, a Large-Scale Distributed Systems Tracing Infrastructure», 2010.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
