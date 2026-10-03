@@ -221,7 +221,7 @@ window.KB_TREE = [
           scope: 'коррелированные подзапросы, EXISTS, CTE, рекурсивные CTE, LATERAL' },
         { id: 'window-functions', freq: 3, status: 'draft', title: 'Window Functions',
           scope: 'ROW_NUMBER, RANK и DENSE_RANK, LAG и LEAD, нарастающий итог, топ-N в группе' },
-        { id: 'sql-practice', freq: 3, status: 'empty', title: 'SQL Practice',
+        { id: 'sql-practice', freq: 3, status: 'draft', title: 'SQL Practice',
           scope: 'задачи на live coding: дубликаты, второй по величине, топ-N в группе, агрегаты по счетам' },
         { id: 'plsql', freq: 2, status: 'draft', title: 'Stored Procedures',
           scope: 'процедуры и функции, триггеры, PL/pgSQL и PL/SQL, курсоры, когда логика живёт в БД' },
