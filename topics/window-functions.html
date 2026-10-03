@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Window Functions · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="window-functions">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Window Functions</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>В отчёте каждому платежу нужен контекст: оборот продавца, место по сумме, предыдущая оплата. Оконная функция дописывает этот контекст к строке, сохраняя сам платёж. Сначала она выбирает его partition, затем использует порядок строк и, для некоторых расчётов, границы frame. Ошибку в отчёте ищи в этих трёх решениях: надпись <code>OVER</code> сама по себе ещё не говорит, какие платежи попали в расчёт.</p>
+    </div>
+
+    <section class="step" id="keep-rows">
+      <h2>Итог продавца нужен рядом с каждым платежом</h2>
+      <p>Поддержка проверяет выплаты продавцам. В отчёте должны остаться все платежи, а рядом с каждым — общий оборот его продавца. Разработчик добавляет <code>GROUP BY merchant</code> и получает правильные суммы, но теряет строки платежей: по такому отчёту уже нельзя найти спорную оплату по <code>id</code>.</p>
+      <p>У нас шесть успешных платежей двух продавцов. Суммы маленькие, чтобы считать в уме; все они в копейках одной валюты. <code>paid_on</code> — день расчёта, поэтому два разных платежа могут иметь одну дату. <code>id</code> различает их и даёт устойчивый порядок внутри дня.</p>
+      <pre><code class="language-sql">-- Все суммы в копейках одной валюты; paid_on — день расчёта.
+CREATE TEMP TABLE payments (
+  id integer PRIMARY KEY,
+  merchant text NOT NULL,
+  paid_on date NOT NULL,
+  amount integer NOT NULL CHECK (amount &gt; 0)
+);
+INSERT INTO payments VALUES
+  (101, &#x27;A&#x27;, &#x27;2026-10-01&#x27;, 100),
+  (102, &#x27;A&#x27;, &#x27;2026-10-01&#x27;, 200),
+  (103, &#x27;A&#x27;, &#x27;2026-10-02&#x27;, 300),
+  (104, &#x27;A&#x27;, &#x27;2026-10-03&#x27;, 200),
+  (201, &#x27;B&#x27;, &#x27;2026-10-01&#x27;, 500),
+  (202, &#x27;B&#x27;, &#x27;2026-10-02&#x27;, 500);</code></pre>
+      <pre><code class="language-sql">SELECT merchant, sum(amount) AS total
+FROM payments
+GROUP BY merchant                  -- один результат на продавца
+ORDER BY merchant;</code></pre>
+      <pre class="out"> merchant | total
+----------+-------
+ A        |   800
+ B        |  1000
+(2 rows)</pre>
+      <p>Группировка сворачивает четыре платежа A в одну строку с суммой 800, два платежа B — в одну строку с суммой 1000. Добавить <code>id</code> в <code>GROUP BY</code> не поможет: получится отдельная группа на платёж, и сумма будет равна его собственному <code>amount</code>. Нам нужен расчёт по группе без сворачивания её строк.</p>
+      <pre><code class="language-sql">SELECT id, merchant, amount,
+       sum(amount) OVER (PARTITION BY merchant) AS total
+FROM payments                       -- каждая строка платежа остаётся
+ORDER BY merchant, id;</code></pre>
+      <pre class="out"> id  | merchant | amount | total
+-----+----------+--------+-------
+ 101 | A        |    100 |   800
+ 102 | A        |    200 |   800
+ 103 | A        |    300 |   800
+ 104 | A        |    200 |   800
+ 201 | B        |    500 |  1000
+ 202 | B        |    500 |  1000
+(6 rows)</pre>
+      <p><code>OVER</code> превращает вызов <code>sum</code> в оконный. Для 101 PostgreSQL находит partition A и записывает её итог 800 рядом с платежом. У 102 тот же контекст, но отдельная строка. Общий результат повторяется, идентичность оплат сохраняется.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 340" role="img" aria-label="Шесть платежей остаются шестью строками после оконной суммы. Четыре платежа продавца A получают итог 800, два платежа B получают итог 1000; стрелки связывают каждую исходную строку с её результатом.">
+            <defs><marker id="wa-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <!-- partition разделяет вход, стрелки сохраняют соответствие строк -->
+            <rect x="30" y="38" width="212" height="158" rx="8" class="dg-sep" fill="none"/>
+            <rect x="30" y="216" width="212" height="86" rx="8" class="dg-sep" fill="none"/>
+            <rect x="66" y="50" width="162" height="28" rx="5" class="dg-cell"/>
+            <rect x="400" y="50" width="276" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="66" y="86" width="162" height="28" rx="5" class="dg-cell"/>
+            <rect x="400" y="86" width="276" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="66" y="122" width="162" height="28" rx="5" class="dg-cell"/>
+            <rect x="400" y="122" width="276" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="66" y="158" width="162" height="28" rx="5" class="dg-cell"/>
+            <rect x="400" y="158" width="276" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="66" y="228" width="162" height="28" rx="5" class="dg-cell"/>
+            <rect x="400" y="228" width="276" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="66" y="264" width="162" height="28" rx="5" class="dg-cell"/>
+            <rect x="400" y="264" width="276" height="28" rx="5" class="dg-cell hit"/>
+            <path d="M228 64 L396 64" class="dg-line" marker-end="url(#wa-n)"/>
+            <path d="M228 100 L396 100" class="dg-line" marker-end="url(#wa-n)"/>
+            <path d="M228 136 L396 136" class="dg-line" marker-end="url(#wa-n)"/>
+            <path d="M228 172 L396 172" class="dg-line" marker-end="url(#wa-n)"/>
+            <path d="M228 242 L396 242" class="dg-line" marker-end="url(#wa-n)"/>
+            <path d="M228 278 L396 278" class="dg-line" marker-end="url(#wa-n)"/>
+            <text x="66" y="24" class="dg-n">id | amount</text>
+            <text x="400" y="24" class="dg-n">id | amount | total</text>
+            <text x="272" y="24" class="dg-n">SUM OVER</text>
+            <text x="40" y="124" class="dg-t">A</text>
+            <text x="40" y="269" class="dg-t">B</text>
+            <text x="147" y="69" class="dg-in" text-anchor="middle">101 | 100</text>
+            <text x="538" y="69" class="dg-in" text-anchor="middle">101 | 100 | 800</text>
+            <text x="147" y="105" class="dg-in" text-anchor="middle">102 | 200</text>
+            <text x="538" y="105" class="dg-in" text-anchor="middle">102 | 200 | 800</text>
+            <text x="147" y="141" class="dg-in" text-anchor="middle">103 | 300</text>
+            <text x="538" y="141" class="dg-in" text-anchor="middle">103 | 300 | 800</text>
+            <text x="147" y="177" class="dg-in" text-anchor="middle">104 | 200</text>
+            <text x="538" y="177" class="dg-in" text-anchor="middle">104 | 200 | 800</text>
+            <text x="147" y="247" class="dg-in" text-anchor="middle">201 | 500</text>
+            <text x="538" y="247" class="dg-in" text-anchor="middle">201 | 500 | 1000</text>
+            <text x="147" y="283" class="dg-in" text-anchor="middle">202 | 500</text>
+            <text x="538" y="283" class="dg-in" text-anchor="middle">202 | 500 | 1000</text>
+            <text x="30" y="319" class="dg-s">Строки не сливаются: расчёт дописывает колонку total</text>
+          </svg>
+        </div>
+        <figcaption>Общий итог повторяется рядом с исходными платежами. Суммировать колонку total ещё раз нельзя.</figcaption>
+      </figure>
+      <p><code>PARTITION BY</code> делит входные строки по указанным значениям; это не физические партиции таблицы. Без него весь вход запроса образует одну partition. А без <code>ORDER BY</code> в этом <code>OVER</code> стандартный frame охватывает всю partition: оборот не зависит от позиции текущего платежа. Дальше порядок понадобится, и тогда привычная сумма начнёт вести себя иначе.</p>
+      <div class="note warn">
+        <p>Колонка <code>total</code> — повторённый итог, а не сумма конкретного платежа. Если сложить её по всем строкам отчёта, оборот A посчитается четыре раза. Окно не меняет смысл исходных строк и не исправляет дубли, которые раньше создал <a href="sql-joins.html">JOIN</a>.</p>
+      </div>
+      <details class="deep">
+        <summary>Как воспроизвести весь отчёт</summary>
+        <p>SQL и вывод ниже проверены в PostgreSQL 17.11. Полный <a href="../examples/sql-windows/demo.sql">demo.sql</a> содержит именно показанные запросы; <a href="../examples/sql-windows/run.sh">run.sh</a> поднимает отдельный контейнер <code>postgres:17.11-alpine</code>, ждёт готовности и выполняет SQL через <code>psql -X -q -v ON_ERROR_STOP=1</code>.</p>
+        <pre><code class="language-bash"># Из корня java-kb; нужен запущенный Docker.
+bash examples/sql-windows/run.sh
+# Контейнер: --rm --network none, база windows_demo, без опубликованных портов.
+# POSTGRES_HOST_AUTH_METHOD=trust действует только в этом изолированном демо.
+# После выполнения runner останавливает свой контейнер; таблица TEMP.</code></pre>
+        <pre><code class="language-sql">SHOW server_version;</code></pre>
+        <pre class="out"> server_version
+----------------
+ 17.11
+(1 row)</pre>
+        <p>Показаны фрагменты одного запуска, без служебных меток секций. Конечные пробелы таблиц <code>psql</code> убраны; значения и отступы сохранены. Демо не подключается к существующим базам и контейнерам.</p>
+      </details>
+    </section>
+
+    <section class="step" id="rank-peers">
+      <h2>Равная сумма может означать общее место</h2>
+      <p>Теперь поддержке нужны самые крупные платежи каждого продавца. Для A суммы по убыванию — 300, 200, 200, 100. Вопрос «какое место занимает платёж?» неоднозначен: это номер отдельной строки, место в соревновании или номер отличающейся суммы? Три функции отвечают на три разных вопроса.</p>
+      <p><code>ROW_NUMBER</code> нумерует строки внутри partition от 1. <code>RANK</code> присваивает равным значениям одно место, а следующее место учитывает, сколько строк уже прошло: 1, 2, 2, 4. <code>DENSE_RANK</code> считает группы равных значений, поэтому получается 1, 2, 2, 3. Здесь равенство определяется всеми выражениями в оконном <code>ORDER BY</code>; такие строки называют <b>peers</b>.</p>
+      <pre><code class="language-sql">SELECT merchant, id, amount,
+       row_number() OVER (
+         PARTITION BY merchant ORDER BY amount DESC, id
+       ) AS rn,                     -- id разрешает равенство для выбора строки
+       rank() OVER (
+         PARTITION BY merchant ORDER BY amount DESC
+       ) AS rnk,                    -- одинаковые суммы делят одно место
+       dense_rank() OVER (
+         PARTITION BY merchant ORDER BY amount DESC
+       ) AS dense
+FROM payments
+ORDER BY merchant, amount DESC, id;  -- порядок вывода задаётся отдельно</code></pre>
+      <pre class="out"> merchant | id  | amount | rn | rnk | dense
+----------+-----+--------+----+-----+-------
+ A        | 103 |    300 |  1 |   1 |     1
+ A        | 102 |    200 |  2 |   2 |     2
+ A        | 104 |    200 |  3 |   2 |     2
+ A        | 101 |    100 |  4 |   4 |     3
+ B        | 201 |    500 |  1 |   1 |     1
+ B        | 202 |    500 |  2 |   1 |     1
+(6 rows)</pre>
+      <p>У <code>ROW_NUMBER</code> в запросе есть дополнительный ключ <code>id</code>. Благодаря ему из двух сумм 200 сначала идёт платёж 102, потом 104: они стабильно получают номера 2 и 3. У <code>RANK</code> и <code>DENSE_RANK</code> в порядке оставлена только сумма, чтобы 102 и 104 продолжали делить место. Разные окна в одном запросе могут задавать разные отношения между теми же входными строками.</p>
+      <p>Ключ разрешения равенства входит в правило отчёта. Для выбора более ранней оплаты используй время и уникальный <code>id</code>. Если равные суммы должны пройти вместе, оставь их peers в <code>RANK</code>; для устойчивого отображения добавь <code>id</code> только во внешний <code>ORDER BY</code>.</p>
+      <div class="trap">
+        <p class="myth">ORDER BY внутри OVER заодно задаёт порядок всего результата.</p>
+        <p class="fact">Он задаёт порядок для расчёта этой функции. Результат запроса упорядочивает внешний <code>ORDER BY</code>. Можно посчитать место по убыванию суммы, а показать платежи по дате; номера останутся привязанными к суммам.</p>
+      </div>
+      <p>Без полного порядка <code>ROW_NUMBER</code> выдаст разные номера равным строкам, но не определит, кто получит меньший. При повторении отчёта может смениться платёж на границе top-N. <code>RANK</code> сохранит общее место, если peers заданы бизнес-критерием.</p>
+    </section>
+
+    <section class="step" id="running-frame">
+      <h2>Нарастающий итог зависит от границы frame</h2>
+      <p>Выплата идёт по нескольким платежам, и бухгалтер просит показать оборот после каждой оплаты. У A платёж 101 приносит 100, следующий 102 — ещё 200. Разработчик добавляет к <code>sum</code> сортировку по дате и ждёт 100, 300, 600, 800. Но первые две строки обе показывают 300.</p>
+      <p>Partition задаёт доступный набор строк. <b>Frame</b> выбирает из него строки для расчёта у текущей строки. В PostgreSQL стандартная граница — <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code>. При оконном <code>ORDER BY</code> она идёт от начала partition до <b>последнего peer текущей строки</b>. Для даты 1 октября оба платежа равны по ключу порядка, поэтому frame включает и 101, и 102 уже для первой строки.</p>
+      <pre><code class="language-sql">SELECT id, paid_on, amount,
+       sum(amount) OVER (
+         PARTITION BY merchant ORDER BY paid_on
+       ) AS by_day,                 -- default RANGE включает весь текущий день
+       sum(amount) OVER (
+         PARTITION BY merchant ORDER BY paid_on, id
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS by_payment,             -- устойчивый префикс до конкретного платежа
+       sum(amount) OVER (
+         PARTITION BY merchant ORDER BY paid_on, id
+       ) AS unique_range            -- уникальный порядок убрал равенства и у RANGE
+FROM payments
+WHERE merchant = &#x27;A&#x27;
+ORDER BY paid_on, id;</code></pre>
+      <pre class="out"> id  |  paid_on   | amount | by_day | by_payment | unique_range
+-----+------------+--------+--------+------------+--------------
+ 101 | 2026-10-01 |    100 |    300 |        100 |          100
+ 102 | 2026-10-01 |    200 |    300 |        300 |          300
+ 103 | 2026-10-02 |    300 |    600 |        600 |          600
+ 104 | 2026-10-03 |    200 |    800 |        800 |          800
+(4 rows)</pre>
+      <p>В <code>by_payment</code> сделаны два осознанных выбора: <code>id</code> задаёт однозначную последовательность внутри даты, а <code>ROWS</code> заканчивает frame на конкретной текущей строке. Поэтому после 101 видны только его 100 копеек. В <code>unique_range</code> оставлен стандартный <code>RANGE</code>, но добавлен тот же уникальный ключ: peers из нескольких строк больше нет, и итог совпал с <code>ROWS</code>. Причина различия — и порядок, и правило границы; сравнивать только слова RANGE и ROWS недостаточно.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 324" role="img" aria-label="Текущая строка проходит четыре платежа A: 101 на 100, 102 на 200, 103 на 300 и 104 на 200. Верхний RANGE по дате включает весь peer-день и даёт суммы 300, 300, 600, 800. Нижний ROWS в порядке даты и id заканчивается на текущем платеже и даёт 100, 300, 600, 800.">
+            <defs>
+              <marker id="wf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- Две последовательности одной partition, одинаковые платежи -->
+            <rect x="180" y="70" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="310" y="70" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="440" y="70" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="570" y="70" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="180" y="190" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="310" y="190" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="440" y="190" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect x="570" y="190" width="110" height="54" rx="6" class="dg-cell"/>
+            <rect data-s="1-" x="180" y="70" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="1-" x="180" y="190" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="1-" x="310" y="70" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="2-" x="310" y="190" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="3-" x="440" y="70" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="3-" x="440" y="190" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="4-" x="570" y="70" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <rect data-s="4-" x="570" y="190" width="110" height="54" rx="6" class="dg-cell hit"/>
+            <g data-s="1" data-frame-state="1">
+              <path d="M235 30 L235 66" class="dg-line" marker-end="url(#wf-n)"/>
+              <path d="M235 150 L235 186" class="dg-line" marker-end="url(#wf-n)"/>
+              <text x="243" y="48" class="dg-n" text-anchor="start">id 101</text>
+              <text x="243" y="169" class="dg-n" text-anchor="start">id 101</text>
+              <text x="20" y="143" class="dg-ok">sum = 300</text>
+              <text x="20" y="263" class="dg-ok">sum = 100</text>
+            </g>
+            <g data-s="2" data-frame-state="2">
+              <path d="M365 30 L365 66" class="dg-line" marker-end="url(#wf-n)"/>
+              <path d="M365 150 L365 186" class="dg-line" marker-end="url(#wf-n)"/>
+              <text x="373" y="48" class="dg-n" text-anchor="start">id 102</text>
+              <text x="373" y="169" class="dg-n" text-anchor="start">id 102</text>
+              <text x="20" y="143" class="dg-ok">sum = 300</text>
+              <text x="20" y="263" class="dg-ok">sum = 300</text>
+            </g>
+            <g data-s="3" data-frame-state="3">
+              <path d="M495 30 L495 66" class="dg-line" marker-end="url(#wf-n)"/>
+              <path d="M495 150 L495 186" class="dg-line" marker-end="url(#wf-n)"/>
+              <text x="503" y="48" class="dg-n" text-anchor="start">id 103</text>
+              <text x="503" y="169" class="dg-n" text-anchor="start">id 103</text>
+              <text x="20" y="143" class="dg-ok">sum = 600</text>
+              <text x="20" y="263" class="dg-ok">sum = 600</text>
+            </g>
+            <g data-s="4" data-frame-state="4">
+              <path d="M625 30 L625 66" class="dg-line" marker-end="url(#wf-n)"/>
+              <path d="M625 150 L625 186" class="dg-line" marker-end="url(#wf-n)"/>
+              <text x="633" y="48" class="dg-n" text-anchor="start">id 104</text>
+              <text x="633" y="169" class="dg-n" text-anchor="start">id 104</text>
+              <text x="20" y="143" class="dg-ok">sum = 800</text>
+              <text x="20" y="263" class="dg-ok">sum = 800</text>
+            </g>
+            <!-- Подписи поверх заливок; дата определяет peers верхнего ряда -->
+            <text x="20" y="91" class="dg-cap">RANGE</text>
+            <text x="20" y="111" class="dg-n">paid_on</text>
+            <text x="20" y="211" class="dg-cap">ROWS</text>
+            <text x="20" y="231" class="dg-n">paid_on, id</text>
+            <text x="235" y="23" class="dg-n" text-anchor="middle">01.10</text>
+            <text x="235" y="90" class="dg-in" text-anchor="middle">101</text>
+            <text x="235" y="111" class="dg-in" text-anchor="middle">+100</text>
+            <text x="235" y="210" class="dg-in" text-anchor="middle">101</text>
+            <text x="235" y="231" class="dg-in" text-anchor="middle">+100</text>
+            <text x="365" y="23" class="dg-n" text-anchor="middle">01.10</text>
+            <text x="365" y="90" class="dg-in" text-anchor="middle">102</text>
+            <text x="365" y="111" class="dg-in" text-anchor="middle">+200</text>
+            <text x="365" y="210" class="dg-in" text-anchor="middle">102</text>
+            <text x="365" y="231" class="dg-in" text-anchor="middle">+200</text>
+            <text x="495" y="23" class="dg-n" text-anchor="middle">02.10</text>
+            <text x="495" y="90" class="dg-in" text-anchor="middle">103</text>
+            <text x="495" y="111" class="dg-in" text-anchor="middle">+300</text>
+            <text x="495" y="210" class="dg-in" text-anchor="middle">103</text>
+            <text x="495" y="231" class="dg-in" text-anchor="middle">+300</text>
+            <text x="625" y="23" class="dg-n" text-anchor="middle">03.10</text>
+            <text x="625" y="90" class="dg-in" text-anchor="middle">104</text>
+            <text x="625" y="111" class="dg-in" text-anchor="middle">+200</text>
+            <text x="625" y="210" class="dg-in" text-anchor="middle">104</text>
+            <text x="625" y="231" class="dg-in" text-anchor="middle">+200</text>
+            <text x="180" y="286" class="dg-s">Заливка — строки frame; стрелка — текущая строка</text>
+            <text x="180" y="304" class="dg-n">Начало frame всегда у 101; конец меняется</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Текущий платёж 101. RANGE уже включает peer 102: 100 + 200 = 300. ROWS заканчивается на 101 и даёт 100.</li>
+          <li>Текущий платёж 102. Оба frame включают первые две оплаты: 100 + 200 = 300. Две строки одного дня получили одинаковую сумму сверху.</li>
+          <li>Текущий платёж 103. Его день новый: граница проходит до третьей строки, итог 100 + 200 + 300 = 600.</li>
+          <li>Текущий платёж 104. Оба frame достигли конца partition A: 100 + 200 + 300 + 200 = 800. Платежи B сюда не входят.</li>
+        </ol>
+        <figcaption>CURRENT ROW в RANGE включает peers по ключу окна. В ROWS это конкретная строка, а для устойчивого выбора её позиции нужен полный порядок.</figcaption>
+      </figure>
+      <p>На всех четырёх шагах partition A содержит те же платежи. Меняется часть, вошедшая в frame: сверху peers определены датой, снизу порядок уточнён <code>id</code>. На первом платеже разница составляет 200, на остальных суммы совпадают.</p>
+      <p><code>ROWS</code> выражает расстояние в строках, а не в днях: <code>ROWS BETWEEN 2 PRECEDING AND CURRENT ROW</code> берёт текущий платёж и до двух предшествующих, даже если между ними неделю не было оплат. <code>RANGE</code> с временным смещением задаёт расстояние по значению даты или времени. Это уже разные бизнес-задачи: «последние три оплаты» и «оплаты за последние три дня» нельзя подменять друг другом.</p>
+      <div class="note tip">
+        <p>Для суммы по всей partition проще убрать оконный <code>ORDER BY</code>. Если порядок нужен другой функции, задай отдельное окно или полный frame. Добавление сортировки «для красоты» к <code>SUM OVER</code> меняет охват по умолчанию: вместо общего оборота получится нарастающий итог.</p>
+      </div>
+    </section>
+
+    <section class="step" id="neighbor-rows">
+      <h2>LAG и LEAD сравнивают соседей в последовательности</h2>
+      <p>После итога поддержке нужна другая подсказка: как сумма оплаты изменилась относительно предыдущей. Делать self join по <code>id - 1</code> опасно: идентификаторы могут иметь пропуски, а порядок расчёта не обязан совпадать с их ростом. Нам нужен предыдущий платёж <em>этого продавца в выбранном порядке</em>, а не арифметически соседний ключ.</p>
+      <p><code>LAG(amount)</code> берёт сумму на одну строку раньше внутри partition; <code>LEAD(amount)</code> — на одну строку позже. На первом платеже у <code>LAG</code> нет соседа, на последнем его нет у <code>LEAD</code>; без дополнительных аргументов результат <code>NULL</code>. Перейти от первого платежа B к последнему A нельзя: partition разделяет их последовательности.</p>
+      <pre><code class="language-sql">SELECT merchant, id, amount,
+       sum(amount) OVER w AS frame_sum,
+       lag(amount) OVER w AS prev_amount,
+       lead(amount) OVER w AS next_amount,
+       amount - lag(amount) OVER w AS delta
+FROM payments
+WINDOW w AS (
+  PARTITION BY merchant ORDER BY paid_on, id
+  ROWS BETWEEN CURRENT ROW AND CURRENT ROW
+)                                   -- SUM видит одну строку, LAG/LEAD — соседей
+ORDER BY merchant, paid_on, id;</code></pre>
+      <pre class="out"> merchant | id  | amount | frame_sum | prev_amount | next_amount | delta
+----------+-----+--------+-----------+-------------+-------------+-------
+ A        | 101 |    100 |       100 |        NULL |         200 |  NULL
+ A        | 102 |    200 |       200 |         100 |         300 |   100
+ A        | 103 |    300 |       300 |         200 |         200 |   100
+ A        | 104 |    200 |       200 |         300 |        NULL |  -100
+ B        | 201 |    500 |       500 |        NULL |         500 |  NULL
+ B        | 202 |    500 |       500 |         500 |        NULL |     0
+(6 rows)</pre>
+      <p>Здесь специально задан frame из одной текущей строки. Его видно по <code>frame_sum</code>: сумма равна своему <code>amount</code>. Но у строки 103 <code>LAG</code> всё равно находит 200 в строке 102, а <code>LEAD</code> находит 200 в 104. Эти функции ищут смещение в последовательности partition, а не край агрегатного frame. Для обычного сравнения соседей frame можно вообще не указывать.</p>
+      <p><code>WINDOW w AS (...)</code> даёт имя общему описанию окна: все четыре выражения используют один порядок, и он не расходится при правке запроса. Разница <code>amount - lag(amount)</code> у первой строки тоже <code>NULL</code>, потому что неизвестная предыдущая сумма не превращается автоматически в ноль. По такому результату можно отличить «предыдущей оплаты нет» от «сумма не изменилась»: у B вторая оплата даёт настоящую разницу 0.</p>
+      <p>«Следующий» — сосед по выбранным ключам, а не событие из будущего. Поздняя вставка между двумя оплатами изменит соседей при повторном отчёте. Для воспроизводимости нужны срез данных и устойчивый бизнес-порядок.</p>
+      <div class="note warn">
+        <p>Фильтрация входа меняет соседей. Если убрать вчерашние платежи в <code>WHERE</code> до расчёта <code>LAG</code>, первая строка сегодняшнего отчёта не увидит вчерашнюю оплату. Если она нужна для сравнения, посчитай окно по истории и только затем ограничь строки отчёта внешним запросом.</p>
+      </div>
+      <details class="deep">
+        <summary>NULL соседа и отсутствие соседа — разные причины</summary>
+        <p>У <code>LAG(value, offset, default)</code> значение <code>default</code> используется, когда строки на нужном смещении нет. Если сосед есть, но его <code>value</code> равен <code>NULL</code>, результат остаётся <code>NULL</code>. Подмена через <code>COALESCE</code> объединит эти причины — это допустимо только по правилу отчёта.</p>
+        <p>В нашей таблице <code>amount NOT NULL</code>, поэтому <code>NULL</code> в <code>prev_amount</code> однозначно означает начало partition. PostgreSQL 17 не реализует <code>IGNORE NULLS</code> для этих функций: соседняя строка с пустым значением не пропускается. Если данные допускают такие значения, сначала реши, что для бизнеса означает «предыдущая сумма».</p>
+      </details>
+    </section>
+
+    <section class="step" id="last-value-frame">
+      <h2>LAST_VALUE смотрит на конец frame, а не всей partition</h2>
+      <p>Для сверки нужен последний платёж каждого продавца, но его <code>id</code> хочется оставить рядом со всеми предыдущими оплатами. Название <code>LAST_VALUE</code> выглядит подходящим: разделяем по продавцу, сортируем по дате и <code>id</code>. Однако функция возвращает 101 рядом с 101, 102 рядом с 102 и так далее. В отчёт попал текущий платёж вместо последнего.</p>
+      <p>Причина уже знакома: эта функция читает последнюю строку <b>frame</b>. При полном порядке <code>paid_on, id</code> у текущей строки нет других peers. Стандартный frame кончается на ней самой, поэтому «последнее значение» оказывается текущим <code>id</code>. Порядок выбран правильно; неверна ожидаемая граница.</p>
+      <pre><code class="language-sql">SELECT merchant, id,
+       last_value(id) OVER (
+         PARTITION BY merchant ORDER BY paid_on, id
+       ) AS default_last,           -- конец default frame здесь — текущая строка
+       last_value(id) OVER (
+         PARTITION BY merchant ORDER BY paid_on, id
+         ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+       ) AS partition_last          -- конец frame явно перенесён в конец partition
+FROM payments
+ORDER BY merchant, paid_on, id;</code></pre>
+      <pre class="out"> merchant | id  | default_last | partition_last
+----------+-----+--------------+----------------
+ A        | 101 |          101 |            104
+ A        | 102 |          102 |            104
+ A        | 103 |          103 |            104
+ A        | 104 |          104 |            104
+ B        | 201 |          201 |            202
+ B        | 202 |          202 |            202
+(6 rows)</pre>
+      <p><code>UNBOUNDED FOLLOWING</code> переносит конец frame к последней строке partition. Теперь у всех платежей A последним стал 104, у B — 202. В каждом случае сохраняется текущая строка отчёта, но контекст берётся из конца её последовательности. Если оставить порядок только по дате, несколько платежей последнего дня снова окажутся равны: выбор одного конкретного последнего <code>id</code> потребует дополнительного ключа.</p>
+      <div class="trap">
+        <p class="myth">Frame — общая настройка, которая одинаково ограничивает все оконные функции.</p>
+        <p class="fact"><code>SUM</code> и <code>LAST_VALUE</code> используют frame, а <code>LAG</code> и <code>LEAD</code> ищут соседей по partition и порядку. <code>RANK</code> описывает место peer-группы в partition. Сначала определи, на какой набор строк смотрит выбранная функция, затем меняй frame.</p>
+      </div>
+      <p><code>MAX(id)</code> не заменяет последний платёж по времени, если идентификаторы не отражают бизнес-порядок. Если же нужна только одна последняя строка на продавца, проще дать строкам <code>ROW_NUMBER</code> по убыванию даты и <code>id</code>, затем оставить номер 1. <code>LAST_VALUE</code> с полным frame нужен именно тогда, когда последний контекст должен сопровождать остальные строки.</p>
+      <p>Полный frame может читать строки позже текущей. Его результат не означает «что сервис знал при оплате 101»: он рассчитан по всему срезу истории. Для состояния на момент платежа нужна граница до текущей строки.</p>
+    </section>
+
+    <section class="step" id="top-n-boundaries">
+      <h2>Top-N фильтрует уже рассчитанные номера</h2>
+      <p>Вернёмся к отчёту о двух крупнейших платежах продавца. Окно присваивает номер каждой строке, но само по себе не удаляет остальные. Написать <code>WHERE row_number() OVER (...) &lt;= 2</code> на том же уровне нельзя: <code>WHERE</code> определяет входные строки раньше, чем логически считаются окна. Номер в этот момент ещё не существует.</p>
+      <p>Сделай границу запроса явной: внутри посчитай номер, снаружи отфильтруй его как обычную колонку. Это логическая граница расчётов; она не обещает создание временной таблицы. Те же два уровня можно записать через CTE; их устройство разобрано в <a href="sql-subqueries.html">Subqueries &amp; CTE</a>.</p>
+      <pre><code class="language-sql">SELECT merchant, id, amount, rn
+FROM (
+  SELECT merchant, id, amount,
+         row_number() OVER (
+           PARTITION BY merchant ORDER BY amount DESC, id
+         ) AS rn
+  FROM payments
+) AS numbered
+WHERE rn &lt;= 2                       -- номер уже стал обычной колонкой
+ORDER BY merchant, rn;</code></pre>
+      <pre class="out"> merchant | id  | amount | rn
+----------+-----+--------+----
+ A        | 103 |    300 |  1
+ A        | 102 |    200 |  2
+ B        | 201 |    500 |  1
+ B        | 202 |    500 |  2
+(4 rows)</pre>
+      <p>У A выбран 103 с суммой 300 и 102 с суммой 200; равный ему 104 не попал, потому что нужен максимум из двух конкретных строк. У B осталось две оплаты по 500. Если в partition меньше N строк, вернутся все имеющиеся — окно не создаёт недостающие платежи.</p>
+      <p>Требование «два первых места с сохранением равных» меняет функцию и peers. Убери уникальный <code>id</code> из порядка <code>RANK</code>, чтобы одинаковые суммы делили место:</p>
+      <pre><code class="language-sql">SELECT merchant, id, amount, rnk
+FROM (
+  SELECT merchant, id, amount,
+         rank() OVER (
+           PARTITION BY merchant ORDER BY amount DESC
+         ) AS rnk                   -- id не включён: равные суммы делят место
+  FROM payments
+) AS ranked
+WHERE rnk &lt;= 2
+ORDER BY merchant, rnk, id;</code></pre>
+      <pre class="out"> merchant | id  | amount | rnk
+----------+-----+--------+-----
+ A        | 103 |    300 |   1
+ A        | 102 |    200 |   2
+ A        | 104 |    200 |   2
+ B        | 201 |    500 |   1
+ B        | 202 |    500 |   1
+(5 rows)</pre>
+      <p>У A теперь три платежа: 103 на месте 1, а 102 и 104 делят место 2. Это корректное превышение N по числу строк. <code>DENSE_RANK &lt;= N</code> выбирает N различных уровней суммы; после большой группы равных его результат может отличаться от <code>RANK &lt;= N</code>, потому что пропуски мест отсутствуют.</p>
+      <p>«Крупнейшие оплаты за октябрь» — фильтр периода до окна. «Сегодняшние оплаты с местом среди всей истории» — фильтр дня после окна. Окна видят результат <code>FROM</code>, <code>WHERE</code>, обычной группировки и <code>HAVING</code>; после группировки по дням они работают с днями, а не с исходными оплатами.</p>
+      <details class="deep">
+        <summary>Почему top-N не обещает дешёвое чтение</summary>
+        <p>Условие <code>rn &lt;= 2</code> ограничивает итог, но чтобы определить победителей, базе нужен подходящий порядок внутри продавцов. На большой истории смотри <code>EXPLAIN (ANALYZE, BUFFERS)</code>: сколько входных строк прочитано, где сортировка, не выходит ли она во временные файлы. Само наличие окна не гарантирует полного сканирования, а внешний фильтр не гарантирует чтения только двух строк на продавца: это решает конкретный план.</p>
+        <p>Индекс выбирают под реальные фильтры и ключи порядка. Для отчёта по множеству продавцов окно часто выражает задачу удобно. Если нужен один продавец и две оплаты, достаточно <code>WHERE merchant = ... ORDER BY amount DESC, id LIMIT 2</code>. Для других вариантов сравнивай планы, а не число строк SQL. Работа с ними — в <a href="slow-queries.html">Slow Queries</a> и <a href="indexes.html">Indexes</a>.</p>
+      </details>
+      <div class="note tip">
+        <p>Перед добавлением окна назови единицу строки: платёж, продавец или день. Затем реши, кто его соседи, что означает равенство и какая граница нужна расчёту. Окно полезно, когда к этой строке нужен контекст; если нужен только итог на продавца, обычный <code>GROUP BY</code> короче и точнее выражает задачу.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Оконная агрегация сохраняет входные строки. <code>PARTITION BY</code> разделяет расчёт по продавцам, но не сворачивает платежи.</li>
+        <li><code>ROW_NUMBER</code> считает строки, <code>RANK</code> — места с пропусками, <code>DENSE_RANK</code> — peer-группы без пропусков. Равенство задают все ключи оконного порядка.</li>
+        <li>Стандартный <code>RANGE</code> идёт до последнего peer текущей строки. Для устойчивого итога после каждой оплаты задай полный порядок и явный <code>ROWS</code>.</li>
+        <li><code>LAG</code> и <code>LEAD</code> ищут соседей в partition. <code>LAST_VALUE</code> читает конец frame; последний платёж всей partition требует другой границы.</li>
+        <li>Входные фильтры меняют контекст окна. Для top-N и фильтра по оконному результату нужен внешний запрос; порядок вывода задаётся отдельно.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="window-vs-group-by" data-freq="3">
+      <h3>Чем оконная функция отличается от GROUP BY?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я использую <code>GROUP BY</code> для одного результата на группу. Когда нужен каждый платёж и оборот его продавца рядом, беру <code>SUM(amount) OVER (PARTITION BY merchant)</code>. Четыре платежа A остаются четырьмя строками с общим итогом 800.</p>
+          <p>В <code>OVER</code> я выбираю partition, порядок и frame. Порядок нужен для места или соседей, frame ограничивает оконную агрегацию. Внешний <code>ORDER BY</code> отдельно задаёт отображение результата.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Окно видит результат WHERE, GROUP BY и HAVING своего уровня. После группировки по дням оно аннотирует дни, а не исходные платежи.</li>
+            <li>Повторённый итог нельзя суммировать по детальным строкам. Окно не устраняет размножение платежей предыдущим JOIN.</li>
+            <li>Несколько окон используют один вход, но могут задавать разные partitions и порядок. Связанные расчёты удобно объединить именованной спецификацией <code>WINDOW</code>.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ranking-ties" data-freq="3">
+      <h3>Как выбрать между ROW_NUMBER, RANK и DENSE_RANK?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я уточняю смысл равенства. <code>ROW_NUMBER</code> нумерует строки отдельно; для устойчивого выбора добавляю ключ разрешения равенства. <code>RANK</code> даёт общее место и пропуски: 1, 2, 2, 4. <code>DENSE_RANK</code> считает уровни без пропусков: 1, 2, 2, 3.</p>
+          <p>Для не более N оплат беру <code>ROW_NUMBER &lt;= N</code>, для N мест с равными — <code>RANK &lt;= N</code>, для N различных сумм — <code>DENSE_RANK &lt;= N</code>. Фильтрую номер внешним запросом.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Peers определяет вся оконная сортировка. Уникальный id в RANK уничтожает общие места; только во внешней сортировке он их сохраняет.</li>
+            <li>Неопределённый порядок peers у ROW_NUMBER меняет состав top-N. Критерий выбора входит в контракт отчёта.</li>
+            <li>После большой группы равных лидеров RANK и DENSE_RANK дают разный проходной порог: один учитывает занятые места, другой считает уровни.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Разработчик добавил id в RANK, чтобы отчёт был стабильным. Что изменилось?</summary>
+          <pre><code class="language-sql">SELECT id, amount,
+       rank() OVER (ORDER BY amount DESC) AS by_amount,
+       rank() OVER (ORDER BY amount DESC, id) AS with_id
+FROM payments
+WHERE merchant = &#x27;A&#x27;
+ORDER BY amount DESC, id;</code></pre>
+          <pre class="out"> id  | amount | by_amount | with_id
+-----+--------+-----------+---------
+ 103 |    300 |         1 |       1
+ 102 |    200 |         2 |       2
+ 104 |    200 |         2 |       3
+ 101 |    100 |         4 |       4
+(4 rows)</pre>
+          <p>Суммы 200 перестали быть peers: пары <code>(200, 102)</code> и <code>(200, 104)</code> различны. Второй платёж получил место 3 и выпал бы из условия <code>rank &lt;= 2</code>. Для стабильного отображения с общим местом оставь сумму в окне, а <code>id</code> добавь во внешнюю сортировку.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="range-vs-rows" data-freq="3">
+      <h3>Почему running sum одинаковый у нескольких соседних строк?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я проверю frame и ключи порядка. Стандартный <code>RANGE</code> идёт от начала partition до последнего peer текущей строки. При сортировке только по дате обе оплаты одного дня входят вместе: вместо 100 и 300 получаем 300 и 300.</p>
+          <p>Для итога после каждой оплаты задаю однозначный порядок <code>paid_on, id</code> и <code>ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code>. Для итога к концу дня общая сумма у всех оплат дня корректна.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>При уникальном порядке RANGE тоже не объединяет несколько peers. Совпадение его результата с ROWS на таком наборе не делает режимы одинаковыми.</li>
+            <li>ROWS 2 PRECEDING измеряет строки, а не дни. Смещение RANGE измеряет значения ключа; в PostgreSQL оно требует одного выражения ORDER BY.</li>
+            <li>Без оконного ORDER BY стандартный frame равен всей partition. Добавление сортировки меняет общий итог на нарастающий.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="lag-and-last" data-freq="3">
+      <h3>Чем LAG отличается от LAST_VALUE и где у них ловушки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через <code>LAG</code> я беру значение предыдущей строки внутри partition, через <code>LEAD</code> — следующей. У края без соседа результат по умолчанию NULL. Порядок задаю по бизнес-времени и ключу разрешения равенства.</p>
+          <p><code>LAST_VALUE</code> читает конец frame. При стандартной границе и уникальном порядке это текущая строка. Для последнего платежа всей partition задаю конец <code>UNBOUNDED FOLLOWING</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Frame из текущей строки ограничит SUM и LAST_VALUE, но не заставит LAG забыть предыдущую строку partition.</li>
+            <li>Третий аргумент LAG заменяет отсутствие строки, а не её NULL. PostgreSQL 17 не поддерживает IGNORE NULLS.</li>
+            <li>Последнее значение всей истории использует более поздние данные. Оно не описывает сведения на момент текущей оплаты.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Почему первый платёж 2 октября потерял предыдущий id?</summary>
+          <p>Сравни <code>prev_id</code> для 103: дата отфильтрована до окна или после него.</p>
+          <pre><code class="language-sql">SELECT id, paid_on,
+       lag(id) OVER (ORDER BY paid_on, id) AS prev_id
+FROM payments
+WHERE merchant = &#x27;A&#x27; AND paid_on &gt;= DATE &#x27;2026-10-02&#x27;
+ORDER BY paid_on, id;</code></pre>
+          <pre class="out"> id  |  paid_on   | prev_id
+-----+------------+---------
+ 103 | 2026-10-02 |    NULL
+ 104 | 2026-10-03 |     103
+(2 rows)</pre>
+          <pre><code class="language-sql">SELECT id, paid_on, prev_id
+FROM (
+  SELECT id, paid_on,
+         lag(id) OVER (ORDER BY paid_on, id) AS prev_id
+  FROM payments
+  WHERE merchant = &#x27;A&#x27;
+) AS history
+WHERE paid_on &gt;= DATE &#x27;2026-10-02&#x27;
+ORDER BY paid_on, id;</code></pre>
+          <pre class="out"> id  |  paid_on   | prev_id
+-----+------------+---------
+ 103 | 2026-10-02 |     102
+ 104 | 2026-10-03 |     103
+(2 rows)</pre>
+          <p>Первое окно не видит прежние дни: для 103 сосед отсутствует. Второе видит историю и возвращает 102; затем ранние дни скрыты. Это разные отчёты: сосед внутри периода или в истории.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="top-n-query" data-freq="3">
+      <h3>Как написать top-N в каждой группе и не поменять смысл фильтров?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Внутри я считаю <code>ROW_NUMBER</code> по продавцу с нужным порядком, снаружи оставляю <code>rn &lt;= N</code>. Номер становится обычной колонкой перед фильтрацией; окно в WHERE того же уровня запрещено, потому что WHERE определяет его вход.</p>
+          <p>До окна ограничиваю участников отбора, например успешные оплаты октября. После него — рассчитанное место или отображаемые строки с контекстом истории. Выбор функции зависит от того, должны ли равные пройти вместе.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Подзапрос задаёт логическую границу, но не обещает материализацию. Чтение, сортировки и использование индекса проверяю по плану.</li>
+            <li>Внешний LIMIT ограничивает весь отчёт. Для одного продавца ORDER BY ... LIMIT достаточен, для множества нужны отдельные отборы или окно.</li>
+            <li>После JOIN окно нумерует строки соединения. Сначала обеспечиваю одну строку на платёж, иначе он может занять несколько мест.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/17/tutorial-window.html">PostgreSQL 17, §3.5 Window Functions</a> — основа урока: контекст текущей строки, сохранение детализации, порядок и фильтрация внешним запросом.</li>
+      <li><a href="https://www.postgresql.org/docs/17/functions-window.html">PostgreSQL 17, §9.22 Window Functions</a> — точные правила ранжирования, LAG/LEAD, LAST_VALUE и поведения NULL.</li>
+      <li><a href="https://www.postgresql.org/docs/17/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS">PostgreSQL 17, §4.2.8 Window Function Calls</a> — стандартный RANGE, границы ROWS, peers и ограничения смещений.</li>
+      <li><a href="https://www.postgresql.org/docs/17/queries-table-expressions.html#QUERIES-WINDOW">PostgreSQL 17, §7.2.5 Window Function Processing</a> — вход окон после фильтрации и группировки, независимый порядок вывода.</li>
+      <li><a href="https://www.postgresql.org/docs/17/using-explain.html">PostgreSQL 17, §14.1 Using EXPLAIN</a> — чтение плана, сортировки и фактической работы запроса.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

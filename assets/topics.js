@@ -219,7 +219,7 @@ window.KB_TREE = [
           scope: 'INNER, LEFT, FULL, CROSS, self join, semi и anti join, NOT IN и NULL' },
         { id: 'sql-subqueries', freq: 2, status: 'draft', title: 'Subqueries & CTE',
           scope: 'коррелированные подзапросы, EXISTS, CTE, рекурсивные CTE, LATERAL' },
-        { id: 'window-functions', freq: 3, status: 'empty', title: 'Window Functions',
+        { id: 'window-functions', freq: 3, status: 'draft', title: 'Window Functions',
           scope: 'ROW_NUMBER, RANK и DENSE_RANK, LAG и LEAD, нарастающий итог, топ-N в группе' },
         { id: 'sql-practice', freq: 3, status: 'empty', title: 'SQL Practice',
           scope: 'задачи на live coding: дубликаты, второй по величине, топ-N в группе, агрегаты по счетам' },
