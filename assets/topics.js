@@ -341,7 +341,7 @@ window.KB_TREE = [
           scope: 'резерв и подтверждение, двойное бронирование, блокировки и версии, истечение брони' },
         { id: 'sd-url-shortener', freq: 2, status: 'draft', title: 'URL Shortener',
           scope: 'генерация ключа, хранение, чтение под нагрузкой, аналитика' },
-        { id: 'sd-notifications', freq: 1, status: 'empty', title: 'Notification Service',
+        { id: 'sd-notifications', freq: 1, status: 'draft', title: 'Notification Service',
           scope: 'каналы доставки, очереди, повторы, шаблоны, лимиты' },
       ] },
     ],
