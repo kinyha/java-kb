@@ -287,7 +287,7 @@ window.KB_TREE = [
           scope: 'RPS, объём данных, пропускная способность, latency numbers, степени двойки' },
         { id: 'scalability', freq: 2, status: 'empty', title: 'Scalability',
           scope: 'вертикальное и горизонтальное масштабирование, stateless, latency и throughput' },
-        { id: 'availability', freq: 2, status: 'empty', title: 'Availability & SLO',
+        { id: 'availability', freq: 2, status: 'draft', title: 'Availability & SLO',
           scope: 'SLA, SLO, SLI, девятки, fail-over, резервирование, active-active и active-passive' },
         { id: 'cap', freq: 3, status: 'draft', title: 'CAP & Consistency',
           scope: 'CAP, PACELC, сильная и eventual consistency, read-your-writes, кворумы' },
