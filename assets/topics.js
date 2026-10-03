@@ -319,7 +319,7 @@ window.KB_TREE = [
       { id: 'reliability', title: 'Reliability', source: 'Azure Cloud Design Patterns: Resiliency, Performance Antipatterns; Release It!', items: [
         { id: 'resilience', freq: 3, status: 'draft', title: 'Resilience Patterns',
           scope: 'таймауты, retry с backoff и jitter, circuit breaker, bulkhead, fallback' },
-        { id: 'overload', freq: 1, status: 'empty', title: 'Overload',
+        { id: 'overload', freq: 1, status: 'draft', title: 'Overload',
           scope: 'backpressure, throttling, load shedding, graceful degradation, retry storm' },
         { id: 'perf-antipatterns', freq: 1, status: 'empty', title: 'Performance Antipatterns',
           scope: 'chatty I/O, busy database, extraneous fetching, noisy neighbor, synchronous I/O' },
