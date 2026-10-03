@@ -329,7 +329,7 @@ window.KB_TREE = [
           scope: 'модульный монолит, границы сервисов, database per service, распил монолита, 12 factor' },
         { id: 'service-communication', freq: 2, status: 'draft', title: 'Service Communication',
           scope: 'синхронные вызовы и сообщения, REST и gRPC между сервисами, цепочки вызовов, API composition' },
-        { id: 'cloud-patterns', freq: 1, status: 'empty', title: 'Cloud Patterns',
+        { id: 'cloud-patterns', freq: 1, status: 'draft', title: 'Cloud Patterns',
           scope: 'strangler fig, sidecar, BFF, anti-corruption layer, ambassador' },
       ] },
       { id: 'cases', title: 'Case Studies', source: 'System Design Interview т. 1–2: разборы задач', items: [

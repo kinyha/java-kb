@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Cloud Patterns · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="cloud-patterns">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Cloud Patterns</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Облачные паттерны решают типовые задачи распределённых систем вне бизнес-кода. Sidecar — вспомогательный процесс рядом с приложением, в том же сетевом пространстве, как контейнеры одного пода: он берёт на себя повторы, TLS, метрики. В демо сайдкар-посол (ambassador) поднял долю успешных вызовов нестабильного сервиса с 70 % до 97 % без единой строки в приложении. Anti-corruption layer переводит чужую модель — устаревшей системы или внешнего API — в свою, чтобы она не расползалась по коду. Strangler fig заменяет систему по кусочку за маршрутизатором, BFF собирает API под конкретного клиента. Каждый паттерн переносит сложность, а не убирает её: сайдкар — ещё один процесс, который надо обновлять и отлаживать.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Повторы, TLS и метрики переписаны в каждом сервисе по-своему</h2>
+      <p>В компании двадцать сервисов на Java, Go и Python. Каждый сам настраивает повторы к внешнему сервису курсов, сам поднимает TLS к соседям, сам отдаёт метрики в своём формате. Повторы в трёх сервисах без задержки, в двух — без ограничения числа попыток; обновление сертификатов — ручная работа в двадцати местах. Это инфраструктурная логика, одинаковая для всех и не связанная с бизнесом, — кандидат на вынос из кода.</p>
+      <p>Тема разбирает sidecar и ambassador на демо, anti-corruption layer на коде и сводку остальных паттернов. Демо <a href="../examples/cloud-patterns/sidecar.sh">sidecar.sh</a> запускает в Docker нестабильный сервис курсов (около 30 % ответов 503), контейнер приложения с curl и nginx 1.31 как сайдкар в сетевом пространстве приложения. Strangler fig подробно — в <a href="microservices.html">Monolith &amp; Microservices</a>, BFF — в <a href="api-gateway.html">API Gateway</a>, повторы — в <a href="resilience.html">Resilience Patterns</a>.</p>
+    </section>
+
+    <section class="step" id="sidecar">
+      <h2>Sidecar и ambassador: инфраструктура рядом с приложением, а не в нём</h2>
+<pre><code class="language-sh"># Приложение — alpine с curl; ничего не знает о повторах.
+docker run -d --name app --network cp-net alpine sleep 600
+# Сайдкар разделяет сетевое пространство app: для приложения он — localhost:9000.
+docker run -d --name ambassador --network container:app -v "$PWD/ambassador.conf":/etc/nginx/nginx.conf:ro nginx:1.31-alpine</code></pre>
+<pre><code class="language-nginx">location / {
+    proxy_pass http://rates;                     # три записи одного адреса — три попытки
+    proxy_next_upstream error timeout http_503;
+    proxy_next_upstream_tries 3;
+    proxy_connect_timeout 200ms;
+    proxy_read_timeout 1s;
+}</code></pre>
+      <pre class="out">== the app calls the rates service 200 times (about 30% of responses are 503)
+   directly, http://rates:8080:            200 x140  503 x60
+   via ambassador, http://localhost:9000:  200 x194  503 x6
+== same network namespace
+   inside the app container, port 9000 is open: 0.0.0.0:9000
+   app container runs: ps sleep</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Под из двух контейнеров с общим сетевым пространством. Приложение вызывает localhost:9000, где слушает сайдкар. Сайдкар идёт к сервису курсов и повторяет при 503. Без сайдкара приложение ходит к сервису напрямую и видит 30 процентов ошибок.">
+            <defs><marker id="cp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="30" width="360" height="130" rx="12" class="dg-cell"/>
+            <text x="34" y="50" class="dg-cap">ОБЩЕЕ СЕТЕВОЕ ПРОСТРАНСТВО (ПОД)</text>
+            <rect x="40" y="70" width="140" height="60" rx="9" class="dg-box"/>
+            <text x="110" y="95" class="dg-in" text-anchor="middle">app</text>
+            <text x="110" y="113" class="dg-n" text-anchor="middle">curl, sleep</text>
+            <rect data-s="2" x="220" y="70" width="140" height="60" rx="9" class="dg-box"/>
+            <text data-s="2" x="290" y="95" class="dg-in" text-anchor="middle">ambassador</text>
+            <text data-s="2" x="290" y="113" class="dg-n" text-anchor="middle">nginx :9000</text>
+            <rect x="540" y="70" width="160" height="60" rx="9" class="dg-box"/>
+            <text x="620" y="95" class="dg-in" text-anchor="middle">rates</text>
+            <text x="620" y="113" class="dg-bad" text-anchor="middle">~30% 503</text>
+            <path data-s="1" d="M180 100 L 538 100" class="dg-line bad" marker-end="url(#cp-a)"/>
+            <text data-s="1" x="360" y="92" class="dg-bad" text-anchor="middle">rates:8080 — 140 из 200</text>
+            <path data-s="2" d="M180 100 L 218 100" class="dg-line" marker-end="url(#cp-a)"/>
+            <text data-s="2" x="199" y="146" class="dg-n" text-anchor="middle">localhost</text>
+            <path data-s="2" d="M360 92 L 538 92" class="dg-line ok" marker-end="url(#cp-a)"/>
+            <path data-s="2" d="M538 108 L 362 108" class="dg-line bad" marker-end="url(#cp-a)"/>
+            <text data-s="2" x="450" y="84" class="dg-ok" text-anchor="middle">до 3 попыток</text>
+            <text data-s="2" x="450" y="126" class="dg-bad" text-anchor="middle">503 → повтор</text>
+            <text data-s="1" x="20" y="196" class="dg-bad">Без сайдкара каждый 503 доходит до приложения.</text>
+            <text data-s="2" x="20" y="196" class="dg-ok">С сайдкаром — 194 из 200: при 30% отказов три попытки дают ≈ 97%.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Приложение ходит к сервису курсов напрямую: каждый 503 — ошибка приложения. Из 200 вызовов успешны 140.</li>
+          <li>Тот же код вызывает <code>localhost:9000</code>, где слушает сайдкар. Он повторяет запрос при 503 до трёх раз: вероятность трёх отказов подряд — 0,3³ ≈ 2,7 %, и успешных вызовов стало 194. Точные числа меняются от запуска к запуску.</li>
+        </ol>
+      </figure>
+      <p>Последние строки вывода показывают сам механизм. Внутри контейнера приложения открыт порт 9000, хотя процессов nginx там нет — только <code>sleep</code> и <code>ps</code>: сетевое пространство общее, а процессы раздельные. Так же устроены контейнеры одного пода в Kubernetes, и так работает сервисная сеть: Istio и Linkerd добавляют в каждый под прокси Envoy, который перехватывает весь входящий и исходящий трафик и даёт mTLS, повторы, тайм-ауты и метрики для любых языков без изменения кода.</p>
+      <p>Ambassador — частный случай сайдкара для исходящих вызовов: представитель внешнего сервиса рядом с приложением. Другие типичные сайдкары: агент сбора логов, прокси для подключения к облачной базе (Cloud SQL Proxy), обновление сертификатов и секретов. Цена — ресурсы на каждый под, ещё одна точка отказа и отладки, лишний переход через localhost на каждый вызов. И главное: повторы в сайдкаре должны знать об идемпотентности. nginx из демо POST не повторит: по умолчанию он не передаёт неидемпотентный запрос следующему серверу, если уже отправил его, — это включается только флагом <code>non_idempotent</code>. В сервисной сети политика повторов задаётся для маршрута, и если включить её для пути платежей, POST повторится: двойное списание, если сервис успел выполнить запрос до 503.</p>
+    </section>
+
+    <section class="step" id="acl">
+      <h2>Anti-corruption layer: чужая модель останавливается на границе</h2>
+<pre><code class="language-java">// Модель устаревшей банковской системы: строки, коды, суммы в копейках строкой.
+record LegacyTxn(String ACCT_NO, String TXN_CD, String AMT_KOP, String DT_YYYYMMDD) {}
+
+// Своя модель предметной области.
+record Payment(AccountId account, PaymentType type, Money amount, LocalDate date) {}
+
+// Слой перевода: единственное место, которое знает о LegacyTxn.
+final class LegacyBankTranslator {
+    Payment toDomain(LegacyTxn t) {
+        return new Payment(
+            new AccountId(t.ACCT_NO().strip()),
+            switch (t.TXN_CD()) {                       // коды старой системы — только здесь
+                case "01", "11" -&gt; PaymentType.CARD;
+                case "07" -&gt; PaymentType.TRANSFER;
+                default -&gt; throw new UnknownLegacyCode(t.TXN_CD());
+            },
+            Money.ofMinor(Long.parseLong(t.AMT_KOP()), "RUB"),
+            LocalDate.parse(t.DT_YYYYMMDD(), DateTimeFormatter.BASIC_ISO_DATE));
+    }
+}</code></pre>
+      <p>Новый сервис платежей интегрируется со старой банковской системой, у которой своя модель: поля в верхнем регистре, коды операций числами в строках, суммы в копейках строкой, даты без разделителей. Если эти типы проникают в код сервиса, новая модель начинает жить по правилам старой: условия на «07» появляются в десятке мест, и замена старой системы требует переписать всё. Anti-corruption layer — слой перевода на границе: снаружи он говорит на языке старой системы, внутрь отдаёт только свою модель. Неизвестный код операции — явная ошибка перевода, а не тихое значение по умолчанию.</p>
+      <p>Этот слой — естественное место для адаптеров из гексагональной архитектуры, как в <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a>, и для перевода между ограниченными контекстами из <a href="ddd.html">DDD</a>. При постепенной замене системы по strangler fig он позволяет новому коду работать сначала со старой системой через перевод, а затем с новой — без изменения модели.</p>
+    </section>
+
+    <section class="step" id="catalog">
+      <h2>Сводка паттернов</h2>
+      <table class="mx">
+        <thead><tr><th>Паттерн</th><th>Задача</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>Strangler fig</td><td>Постепенная замена системы за маршрутизатором</td><td>Долгий период двух систем, синхронизация данных</td></tr>
+          <tr><td>Sidecar</td><td>Инфраструктура рядом с приложением на любом языке</td><td>Ресурсы на каждый под, ещё одна точка отказа</td></tr>
+          <tr><td>Ambassador</td><td>Представитель внешнего сервиса: повторы, тайм-ауты, TLS</td><td>Повторы без знания об идемпотентности опасны</td></tr>
+          <tr><td>Anti-corruption layer</td><td>Перевод чужой модели в свою на границе</td><td>Код перевода и его тесты</td></tr>
+          <tr><td>BFF</td><td>API под конкретного клиента с агрегацией</td><td>Дублирование между BFF разных клиентов</td></tr>
+          <tr><td>Gateway offloading</td><td>TLS, аутентификация, лимиты на шлюзе</td><td>Шлюз критичен и может стать монолитом</td></tr>
+          <tr><td>Valet key</td><td>Клиент грузит файл прямо в хранилище по подписанной ссылке</td><td>Короткий срок и узкие права ссылки</td></tr>
+          <tr><td>Claim check</td><td>Большое вложение — в хранилище, в сообщении — только ссылка</td><td>Жизненный цикл вложений</td></tr>
+          <tr><td>Competing consumers</td><td>Несколько обработчиков одной очереди</td><td>Порядок и идемпотентность</td></tr>
+        </tbody>
+      </table>
+      <p>Valet key и claim check решают одну задачу — не гонять большие данные через сервис. Клиент загружает файл в S3 по подписанной ссылке с правом записи одного объекта на 10 минут, и сервис не держит соединение на время загрузки. Сообщение о загруженном файле несёт ссылку на объект, а не сам файл: брокеры рассчитаны на сообщения в килобайты, а не в мегабайты. Competing consumers — основа очередей задач из <a href="background-jobs.html">Background Jobs</a>.</p>
+      <div class="trap">
+        <p class="myth">Повторы в сайдкаре или сервисной сети безопасны: приложение ничего не знает, а успешных запросов больше.</p>
+        <p class="fact">Сайдкар не знает, выполнил ли сервис запрос перед ответом 503 или обрывом. В демо повторы подняли успех GET с 140 до 194 из 200; nginx по умолчанию не повторяет POST, но политика повторов в сервисной сети, включённая для маршрута платежей, повторит и его. Повторы в инфраструктуре включают только для идемпотентных методов или запросов с ключом идемпотентности.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Sidecar — процесс рядом с приложением в общем сетевом пространстве; ambassador — для исходящих вызовов.</li>
+        <li>Демо: сайдкар с тремя попытками поднял успех вызовов к сервису с 30 % отказов со 140 до 194 из 200.</li>
+        <li>В контейнере приложения открыт порт сайдкара, но нет его процесса: сеть общая, процессы раздельные.</li>
+        <li>Anti-corruption layer держит чужую модель на границе; неизвестные значения — явная ошибка перевода.</li>
+        <li>Valet key и claim check не гоняют большие данные через сервис; повторы в инфраструктуре — только для идемпотентного.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="cpt-sidecar" data-freq="2">
+      <h3>Что такое sidecar и когда он оправдан?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Вспомогательный контейнер рядом с приложением в одном поде с общей сетью и томами. Он берёт инфраструктурные задачи — прокси с TLS и повторами, сбор логов, метрики, обновление секретов — одинаково для сервисов на любых языках. Оправдан, когда сервисов много и на разных стеках; для одного сервиса на Java проще библиотека.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Сервисная сеть (Istio, Linkerd) — сайдкар Envoy в каждом поде.</li>
+            <li>Цена: ресурсы на каждый под, задержка лишнего перехода, сложность отладки и обновления.</li>
+            <li>Повторы в сайдкаре — только для идемпотентных запросов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cpt-acl" data-freq="2">
+      <h3>Зачем нужен anti-corruption layer?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Чтобы модель чужой системы — устаревшей или внешней — не проникала в свой код. Слой перевода на границе принимает чужие типы и коды и отдаёт свою модель предметной области. Тогда замена внешней системы меняет только этот слой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Неизвестные коды — явная ошибка, а не значение по умолчанию.</li>
+            <li>Естественно ложится на адаптеры гексагональной архитектуры и границы контекстов DDD.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой интеграцией?</summary>
+          <pre><code class="language-java">@Service
+class RefundService {
+    void refund(LegacyTxn txn) {                         // тип старой системы в бизнес-коде
+        if (txn.TXN_CD().equals("07")) { ... }           // код операции «перевод»
+        long amount = Long.parseLong(txn.AMT_KOP());
+        ledger.post(txn.ACCT_NO(), -amount);
+    }
+}</code></pre>
+          <p>Бизнес-логика возвратов зависит от типов и кодов старой системы: «07», копейки строкой и номер счёта с пробелами расползутся по всем сервисам, а замена системы потребует их переписать. Нужен слой перевода, который превращает <code>LegacyTxn</code> в свою модель <code>Payment</code> с типом, деньгами и счётом, а <code>RefundService</code> работает только с ней.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cpt-valet" data-freq="2">
+      <h3>Как принимать большие файлы, не гоняя их через сервис?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Valet key: сервис выдаёт клиенту подписанную ссылку на загрузку одного объекта в объектное хранилище с коротким сроком, и клиент грузит файл напрямую. Затем сервис получает уведомление о загрузке. В сообщениях между сервисами передают ссылку на объект, а не содержимое (claim check).</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Права ссылки — только запись конкретного ключа, ограничение размера и типа.</li>
+            <li>Проверку содержимого (антивирус, формат) делают после загрузки асинхронно.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/">Azure Architecture Center: Cloud Design Patterns</a> — Sidecar, Ambassador, Anti-corruption Layer, Valet Key, Claim Check, Strangler Fig.</li>
+      <li>Eric Evans, «Domain-Driven Design», глава 14 — anti-corruption layer.</li>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/">Kubernetes: Sidecar Containers</a>.</li>
+      <li><a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream">nginx: proxy_next_upstream</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
