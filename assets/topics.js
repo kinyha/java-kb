@@ -65,7 +65,7 @@ window.KB_TREE = [
           scope: 'скобки, монотонный стек, следующий больший элемент, вычисление выражений' },
         { id: 'searching', freq: 2, status: 'draft', title: 'Binary Search',
           scope: 'поиск в отсортированном массиве, левая и правая граница, поиск по ответу, повёрнутый массив' },
-        { id: 'prefix-sums', freq: 2, status: 'empty', title: 'Prefix Sums',
+        { id: 'prefix-sums', freq: 2, status: 'draft', title: 'Prefix Sums',
           scope: 'сумма на отрезке за O(1), подмассивы с заданной суммой, префиксы и HashMap' },
         { id: 'linked-list', freq: 2, status: 'empty', title: 'Linked List',
           scope: 'разворот списка, fast и slow pointers, поиск цикла, слияние списков, dummy head' },
