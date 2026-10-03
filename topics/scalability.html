@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scalability · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="scalability">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Scalability</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Масштабируемость — способность обслуживать больше нагрузки, добавляя ресурсы. Вертикально — больше ядер и памяти на одной машине, — пока работа не упирается в общее: в демо 16 потоков без общего состояния дали ×14,3, а с общей блокировкой на 10 % работы — ×0,4, медленнее одного потока, потому что ядра тратят время на передачу друг другу кеш-линии. Горизонтально — больше экземпляров, — если экземпляры не хранят состояние: сессия в памяти одного экземпляра за балансировщиком узнаётся в половине запросов. Состояние выносят в общие хранилища, и тогда узким местом становятся они: их масштабируют репликами для чтения, кешами и, в последнюю очередь, шардированием.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Добавили серверов — стало не быстрее, а пользователей выкидывает</h2>
+      <p>Сервис личного кабинета не справлялся с нагрузкой. Сначала его перенесли на машину вдвое мощнее — пропускная способность почти не выросла: потоки ждали один общий объект с кешем курсов, защищённый <code>synchronized</code>. Затем запустили второй экземпляр за балансировщиком — и пользователей стало выкидывать на страницу входа через раз: сессия хранилась в памяти экземпляра, на котором пользователь вошёл.</p>
+      <p>Тема разбирает пределы вертикального масштабирования, требование отсутствия состояния для горизонтального и порядок масштабирования данных. Демо в <a href="../examples/scalability/">examples/scalability</a>: <code>ContentionDemo</code> меряет пропускную способность потоков на 18 ядрах, <code>SessionDemo</code> поднимает два экземпляра за nginx 1.31 с сессиями в памяти и в Redis. Балансировка подробно — в <a href="load-balancing.html">Load Balancing</a>, шардирование — в <a href="sharding.html">Sharding</a>.</p>
+    </section>
+
+    <section class="step" id="vertical">
+      <h2>Вертикально: всё упирается в общее</h2>
+<pre><code class="language-java">while (running) {
+    for (int k = 0; k &lt; 90; k++) x = x * 6364136223846793005L + 1442695040888963407L;   // независимая работа
+    if (withLock) synchronized (lock) { for (int k = 0; k &lt; 10; k++) shared = shared * 31 + x; }
+    else for (int k = 0; k &lt; 10; k++) local = local * 31 + x;
+    n++;
+}</code></pre>
+      <pre class="out">== throughput, ops per second (18 CPUs)
+   threads   no shared state   with lock 10% of work
+         1       74.9M (x 1.0)       74.4M (x 1.0)
+         2      153.9M (x 2.1)       24.3M (x 0.3)
+         4      295.1M (x 3.9)       28.8M (x 0.4)
+         8      570.4M (x 7.6)       29.9M (x 0.4)
+        16     1068.1M (x14.3)       29.7M (x 0.4)</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+            <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Ускорение от числа потоков. Без общего состояния: 1, 2,1, 3,9, 7,6, 14,3 раза. С блокировкой на 10 процентов работы: 1, затем 0,3–0,4 раза при 2–16 потоках. Предел Амдала для 10 процентов последовательной работы — 10 раз.">
+            <path d="M90 190 L 620 190" class="dg-line"/>
+            <path d="M90 190 L 90 30" class="dg-line"/>
+            <text x="90" y="208" class="dg-n" text-anchor="middle">1</text>
+            <text x="220" y="208" class="dg-n" text-anchor="middle">2</text>
+            <text x="350" y="208" class="dg-n" text-anchor="middle">4</text>
+            <text x="480" y="208" class="dg-n" text-anchor="middle">8</text>
+            <text x="610" y="208" class="dg-n" text-anchor="middle">16</text>
+            <text x="355" y="226" class="dg-n" text-anchor="middle">потоков</text>
+            <text x="80" y="184" class="dg-n" text-anchor="end">×1</text>
+            <text x="80" y="144" class="dg-n" text-anchor="end">×5</text>
+            <text x="80" y="94" class="dg-n" text-anchor="end">×10</text>
+            <text x="80" y="44" class="dg-n" text-anchor="end">×15</text>
+            <path d="M90 180 L 620 180" class="dg-sep"/>
+            <path data-s="3" d="M90 90 L 620 90" class="dg-sep"/>
+            <text data-s="3" x="625" y="94" class="dg-n">Амдал: ×10</text>
+            <polyline data-s="1-" points="90,180 220,169 350,151 480,114 610,47" fill="none" class="dg-line ok" style="stroke-width:2.5"/>
+            <circle data-s="1-" cx="90" cy="180" r="4" class="dg-cell hit"/>
+            <circle data-s="1-" cx="220" cy="169" r="4" class="dg-cell hit"/>
+            <circle data-s="1-" cx="350" cy="151" r="4" class="dg-cell hit"/>
+            <circle data-s="1-" cx="480" cy="114" r="4" class="dg-cell hit"/>
+            <circle data-s="1-" cx="610" cy="47" r="4" class="dg-cell hit"/>
+            <text data-s="1-" x="602" y="37" class="dg-ok" text-anchor="end">без общего состояния ×14,3</text>
+            <polyline data-s="2-" points="90,180 220,187 350,186 480,186 610,186" fill="none" class="dg-line bad" style="stroke-width:2.5"/>
+            <circle data-s="2-" cx="90" cy="180" r="4" class="dg-cell miss"/>
+            <circle data-s="2-" cx="220" cy="187" r="4" class="dg-cell miss"/>
+            <circle data-s="2-" cx="350" cy="186" r="4" class="dg-cell miss"/>
+            <circle data-s="2-" cx="480" cy="186" r="4" class="dg-cell miss"/>
+            <circle data-s="2-" cx="610" cy="186" r="4" class="dg-cell miss"/>
+            <text data-s="2-" x="602" y="176" class="dg-bad" text-anchor="end">общая блокировка ×0,4</text>
+            </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Без общего состояния каждый поток работает со своими данными: 16 потоков дают ×14,3. Недостающее до ×16 — общая память и частоты ядер под нагрузкой.</li>
+          <li>Та же работа, но 10 % каждой операции — под общей блокировкой. Уже два потока медленнее одного: ×0,3.</li>
+          <li>Закон Амдала обещал бы предел ×10: последовательная часть — 10 %. Реальность хуже: каждый захват блокировки и запись в <code>shared</code> переносят кеш-линию между ядрами, и эта передача стоит дороже самой работы. Чем больше потоков, тем больше таких передач.</li>
+        </ol>
+      </figure>
+      <p>Закон Амдала даёт верхнюю границу ускорения при последовательной доле работы s: 1 / s, то есть ×10 при 10 %. Универсальный закон масштабируемости Ганнера добавляет стоимость согласования между участниками, которая растёт с их числом, — и предсказывает ретроградное масштабирование, которое видно в демо: после некоторого числа потоков пропускная способность падает. Это верно не только для потоков: общая строка в базе, на которую пишут все экземпляры, глобальный счётчик в Redis, один брокер на всех — то же общее состояние, только дороже.</p>
+      <p>Вертикальное масштабирование всё равно стоит пробовать первым: оно не требует менять архитектуру, а современные машины огромны. Но у него есть потолок, цена растёт быстрее мощности, а одна машина остаётся единой точкой отказа. Прежде чем покупать ядра, ищут общие ресурсы: <code>synchronized</code> на горячем пути, общие счётчики, пулы с одной очередью. Разбор блокировок в JVM — в <a href="locks.html">Locks</a>, атомики и <code>LongAdder</code> — в <a href="atomics.html">Atomics</a>.</p>
+    </section>
+
+    <section class="step" id="stateless">
+      <h2>Горизонтально: экземпляры не должны хранить состояние</h2>
+<pre><code class="language-java">// Сессии в памяти процесса: у каждого экземпляра своя карта.
+instance(8191, local()); instance(8192, local());
+// Сессии в Redis: общая для всех экземпляров.
+Store shared = new Store() {
+    public void put(String sid, String user) { redis.set("session:" + sid, user, SetParams.setParams().ex(1800)); }
+    public String get(String sid) { return redis.get("session:" + sid); }
+};
+instance(8193, shared); instance(8194, shared);</code></pre>
+      <pre class="out">== log in, then call /me 6 times through nginx round robin
+   sessions in memory   logged in on 8191; /me: 401 200 401 200 401 200 -> 3 of 6 recognized
+   sessions in Redis    logged in on 8193; /me: 200 200 200 200 200 200 -> 6 of 6 recognized</pre>
+      <p>Пользователь вошёл на экземпляре 8191, и сессия легла в его память. Round robin отправляет каждый второй запрос на 8192, который о сессии не знает: 401 через раз. С сессией в Redis любой экземпляр находит её по идентификатору из cookie — все 6 запросов узнаны. Это и есть требование горизонтального масштабирования: экземпляр сервиса взаимозаменяем, любой запрос может прийти на любой, и экземпляр можно убить или добавить в любой момент.</p>
+      <table class="mx">
+        <thead><tr><th>Где держать состояние</th><th>Плюсы</th><th>Минусы</th></tr></thead>
+        <tbody>
+          <tr><td>Redis, общая база</td><td>Экземпляры взаимозаменяемы</td><td>Сетевой вызов на запрос, хранилище надо масштабировать</td></tr>
+          <tr><td>В токене у клиента (JWT)</td><td>Сервер ничего не хранит</td><td>Нельзя отозвать до истечения, размер на каждый запрос — как в <a href="jwt.html">JWT</a></td></tr>
+          <tr><td>Sticky sessions</td><td>Без изменений кода</td><td>Неравномерная нагрузка, потеря сессий при отказе экземпляра</td></tr>
+          <tr><td>Локальный кеш</td><td>Быстро</td><td>Только для данных, которые можно потерять и перечитать</td></tr>
+        </tbody>
+      </table>
+      <p>Состоянием бывает не только сессия: загруженные файлы на локальном диске, задачи в памяти, планировщик, запущенный на каждом экземпляре, локальные счётчики лимитов. Каждое такое место при втором экземпляре даёт ошибку, которой не было на одном. Принципы Twelve-Factor — конфигурация в окружении, логи в поток, ничего важного на локальном диске — и есть способ сделать экземпляры взаимозаменяемыми.</p>
+    </section>
+
+    <section class="step" id="data">
+      <h2>Масштабирование данных: от дешёвого к дорогому</h2>
+      <p>Когда сервисы без состояния, узким местом становится хранилище, куда это состояние переехало. Порядок шагов — от дешёвых и обратимых к дорогим:</p>
+      <table class="mx">
+        <thead><tr><th>Шаг</th><th>Что даёт</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>Индексы, запросы, пулы</td><td>Часто кратный выигрыш</td><td>Только время разработчика — <a href="query-tuning.html">Query Tuning</a></td></tr>
+          <tr><td>Вертикально</td><td>Больше памяти — больше данных в кеше базы</td><td>Деньги, потолок</td></tr>
+          <tr><td>Кеш</td><td>Снимает повторяющиеся чтения</td><td>Инвалидация, устаревание — <a href="caching.html">Caching</a></td></tr>
+          <tr><td>Реплики для чтения</td><td>Масштабирует чтения</td><td>Отставание реплик — <a href="replication.html">Replication</a></td></tr>
+          <tr><td>Партиционирование</td><td>Маленькие горячие партиции, дешёвое удаление старого</td><td>Ключ партиции в запросах — <a href="partitioning.html">Partitioning</a></td></tr>
+          <tr><td>Шардирование</td><td>Масштабирует запись и объём</td><td>Запросы и транзакции между шардами, перебалансировка</td></tr>
+        </tbody>
+      </table>
+      <p>Шардирование — последний шаг, потому что оно меняет модель данных и код: всё, что раньше было одной транзакцией или одним JOIN, через границу шардов становится сагой или агрегацией в приложении. До него доходят, когда запись или объём перерастают самую большую разумную машину, — как показывает оценка в <a href="sd-approach.html">Interview Framework</a>, это случается позже, чем кажется.</p>
+      <p>Масштабирование в облаке добавляет автоматику: горизонтальный автоскейлер добавляет экземпляры по CPU или по длине очереди. Новый экземпляр JVM не сразу работает в полную силу — классы загружаются, JIT ещё не скомпилировал горячие методы, кеши пустые, — поэтому масштабируются заранее, по прогнозу или с запасом, а readiness-проба пускает трафик после прогрева.</p>
+      <div class="trap">
+        <p class="myth">Если сервис упирается в CPU, достаточно дать ему больше ядер или потоков.</p>
+        <p class="fact">Дополнительные ядра помогают только работе без общего состояния: в демо 16 потоков без него дали ×14,3. Та же работа с общей блокировкой на 10 % стала медленнее одного потока — ×0,4. Сначала ищут общий ресурс, потом добавляют ядра.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>16 потоков без общего состояния — ×14,3; с общей блокировкой на 10 % работы — ×0,4: передача кеш-линий дороже работы.</li>
+        <li>Амдал даёт предел 1/s, универсальный закон масштабируемости — ещё и падение при росте числа участников.</li>
+        <li>Сессия в памяти за round robin узнана в 3 запросах из 6, в Redis — в 6 из 6: экземпляры должны быть взаимозаменяемы.</li>
+        <li>Данные масштабируют от дешёвого к дорогому: запросы, вертикально, кеш, реплики, партиции, шарды.</li>
+        <li>JVM нужен прогрев: масштабироваться заранее, трафик — после readiness.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="sc-hv" data-freq="3">
+      <h3>Чем вертикальное масштабирование отличается от горизонтального?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Вертикальное — более мощная машина: просто, без изменения кода, но есть потолок, цена растёт быстрее мощности, а машина остаётся единой точкой отказа. Горизонтальное — больше экземпляров: почти без потолка и с отказоустойчивостью, но требует, чтобы экземпляры не хранили состояние, а данные — распределения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>И то и другое упирается в общие ресурсы: блокировки, горячие строки, один брокер.</li>
+            <li>Амдал и универсальный закон масштабируемости: ретроградное масштабирование при согласовании.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="sc-stateless" data-freq="3">
+      <h3>Что значит «сервис без состояния» и как его добиться?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Любой экземпляр может обработать любой запрос, а экземпляры можно добавлять и убивать в любой момент. Сессии — в Redis или в токене, файлы — в объектном хранилище, задачи — в очереди, конфигурация — в окружении. Локально можно держать только то, что можно потерять: кеш.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Sticky sessions — обходной путь с неравномерной нагрузкой и потерей сессий при отказе.</li>
+            <li>Скрытое состояние: планировщики на каждом экземпляре, локальные лимиты, файлы на диске.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что сломается при запуске второго экземпляра?</summary>
+          <pre><code class="language-java">@RestController
+class ReportController {
+    private final Map&lt;String, byte[]&gt; ready = new ConcurrentHashMap&lt;&gt;();
+    @PostMapping("/reports") String start() { String id = uuid(); executor.submit(() -&gt; ready.put(id, build())); return id; }
+    @GetMapping("/reports/{id}") byte[] get(@PathVariable String id) { return ready.get(id); }
+    @Scheduled(cron = "0 0 3 * * *") void cleanup() { ... }       // удаляет старые отчёты из S3
+}</code></pre>
+          <p>Отчёт строится и хранится в памяти экземпляра, принявшего POST; GET попадёт на другой экземпляр и вернёт пустоту, а при перезапуске отчёты пропадут. Задача в executor теряется при остановке экземпляра. Планировщик cleanup запустится на каждом экземпляре. Нужно: задача в общей очереди, результат в объектном хранилище, статус в базе, планировщик с блокировкой (ShedLock), как в <a href="background-jobs.html">Background Jobs</a>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="sc-data" data-freq="2">
+      <h3>Как масштабировать базу данных?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>От дешёвого к дорогому: оптимизировать запросы и индексы, увеличить машину, добавить кеш, вынести чтения на реплики, партиционировать большие таблицы, и только потом шардировать. Шардирование масштабирует запись и объём, но транзакции и JOIN между шардами становятся задачей приложения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Отставание реплик — read-your-writes надо обеспечивать отдельно.</li>
+            <li>Ключ шардирования выбирают по главным запросам, чтобы они не ходили по всем шардам.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, «System Design Interview», том 1, глава 1 «Scale from Zero to Millions of Users» — основа урока.</li>
+      <li>Neil Gunther, «Guerrilla Capacity Planning» — универсальный закон масштабируемости.</li>
+      <li>Gene Amdahl, «Validity of the single processor approach to achieving large scale computing capabilities», 1967.</li>
+      <li><a href="https://12factor.net/">The Twelve-Factor App</a> — процессы без состояния.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
