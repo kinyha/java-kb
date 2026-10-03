@@ -299,7 +299,7 @@ window.KB_TREE = [
           scope: 'маршрутизация, аутентификация на входе, агрегация, реестр сервисов, client-side и server-side discovery' },
         { id: 'rate-limiting', freq: 2, status: 'draft', title: 'Rate Limiting',
           scope: 'token bucket, leaky bucket, fixed и sliding window, распределённый лимит на Redis' },
-        { id: 'consistent-hashing', freq: 2, status: 'empty', title: 'Consistent Hashing',
+        { id: 'consistent-hashing', freq: 2, status: 'draft', title: 'Consistent Hashing',
           scope: 'кольцо хешей, виртуальные узлы, перераспределение ключей при добавлении узла' },
         { id: 'id-generation', freq: 1, status: 'empty', title: 'Unique ID Generation',
           scope: 'автоинкремент, UUID v4 и v7, Snowflake, сортируемость и коллизии' },

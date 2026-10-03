@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Consistent Hashing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="consistent-hashing">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Consistent Hashing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Раскладка ключей по <code>hash % N</code> ровная, но при изменении N переезжает почти всё: при переходе с 4 узлов на 5 — 80 % ключей. Консистентное хеширование помещает и ключи, и узлы на одно кольцо хешей; ключ принадлежит первому узлу по часовой стрелке, поэтому новый узел забирает только свою дугу — около 1/N ключей. С одной точкой на узел дуги случайны и нагрузка неравна — от 7 до 195 % средней. Виртуальные узлы — сотни точек на узел — выравнивают нагрузку до нескольких процентов и распределяют ключи упавшего узла по всем остальным. Redis Cluster вместо кольца использует 16 384 фиксированных слота, а Kafka — <code>hash % partitions</code>, поэтому добавление партиций меняет раскладку ключей.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Добавили пятый узел кеша, и база легла</h2>
+      <p>Кеш карт клиентов разложен по четырём узлам Redis на стороне приложения: <code>node = hash(cardId) % 4</code>. Под нагрузкой добавили пятый узел, и формула стала <code>% 5</code>. Почти каждый ключ теперь ищется не на том узле, где лежит: кеш как будто очистился целиком, все запросы пошли в базу, и она не выдержала. Ровно то же происходит, когда один узел падает и N уменьшается.</p>
+      <p>Тема разбирает, сколько ключей переезжает при разных схемах, как кольцо и виртуальные узлы решают задачу и где эти идеи живут в Redis Cluster, Cassandra и Kafka. Шардирование баз целиком — в <a href="sharding.html">Sharding</a>, кеширование и лавина промахов — в <a href="caching.html">Caching</a>. Демо <a href="../examples/consistent-hashing/HashRingDemo.java">HashRingDemo.java</a> раскладывает миллион ключей и считает переезды и нагрузку.</p>
+    </section>
+
+    <section class="step" id="modulo">
+      <h2>hash % N переносит почти все ключи при изменении N</h2>
+      <pre class="out">== adding cache-5 to 4 nodes: share of 1,000,000 keys that move
+   hash % N             moved  80.0%   load on 5 nodes: min  100%, max  100% of average
+   ring, 1 vnodes       moved   8.1%   load on 5 nodes: min    7%, max  195% of average
+   ring, 10 vnodes      moved  26.6%   load on 5 nodes: min   57%, max  141% of average
+   ring, 100 vnodes     moved  21.1%   load on 5 nodes: min   96%, max  105% of average
+   ring, 1000 vnodes    moved  20.5%   load on 5 nodes: min   97%, max  103% of average</pre>
+      <p>Ключ остаётся на месте при переходе с 4 на 5 узлов, только если <code>h % 4 == h % 5</code>, то есть остаток от деления на 20 меньше 4 — для 4 значений из 20. Поэтому переезжает 16/20 = 80 % ключей, что и показала первая строка. В общем случае при переходе с N на N + 1 остаётся на месте лишь 1/(N + 1) ключей: чем больше кластер, тем хуже. Минимально возможный переезд — только то, что должно уйти на новый узел, 1/5 = 20 % ключей.</p>
+      <p>При этом раскладка <code>% N</code> идеально ровная — каждый узел получил 100 % средней нагрузки. Задача консистентного хеширования — сохранить ровность и переносить при изменении состава только необходимый минимум.</p>
+    </section>
+
+    <section class="step" id="ring">
+      <h2>Кольцо: новый узел забирает только свою дугу</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+            <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Кольцо хешей. Четыре узла по одной точке; ключ идёт к первой точке по часовой стрелке. Новый узел cache-5 забирает только дугу перед собой. Дуги неравны, и один узел получает почти вдвое больше среднего. С виртуальными узлами каждый узел занимает много коротких дуг, и нагрузка выравнивается.">
+            <defs><marker id="ch-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <circle cx="190" cy="130" r="92" class="dg-line"/>
+            <circle data-s="-3" cx="221.5" cy="43.5" r="7" class="dg-cell"/>
+            <text data-s="-3" x="230.4" y="23.1" class="dg-n" text-anchor="start">cache-1</text>
+            <circle data-s="-3" cx="276.5" cy="161.5" r="7" class="dg-cell"/>
+            <text data-s="-3" x="300.9" y="174.4" class="dg-n" text-anchor="start">cache-2</text>
+            <circle data-s="-3" cx="137.2" cy="205.4" r="7" class="dg-cell"/>
+            <text data-s="-3" x="122.3" y="230.7" class="dg-n" text-anchor="end">cache-3</text>
+            <circle data-s="-3" cx="114.6" cy="182.8" r="7" class="dg-cell"/>
+            <text data-s="-3" x="93.3" y="201.7" class="dg-n" text-anchor="end">cache-4</text>
+            <circle data-s="1-2" cx="269.7" cy="84.0" r="4" class="dg-cell miss"/>
+            <text data-s="1-2" x="250.6" y="99.0" class="dg-n" text-anchor="end">card-42</text>
+            <path data-s="2" d="M265.5 93.2 A 84 84 0 0 1 273.8 124.1" class="dg-line ok" marker-end="url(#ch-a)"/>
+            <path data-s="1" d="M265.5 93.2 A 84 84 0 0 1 271.1 151.7" class="dg-line ok" marker-end="url(#ch-a)"/>
+            <circle data-s="2-3" cx="282.0" cy="130.0" r="7" class="dg-cell hit"/>
+            <text data-s="2-3" x="308.0" y="134.0" class="dg-n" text-anchor="start">cache-5</text>
+            <path data-s="2" d="M226.7 39.1 A 98 98 0 0 1 287.9 126.6" class="dg-line ok" style="stroke-width:4"/>
+            <path data-s="3" d="M107.8 183.4 A 98 98 0 0 1 220.3 36.8" class="dg-line bad" style="stroke-width:4"/>
+            <path data-s="3" d="M131.0 208.3 A 98 98 0 0 1 111.7 189.0" class="dg-line ok" style="stroke-width:4"/>
+            <circle data-s="4" cx="198.0" cy="38.4" r="5" class="dg-cell"/>
+            <text data-s="4" x="199.3" y="27.4" class="dg-n" text-anchor="middle">1</text>
+            <circle data-s="4" cx="231.8" cy="48.0" r="5" class="dg-cell"/>
+            <text data-s="4" x="238.6" y="38.7" class="dg-n" text-anchor="middle">2</text>
+            <circle data-s="4" cx="253.9" cy="63.8" r="5" class="dg-cell"/>
+            <text data-s="4" x="264.3" y="57.0" class="dg-n" text-anchor="middle">3</text>
+            <circle data-s="4" cx="276.5" cy="98.5" r="5" class="dg-cell"/>
+            <text data-s="4" x="290.5" y="97.4" class="dg-n" text-anchor="middle">4</text>
+            <circle data-s="4" cx="281.9" cy="126.8" r="5" class="dg-cell"/>
+            <text data-s="4" x="296.9" y="130.3" class="dg-n" text-anchor="middle">5</text>
+            <circle data-s="4" cx="279.6" cy="150.7" r="5" class="dg-cell"/>
+            <text data-s="4" x="294.3" y="158.1" class="dg-n" text-anchor="middle">1</text>
+            <circle data-s="4" cx="259.4" cy="190.4" r="5" class="dg-cell"/>
+            <text data-s="4" x="270.8" y="204.2" class="dg-n" text-anchor="middle">2</text>
+            <circle data-s="4" cx="237.4" cy="208.9" r="5" class="dg-cell"/>
+            <text data-s="4" x="245.1" y="225.7" class="dg-n" text-anchor="middle">3</text>
+            <circle data-s="4" cx="212.3" cy="219.3" r="5" class="dg-cell"/>
+            <text data-s="4" x="215.9" y="237.8" class="dg-n" text-anchor="middle">4</text>
+            <circle data-s="4" cx="174.0" cy="220.6" r="5" class="dg-cell"/>
+            <text data-s="4" x="171.4" y="239.4" class="dg-n" text-anchor="middle">5</text>
+            <circle data-s="4" cx="148.2" cy="212.0" r="5" class="dg-cell"/>
+            <text data-s="4" x="141.4" y="229.3" class="dg-n" text-anchor="middle">1</text>
+            <circle data-s="4" cx="120.6" cy="190.4" r="5" class="dg-cell"/>
+            <text data-s="4" x="109.2" y="204.2" class="dg-n" text-anchor="middle">2</text>
+            <circle data-s="4" cx="103.5" cy="161.5" r="5" class="dg-cell"/>
+            <text data-s="4" x="89.5" y="170.6" class="dg-n" text-anchor="middle">3</text>
+            <circle data-s="4" cx="98.2" cy="136.4" r="5" class="dg-cell"/>
+            <text data-s="4" x="83.3" y="141.5" class="dg-n" text-anchor="middle">4</text>
+            <circle data-s="4" cx="103.5" cy="98.5" r="5" class="dg-cell"/>
+            <text data-s="4" x="89.5" y="97.4" class="dg-n" text-anchor="middle">5</text>
+            <circle data-s="4" cx="120.6" cy="69.6" r="5" class="dg-cell"/>
+            <text data-s="4" x="109.2" y="63.8" class="dg-n" text-anchor="middle">1</text>
+            <circle data-s="4" cx="148.2" cy="48.0" r="5" class="dg-cell"/>
+            <text data-s="4" x="141.4" y="38.7" class="dg-n" text-anchor="middle">2</text>
+            <circle data-s="4" cx="172.4" cy="39.7" r="5" class="dg-cell"/>
+            <text data-s="4" x="169.6" y="29.0" class="dg-n" text-anchor="middle">3</text>
+            <circle data-s="4" cx="221.5" cy="43.5" r="5" class="dg-cell"/>
+            <text data-s="4" x="226.6" y="33.5" class="dg-n" text-anchor="middle">4</text>
+            <circle data-s="4" cx="269.7" cy="176.0" r="5" class="dg-cell"/>
+            <text data-s="4" x="282.7" y="187.5" class="dg-n" text-anchor="middle">5</text>
+            <text data-s="4" x="190" y="134" class="dg-n" text-anchor="middle">по 4 точки на узел</text>
+            <text data-s="1" x="360" y="90" class="dg-in">Ключ и узлы хешируются в одно</text>
+            <text data-s="1" x="360" y="112" class="dg-in">кольцо. card-42 идёт по часовой</text>
+            <text data-s="1" x="360" y="134" class="dg-in">стрелке к первому узлу: cache-2.</text>
+            <text data-s="2" x="360" y="90" class="dg-in">Добавили cache-5. Переезжают только</text>
+            <text data-s="2" x="360" y="112" class="dg-in">ключи дуги между cache-1 и cache-5,</text>
+            <text data-s="2" x="360" y="134" class="dg-in">card-42 в их числе; остальные на месте.</text>
+            <text data-s="3" x="360" y="90" class="dg-in">Но дуги случайной длины: cache-1</text>
+            <text data-s="3" x="360" y="112" class="dg-in">владеет 40 % кольца, cache-4 — 6 %.</text>
+            <text data-s="3" x="360" y="134" class="dg-in">В демо нагрузка от 7 до 195 % средней.</text>
+            <text data-s="4" x="360" y="90" class="dg-in">Виртуальные узлы: у каждого узла</text>
+            <text data-s="4" x="360" y="112" class="dg-in">много точек, дуги короткие.</text>
+            <text data-s="4" x="360" y="134" class="dg-in">100 точек: нагрузка 96–105 %.</text>
+            <text data-s="3" x="360" y="180" class="dg-bad">ring, 1 vnode:  min 7%, max 195%</text>
+            <text data-s="4" x="360" y="180" class="dg-ok">ring, 100 vnodes: min 96%, max 105%</text>
+            <text data-s="2" x="360" y="180" class="dg-ok">кольцо: 8,1 %; hash % N: 80 %</text>
+            </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Хеш-функция отображает и ключи, и имена узлов в одно пространство 0…2⁶⁴, свёрнутое в кольцо. Ключ card-42 принадлежит первому узлу по часовой стрелке — cache-2.</li>
+          <li>Новый узел cache-5 встаёт в точку своего хеша и забирает ключи дуги между предыдущим узлом и собой — card-42 переезжает к нему. Остальные ключи не двигаются.</li>
+          <li>Точки узлов случайны, и дуги разной длины. В демо при одной точке на узел самый загруженный узел получил 195 % средней нагрузки, самый лёгкий — 7 %.</li>
+          <li>Виртуальные узлы: у каждого физического узла много точек на кольце. Каждому достаётся много коротких дуг, и их сумма близка к средней — 96–105 % при 100 точках.</li>
+        </ol>
+      </figure>
+<pre><code class="language-java">// Кольцо: каждый узел занимает vnodes точек; ключ идёт к первой точке по часовой стрелке.
+static Placement ring(List&lt;String&gt; nodes, int vnodes) {
+    TreeMap&lt;Long, String&gt; ring = new TreeMap&lt;&gt;();
+    for (String n : nodes) for (int v = 0; v &lt; vnodes; v++) ring.put(hash(n + "#" + v), n);
+    return h -&gt; {
+        SortedMap&lt;Long, String&gt; tail = ring.tailMap(h);           // точки не меньше хеша ключа
+        return tail.isEmpty() ? ring.firstEntry().getValue()      // за концом — переход на начало
+                              : tail.get(tail.firstKey());
+    };
+}</code></pre>
+      <p>Поиск узла — <code>TreeMap.ceilingEntry</code> по хешу ключа, O(log V), где V — число точек. Хеш-функция должна хорошо перемешивать: <code>String.hashCode</code> для похожих имён вроде «cache-1», «cache-2» даёт близкие значения, и все точки соберутся в одном месте кольца. Демо берёт первые 8 байт MD5; в продакшене — MurmurHash или xxHash, которые быстрее и не претендуют на криптостойкость.</p>
+      <p>С одной точкой новый узел забрал 8,1 % ключей вместо ожидаемых 20 % — ему досталась короткая дуга. Это та же неравномерность: переезжает ровно то, что легло на новую дугу. С 100 и 1 000 точками переезд — 21,1 % и 20,5 %, почти идеальные 20 %. Строка с 10 точками — 26,6 % при нагрузке от 57 до 141 % — показывает, что десятка точек мало: разброс дуг ещё велик.</p>
+    </section>
+
+    <section class="step" id="failure">
+      <h2>Виртуальные узлы распределяют ключи упавшего узла по всем</h2>
+      <pre class="out">== cache-3 fails: who takes its keys
+   ring, 1 vnodes: {cache-2=349228}
+   ring, 100 vnodes: {cache-1=29871, cache-2=56400, cache-4=32307, cache-5=80430}</pre>
+      <p>С одной точкой на узел упавший cache-3 отдаёт все свои 349 тысяч ключей единственному соседу по кольцу. Сосед получает двойную нагрузку разом — промахи кеша, прогрев, запросы к базе — и может упасть следом, передав ещё больше ключей следующему: каскадный отказ. Со 100 точками те же ключи расходятся по всем четырём оставшимся узлам. Распределение не идеально ровное — от 30 до 80 тысяч, — но ни один узел не получает весь удар.</p>
+      <p>Виртуальные узлы дают и третью возможность: разное число точек для узлов разной мощности. Узел с вдвое большей памятью получает вдвое больше точек и вдвое больше ключей. Цена — память под кольцо (тысячи точек на кластер — копейки) и более сложная картина при перебалансировке: новый узел забирает понемногу у всех, поэтому все узлы участвуют в переносе данных.</p>
+    </section>
+
+    <section class="step" id="real-systems">
+      <h2>Как это устроено в Redis Cluster, Cassandra и Kafka</h2>
+      <table class="mx">
+        <thead><tr><th>Система</th><th>Схема</th><th>Что происходит при изменении состава</th></tr></thead>
+        <tbody>
+          <tr><td>Redis Cluster</td><td>CRC16(key) mod 16 384 слота; слоты назначены узлам</td><td>Слоты переносят между узлами явно, ключи слота мигрируют вместе</td></tr>
+          <tr><td>Cassandra</td><td>Кольцо токенов, виртуальные узлы; <code>num_tokens: 16</code> по умолчанию с 4.0</td><td>Новый узел берёт диапазоны токенов, данные стримятся с соседей</td></tr>
+          <tr><td>DynamoDB, Riak</td><td>Кольцо с виртуальными узлами (идея Dynamo)</td><td>Минимальный перенос диапазонов</td></tr>
+          <tr><td>Kafka producer</td><td>murmur2(key) mod число партиций</td><td>Новые партиции меняют раскладку ключей; порядок по ключу ломается</td></tr>
+          <tr><td>Клиентский шардинг кеша</td><td>Кольцо (ketama в memcached-клиентах)</td><td>Новый узел — промахи только на его дуге</td></tr>
+        </tbody>
+      </table>
+      <p>Фиксированные слоты Redis Cluster — вариант той же идеи: число слотов не меняется, меняется только их владелец, поэтому ключи никогда не пересчитывают формулу заново. Схема проще кольца и позволяет переносить нагрузку слотами вручную. У Kafka, наоборот, формула <code>% партиций</code>: увеличение числа партиций переводит часть ключей в другие партиции, и события одного ключа оказываются в двух партициях с разным порядком, как разобрано в <a href="kafka-producer.html">Kafka Producer</a>. Поэтому число партиций выбирают с запасом заранее.</p>
+      <p>Есть и другие схемы с тем же свойством минимального переноса. Rendezvous hashing (HRW) считает для ключа хеш с каждым узлом и выбирает максимальный — без кольца, O(N) на поиск. Jump consistent hash от Google вычисляет номер узла за O(log N) без памяти, но умеет только добавлять и убирать узлы с конца списка.</p>
+      <div class="trap">
+        <p class="myth">Консистентное хеширование само по себе распределяет нагрузку равномерно.</p>
+        <p class="fact">С одной точкой на узел дуги случайны: в демо нагрузка от 7 до 195 % средней, а ключи упавшего узла целиком ушли одному соседу. Равномерность дают виртуальные узлы — при 100 точках 96–105 %. Горячий ключ при этом всё равно лежит на одном узле: от него спасает не хеширование, а репликация чтений или локальный кеш.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>hash % N при переходе с 4 на 5 узлов переносит 80 % ключей; минимум — 20 %.</li>
+        <li>Кольцо: ключ принадлежит первому узлу по часовой стрелке; новый узел забирает только свою дугу.</li>
+        <li>Одна точка на узел — нагрузка 7–195 % средней; 100 виртуальных узлов — 96–105 %, переезд 21 %.</li>
+        <li>Ключи упавшего узла: с одной точкой — все одному соседу, с виртуальными — по всем.</li>
+        <li>Redis Cluster — 16 384 фиксированных слота; Cassandra — токены и vnodes; Kafka — hash % партиций.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ch-what" data-freq="3">
+      <h3>Что такое консистентное хеширование и зачем оно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Способ распределить ключи по узлам так, чтобы при добавлении или удалении узла переезжал минимум ключей. Ключи и узлы хешируются на одно кольцо, ключ принадлежит первому узлу по часовой стрелке. Новый узел забирает только дугу перед собой — около 1/N ключей, тогда как hash % N при переходе с 4 на 5 узлов переносит 80 %.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без виртуальных узлов нагрузка неравна, и упавший узел целиком нагружает соседа.</li>
+            <li>Поиск — TreeMap.ceilingEntry, O(log V).</li>
+            <li>Альтернативы: фиксированные слоты, rendezvous hashing, jump hash.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ch-vnodes" data-freq="2">
+      <h3>Зачем нужны виртуальные узлы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>С одной точкой на узел длины дуг случайны, и нагрузка сильно неравна. Каждый физический узел получает много точек на кольце, сумма многих коротких дуг близка к средней. Ключи упавшего узла расходятся по всем остальным, а не достаются одному соседу. Число точек можно сделать пропорциональным мощности узла.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Десятка точек мало: в демо 57–141 % средней; сотни — несколько процентов.</li>
+            <li>Цена — все узлы участвуют в перебалансировке.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим шардингом кеша?</summary>
+          <pre><code class="language-java">List&lt;Jedis&gt; nodes = ...;                       // 6 узлов, при пиках добавляем седьмой
+Jedis nodeFor(String key) {
+    return nodes.get(Math.abs(key.hashCode()) % nodes.size());
+}</code></pre>
+          <p>При добавлении седьмого узла остаток меняется почти у всех ключей — с 6 на 7 узлов на месте остаются лишь около 1/7 ключей — и кеш фактически обнуляется в момент пика, когда он нужнее всего. <code>Math.abs(Integer.MIN_VALUE)</code> отрицателен, и для такого хеша индекс выйдет за границы; нужен <code>Math.floorMod</code>. <code>String.hashCode</code> плохо перемешивает похожие ключи. Нужно кольцо с виртуальными узлами и хорошей хеш-функцией или Redis Cluster со слотами.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ch-systems" data-freq="2">
+      <h3>Как распределяются ключи в Redis Cluster и Kafka?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Redis Cluster: CRC16 ключа по модулю 16 384 слота, слоты назначены узлам и переносятся между ними явно; ключи с одинаковым hash tag в фигурных скобках попадают в один слот. Kafka: murmur2 ключа по модулю числа партиций, поэтому добавление партиций меняет раскладку ключей и нарушает порядок по ключу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Фиксированное число слотов — та же идея, что и кольцо: формула не меняется, меняется владелец.</li>
+            <li>Число партиций Kafka выбирают с запасом заранее.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, «System Design Interview», том 1, глава 5 «Design Consistent Hashing» — основа урока.</li>
+      <li>David Karger и др., «Consistent Hashing and Random Trees», 1997.</li>
+      <li>Giuseppe DeCandia и др., «Dynamo: Amazon's Highly Available Key-value Store», 2007 — виртуальные узлы.</li>
+      <li><a href="https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/">Redis Cluster specification</a> — 16 384 слота, hash tags.</li>
+      <li>John Lamping, Eric Veach, «A Fast, Minimal Memory, Consistent Hash Algorithm», 2014 — jump hash.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
