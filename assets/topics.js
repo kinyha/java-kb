@@ -327,7 +327,7 @@ window.KB_TREE = [
       { id: 'architecture', title: 'Architecture', source: 'microservices.io; Azure Cloud Design Patterns', items: [
         { id: 'microservices', freq: 3, status: 'draft', title: 'Monolith & Microservices',
           scope: 'модульный монолит, границы сервисов, database per service, распил монолита, 12 factor' },
-        { id: 'service-communication', freq: 2, status: 'empty', title: 'Service Communication',
+        { id: 'service-communication', freq: 2, status: 'draft', title: 'Service Communication',
           scope: 'синхронные вызовы и сообщения, REST и gRPC между сервисами, цепочки вызовов, API composition' },
         { id: 'cloud-patterns', freq: 1, status: 'empty', title: 'Cloud Patterns',
           scope: 'strangler fig, sidecar, BFF, anti-corruption layer, ambassador' },
