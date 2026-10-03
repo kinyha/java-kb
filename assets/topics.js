@@ -33,7 +33,7 @@ window.KB_TREE = [
               scope: 'порядок и Comparator, стабильность, сравнения и нижняя граница, время и память, выбор сортировки' },
             { id: 'merge-sort', freq: 2, status: 'draft', title: 'Merge Sort',
               scope: 'слияние отсортированных частей, рекурсивная и итеративная сортировка, стабильность, подсчёт инверсий' },
-            { id: 'quick-sort', freq: 2, status: 'empty', title: 'Quick Sort',
+            { id: 'quick-sort', freq: 2, status: 'draft', title: 'Quick Sort',
               scope: 'partition, выбор pivot, повторы и трёхстороннее разбиение, худший случай, стек, quickselect' },
             { id: 'heap-sort', freq: 1, status: 'empty', title: 'Heap Sort',
               scope: 'max-heap, sift-down, линейный heapify, отсортированный суффикс, O(n log n) и O(1) памяти' },
