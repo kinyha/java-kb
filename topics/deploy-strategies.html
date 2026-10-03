@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Deployment Strategies · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="deploy-strategies">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Deployment Strategies</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Стратегия выкатки решает, как долго старая и новая версии работают одновременно и как быстро можно откатиться. Rolling update заменяет поды по одному: в демо 7 секунд из 12 обе версии отвечали вперемешку — код и схема базы обязаны это выдерживать. Blue-green держит две полные копии и переключает трафик разом: смешение длилось меньше двух секунд, а откат — такое же переключение назад, но нужна двойная мощность. Canary пускает на новую версию малую долю трафика — 31 запрос из 400 при 1 поде из 10 — и расширяет её, пока метрики в норме. Feature flags отделяют выкатку кода от включения функции. Самое трудное — база: миграция, несовместимая со старой версией, ломает ещё работающие поды и делает откат бесполезным; совместимость даёт схема expand/contract.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Новая версия переименовала столбец, и откат не помог</h2>
+      <p>Релиз платёжного сервиса переименовал столбец <code>amount</code> в <code>amount_minor</code> миграцией при старте. Первый новый под применил миграцию, и три старых пода, которые ещё обслуживали трафик, начали падать на каждой записи. Через пять минут ошибок решили откатиться — но старая версия тоже падала: столбца, с которым она работает, больше не было. Откатывать пришлось и код, и схему, вручную, под нагрузкой.</p>
+      <p>Тема разбирает стратегии выкатки на кластере k3s 1.34 и совместимость миграций на PostgreSQL 17. Демо <a href="../examples/deploy-strategies/deploy.sh">deploy.sh</a> использует образ из <a href="kubernetes.html">Kubernetes Basics</a>, который отвечает номером своей версии; клиентский под шлёт запрос каждые 100 мс. Демо <a href="../examples/deploy-strategies/migrate.sh">migrate.sh</a> выполняет миграции так, как их видят одновременно работающие версии. Пробы и корректная остановка подов — в <a href="k8s-java.html">Java in Kubernetes</a>, миграции подробно — в <a href="db-migrations.html">Migrations</a>.</p>
+    </section>
+
+    <section class="step" id="rolling">
+      <h2>Rolling update: версии работают одновременно</h2>
+<pre><code class="language-yaml">spec:
+  replicas: 4
+  minReadySeconds: 3                 # новый под должен 3 с оставаться готовым, прежде чем выкатка пойдёт дальше
+  strategy: { rollingUpdate: { maxSurge: 1, maxUnavailable: 0 } }</code></pre>
+      <pre class="out">== rolling update v1 -> v2, 4 replicas, maxSurge 1, maxUnavailable 0
+   seconds with both versions answering: 7; failed requests: 0
+    0s  v1=7
+    1s  v1=10
+    2s  v1=9
+    3s  v1=9
+    4s  v1=9 v2=1
+    5s  v1=9
+    6s  v1=6 v2=3
+    7s  v1=5 v2=5
+    8s  v1=5 v2=5
+    9s  v2=9
+   10s  v1=6 v2=3
+   11s  v1=2 v2=8
+== rollback: kubectl rollout undo
+   back to v1 in 13 s, revisions: 2 3 </pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Четыре пода. Rolling update с maxSurge 1 и maxUnavailable 0: сначала добавляется пятый под с v2, после его готовности удаляется один под v1, и так далее. В середине выкатки трафик делится между версиями.">
+            <text x="20" y="22" class="dg-cap">ПОДЫ ВО ВРЕМЯ ВЫКАТКИ</text>
+            <g data-s="1">
+              <rect x="20" y="40" width="110" height="40" rx="7" class="dg-cell"/><text x="75" y="65" class="dg-in" text-anchor="middle">v1</text>
+              <rect x="140" y="40" width="110" height="40" rx="7" class="dg-cell"/><text x="195" y="65" class="dg-in" text-anchor="middle">v1</text>
+              <rect x="260" y="40" width="110" height="40" rx="7" class="dg-cell"/><text x="315" y="65" class="dg-in" text-anchor="middle">v1</text>
+              <rect x="380" y="40" width="110" height="40" rx="7" class="dg-cell"/><text x="435" y="65" class="dg-in" text-anchor="middle">v1</text>
+              <rect x="500" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="555" y="65" class="dg-ok" text-anchor="middle">v2 +1</text>
+              <text x="20" y="110" class="dg-t">maxSurge 1: сначала поднимается пятый под с v2; старые продолжают работать.</text>
+            </g>
+            <g data-s="2">
+              <rect x="20" y="40" width="110" height="40" rx="7" class="dg-cell miss"/><text x="75" y="65" class="dg-bad" text-anchor="middle">v1 −1</text>
+              <rect x="140" y="40" width="110" height="40" rx="7" class="dg-cell"/><text x="195" y="65" class="dg-in" text-anchor="middle">v1</text>
+              <rect x="260" y="40" width="110" height="40" rx="7" class="dg-cell"/><text x="315" y="65" class="dg-in" text-anchor="middle">v1</text>
+              <rect x="380" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="435" y="65" class="dg-ok" text-anchor="middle">v2</text>
+              <rect x="500" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="555" y="65" class="dg-ok" text-anchor="middle">v2 +1</text>
+              <text x="20" y="110" class="dg-t">Новый под готов 3 с — один старый удаляется, поднимается следующий новый.</text>
+            </g>
+            <g data-s="3">
+              <rect x="140" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="195" y="65" class="dg-ok" text-anchor="middle">v2</text>
+              <rect x="260" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="315" y="65" class="dg-ok" text-anchor="middle">v2</text>
+              <rect x="380" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="435" y="65" class="dg-ok" text-anchor="middle">v2</text>
+              <rect x="500" y="40" width="110" height="40" rx="7" class="dg-cell hit"/><text x="555" y="65" class="dg-ok" text-anchor="middle">v2</text>
+              <text x="20" y="110" class="dg-t">Выкатка завершена: ни в один момент не было меньше 4 готовых подов.</text>
+            </g>
+            <rect x="20" y="140" width="680" height="44" rx="8" class="dg-box"/>
+            <text data-s="1" x="360" y="167" class="dg-n" text-anchor="middle">трафик: только v1</text>
+            <text data-s="2" x="360" y="167" class="dg-bad" text-anchor="middle">трафик: v1 и v2 вперемешку — код и схема должны это выдерживать</text>
+            <text data-s="3" x="360" y="167" class="dg-ok" text-anchor="middle">трафик: только v2</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>С <code>maxSurge: 1</code> Deployment сначала добавляет один под новой версии сверх нужного числа. С <code>maxUnavailable: 0</code> он не удаляет старый под, пока новый не готов.</li>
+          <li>Когда новый под 3 секунды пробыл готовым (<code>minReadySeconds</code>), один старый удаляется, и цикл повторяется. Всё это время Service отправляет запросы и на v1, и на v2.</li>
+          <li>Все поды заменены. Мощность ни в один момент не падала ниже четырёх подов, но несколько секунд работали обе версии.</li>
+        </ol>
+      </figure>
+      <p>В хронологии демо видно, как растёт доля v2: с 4-й секунды появляются ответы новой версии, к 11-й их уже большинство, и 7 из 12 секунд обе версии отвечают одновременно. Пользователь может получить ответ v2, а следующий запрос — от v1. Значит, обе версии должны понимать формат друг друга в API, в сообщениях брокера, в кеше и в базе. Ошибок нет: <code>maxUnavailable: 0</code> и readiness-проба не дают убрать старый под раньше, чем готов новый. Без <code>minReadySeconds</code> выкатка проходила примерно за 2 секунды, и смешение почти не попадало в выборку клиента.</p>
+      <p>Откат — <code>kubectl rollout undo</code>: Deployment хранит прежние ReplicaSet как ревизии и выкатывает предыдущую тем же постепенным способом — 13 секунд. Откат кода безопасен, только если состояние, которое успела создать новая версия, понятно старой, — об этом последний шаг.</p>
+    </section>
+
+    <section class="step" id="blue-green">
+      <h2>Blue-green и canary: переключить всё сразу или понемногу</h2>
+<pre><code class="language-sh"># blue-green: две полные копии, Service переключается сменой селектора
+svc '{ app: payments, color: blue }'     # весь трафик на blue (v1)
+svc '{ app: payments, color: green }'    # весь трафик на green (v2), blue продолжает работать для отката
+
+# canary: стабильная и канареечная версии за одним Service
+dep stable 1 9 '{ app: payments, track: stable }'
+dep canary 2 1 '{ app: payments, track: canary }'</code></pre>
+      <pre class="out">== blue-green: switch the Service selector
+   seconds with both versions answering: 1; failed requests: 0
+== canary: 9 stable pods v1 + 1 canary pod v2 behind one Service
+   v1: 369 of 400
+   v2: 31 of 400</pre>
+      <p>Blue-green держит две полные копии: синюю с текущей версией и зелёную с новой, прогретой и проверенной заранее. Переключение — смена селектора Service: ответы v1 и v2 смешивались в пределах одной секунды, пока kube-proxy обновлял правила, ошибок нет. Откат — переключение обратно за ту же секунду, потому что синяя копия продолжает работать. Цена — двойная мощность на время выкатки и та же проблема с базой: обе копии работают с одной схемой.</p>
+      <p>Canary пускает на новую версию малую долю трафика и смотрит на её метрики. В демо доля задаётся соотношением реплик: один канареечный под из десяти получил 31 запрос из 400 — около 8 % при ожидаемых 10 %, балансировка соединений случайна. Точное деление — 1 %, 5 %, только для внутренних пользователей — делают на уровне L7: ingress-контроллер, сервисная сеть или шлюз с весами маршрутов. Решение «расширять или откатывать» принимают по SLI канарейки в сравнении со стабильной версией: доля ошибок, p99, бизнес-метрики. Автоматизируют это Argo Rollouts и Flagger.</p>
+      <table class="mx">
+        <thead><tr><th>Стратегия</th><th>Смешение версий</th><th>Откат</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>Recreate</td><td>Нет, но простой</td><td>Новая выкатка</td><td>Недоступность на время замены</td></tr>
+          <tr><td>Rolling update</td><td>Всё время выкатки</td><td>Постепенный, <code>rollout undo</code></td><td>Совместимость версий</td></tr>
+          <tr><td>Blue-green</td><td>Секунда переключения</td><td>Мгновенный</td><td>Двойная мощность</td></tr>
+          <tr><td>Canary</td><td>Долго, на малой доле</td><td>Убрать канарейку</td><td>Метрики и автоматизация анализа</td></tr>
+          <tr><td>Feature flag</td><td>Код один, поведение разное</td><td>Выключить флаг</td><td>Ветвления в коде, долг по старым флагам</td></tr>
+        </tbody>
+      </table>
+      <p>Feature flags отделяют выкатку от релиза: новый код выкатывается выключенным, а функцию включают для 1 % пользователей, для сотрудников или для одного магазина без деплоя. Откат функции — выключение флага за секунды, без выкатки. Цена — ветвления в коде и долг: каждый флаг после полного включения надо удалять, иначе код обрастает мёртвыми путями.</p>
+    </section>
+
+    <section class="step" id="migrations">
+      <h2>Миграции базы: expand/contract совместим с обеими версиями</h2>
+      <pre class="out">== breaking: rename the column in one step
+   migration: rename amount -> amount_minor
+     OK
+   v1 pods still running:
+     ERROR:  column "amount" of relation "invoice" does not exist
+   v2 pods:
+     OK
+   rollback to v1 does not help:
+     ERROR:  column "amount" of relation "invoice" does not exist
+== expand / contract
+   1. expand: add the new column, nullable
+     OK
+   v1 writes the old column:
+     OK
+   v2 writes both columns:
+     OK
+   2. backfill old rows:
+     OK
+   rows missing amount_minor: 0
+   3. contract, after no v1 is left and rollback to v1 is no longer needed:
+     OK
+   v2 writes only the new column:
+     OK
+   rows: 100 100 200 200</pre>
+      <p>Миграция, переименовавшая столбец одним шагом, сразу сломала все ещё работающие поды v1 — при rolling update они обслуживают трафик всё время выкатки, при blue-green синяя копия работает с той же базой. Откат кода на v1 не помогает: схема уже новая. Откатывать схему под нагрузкой — ещё один риск, а если v2 успела записать данные в новом формате, они могут потеряться.</p>
+      <p>Expand/contract разбивает изменение на шаги, каждый из которых совместим с соседними версиями кода. Сначала схема расширяется: новый столбец добавляется необязательным — v1 его не замечает и продолжает писать старый. v2 пишет оба столбца и читает новый с запасным чтением старого. Фоновая задача переносит старые строки — пачками, чтобы не держать длинных блокировок, как в <a href="db-migrations.html">Migrations</a>. Только когда v1 не осталось нигде и откат на неё больше не планируется, отдельным релизом схема сужается: новый столбец становится обязательным, старый удаляется. Переименование превращается в три-четыре релиза — это цена выкаток без простоя и с возможностью отката. То же правило для API и сообщений: сначала принимать оба формата, потом писать новый, потом перестать понимать старый.</p>
+      <div class="trap">
+        <p class="myth">Если новая версия сломалась, достаточно откатить деплой.</p>
+        <p class="fact">Откат кода не откатывает базу. В демо после переименования столбца и v2, и откаченная v1 работают с новой схемой — и v1 падает на каждой записи. Миграции делают совместимыми с предыдущей версией кода (expand/contract), тогда откат кода безопасен.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Rolling update (maxSurge 1, maxUnavailable 0, minReadySeconds 3): 7 из 12 секунд обе версии отвечают, ошибок 0; откат — 13 с.</li>
+        <li>Blue-green: переключение селектора, смешение около секунды, мгновенный откат, двойная мощность.</li>
+        <li>Canary: 1 под из 10 получил 31 запрос из 400; точные доли — на L7; решение по SLI.</li>
+        <li>Feature flags отделяют выкатку от включения функции.</li>
+        <li>Переименование столбца одним шагом ломает v1 и откат; expand → двойная запись → перенос → contract.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ds-compare" data-freq="3">
+      <h3>Какие стратегии выкатки вы знаете и чем они отличаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Recreate — остановить старое, запустить новое: просто, но простой. Rolling update — заменять поды постепенно: без простоя, но версии работают одновременно. Blue-green — две полные копии и мгновенное переключение трафика: быстрый откат, двойная мощность. Canary — новая версия на малой доле трафика с расширением по метрикам. Feature flags — включение функций без деплоя.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>maxSurge, maxUnavailable и minReadySeconds управляют темпом rolling update.</li>
+            <li>Canary по репликам грубый; точные доли — ingress, сервисная сеть, Argo Rollouts.</li>
+            <li>Все стратегии, кроме recreate, требуют совместимости версий.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ds-db" data-freq="3">
+      <h3>Как выкатывать изменения схемы базы без простоя?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По схеме expand/contract: каждая миграция совместима с текущей и предыдущей версиями кода. Добавить новое необязательным, научить код писать оба варианта, перенести данные, переключить чтение на новое, и только отдельным релизом удалить старое. Никаких переименований и удалений в одном релизе с кодом, который их требует.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Перенос данных пачками, индексы CONCURRENTLY, без долгих блокировок.</li>
+            <li>Откат кода безопасен, только если схема совместима с предыдущей версией.</li>
+            <li>То же для API и событий: сначала читать оба формата.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим релизом?</summary>
+          <pre><code class="language-sql">-- V42__payment_status.sql, выполняется Flyway при старте пода v2
+alter table payment drop column legacy_status;
+alter table payment alter column status set not null;
+-- v1 пишет legacy_status и не заполняет status</code></pre>
+          <p>Миграция выполняется при старте первого пода v2, когда поды v1 ещё обслуживают трафик: v1 сразу начинает падать — столбца <code>legacy_status</code> нет, а <code>status</code> стал обязательным, хотя v1 его не заполняет. Откат на v1 невозможен без ручного восстановления схемы, а данные столбца уже удалены. Нужно: в этом релизе только добавить и заполнять <code>status</code>, перенести старые строки, а удаление <code>legacy_status</code> и NOT NULL — отдельным релизом, когда v1 нигде не осталось.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ds-canary" data-freq="2">
+      <h3>Как понять, что канареечный релиз можно расширять?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сравнить SLI канарейки и стабильной версии за одно и то же время: доля ошибок, задержка p99, насыщение, бизнес-метрики вроде успешных платежей. Если канарейка не хуже в пределах порога — расширять долю по шагам; если хуже — откатить. Анализ автоматизируют Argo Rollouts или Flagger по запросам к Prometheus.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Малая доля трафика — мало данных: окно анализа должно набрать статистику.</li>
+            <li>Канарейку отделяют меткой версии в метриках и трассах.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-update-deployment">Kubernetes: Rolling Update Deployment</a>, <a href="https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#rolling-back-a-deployment">Rolling back</a>.</li>
+      <li><a href="https://martinfowler.com/bliki/BlueGreenDeployment.html">Martin Fowler: BlueGreenDeployment</a>, <a href="https://martinfowler.com/bliki/CanaryRelease.html">CanaryRelease</a>, <a href="https://martinfowler.com/articles/feature-toggles.html">Feature Toggles</a>.</li>
+      <li><a href="https://martinfowler.com/bliki/ParallelChange.html">Martin Fowler: ParallelChange</a> — expand/contract.</li>
+      <li><a href="https://argoproj.github.io/argo-rollouts/">Argo Rollouts</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

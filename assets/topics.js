@@ -605,7 +605,7 @@ window.KB_TREE = [
       { id: 'delivery', title: 'Delivery', items: [
         { id: 'cicd', freq: 2, status: 'empty', title: 'CI/CD',
           scope: 'пайплайн, артефакты и registry, проверки перед мержем, GitLab CI и GitHub Actions' },
-        { id: 'deploy-strategies', freq: 2, status: 'empty', title: 'Deployment Strategies',
+        { id: 'deploy-strategies', freq: 2, status: 'draft', title: 'Deployment Strategies',
           scope: 'rolling update, blue-green, canary, feature flags, совместимость миграций БД с откатом' },
       ] },
       { id: 'run', title: 'Observability', source: 'Google SRE Book: Monitoring Distributed Systems; OpenTelemetry Documentation', items: [
