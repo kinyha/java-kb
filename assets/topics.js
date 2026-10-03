@@ -303,7 +303,7 @@ window.KB_TREE = [
           scope: 'кольцо хешей, виртуальные узлы, перераспределение ключей при добавлении узла' },
         { id: 'id-generation', freq: 1, status: 'draft', title: 'Unique ID Generation',
           scope: 'автоинкремент, UUID v4 и v7, Snowflake, сортируемость и коллизии' },
-        { id: 'background-jobs', freq: 1, status: 'empty', title: 'Background Jobs',
+        { id: 'background-jobs', freq: 1, status: 'draft', title: 'Background Jobs',
           scope: 'очереди задач, планировщики, повторы, async request-reply, возврат результата' },
       ] },
       { id: 'distributed', title: 'Distributed Systems', source: 'DDIA; microservices.io: Saga, CQRS, Event Sourcing', items: [

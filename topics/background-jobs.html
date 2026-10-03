@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Background Jobs · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="background-jobs">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Background Jobs</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Фоновая задача — работа, которую не нужно делать, пока пользователь ждёт ответа: письмо, отчёт, вызов медленного внешнего API. Её кладут в очередь и отвечают сразу (202 Accepted со ссылкой на статус), а воркеры выполняют задачи независимо. Очередь можно держать в той же базе: воркер берёт задачу через <code>FOR UPDATE SKIP LOCKED</code>, иначе все воркеры выстраиваются за одной строкой — в демо 11,7 с вместо 1,4. Воркер может умереть посреди задачи, поэтому задача берётся в аренду со сроком: по истечении её забирает другой. Значит, задача может выполниться дважды и должна быть идемпотентной. Неудачи повторяют с растущей задержкой, а после нескольких попыток задачу откладывают в dead letter для разбора.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Ответ ждёт отправки письма и формирования PDF</h2>
+      <p>Обработчик оформления заказа сохраняет заказ, формирует PDF-чек за 800 мс и отправляет письмо через внешний сервис, который иногда отвечает за 5 секунд. Пользователь ждёт всё это время, а если почтовый сервис недоступен, оформление заказа падает, хотя заказ уже сохранён. Чек и письмо не нужны для ответа: достаточно записать задачу «отправить чек по заказу 42» в той же транзакции, что и заказ, и ответить сразу.</p>
+      <p>Тема разбирает очередь задач в PostgreSQL, аренду и повторы, асинхронный запрос-ответ и выбор между базой и брокером. Публикация событий из той же транзакции — в <a href="outbox.html">Transactional Outbox</a>, брокеры — в <a href="messaging.html">Messaging</a>. Демо <a href="../examples/background-jobs/JobQueueDemo.java">JobQueueDemo.java</a> держит очередь в таблице PostgreSQL 17; задача — 20 мс работы, воркеров 8.</p>
+<pre><code class="language-sql">create table job(
+  id bigserial primary key,
+  payload text,
+  status text not null default 'READY',          -- READY, RUNNING, DONE, DEAD
+  attempts int not null default 0,
+  run_at timestamptz not null default now(),     -- не раньше этого времени (backoff)
+  locked_until timestamptz,                      -- аренда: после истечения задачу берёт другой
+  done_by text);
+create index on job (run_at) where status = 'READY';</code></pre>
+    </section>
+
+    <section class="step" id="skip-locked">
+      <h2>FOR UPDATE выстраивает воркеров в очередь, SKIP LOCKED — нет</h2>
+<pre><code class="language-java">// Классический вариант: строка заблокирована, пока идёт работа.
+ResultSet r = c.createStatement().executeQuery(
+    "select id from job where status = 'READY' order by id limit 1 for update" + lockMode);
+long id = r.getLong(1);
+Thread.sleep(20);                                           // работа под блокировкой
+c.createStatement().executeUpdate("update job set status = 'DONE' where id = " + id);
+c.commit();</code></pre>
+      <pre class="out">== 400 jobs, 8 workers, each job takes 20 ms; row locked for the whole job
+   for update               done 400 in 11663 ms, empty polls 0
+   for update skip locked   done 400 in  1376 ms, empty polls 8</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+<svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Три воркера и очередь задач. С FOR UPDATE все выбирают первую готовую задачу и ждут, пока первый воркер её закончит. С SKIP LOCKED каждый пропускает заблокированные строки и берёт следующую свободную.">
+          <defs><marker id="bj-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+          <text x="40" y="22" class="dg-cap">ВОРКЕРЫ</text>
+          <text x="420" y="22" class="dg-cap">ТАБЛИЦА JOB</text>
+          <rect x="40" y="40" width="110" height="36" rx="8" class="dg-box"/>
+          <text x="95" y="63" class="dg-in" text-anchor="middle">w1</text>
+          <rect x="40" y="90" width="110" height="36" rx="8" class="dg-box"/>
+          <text x="95" y="113" class="dg-in" text-anchor="middle">w2</text>
+          <rect x="40" y="140" width="110" height="36" rx="8" class="dg-box"/>
+          <text x="95" y="163" class="dg-in" text-anchor="middle">w3</text>
+          <rect x="420" y="34" width="120" height="32" rx="6" class="dg-cell miss"/>
+          <text x="480" y="55" class="dg-in" text-anchor="middle">job 1</text>
+          <rect data-s="1" x="420" y="74" width="120" height="32" rx="6" class="dg-cell"/>
+          <rect data-s="2" x="420" y="74" width="120" height="32" rx="6" class="dg-cell miss"/>
+          <text x="480" y="95" class="dg-in" text-anchor="middle">job 2</text>
+          <rect data-s="1" x="420" y="114" width="120" height="32" rx="6" class="dg-cell"/>
+          <rect data-s="2" x="420" y="114" width="120" height="32" rx="6" class="dg-cell miss"/>
+          <text x="480" y="135" class="dg-in" text-anchor="middle">job 3</text>
+          <rect x="420" y="154" width="120" height="32" rx="6" class="dg-cell"/>
+          <text x="480" y="175" class="dg-in" text-anchor="middle">job 4</text>
+          <path d="M150 58 L 418 50" class="dg-line ok" marker-end="url(#bj-a)"/>
+          <text x="560" y="55" class="dg-ok">w1 работает</text>
+          <path data-s="1" d="M150 108 L 418 54" class="dg-line bad" marker-end="url(#bj-a)" stroke-dasharray="4 4"/>
+          <path data-s="1" d="M150 158 L 418 58" class="dg-line bad" marker-end="url(#bj-a)" stroke-dasharray="4 4"/>
+          <text data-s="1" x="420" y="205" class="dg-bad">w2, w3 ждут блокировку job 1</text>
+          <path data-s="2" d="M150 108 L 418 90" class="dg-line ok" marker-end="url(#bj-a)"/>
+          <path data-s="2" d="M150 158 L 418 130" class="dg-line ok" marker-end="url(#bj-a)"/>
+          <text data-s="2" x="560" y="95" class="dg-ok">w2 пропустил 1</text>
+          <text data-s="2" x="560" y="135" class="dg-ok">w3 пропустил 1, 2</text>
+          <text data-s="1" x="40" y="226" class="dg-bad">FOR UPDATE: 400 задач — 11,7 с, воркеры работают по очереди.</text>
+          <text data-s="2" x="40" y="226" class="dg-ok">SKIP LOCKED: 400 задач — 1,4 с, каждый воркер со своей задачей.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>FOR UPDATE: все воркеры выбирают первую готовую строку — job 1 — и ждут, пока w1 закончит. Когда блокировка снята, строка уже DONE, ожидающий перечитывает её и берёт следующую — снова все вместе. Восемь воркеров работают последовательно.</li>
+          <li>SKIP LOCKED: запрос пропускает строки, заблокированные другими транзакциями, и сразу берёт следующую свободную. Каждый воркер работает со своей задачей.</li>
+        </ol>
+      </figure>
+      <p>С <code>FOR UPDATE</code> 400 задач по 20 мс выполнялись 11,7 с — дольше, чем 400 × 20 мс = 8 с одним воркером: восемь воркеров не только не помогли, но и добавили накладные расходы на ожидание и перепроверку строк. С <code>SKIP LOCKED</code> — 1,4 с, почти 8-кратное ускорение. Несколько пустых опросов в конце — воркеры, которые видели только заблокированные последние задачи. <code>SKIP LOCKED</code> есть в PostgreSQL с 9.5, в MySQL 8 и Oracle; на нём, например, работает режим lock-and-fetch планировщика db-scheduler. Время выполнения меняется от запуска к запуску, соотношение — нет.</p>
+    </section>
+
+    <section class="step" id="lease">
+      <h2>Аренда вместо долгой транзакции: упавший воркер не теряет задачу</h2>
+<pre><code class="language-sql">update job set status = 'RUNNING', attempts = attempts + 1,
+               locked_until = now() + interval '2 seconds', done_by = ?
+where id = (
+  select id from job
+  where (status = 'READY' and run_at &lt;= now())
+     or (status = 'RUNNING' and locked_until &lt; now())     -- аренда истекла: воркер умер
+  order by id limit 1
+  for update skip locked)
+returning id</code></pre>
+      <pre class="out">== same, but claim commits at once and the lease protects the job
+   claim + lease            done 400 in  1404 ms, empty polls 0
+== worker crashes after taking a job; lease is 2 s
+   w-crashed took job 1, status RUNNING
+   w2 immediately: nothing to take
+   w2 after 2.2 s: took job 1, attempts 2</pre>
+      <p>Держать транзакцию открытой всю работу плохо: задача на минуту — это минута открытой транзакции, которая мешает VACUUM и держит соединение из пула, как в <a href="vacuum.html">VACUUM</a>. Поэтому задачу берут короткой транзакцией: помечают RUNNING с арендой <code>locked_until</code>, коммитят и работают уже без блокировок. Скорость та же — 1,4 с на 400 задач. Если воркер упал, не закончив, задача остаётся RUNNING, но после истечения аренды её забирает другой: в демо w2 сразу ничего не взял, а через 2,2 с взял ту же задачу второй попыткой. Долгие задачи продлевают аренду периодически (heartbeat).</p>
+      <p>Обратная сторона аренды — повтор выполнения. Воркер мог не упасть, а зависнуть на сборке мусора или медленном вызове: аренда истекла, задачу взял второй, а первый проснулся и тоже закончил. Задача выполнится дважды, поэтому она должна быть идемпотентной: письмо — с ключом идемпотентности у почтового провайдера, запись — через upsert, как в <a href="idempotency.html">Idempotency</a>. Гарантию «ровно один раз» очередь задач не даёт — только «хотя бы один раз».</p>
+    </section>
+
+    <section class="step" id="retries">
+      <h2>Повторы с задержкой и dead letter</h2>
+      <pre class="out">== job fails: retry with backoff, then dead letter after 3 attempts
+   attempt 1: failed -> retry in 200 ms
+   attempt 2: failed -> retry in 400 ms
+   attempt 3: failed -> DEAD, needs a human</pre>
+      <p>Неудача задачи — обычное дело: внешний сервис вернул 503, база была перегружена. Задачу возвращают в READY с <code>run_at</code> в будущем, увеличивая задержку с каждой попыткой (в демо 200, 400 мс; в жизни — секунды и минуты), чтобы не долбить больной сервис, как разобрано в <a href="overload.html">Overload</a>. После нескольких попыток задача уходит в DEAD — dead letter: дальше повторять бессмысленно, нужен человек или исправление кода. Мёртвые задачи должны быть видны в мониторинге, а их повторный запуск после исправления — одной командой. Ошибки, которые повтор не исправит (неверные данные, 400 от внешнего API), сразу отправляют в DEAD без повторов.</p>
+    </section>
+
+    <section class="step" id="async-api">
+      <h2>Асинхронный запрос-ответ и выбор между базой и брокером</h2>
+<pre><code class="language-http">POST /v1/reports            { "month": "2026-09" }
+202 Accepted
+Location: /v1/reports/jobs/81
+
+GET /v1/reports/jobs/81
+200 OK  { "status": "RUNNING" }
+...
+200 OK  { "status": "DONE", "result": "/v1/reports/81.pdf" }</code></pre>
+      <p>Когда результат нужен пользователю, но считается долго, API принимает задачу ответом 202 со ссылкой на статус, а клиент опрашивает статус или получает вебхук по завершении. Статус — это и есть строка задачи. Опрос дешевле держать короткими запросами с <code>Retry-After</code>, чем держать соединение открытым.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Очередь в базе</th><th>Брокер (RabbitMQ, Kafka, SQS)</th></tr></thead>
+        <tbody>
+          <tr><td>Атомарность с данными</td><td>Задача в одной транзакции с заказом</td><td>Нужен outbox</td></tr>
+          <tr><td>Поток</td><td>Сотни–тысячи задач в секунду</td><td>Десятки и сотни тысяч сообщений в секунду</td></tr>
+          <tr><td>Отложенный запуск, приоритеты, статус</td><td>Обычные столбцы и запросы</td><td>Зависит от брокера: TTL и DLX, отдельные очереди</td></tr>
+          <tr><td>Нагрузка на базу</td><td>Опросы, обновления, VACUUM таблицы задач</td><td>База не участвует</td></tr>
+        </tbody>
+      </table>
+      <p>Очередь в базе проще: нет нового компонента, задача ставится атомарно с данными, видно статус и историю. Её выбирают, пока поток задач умеренный. Брокер нужен, когда задач очень много, их потребляют разные сервисы или нужна доставка с малой задержкой без опроса. Планировщики по расписанию (<code>@Scheduled</code>, Quartz) в кластере из нескольких экземпляров запускают задачу на каждом экземпляре; чтобы выполнял один, используют блокировку в базе — ShedLock или тот же <code>SKIP LOCKED</code>.</p>
+      <div class="trap">
+        <p class="myth">Чем больше воркеров читают очередь из таблицы, тем быстрее она разбирается.</p>
+        <p class="fact">С <code>FOR UPDATE</code> воркеры выбирают одну и ту же первую строку и ждут друг друга: восемь воркеров разобрали 400 задач за 11,7 с — дольше, чем 400 × 20 мс = 8 с чистой последовательной работы. Параллельность даёт <code>SKIP LOCKED</code>: 1,4 с.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Работу, не нужную для ответа, кладут в очередь в той же транзакции, что и данные, и отвечают сразу.</li>
+        <li>FOR UPDATE: 8 воркеров разбирают 400 задач за 11,7 с; SKIP LOCKED — за 1,4 с.</li>
+        <li>Задачу берут короткой транзакцией с арендой; после истечения аренды её забирает другой воркер.</li>
+        <li>Аренда даёт «хотя бы один раз»: задачи должны быть идемпотентными.</li>
+        <li>Повторы с растущей задержкой, после N попыток — dead letter с мониторингом.</li>
+        <li>Долгий результат — 202 Accepted и статус; база — для умеренного потока, брокер — для большого.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="bj-queue" data-freq="2">
+      <h3>Как сделать очередь задач на реляционной базе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Таблица задач со статусом, числом попыток, временем следующего запуска и сроком аренды. Воркер берёт задачу <code>UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING</code>, помечает RUNNING с арендой и коммитит; работает вне транзакции; по завершении — DONE, при ошибке — READY с задержкой или DEAD. Задача с истёкшей арендой снова доступна.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без SKIP LOCKED воркеры ждут одну строку и работают последовательно.</li>
+            <li>Частичный индекс по готовым задачам; старые DONE удалять или переносить, чтобы таблица не росла.</li>
+            <li>Задачи идемпотентны: аренда даёт «хотя бы один раз».</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим воркером?</summary>
+          <pre><code class="language-java">@Scheduled(fixedDelay = 1000)
+@Transactional
+public void process() {
+    List&lt;Job&gt; jobs = jobRepository.findTop100ByStatusOrderById(READY);   // select ... for update
+    for (Job job : jobs) {
+        mailClient.send(job.getPayload());                                  // до 5 секунд
+        job.setStatus(DONE);
+    }
+}</code></pre>
+          <p>Одна транзакция на 100 задач с внешними вызовами — до 500 секунд открытой транзакции с блокировками: остальные экземпляры приложения ждут те же строки, VACUUM не может чистить таблицу. Если отправка одного письма упадёт, откатятся статусы всех ста, и уже отправленные письма уйдут повторно. Нужно брать задачи по одной или небольшими пачками с <code>SKIP LOCKED</code> и арендой, коммитить сразу, отправлять письма вне транзакции и делать отправку идемпотентной.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="bj-retry" data-freq="2">
+      <h3>Как обрабатывать неудачи фоновых задач?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Повторять с экспоненциальной задержкой и ограничением числа попыток; после него — dead letter, видимый в мониторинге, с возможностью перезапуска после исправления. Ошибки, которые повтор не исправит, сразу в dead letter. Задачи должны быть идемпотентными, потому что повтор возможен и после частичного выполнения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Jitter к задержке, чтобы задачи не повторялись разом.</li>
+            <li>Отдельно различать «упал воркер» (аренда) и «упала задача» (повтор с backoff).</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="bj-async" data-freq="2">
+      <h3>Как вернуть клиенту результат долгой операции?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Асинхронный запрос-ответ: принять задачу ответом 202 Accepted со ссылкой на статус, выполнить в фоне, а клиент опрашивает статус или получает вебхук или сообщение по WebSocket. Статус хранится в строке задачи, результат — по ссылке после завершения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Retry-After в ответе статуса задаёт частоту опроса.</li>
+            <li>Ключ идемпотентности на создание задачи, чтобы повтор POST не запустил вторую.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE">PostgreSQL: The Locking Clause</a> — SKIP LOCKED и NOWAIT.</li>
+      <li><a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/async-request-reply">Azure Architecture: Asynchronous Request-Reply</a> и <a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/competing-consumers">Competing Consumers</a>.</li>
+      <li><a href="https://github.com/lukas-krecan/ShedLock">ShedLock</a>, <a href="https://github.com/kagkarlsson/db-scheduler">db-scheduler</a> — планировщики на базе в кластере.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
