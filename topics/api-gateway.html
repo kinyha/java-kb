@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>API Gateway &amp; Service Discovery · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="api-gateway">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>API Gateway &amp; Service Discovery</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>API-шлюз — единая точка входа для внешних клиентов: он маршрутизирует запросы к сервисам по пути, проверяет аутентификацию, ограничивает частоту и добавляет сквозные заголовки вроде идентификатора запроса, чтобы каждый сервис не делал этого сам. Шлюз не должен содержать бизнес-логики и сам становится критичным компонентом: его резервируют и масштабируют. Обнаружение сервисов отвечает на вопрос, по какому адресу сейчас живут экземпляры: реестр (Consul, Eureka) или DNS платформы (Kubernetes, Docker). Типичная ловушка — прокси, который разрешает имя один раз: в демо nginx с именем в <code>upstream</code> отправил все 30 запросов на старый экземпляр и не заметил новый, а с <code>resolver</code> и именем в переменной распределил запросы по трём.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Каждый сервис сам проверяет токен и сам считает лимиты</h2>
+      <p>Мобильное приложение обращается к десяти сервисам напрямую. В каждом своя проверка JWT — в трёх уже забыли проверить срок действия, — свои лимиты, своя схема логирования, и клиенту известны десять адресов. Переименование или разделение сервиса ломает старые версии приложения, которые обновятся через месяцы. Шлюз прячет внутреннее устройство за одним адресом и делает общие вещи в одном месте.</p>
+      <p>Тема разбирает обязанности шлюза, обнаружение сервисов и связанные ловушки. Демо <a href="../examples/api-gateway/gateway.sh">gateway.sh</a> поднимает в Docker-сети шлюз на nginx 1.31, сервис аутентификации и сервисы orders и users в нескольких экземплярах; экземпляры одного сервиса имеют общее сетевое имя, как поды за Service в Kubernetes. Балансировка между экземплярами — в <a href="load-balancing.html">Load Balancing</a>, лимиты — в <a href="rate-limiting.html">Rate Limiting</a>.</p>
+    </section>
+
+    <section class="step" id="duties">
+      <h2>Маршрутизация, аутентификация, лимиты — в одном месте</h2>
+<pre><code class="language-nginx">location = /_auth {                           # подзапрос к сервису аутентификации
+    internal;
+    proxy_pass http://auth:8080/auth;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+}
+location /orders/ {
+    auth_request /_auth;                       # 2xx — пропустить, 401/403 — отказать
+    limit_req zone=perclient burst=2 nodelay;  # 5 r/s на токен
+    limit_req_status 429;
+    set $orders http://orders:8080;
+    proxy_set_header X-Request-Id $request_id; # сквозной идентификатор для логов и трассировки
+    proxy_set_header X-User anna;              # шлюз передаёт сервису, кто пользователь
+    proxy_pass $orders;
+}</code></pre>
+      <pre class="out">== routing and authentication at the gateway
+   GET /orders/42, no token           401 401 Authorization Required
+   GET /orders/42, bad token          401 401 Authorization Required
+   GET /orders/42, good token         200 orders-2 req=&lt;32 hex&gt; user=anna
+   GET /users/7, good token           200 users-1 req=&lt;32 hex&gt; user=
+== rate limit 5 r/s, burst 2: 10 requests at once
+   200 200 200 429 429 429 429 429 429 429</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Клиент обращается к шлюзу. Шлюз спрашивает сервис аутентификации, проверяет лимит, добавляет X-Request-Id и маршрутизирует /orders к экземплярам orders, /users к экземплярам users.">
+            <defs><marker id="gw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="80" width="100" height="44" rx="9" class="dg-box"/>
+            <text x="70" y="107" class="dg-in" text-anchor="middle">клиент</text>
+            <rect x="190" y="50" width="190" height="104" rx="10" class="dg-cell"/>
+            <text x="285" y="72" class="dg-in" text-anchor="middle">шлюз</text>
+            <text x="205" y="94" class="dg-n">1. auth_request → auth</text>
+            <text x="205" y="112" class="dg-n">2. limit_req: 5 r/s</text>
+            <text x="205" y="130" class="dg-n">3. X-Request-Id, X-User</text>
+            <text x="205" y="148" class="dg-n">4. маршрут по пути</text>
+            <rect x="230" y="176" width="110" height="28" rx="7" class="dg-box"/>
+            <text x="285" y="195" class="dg-in" text-anchor="middle">auth</text>
+            <path d="M285 154 L 285 174" class="dg-line" marker-end="url(#gw-a)"/>
+            <rect x="460" y="30" width="110" height="34" rx="8" class="dg-box"/><text x="515" y="52" class="dg-in" text-anchor="middle">orders-1</text>
+            <rect x="590" y="30" width="110" height="34" rx="8" class="dg-box"/><text x="645" y="52" class="dg-in" text-anchor="middle">orders-2</text>
+            <rect x="460" y="140" width="110" height="34" rx="8" class="dg-box"/><text x="515" y="162" class="dg-in" text-anchor="middle">users-1</text>
+            <path d="M120 102 L 188 102" class="dg-line" marker-end="url(#gw-a)"/>
+            <path d="M380 80 L 458 50" class="dg-line" marker-end="url(#gw-a)"/>
+            <path d="M380 70 C 450 0, 600 0, 640 28" class="dg-line" marker-end="url(#gw-a)"/>
+            <text x="392" y="92" class="dg-n">/orders/</text>
+            <path d="M380 124 L 458 154" class="dg-line" marker-end="url(#gw-a)"/>
+            <text x="400" y="172" class="dg-n">/users/</text>
+          </svg>
+        </div>
+        <figcaption>Общие проверки делает шлюз; сервисы получают уже проверенный запрос с идентификатором пользователя и запроса.</figcaption>
+      </figure>
+      <p>Без токена и с плохим токеном шлюз отвечает 401, не дойдя до сервиса: сервис аутентификации вернул 401 на подзапрос <code>auth_request</code>. С хорошим токеном запрос ушёл в orders с добавленными <code>X-Request-Id</code> (случайный, заменён в выводе заглушкой) и <code>X-User</code>. Из 10 одновременных запросов лимит пропустил 3 — один по скорости и два из запаса <code>burst</code>, — остальные получили 429. В маршруте /users/ заголовок <code>X-User</code> не задан — сервис его не получил: каждую сквозную функцию нужно включить в каждом маршруте, и это довод в пользу шлюзов с общими фильтрами.</p>
+      <pre class="out">== cost of auth_request: 300 sequential requests
+   /plain/ (no auth_request): 0.59 ms per request
+   /users/ (auth_request):    0.65 ms per request</pre>
+      <p>Подзапрос к сервису аутентификации на каждый запрос здесь почти ничего не стоит — 0,06 мс, — потому что всё работает в одной Docker-сети на одной машине. В продакшене к каждому запросу добавится круг по сети до сервиса аутентификации и его работа, а при его отказе отказывает весь API. Поэтому выбор способа проверки — важное решение для шлюза:</p>
+      <table class="mx">
+        <thead><tr><th>Способ</th><th>Как</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr><td>Локальная проверка JWT</td><td>Шлюз проверяет подпись по публичному ключу (JWKS) и срок</td><td>Без сетевого вызова; отзыв токена — только по истечении срока</td></tr>
+          <tr><td>Интроспекция</td><td>Шлюз спрашивает сервер авторизации, жив ли токен (как auth_request)</td><td>Круг по сети на запрос; кешируют результат на секунды</td></tr>
+          <tr><td>Обмен токена</td><td>Внешний непрозрачный токен меняется на короткий внутренний JWT</td><td>Внешний токен легко отозвать, внутренние сервисы проверяют локально</td></tr>
+        </tbody>
+      </table>
+      <p>Шлюз проверяет, кто пользователь, но не что ему можно с конкретным заказом: это решает сервис, который знает владельца заказа. Сервис не должен слепо доверять заголовку <code>X-User</code>, если до него можно дойти в обход шлюза; внутренний трафик защищают сетью и mTLS или передают подписанный токен, а не голый заголовок.</p>
+      <p>Типичный набор обязанностей шлюза: маршрутизация и версии API, завершение TLS, аутентификация (проверка подписи JWT или обмен непрозрачного токена на внутренний, как в <a href="oauth2.html">OAuth2 / OIDC</a>), лимиты на клиента, идентификатор запроса и начало трассы, CORS, сжатие, иногда кеш. Бизнес-правила — нет: шлюз, который знает, какие заказы можно отменять, становится распределённым монолитом, через который должен проходить каждый релиз. В Java-экосистеме — Spring Cloud Gateway, в инфраструктуре — nginx, Kong, Envoy, облачные шлюзы.</p>
+    </section>
+
+    <section class="step" id="discovery">
+      <h2>Обнаружение сервисов: прокси, который разрешил имя один раз</h2>
+<pre><code class="language-nginx">upstream users { server users:8080; }          # имя разрешается один раз, при старте nginx
+resolver 127.0.0.11 valid=1s ipv6=off;        # DNS Docker; нужен для переменной ниже
+set $orders http://orders:8080;               # имя в переменной — разрешается заново по TTL
+proxy_pass $orders;</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Шлюз и DNS Docker. При старте nginx разрешает имена orders и users. Затем запускаются orders-3 и users-2 и регистрируются в DNS. Маршрут orders перечитывает DNS раз в секунду и видит три адреса. Маршрут users держит адрес, полученный при старте, и шлёт всё на users-1.">
+            <defs><marker id="gd-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="70" width="130" height="60" rx="9" class="dg-cell"/>
+            <text x="85" y="96" class="dg-in" text-anchor="middle">шлюз</text>
+            <text x="85" y="114" class="dg-n" text-anchor="middle">nginx</text>
+            <rect x="250" y="80" width="120" height="40" rx="8" class="dg-box"/>
+            <text x="310" y="105" class="dg-in" text-anchor="middle">DNS Docker</text>
+            <rect x="480" y="20" width="100" height="30" rx="7" class="dg-box"/><text x="530" y="40" class="dg-in" text-anchor="middle">orders-1</text>
+            <rect x="600" y="20" width="100" height="30" rx="7" class="dg-box"/><text x="650" y="40" class="dg-in" text-anchor="middle">orders-2</text>
+            <rect data-s="2-" x="540" y="60" width="100" height="30" rx="7" class="dg-cell hit"/><text data-s="2-" x="590" y="80" class="dg-in" text-anchor="middle">orders-3</text>
+            <rect x="480" y="130" width="100" height="30" rx="7" class="dg-box"/><text x="530" y="150" class="dg-in" text-anchor="middle">users-1</text>
+            <rect data-s="2-" x="600" y="130" width="100" height="30" rx="7" class="dg-cell hit"/><text data-s="2-" x="650" y="150" class="dg-in" text-anchor="middle">users-2</text>
+            <path d="M150 100 L 248 100" class="dg-line" marker-end="url(#gd-a)"/>
+            <text data-s="1" x="160" y="90" class="dg-n">при старте</text>
+            <text data-s="2-" x="160" y="90" class="dg-n">orders — раз в 1 с</text>
+            <path data-s="3" d="M150 80 C 300 20, 400 50, 588 62" class="dg-line ok" marker-end="url(#gd-a)"/>
+            <path data-s="3" d="M150 120 C 300 170, 400 150, 478 146" class="dg-line bad" marker-end="url(#gd-a)"/>
+            <text data-s="3" x="380" y="186" class="dg-bad" text-anchor="middle">users: адрес со старта — 30 из 30 на users-1</text>
+            <text data-s="1" x="20" y="186" class="dg-t">nginx разрешил имена при старте: orders — 2 адреса, users — 1.</text>
+            <text data-s="2" x="20" y="186" class="dg-t">Запущены orders-3 и users-2; DNS уже отдаёт их адреса.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>При запуске nginx разрешает имена: для <code>upstream users</code> — один раз и навсегда, для переменной <code>$orders</code> — через <code>resolver</code> при запросах.</li>
+          <li>Запускаются orders-3 и users-2 с теми же сетевыми именами. DNS Docker сразу начинает возвращать их адреса.</li>
+          <li>Маршрут /orders/ через секунду перечитывает имя и распределяет запросы по трём экземплярам. Маршрут /users/ продолжает использовать адрес, полученный при старте: все запросы — на users-1.</li>
+        </ol>
+      </figure>
+      <pre class="out">== discovery: start orders-3 and users-2, then send 30 requests to each
+   /orders/ (name in a variable, resolver valid=1s): orders-1=8 orders-2=11 orders-3=11
+   /users/  (name resolved at nginx start):         users-1=30</pre>
+      <p>Демо запускает третий экземпляр orders и второй экземпляр users. Маршрут /orders/ держит имя в переменной и с <code>resolver</code> перечитывает DNS раз в секунду — новый экземпляр сразу получил свою треть запросов (точное распределение меняется от запуска к запуску). Маршрут /users/ записан через <code>upstream</code>: nginx разрешил имя при старте, когда экземпляр был один, и все 30 запросов ушли на users-1; users-2 не получит трафика до перезагрузки конфигурации. Та же ловушка у Java: <code>InetAddress</code> кеширует успешные ответы DNS, а HTTP-клиент держит открытые соединения со старыми адресами, поэтому новые экземпляры получают трафик с задержкой, а удалённые ещё какое-то время получают запросы.</p>
+      <table class="mx">
+        <thead><tr><th>Способ</th><th>Как узнают адреса</th><th>Примеры</th></tr></thead>
+        <tbody>
+          <tr><td>Серверный</td><td>Клиент идёт на один адрес, балансировщик знает экземпляры</td><td>Kubernetes Service (ClusterIP), облачный балансировщик</td></tr>
+          <tr><td>Клиентский</td><td>Клиент получает список из реестра и балансирует сам</td><td>Eureka + Spring Cloud LoadBalancer, gRPC с headless Service</td></tr>
+          <tr><td>DNS</td><td>Имя разрешается во все адреса экземпляров</td><td>Docker, headless Service, Consul DNS</td></tr>
+          <tr><td>Сервисная сеть</td><td>Sidecar-прокси получает адреса от управляющего слоя</td><td>Istio, Linkerd на Envoy</td></tr>
+        </tbody>
+      </table>
+      <p>Реестр должен знать не только адреса, но и здоровье: экземпляр регистрируется при старте, подтверждает жизнь сердцебиениями и удаляется при остановке или пропаже сердцебиений. В Kubernetes это делает платформа: под попадает в Endpoints, когда проходит readiness-пробу, и исчезает при остановке, поэтому отдельный реестр в Kubernetes обычно не нужен. Клиентское обнаружение даёт гибкость — свой алгоритм балансировки, повторы, учёт зон, — но каждый клиент должен его реализовать; серверное проще для клиентов, но добавляет переход по сети.</p>
+    </section>
+
+    <section class="step" id="bff">
+      <h2>Шлюз как точка отказа, BFF и агрегация</h2>
+      <p>Все внешние запросы идут через шлюз, поэтому его отказ — отказ всего API. Его разворачивают в нескольких экземплярах за L4-балансировщиком в нескольких зонах, держат без состояния (лимиты — в общем хранилище, как в <a href="rate-limiting.html">Rate Limiting</a>) и выкатывают изменения конфигурации постепенно. Каждая функция в шлюзе добавляет задержку ко всем запросам — подзапрос <code>auth_request</code> на каждый запрос стоит круга по сети, поэтому результат проверки кешируют на короткое время или проверяют подпись JWT локально.</p>
+      <p>Backend for Frontend — отдельный шлюз для каждого типа клиента: мобильному приложению нужен компактный ответ одним запросом, веб-приложению — другой набор данных. BFF собирает ответ из нескольких сервисов (агрегация, API composition) и принадлежит команде клиента. Агрегация в шлюзе превращает один запрос клиента в несколько внутренних — их делают параллельно, с тайм-аутами и частичным ответом при отказе второстепенного сервиса, иначе задержка и недоступность перемножаются, как в <a href="microservices.html">Monolith &amp; Microservices</a>.</p>
+      <div class="trap">
+        <p class="myth">Достаточно указать в прокси DNS-имя сервиса, и новые экземпляры начнут получать трафик автоматически.</p>
+        <p class="fact">Многие прокси и клиенты разрешают имя один раз или кешируют ответ надолго. В демо nginx с именем в <code>upstream</code> отправил все 30 запросов на старый users-1 и не увидел users-2. Нужен явный повторный опрос DNS (<code>resolver</code> с переменной, настройки кеша DNS в JVM) или обнаружение через реестр.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Шлюз — единая точка входа: маршрутизация, TLS, аутентификация, лимиты, X-Request-Id; бизнес-логики в нём нет.</li>
+        <li>Демо: без токена — 401 на шлюзе; лимит 5 r/s с burst 2 пропустил 3 запроса из 10.</li>
+        <li>Проверка токена: локально по JWKS, интроспекцией с кешем или обменом на внутренний токен; права на объект проверяет сервис.</li>
+        <li>Обнаружение: серверное, клиентское, DNS, сервисная сеть; реестр знает и здоровье.</li>
+        <li>nginx с именем в upstream разрешил его при старте — новый экземпляр не получил ни одного запроса из 30; resolver с переменной распределил по трём.</li>
+        <li>Шлюз резервируют и держат без состояния; BFF — шлюз под клиента с агрегацией параллельными вызовами.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="gw-duties" data-freq="3">
+      <h3>Зачем нужен API-шлюз и что в нём делать не стоит?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Единая точка входа для внешних клиентов: скрывает внутреннее устройство, маршрутизирует по пути и версии, завершает TLS, проверяет аутентификацию, ограничивает частоту, добавляет идентификатор запроса и начинает трассу. Бизнес-логику туда не кладут — иначе шлюз становится монолитом, через который проходит каждый релиз.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Шлюз — критичный компонент: несколько экземпляров, без состояния, постепенная выкатка.</li>
+            <li>Каждая функция добавляет задержку ко всем запросам; проверку токена кешировать или делать локально.</li>
+            <li>BFF — отдельный шлюз под тип клиента с агрегацией.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="gw-discovery" data-freq="2">
+      <h3>Как сервисы находят друг друга?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через реестр или DNS платформы. Серверное обнаружение — клиент идёт на один адрес, балансировщик знает экземпляры (Kubernetes Service). Клиентское — клиент получает список из реестра (Eureka, Consul) и балансирует сам. Экземпляры регистрируются при старте, подтверждают жизнь и удаляются при остановке.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Кеширование DNS в прокси и JVM: новые экземпляры не получают трафик, удалённые получают.</li>
+            <li>В Kubernetes Endpoints обновляет платформа по readiness; отдельный реестр не нужен.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему после масштабирования payments с 2 до 6 подов нагрузка не перераспределилась?</summary>
+          <pre><code class="language-nginx"># ingress-шлюз собран вручную на nginx
+upstream payments { server payments.prod.svc.cluster.local:8080; }   # headless Service
+location /payments/ { proxy_pass http://payments; }</code></pre>
+          <p>Для headless Service DNS возвращает адреса подов, а nginx разрешает имя в <code>upstream</code> один раз при запуске или перезагрузке конфигурации. Шлюз продолжает слать запросы двум старым подам; новые четыре не получат трафика до перезагрузки, а если старые поды удалят, шлюз будет ходить на несуществующие адреса. Нужен <code>resolver</code> с именем в переменной, обычный ClusterIP Service вместо headless или ingress-контроллер, который следит за Endpoints.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="gw-bff" data-freq="2">
+      <h3>Что такое Backend for Frontend?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Отдельный шлюз для каждого типа клиента — мобильного, веба, партнёрского API. Он собирает ответ из нескольких сервисов под нужды конкретного клиента, адаптирует формат и принадлежит команде этого клиента. Вызовы к сервисам делает параллельно, с тайм-аутами и частичным ответом.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Агрегация в одном общем шлюзе для всех клиентов быстро обрастает частными случаями.</li>
+            <li>GraphQL — альтернатива BFF: клиент сам выбирает поля.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://microservices.io/patterns/apigateway.html">microservices.io: API Gateway / BFF</a>, <a href="https://microservices.io/patterns/client-side-discovery.html">Client-side discovery</a>, <a href="https://microservices.io/patterns/server-side-discovery.html">Server-side discovery</a>.</li>
+      <li><a href="https://nginx.org/en/docs/http/ngx_http_auth_request_module.html">nginx: auth_request</a>, <a href="https://nginx.org/en/docs/http/ngx_http_core_module.html#resolver">resolver</a>.</li>
+      <li><a href="https://docs.spring.io/spring-cloud-gateway/reference/">Spring Cloud Gateway</a>.</li>
+      <li><a href="https://learn.microsoft.com/en-us/azure/architecture/patterns/backends-for-frontends">Azure Architecture: Backends for Frontends</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
