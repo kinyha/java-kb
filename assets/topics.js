@@ -335,7 +335,7 @@ window.KB_TREE = [
       { id: 'cases', title: 'Case Studies', source: 'System Design Interview т. 1–2: разборы задач', items: [
         { id: 'sd-payments', freq: 3, status: 'draft', title: 'Payment System',
           scope: 'приём платежа, статусы, идемпотентность, сверка, интеграция с банком и PSP' },
-        { id: 'sd-wallet', freq: 2, status: 'empty', title: 'Digital Wallet',
+        { id: 'sd-wallet', freq: 2, status: 'draft', title: 'Digital Wallet',
           scope: 'баланс и проводки, перевод между счетами, двойная запись, event sourcing, аудит' },
         { id: 'sd-booking', freq: 2, status: 'empty', title: 'Booking System',
           scope: 'резерв и подтверждение, двойное бронирование, блокировки и версии, истечение брони' },
