@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hash Tables · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="hash-tables">
+<main class="page">
+  <header class="topic-head"><h1>Hash Tables</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сервис получает ключ платежа и по его хешу выбирает короткий путь к записи. Несколько ключей могут вести в одно место, поэтому окончательный ответ даёт сравнение самих ключей. Цепочки хранят такие записи в узлах рядом с массивом, открытая адресация ищет свободные слоты внутри массива. Удаление и расширение должны сохранить путь поиска: иначе платёж останется в памяти, а сервис перестанет его находить.</p>
+    </div>
+
+    <section class="step" id="hash-and-key">
+      <h2>Хеш выбирает место поиска, равенство узнаёт платёж</h2>
+      <p>Платёжный сервис хранит результаты недавних запросов. Клиент прислал повторный requestId — нужно быстро найти прошлый результат. Если каждый раз просматривать список из n платежей, один поиск стоит O(n). Индексировать массив напрямую по requestId тоже неудобно: ключи бывают строками, а числовые идентификаторы могут занимать огромный диапазон с большими промежутками.</p>
+      <p>Хеш-таблица оставляет массив умеренного размера m. Из ключа вычисляет целое число — <b>хеш</b>, затем превращает его в индекс от 0 до m − 1. Этот индекс выбирает <b>бакет</b>, то есть место начала поиска. В учебных таблицах ниже для числового ключа используем сам ключ как хеш и <code>Math.floorMod(key, m)</code> как индекс. Это позволяет видеть все вычисления; для произвольных данных такую простую функцию нужно оценивать по распределению ключей.</p>
+      <p>Разных ключей больше, чем ячеек, поэтому совпадения неизбежны. <b>Коллизия полного хеша</b> — разные ключи дали одинаковое число. <b>Коллизия индекса</b> — числа разные, но после сокращения до диапазона массива получился один бакет. Оба случая требуют способа хранить и искать несколько записей. Если уже найден равный ключ, <code>put</code> заменяет его значение, а не создаёт ещё один платёж.</p>
+      <p>В Java равенство объектов задаёт <code>equals</code>. У равных ключей обязаны совпадать <code>hashCode</code>; обратное неверно. Без этого правила повторный запрос может уйти по другому маршруту, и таблица его пропустит. Одинаковый хеш у двух разных ключей допустим: например, у строк Aa и BB.</p>
+      <p>Фрагменты <a href="../examples/hash-tables/HashContractDemo.java">HashContractDemo.java</a>, JDK 21. Здесь готовый HashMap позволяет увидеть контракт без собственной реализации:</p>
+      <pre><code class="language-java">String a = &quot;Aa&quot;, b = &quot;BB&quot;;
+System.out.println(&quot;hashes=&quot; + a.hashCode() + &quot;,&quot; + b.hashCode()
+        + &quot; equal=&quot; + a.equals(b));
+var payments = new HashMap&lt;String, String&gt;();
+payments.put(a, &quot;PAID&quot;);
+payments.put(b, &quot;REFUNDED&quot;); // Совпадение хешей не делает ключи равными.
+System.out.println(&quot;size=&quot; + payments.size() + &quot; Aa=&quot; + payments.get(a)
+        + &quot; BB=&quot; + payments.get(b));
+System.out.println(&quot;new Aa=&quot; + payments.get(new String(&quot;Aa&quot;)));
+System.out.println(&quot;replace=&quot; + payments.put(new String(&quot;Aa&quot;), &quot;SETTLED&quot;)
+        + &quot; size=&quot; + payments.size());
+</code></pre>
+      <pre class="out">hashes=2112,2112 equal=false
+size=2 Aa=PAID BB=REFUNDED
+new Aa=PAID
+replace=PAID size=2</pre>
+      <p>Оба платежа сохранились. Новый объект со строкой Aa нашёл прежний результат, потому что содержимое ключа равно. При замене число записей осталось 2. Хеш помогает выбрать, где искать, но его нельзя хранить вместо исходного requestId как гарантированно уникальный идентификатор.</p>
+      <h3>Индекс должен быть допустимым даже для отрицательного хеша</h3>
+      <pre><code class="language-java">System.out.println(&quot;hashes=1,5 buckets=&quot; + Math.floorMod(1, 4)
+        + &quot;,&quot; + Math.floorMod(5, 4));
+int hash = Integer.MIN_VALUE;
+System.out.println(&quot;abs%10=&quot; + Math.abs(hash) % 10
+        + &quot; floorMod=&quot; + Math.floorMod(hash, 10));
+</code></pre>
+      <pre class="out">hashes=1,5 buckets=1,1
+abs%10=-8 floorMod=2</pre>
+      <p>Ключи 1 и 5 имеют разные полные хеши, но один индекс при m = 4. У отрицательных хешей есть отдельная ловушка: <code>Math.abs(Integer.MIN_VALUE)</code> остаётся отрицательным, поскольку положительный результат не помещается в int. При положительном m метод <code>floorMod</code> возвращает допустимый индекс. Маска <code>hash &amp; (m - 1)</code> тоже даёт индекс, если m — степень двойки; у неё особенно важно хорошее распределение младших битов.</p>
+      <h3>Сначала реши, что означает один и тот же запрос</h3>
+      <p>Два продавца могут прислать один requestId. Коллизией таблицы это не будет: если ключом выбрана одна строка, она просто равна самой себе. Для локального кеша результатов нужен составной ключ из продавца и идентификатора запроса.</p>
+      <pre><code class="language-java">record PaymentKey(int merchantId, String requestId) {}
+
+var byRequest = new HashMap&lt;String, String&gt;();
+byRequest.put(&quot;A&quot;, &quot;merchant-1&quot;);
+byRequest.put(&quot;A&quot;, &quot;merchant-2&quot;); // Неверная граница уникальности.
+var byMerchant = new HashMap&lt;PaymentKey, String&gt;();
+byMerchant.put(new PaymentKey(1, &quot;A&quot;), &quot;merchant-1&quot;);
+byMerchant.put(new PaymentKey(2, &quot;A&quot;), &quot;merchant-2&quot;);
+System.out.println(&quot;request-only=&quot; + byRequest.size()
+        + &quot; merchant+request=&quot; + byMerchant.size());
+System.out.println(&quot;merchant-1=&quot; + byMerchant.get(new PaymentKey(1, &quot;A&quot;)));
+</code></pre>
+      <pre class="out">request-only=1 merchant+request=2
+merchant-1=merchant-1</pre>
+      <p>Record здесь содержит int и неизменяемый String, поэтому его равенство и хеш остаются устойчивыми. Это исправляет границу ключа в памяти. Надёжная <a href="idempotency.html">идемпотентность платежей</a> дополнительно требует согласовать результат между процессами и сохранить его при перезапуске.</p>
+    </section>
+
+    <section class="step" id="chains">
+      <h2>Цепочка собирает записи одного бакета</h2>
+      <p>Первый способ разрешать коллизии — <b>метод цепочек</b>, separate chaining. Массив хранит ссылки на головы списков. Узел содержит ключ, значение и ссылку next. У разных бакетов разные цепочки; пустой бакет содержит null. Записи с одинаковым индексом добавляются в одну цепочку и остаются различимыми по ключу.</p>
+      <p>Поиск вычисляет индекс и проходит только соответствующую цепочку. На равном ключе возвращает значение; на конце списка сообщает, что записи нет. Вставка сначала делает тот же поиск. Равный ключ означает замену значения. Если такого ключа нет, создаётся новый узел; в нашем примере он становится головой, и size увеличивается.</p>
+      <figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 268" role="img" aria-label="Массив из четырёх голов цепочек. Бакет 1 ссылается на узлы 9, 5 и 1. Поиск ключа 5 заканчивается на втором узле; поиск отсутствующего 13 проходит всю цепочку.">
+      <defs>
+      <marker id="hc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hc-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="20" y="24" class="dg-cap" text-anchor="start">МАССИВ ГОЛОВ: m = 4</text>
+      <text x="210" y="24" class="dg-cap" text-anchor="start">УЗЛЫ: КЛЮЧ, ЗНАЧЕНИЕ, NEXT</text>
+      <rect x="54" y="46" width="72" height="36" rx="6" class="dg-cell"/>
+      <text x="32" y="69" class="dg-n" text-anchor="middle">0</text>
+      <text x="90" y="69" class="dg-in" text-anchor="middle">null</text>
+      <rect x="54" y="98" width="72" height="36" rx="6" class="dg-cell"/>
+      <text x="32" y="121" class="dg-n" text-anchor="middle">1</text>
+      <rect x="54" y="150" width="72" height="36" rx="6" class="dg-cell"/>
+      <text x="32" y="173" class="dg-n" text-anchor="middle">2</text>
+      <text x="90" y="173" class="dg-in" text-anchor="middle">null</text>
+      <rect x="54" y="202" width="72" height="36" rx="6" class="dg-cell"/>
+      <text x="32" y="225" class="dg-n" text-anchor="middle">3</text>
+      <text x="90" y="225" class="dg-in" text-anchor="middle">null</text>
+      <path d="M126 116 L206 116" class="dg-line" marker-end="url(#hc-n)"/>
+      <rect x="210" y="94" width="130" height="48" rx="6" class="dg-cell"/>
+      <text x="275" y="113" class="dg-in" text-anchor="middle">key = 9</text>
+      <text x="275" y="132" class="dg-s" text-anchor="middle">REFUNDED</text>
+      <rect x="384" y="94" width="130" height="48" rx="6" class="dg-cell hit"/>
+      <text x="449" y="113" class="dg-in" text-anchor="middle">key = 5</text>
+      <text x="449" y="132" class="dg-s" text-anchor="middle">PENDING</text>
+      <rect x="558" y="94" width="130" height="48" rx="6" class="dg-cell"/>
+      <text x="623" y="113" class="dg-in" text-anchor="middle">key = 1</text>
+      <text x="623" y="132" class="dg-s" text-anchor="middle">PAID</text>
+      <path d="M340 116 L380 116" class="dg-line" marker-end="url(#hc-n)"/>
+      <path d="M514 116 L554 116" class="dg-line" marker-end="url(#hc-n)"/>
+      <text x="210" y="173" class="dg-s" text-anchor="start">1, 5, 9: разные хеши, один индекс 1</text>
+      <text x="210" y="205" class="dg-ok" text-anchor="start">get(5): 9 → 5, два сравнения</text>
+      <text x="210" y="237" class="dg-s" text-anchor="start">get(13): 9 → 5 → 1 → null, три сравнения</text>
+    </svg>
+  </div>
+  <figcaption>В бакете хранится ссылка на голову. Три записи могут делить один индекс массива; значение size равно 3, ёмкость массива — 4.</figcaption>
+</figure>
+      <p>Ниже устройство <a href="../examples/hash-tables/ChainingDemo.java">ChainingDemo.java</a>. Это небольшая таблица с int-ключами и значениями без null. Поэтому <code>==</code> сравнивает ключи по значению, а null в результате get означает отсутствие. Для объектов на месте сравнения нужен equals; настоящий HashMap также умеет хранить null-значение, и там get(null-результат) сам по себе ещё не доказывает отсутствие ключа.</p>
+      <pre><code class="language-java">static final class Node {
+    final int key;
+    String value;
+    Node next;
+    Node(int key, String value, Node next) {
+        this.key = key;
+        this.value = value;
+        this.next = next;
+    }
+}
+</code></pre>
+      <pre><code class="language-java">Node[] buckets = new Node[4];
+int size;
+int checks;
+
+String get(int key) {
+    checks = 0;
+    int index = Math.floorMod(key, buckets.length);
+    for (Node node = buckets[index]; node != null; node = node.next) {
+        checks++;
+        if (node.key == key) return node.value;
+    }
+    return null;
+}
+
+String put(int key, String value) {
+    Objects.requireNonNull(value);
+    int index = Math.floorMod(key, buckets.length);
+    for (Node node = buckets[index]; node != null; node = node.next) {
+        if (node.key == key) {
+            String old = node.value;
+            node.value = value; // Замена не добавляет запись и не растит size.
+            return old;
+        }
+    }
+    buckets[index] = new Node(key, value, buckets[index]);
+    size++;
+    if (size &gt; buckets.length * 3 / 4) grow(); // Учебный порог 0.75.
+    return null;
+}
+</code></pre>
+      <p>Фрагмент main. <code>snapshot()</code> печатает размер массива, число записей и непустые цепочки. Поле checks считает сравнения ключей при последнем поиске; это счётчик работы алгоритма, а не измерение времени:</p>
+      <pre><code class="language-java">var table = new Table();
+table.put(1, &quot;PAID&quot;);
+table.put(5, &quot;PENDING&quot;);
+table.put(9, &quot;REFUNDED&quot;);
+System.out.println(&quot;== chain ==&quot;);
+System.out.println(table.snapshot());
+System.out.println(&quot;get 5=&quot; + table.get(5) + &quot; checks=&quot; + table.checks);
+System.out.println(&quot;get 13=&quot; + table.get(13) + &quot; checks=&quot; + table.checks);
+System.out.println(&quot;replace 5=&quot; + table.put(5, &quot;CAPTURED&quot;)
+        + &quot; size=&quot; + table.size);
+</code></pre>
+      <pre class="out">m=4 n=3 alpha=0.75
+1: 9:REFUNDED -&gt; 5:PENDING -&gt; 1:PAID
+get 5=PENDING checks=2
+get 13=null checks=3
+replace 5=PENDING size=3</pre>
+      <p>Новый узел добавляется в голову, поэтому после вставок 1, 5 и 9 список идёт в обратном порядке. Замена 5 не создаёт узел и не вызывает расширение. На отсутствующем ключе нужно пройти всю цепочку: ранний выход после первого несовпадения вернул бы неверный результат.</p>
+      <p><b>Коэффициент загрузки</b>, load factor, обозначим α = n / m: число записей делим на число бакетов. Для цепочек это средняя длина списка, а не доля занятых ячеек. Значение α = 2 допустимо: в среднем по две записи на бакет. При хорошем распределении ожидаемая стоимость поиска O(1 + α). Если держать α ограниченным, она остаётся O(1); если все ключи попали в один список, поиск снова O(n).</p>
+      <details class="deep">
+        <summary>Под капотом: удаление узла тоже начинается с поиска</summary>
+        <p>В односвязной цепочке удаление меняет ссылку предшественника: <code>prev.next = node.next</code>. Для головы меняется элемент массива. Сама пересвязка постоянная, но поиск узла и его предшественника стоит столько же, сколько обход цепочки. В среднем это O(1 + α), в худшем случае O(n).</p>
+        <p>Узел можно дополнить сохранённым полным хешем. Тогда сначала сравнивают дешёвые числа, а equals вызывают только при совпадении. Это полезно для длинных составных ключей, но не заменяет равенство: одинаковые хеши всё ещё могут принадлежать разным ключам.</p>
+      </details>
+    </section>
+
+    <section class="step" id="probing">
+      <h2>Открытая адресация продолжает поиск в самом массиве</h2>
+      <p>Цепочки требуют отдельных узлов и переходов по ссылкам. Второй подход — <b>открытая адресация</b>, open addressing. Записи лежат в слотах самой таблицы. Если начальный слот занят другим ключом, алгоритм пробует следующие места по установленному правилу. Правило одинаково для вставки и поиска; иначе вставленный платёж потом не найдётся.</p>
+      <p>Самое простое правило — <b>линейное пробирование</b>. Для home = h(key) mod m проверяем home, home + 1, home + 2 и так далее с переходом от конца к началу массива. Один просмотр слота называется пробой. USED с нужным ключом даёт успешный поиск. USED с другим ключом заставляет идти дальше. EMPTY завершает поиск: при вставке запись остановилась бы здесь, а не ушла за этот слот.</p>
+      <p>В <a href="../examples/hash-tables/ProbingDemo.java">ProbingDemo.java</a> восемь слотов. Ключи 1, 9 и 17 стартуют с индекса 1; после трёх вставок занимают 1, 2 и 3. Состояние хранится отдельно от ключа, поэтому числовой 0 тоже можно использовать как обычный ключ.</p>
+      <pre><code class="language-java">static final byte EMPTY = 0, USED = 1, DELETED = 2;
+
+final int[] keys = new int[8];
+final String[] values = new String[8];
+final byte[] states = new byte[8];
+int size;
+int deleted;
+int probes;
+</code></pre>
+      <pre><code class="language-java">String get(int key) {
+    probes = 0;
+    int home = Math.floorMod(key, keys.length);
+    for (int step = 0; step &lt; keys.length; step++) {
+        int index = (home + step) % keys.length;
+        probes++;
+        if (states[index] == EMPTY) return null; // Здесь поиск заканчивается.
+        if (states[index] == USED &amp;&amp; keys[index] == key) return values[index];
+        // DELETED сохраняет путь к более поздним записям.
+    }
+    return null; // Полный круг: ключа нет даже при отсутствии EMPTY.
+}
+</code></pre>
+      <pre><code class="language-java">var table = new Table();
+table.put(1, &quot;PAID&quot;);
+table.put(9, &quot;PENDING&quot;);
+table.put(17, &quot;REFUNDED&quot;);
+System.out.println(table.snapshot());
+System.out.println(&quot;get 17=&quot; + table.get(17) + &quot; probes=&quot; + table.probes);
+</code></pre>
+      <pre class="out">n=3 deleted=0 slots=0:_ | 1:1 | 2:9 | 3:17 | 4:_ | 5:_ | 6:_ | 7:_
+get 17=REFUNDED probes=3</pre>
+      <p>Индекс 3 не вычисляется из ключа 17 напрямую. Таблица добирается до него по маршруту через 1 и 2. Ограничение цикла m пробами даёт ещё одно условие остановки: полный оборот. Без него поиск отсутствующего ключа в таблице без EMPTY зациклился бы.</p>
+      <h3>Плотный массив заставляет платить за промахи</h3>
+      <p>Соседние занятые слоты образуют <b>кластер</b>. Новый ключ, чей начальный индекс попал в кластер, доходит до его конца и увеличивает кластер. Так длинные участки начинают расти ещё быстрее. Это первичная кластеризация линейного пробирования. Хорошие полные хеши полезны, но высокая загрузка остаётся проблемой самого способа размещения.</p>
+      <pre><code class="language-java">var crowded = new Table();
+for (int i = 0; i &lt; 7; i++) crowded.put(i, &quot;PAID&quot;);
+System.out.println(crowded.snapshot());
+System.out.println(&quot;get 8=&quot; + crowded.get(8) + &quot; probes=&quot; + crowded.probes);
+</code></pre>
+      <pre class="out">n=7 deleted=0 slots=0:0 | 1:1 | 2:2 | 3:3 | 4:4 | 5:5 | 6:6 | 7:_
+get 8=null probes=8</pre>
+      <p>Ключ 8 отсутствует, но пришлось проверить все восемь слотов. Здесь α = 7/8 = 0.875 — доля живых записей в массиве. При открытой адресации без дополнительного хранилища n не может превысить m. Обычно оставляют заметный запас до полной загрузки: после роста исчезает часть кластеров, а промахи становятся короче. Конкретный порог зависит от алгоритма и нагрузки; число 0.75 из нашей таблицы с цепочками нельзя автоматически переносить сюда.</p>
+      <table class="mx">
+        <thead><tr><th>Свойство</th><th>Цепочки</th><th>Открытая адресация</th></tr></thead>
+        <tbody>
+          <tr><td>Где запись</td><td>В узле цепочки выбранного бакета</td><td>В одном из слотов массива, найденном пробированием</td></tr>
+          <tr><td>Смысл n/m</td><td>Средняя длина цепочки, может быть больше 1</td><td>Доля слотов с живыми записями, не больше 1</td></tr>
+          <tr><td>Память и доступ</td><td>Узлы и ссылки; обход может уходить в разные участки памяти</td><td>Запас пустых слотов и состояния; соседние пробы обычно лучше используют кеш процессора</td></tr>
+          <tr><td>Удаление</td><td>Пересвязать найденный узел</td><td>Сохранить маршрут: маркер либо корректная перестройка кластера</td></tr>
+          <tr><td>Слабое место</td><td>Длинная цепочка при плохом распределении</td><td>Длинные кластеры, высокая загрузка и накопление маркеров</td></tr>
+        </tbody>
+      </table>
+      <details class="deep">
+        <summary>Под капотом: маршрут можно менять, но он должен охватить таблицу</summary>
+        <p>Квадратичное пробирование меняет смещение как функцию номера пробы. Двойное хеширование выбирает ещё и шаг движения из второго хеша. Оно уменьшает общие маршруты разных ключей, но величина шага должна быть взаимно простой с m. Иначе последовательность посетит лишь часть слотов и объявит таблицу полной, хотя свободные места есть. Например, шаг 2 при m = 8 обходит только четыре позиции.</p>
+        <p>У других вариантов есть свои условия на ёмкость и допустимую загрузку. Важна не формула сама по себе, а инвариант: поиск повторяет маршрут вставки и умеет корректно установить, что ключа нет.</p>
+      </details>
+    </section>
+
+    <section class="step" id="deletion-path">
+      <h2>Удаление должно сохранить маршрут к следующим ключам</h2>
+      <p>Теперь удалим 9 из слота 2. Если просто сделать слот EMPTY, поиск 17 стартует с 1, остановится на 2 и вернёт отсутствие. Платёж физически лежит в слоте 3, но ранний выход больше до него не доходит. Проблема в значении пустоты: она говорит, что на этом месте маршрут вставки ещё не продолжался.</p>
+      <p>Добавим третье состояние — <b>DELETED</b>, или tombstone, маркер удалённой записи. Значения там уже нет, но поиск обязан продолжаться. Новый ключ сможет занять этот слот, когда алгоритм убедится, что ключа ещё нет дальше по маршруту. USED, EMPTY и DELETED нужны для управления поиском; это отдельная информация, а не особое значение платежа.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 277" role="img" aria-label="Ключи 1, 9 и 17 начинают поиск в слоте 1. Очистка слота 2 скрывает 17. Маркер D сохраняет маршрут. Обновление 17 проходит мимо D, а новый 25 занимает D только после проверки остатка маршрута.">
+      <defs>
+      <marker id="hp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="24" y="25" class="dg-cap" text-anchor="start">ЛИНЕЙНОЕ ПРОБИРОВАНИЕ: m = 8</text>
+      <text x="24" y="49" class="dg-s" text-anchor="start">home(1) = home(9) = home(17) = home(25) = 1</text>
+      <rect x="24" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="62" y="103" class="dg-in" text-anchor="middle">_</text>
+      <rect x="108" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="146" y="103" class="dg-in" text-anchor="middle">1</text>
+      <rect x="360" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="398" y="103" class="dg-in" text-anchor="middle">_</text>
+      <rect x="444" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="482" y="103" class="dg-in" text-anchor="middle">_</text>
+      <rect x="528" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="566" y="103" class="dg-in" text-anchor="middle">_</text>
+      <rect x="612" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="650" y="103" class="dg-in" text-anchor="middle">_</text>
+      <text x="62" y="143" class="dg-n" text-anchor="middle">0</text>
+      <text x="146" y="143" class="dg-n" text-anchor="middle">1</text>
+      <text x="230" y="143" class="dg-n" text-anchor="middle">2</text>
+      <text x="314" y="143" class="dg-n" text-anchor="middle">3</text>
+      <text x="398" y="143" class="dg-n" text-anchor="middle">4</text>
+      <text x="482" y="143" class="dg-n" text-anchor="middle">5</text>
+      <text x="566" y="143" class="dg-n" text-anchor="middle">6</text>
+      <text x="650" y="143" class="dg-n" text-anchor="middle">7</text>
+      <g data-s="1">
+      <rect x="192" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="230" y="103" class="dg-in" text-anchor="middle">9</text>
+      <rect x="276" y="72" width="76" height="50" rx="6" class="dg-cell hit"/>
+      <text x="314" y="103" class="dg-in" text-anchor="middle">17</text>
+      <path d="M146 160 L314 160 L314 126" class="dg-line ok" marker-end="url(#hp-ok)"/>
+      <text x="342" y="183" class="dg-ok" text-anchor="start">17 найден в слоте 3</text>
+      <text x="24" y="228" class="dg-t" text-anchor="start">n = 3, deleted = 0</text>
+      <text x="24" y="251" class="dg-s" text-anchor="start">get(17) = REFUNDED, probes = 3</text>
+      </g>
+      <g data-s="2">
+      <rect x="192" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="230" y="103" class="dg-in" text-anchor="middle">_</text>
+      <rect x="276" y="72" width="76" height="50" rx="6" class="dg-cell"/>
+      <text x="314" y="103" class="dg-in" text-anchor="middle">17</text>
+      <path d="M146 160 L230 160 L230 126" class="dg-line bad" marker-end="url(#hp-bad)"/>
+      <text x="260" y="183" class="dg-bad" text-anchor="start">EMPTY: поиск оборван</text>
+      <text x="24" y="228" class="dg-t" text-anchor="start">n = 2, deleted = 0</text>
+      <text x="24" y="251" class="dg-s" text-anchor="start">get(17) = null, probes = 2</text>
+      </g>
+      <g data-s="3">
+      <rect x="192" y="72" width="76" height="50" rx="6" class="dg-cell miss"/>
+      <text x="230" y="103" class="dg-in" text-anchor="middle">D</text>
+      <rect x="276" y="72" width="76" height="50" rx="6" class="dg-cell hit"/>
+      <text x="314" y="103" class="dg-in" text-anchor="middle">17</text>
+      <path d="M146 160 L314 160 L314 126" class="dg-line ok" marker-end="url(#hp-ok)"/>
+      <text x="342" y="183" class="dg-ok" text-anchor="start">17 найден в слоте 3</text>
+      <text x="24" y="228" class="dg-t" text-anchor="start">n = 2, deleted = 1</text>
+      <text x="24" y="251" class="dg-s" text-anchor="start">get(17) = REFUNDED, probes = 3</text>
+      </g>
+      <g data-s="4">
+      <rect x="192" y="72" width="76" height="50" rx="6" class="dg-cell miss"/>
+      <text x="230" y="103" class="dg-in" text-anchor="middle">D</text>
+      <rect x="276" y="72" width="76" height="50" rx="6" class="dg-cell hit"/>
+      <text x="314" y="103" class="dg-in" text-anchor="middle">17</text>
+      <path d="M146 160 L314 160 L314 126" class="dg-line ok" marker-end="url(#hp-ok)"/>
+      <text x="342" y="183" class="dg-ok" text-anchor="start">17 найден в слоте 3</text>
+      <text x="24" y="228" class="dg-t" text-anchor="start">n = 2, deleted = 1</text>
+      <text x="24" y="251" class="dg-s" text-anchor="start">put(17, SETTLED): замена в слоте 3</text>
+      </g>
+      <g data-s="5">
+      <rect x="192" y="72" width="76" height="50" rx="6" class="dg-cell hit"/>
+      <text x="230" y="103" class="dg-in" text-anchor="middle">25</text>
+      <rect x="276" y="72" width="76" height="50" rx="6" class="dg-cell hit"/>
+      <text x="314" y="103" class="dg-in" text-anchor="middle">17</text>
+      <path d="M146 160 L398 160 L398 126" class="dg-line" marker-end="url(#hp-n)"/>
+      <path d="M398 190 L230 190 L230 126" class="dg-line ok" marker-end="url(#hp-ok)"/>
+      <text x="425" y="183" class="dg-ok" text-anchor="start">25 → слот 2</text>
+      <text x="24" y="228" class="dg-t" text-anchor="start">n = 3, deleted = 0</text>
+      <text x="24" y="251" class="dg-s" text-anchor="start">put(25, NEW): проверка до EMPTY в слоте 4</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>Исходная таблица. Ключи 1, 9 и 17 заняли слоты 1, 2 и 3. Поиск 17 проверяет три слота: 1 → 2 → 3.</li>
+    <li>Ошибочно удаляем 9, делая слот 2 пустым. Поиск останавливается на втором слоте. Запись 17 ещё лежит в таблице, но маршрут к ней оборван.</li>
+    <li>Возвращаемся к исходной таблице и удаляем 9 правильно: ставим D. Поиск проходит через маркер и на третьей пробе находит 17.</li>
+    <li>Обновляем 17 до SETTLED. Слот 2 свободен для будущей вставки, но поиск продолжается до существующего ключа в слоте 3. Число записей остаётся 2.</li>
+    <li>Добавляем 25. Сначала проверяем маршрут до EMPTY в слоте 4: такого ключа нет. Затем используем запомненный слот 2. Маркер исчез, число записей выросло до 3.</li>
+  </ol>
+</figure>
+      <p>Фрагмент remove из того же демо. Метод очистил ссылку на значение, но оставил состояние DELETED:</p>
+      <pre><code class="language-java">String remove(int key) {
+    int home = Math.floorMod(key, keys.length);
+    for (int step = 0; step &lt; keys.length; step++) {
+        int index = (home + step) % keys.length;
+        if (states[index] == EMPTY) return null;
+        if (states[index] == USED &amp;&amp; keys[index] == key) {
+            String old = values[index];
+            states[index] = DELETED; // EMPTY здесь скрыл бы следующие ключи.
+            values[index] = null;
+            size--;
+            deleted++;
+            return old;
+        }
+    }
+    return null;
+}
+</code></pre>
+      <p>Вставка запоминает первый удалённый слот и <em>продолжает</em> поиск. Если равный ключ нашёлся дальше, меняет его значение. Если встретился EMPTY, равного ключа на маршруте нет: можно вставить в запомненное место. После полного круга вставка также возможна в DELETED; при отсутствии обоих видов свободного места наша фиксированная таблица бросает исключение.</p>
+      <pre><code class="language-java">String put(int key, String value) {
+    Objects.requireNonNull(value);
+    int home = Math.floorMod(key, keys.length);
+    int firstDeleted = -1;
+    for (int step = 0; step &lt; keys.length; step++) {
+        int index = (home + step) % keys.length;
+        if (states[index] == USED &amp;&amp; keys[index] == key) {
+            String old = values[index];
+            values[index] = value; // Существующий ключ мог стоять после DELETED.
+            return old;
+        }
+        if (states[index] == DELETED &amp;&amp; firstDeleted == -1) firstDeleted = index;
+        if (states[index] == EMPTY) {
+            insert(firstDeleted == -1 ? index : firstDeleted, key, value);
+            return null;
+        }
+    }
+    if (firstDeleted != -1) {
+        insert(firstDeleted, key, value);
+        return null;
+    }
+    throw new IllegalStateException(&quot;table is full&quot;);
+}
+
+void insert(int index, int key, String value) {
+    if (states[index] == DELETED) deleted--;
+    states[index] = USED;
+    keys[index] = key;
+    values[index] = value;
+    size++;
+}
+</code></pre>
+      <p>Фрагменты main: две разные копии одной исходной таблицы сравнивают ошибочное и правильное удаление. Метод threePayments создаёт таблицу с теми же тремя вставками, что в прошлом шаге. Затем исправленная таблица обновляет 17 и вставляет 25:</p>
+      <pre><code class="language-java">static Table threePayments() {
+    var table = new Table();
+    table.put(1, &quot;PAID&quot;);
+    table.put(9, &quot;PENDING&quot;);
+    table.put(17, &quot;REFUNDED&quot;);
+    return table;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== broken deletion ==&quot;);
+var broken = threePayments();
+broken.states[2] = EMPTY; // Намеренная ошибка: разрываем маршрут через слот 2.
+broken.values[2] = null;
+broken.size--;
+System.out.println(broken.snapshot());
+System.out.println(&quot;get 17=&quot; + broken.get(17) + &quot; probes=&quot; + broken.probes);
+
+System.out.println(&quot;== tombstone ==&quot;);
+table.remove(9);
+System.out.println(table.snapshot());
+System.out.println(&quot;get 17=&quot; + table.get(17) + &quot; probes=&quot; + table.probes);
+System.out.println(&quot;replace 17=&quot; + table.put(17, &quot;SETTLED&quot;)
+        + &quot; n=&quot; + table.size + &quot; deleted=&quot; + table.deleted);
+table.put(25, &quot;NEW&quot;); // Слот 2 переиспользуем после проверки оставшегося пути.
+System.out.println(table.snapshot());
+System.out.println(&quot;get 17=&quot; + table.get(17) + &quot; probes=&quot; + table.probes);
+</code></pre>
+      <pre class="out">== broken deletion ==
+n=2 deleted=0 slots=0:_ | 1:1 | 2:_ | 3:17 | 4:_ | 5:_ | 6:_ | 7:_
+get 17=null probes=2
+== tombstone ==
+n=2 deleted=1 slots=0:_ | 1:1 | 2:D | 3:17 | 4:_ | 5:_ | 6:_ | 7:_
+get 17=REFUNDED probes=3
+replace 17=REFUNDED n=2 deleted=1
+n=3 deleted=0 slots=0:_ | 1:1 | 2:25 | 3:17 | 4:_ | 5:_ | 6:_ | 7:_
+get 17=SETTLED probes=3</pre>
+      <p>При замене 17 число записей осталось 2 и маркер сохранился. Новая запись 25 заняла именно удалённый слот; deleted уменьшился до 0. Если вставлять сразу при первом DELETED, обновление 17 создало бы второй 17 в слоте 2. Старый результат остался бы в слоте 3: таблица нарушила бы правило «один ключ — одно значение».</p>
+      <div class="note warn">
+        <p>Удаления могут оставить таблицу с небольшим size, но длинными поисками. Для оценки промахов важны не только живые записи, а и занятые маркерами слоты: <code>(size + deleted) / m</code>. Если 10% слотов содержат записи, а 85% — DELETED, пустоты всё ещё мало. Перестройка в массив той же длины заново размещает живые записи и убирает маркеры; увеличение ёмкости нужно, когда много самих записей.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: можно ли обойтись без маркеров?</summary>
+        <p>Да. Один способ для линейного пробирования — после удаления вынуть последующие записи кластера до EMPTY и заново вставить их. Другой — сдвигать только те записи, чей маршрут действительно проходит через освободившийся слот. Оба восстанавливают возможность остановиться на EMPTY. Простое «сдвинуть весь хвост на один» не годится: у каждой записи свой начальный индекс, а кластер может переходить через конец массива.</p>
+        <p>Так мы платим частью работы во время удаления вместо накопления маркеров. При частых удалениях это полезный компромисс, но алгоритм должен сохранять маршруты всех перемещённых ключей.</p>
+      </details>
+    </section>
+
+    <section class="step" id="growth">
+      <h2>Новый размер массива меняет адрес каждой записи</h2>
+      <p>Вернёмся к цепочкам. При m = 4 три записи дали α = 0.75. Добавляем 13, получаем n = 4 и запускаем расширение. Наш порог — учебное правило из put, а не обязательный параметр любой хеш-таблицы. Новый массив имеет восемь бакетов. Полный хеш ключа остался прежним, но индекс теперь вычисляется по модулю 8.</p>
+      <p>Записи 1 и 9 остаются в бакете 1. Записи 5 и 13 переходят в бакет 5. Если скопировать прежние головы в более длинный массив и оставить их на старых индексах, поиск 13 отправится в пустой бакет 5. Копирование массива не исправляет маршруты; нужен перенос записей по новым индексам.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 300" role="img" aria-label="После добавления 13 старый бакет 1 содержит 13, 9, 5, 1. Создаётся массив длины 8. Узлы последовательно переходят в бакеты 5 и 1; новые цепочки становятся 1, 9 и 5, 13.">
+      <defs>
+      <marker id="hg-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hg-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hg-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="20" y="24" class="dg-cap" text-anchor="start">СТАРЫЙ МАССИВ: m = 4</text>
+      <text x="398" y="24" class="dg-cap" text-anchor="start">НОВЫЙ МАССИВ: m = 8</text>
+      <g data-s="1">
+      <text x="20" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <rect x="74" y="66" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="87" class="dg-in" text-anchor="middle">13</text>
+      <path d="M138 98 L138 106" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="110" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="131" class="dg-in" text-anchor="middle">9</text>
+      <path d="M138 142 L138 150" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="154" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="175" class="dg-in" text-anchor="middle">5</text>
+      <path d="M138 186 L138 194" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="198" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="219" class="dg-in" text-anchor="middle">1</text>
+      <text x="20" y="273" class="dg-t" text-anchor="start">n = 4: порог 3/4 пересечён</text>
+      </g>
+      <g data-s="2">
+      <text x="20" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <rect x="74" y="66" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="87" class="dg-in" text-anchor="middle">13</text>
+      <path d="M138 98 L138 106" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="110" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="131" class="dg-in" text-anchor="middle">9</text>
+      <path d="M138 142 L138 150" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="154" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="175" class="dg-in" text-anchor="middle">5</text>
+      <path d="M138 186 L138 194" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="198" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="219" class="dg-in" text-anchor="middle">1</text>
+      <text x="398" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <text x="398" y="153" class="dg-n" text-anchor="start">бакет 5</text>
+      <rect x="398" y="65" width="118" height="34" rx="6" class="dg-cell"/>
+      <text x="457" y="87" class="dg-in" text-anchor="middle">null</text>
+      <rect x="398" y="168" width="118" height="34" rx="6" class="dg-cell"/>
+      <text x="457" y="190" class="dg-in" text-anchor="middle">null</text>
+      <text x="20" y="273" class="dg-t" text-anchor="start">новый массив создан, узлы ещё не перенесены</text>
+      </g>
+      <g data-s="3">
+      <text x="20" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <rect x="74" y="66" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="87" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="110" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="131" class="dg-in" text-anchor="middle">9</text>
+      <path d="M138 142 L138 150" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="154" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="175" class="dg-in" text-anchor="middle">5</text>
+      <path d="M138 186 L138 194" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="198" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="219" class="dg-in" text-anchor="middle">1</text>
+      <text x="398" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <text x="398" y="153" class="dg-n" text-anchor="start">бакет 5</text>
+      <rect x="398" y="65" width="118" height="34" rx="6" class="dg-cell"/>
+      <text x="457" y="87" class="dg-in" text-anchor="middle">null</text>
+      <rect x="398" y="168" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="190" class="dg-in" text-anchor="middle">13</text>
+      <path d="M202 82 C285 82, 310 185, 394 185" class="dg-line ok" marker-end="url(#hg-ok)"/>
+      <text x="242" y="248" class="dg-ok" text-anchor="start">13 % 8 = 5</text>
+      <text x="20" y="273" class="dg-t" text-anchor="start">13 → бакет 5</text>
+      </g>
+      <g data-s="4">
+      <text x="20" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <rect x="74" y="66" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="87" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="110" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="131" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="154" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="175" class="dg-in" text-anchor="middle">5</text>
+      <path d="M138 186 L138 194" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="74" y="198" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="219" class="dg-in" text-anchor="middle">1</text>
+      <text x="398" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <text x="398" y="153" class="dg-n" text-anchor="start">бакет 5</text>
+      <rect x="398" y="65" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="87" class="dg-in" text-anchor="middle">9</text>
+      <rect x="398" y="168" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="190" class="dg-in" text-anchor="middle">13</text>
+      <path d="M202 126 C285 126, 310 82, 394 82" class="dg-line ok" marker-end="url(#hg-ok)"/>
+      <text x="242" y="248" class="dg-ok" text-anchor="start">9 % 8 = 1</text>
+      <text x="20" y="273" class="dg-t" text-anchor="start">9 → бакет 1</text>
+      </g>
+      <g data-s="5">
+      <text x="20" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <rect x="74" y="66" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="87" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="110" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="131" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="154" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="175" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="198" width="128" height="32" rx="6" class="dg-cell"/>
+      <text x="138" y="219" class="dg-in" text-anchor="middle">1</text>
+      <text x="398" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <text x="398" y="153" class="dg-n" text-anchor="start">бакет 5</text>
+      <rect x="398" y="65" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="87" class="dg-in" text-anchor="middle">9</text>
+      <rect x="398" y="168" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="190" class="dg-in" text-anchor="middle">5</text>
+      <path d="M516 185 L554 185" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="558" y="168" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="617" y="190" class="dg-in" text-anchor="middle">13</text>
+      <path d="M202 170 C285 170, 310 185, 394 185" class="dg-line ok" marker-end="url(#hg-ok)"/>
+      <text x="242" y="248" class="dg-ok" text-anchor="start">5 % 8 = 5</text>
+      <text x="20" y="273" class="dg-t" text-anchor="start">5 → голова бакета 5</text>
+      </g>
+      <g data-s="6">
+      <text x="20" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <rect x="74" y="66" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="87" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="110" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="131" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="154" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="175" class="dg-n" text-anchor="middle">перенесён</text>
+      <rect x="74" y="198" width="128" height="32" rx="6" class="dg-cell miss"/>
+      <text x="138" y="219" class="dg-n" text-anchor="middle">перенесён</text>
+      <text x="398" y="50" class="dg-n" text-anchor="start">бакет 1</text>
+      <text x="398" y="153" class="dg-n" text-anchor="start">бакет 5</text>
+      <rect x="398" y="65" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="87" class="dg-in" text-anchor="middle">1</text>
+      <path d="M516 82 L554 82" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="558" y="65" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="617" y="87" class="dg-in" text-anchor="middle">9</text>
+      <rect x="398" y="168" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="457" y="190" class="dg-in" text-anchor="middle">5</text>
+      <path d="M516 185 L554 185" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="558" y="168" width="118" height="34" rx="6" class="dg-cell hit"/>
+      <text x="617" y="190" class="dg-in" text-anchor="middle">13</text>
+      <path d="M202 214 C285 214, 310 82, 394 82" class="dg-line ok" marker-end="url(#hg-ok)"/>
+      <text x="242" y="248" class="dg-ok" text-anchor="start">1 % 8 = 1</text>
+      <text x="20" y="273" class="dg-t" text-anchor="start">1 → голова бакета 1; alpha = 4/8 = 0.50</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>После вставки 13 стало четыре записи при четырёх бакетах. Старый бакет 1: 13 → 9 → 5 → 1. Учебный порог 0.75 уже пересечён.</li>
+    <li>Выделен новый массив на восемь бакетов. Все его головы пока null. Старые узлы сохраняют ключи и значения.</li>
+    <li>Переносим 13. Его полный хеш прежний, 13, но 13 % 8 = 5. Первая новая цепочка появляется в бакете 5.</li>
+    <li>Переносим 9. Индекс 9 % 8 = 1. В новом массиве теперь заняты два бакета.</li>
+    <li>Переносим 5 в голову бакета 5. Получается цепочка 5 → 13. Порядок узлов меняется из-за вставки в голову.</li>
+    <li>Переносим 1 в голову бакета 1. Итог: 1 → 9 и 5 → 13. Size остался 4, загрузка стала 0.50; старый массив больше не нужен.</li>
+  </ol>
+</figure>
+      <p>Слева на схеме показан порядок обхода старой цепочки. Надпись «перенесён» отмечает уже обработанное место; она не означает вторую копию узла. Остальные шесть бакетов нового массива пусты и на схеме опущены.</p>
+      <p>Метод grow из ChainingDemo пересвязывает уже существующие узлы. До изменения next сохраняет старого соседа, чтобы не потерять оставшуюся часть цепочки. Вставка в голову нового бакета меняет порядок узлов:</p>
+      <pre><code class="language-java">void grow() {
+    Node[] old = buckets;
+    buckets = new Node[Math.multiplyExact(old.length, 2)];
+    System.out.println(&quot;resize &quot; + old.length + &quot;-&gt;&quot; + buckets.length);
+    for (Node head : old) {
+        for (Node node = head; node != null;) {
+            Node next = node.next; // Сохраняем старый путь до смены ссылки.
+            int index = Math.floorMod(node.key, buckets.length);
+            node.next = buckets[index];
+            buckets[index] = node;
+            System.out.println(&quot;move &quot; + node.key + &quot; -&gt; bucket &quot; + index);
+            node = next;
+        }
+    }
+}
+</code></pre>
+      <pre><code class="language-java">table.put(13, &quot;NEW&quot;);
+System.out.println(table.snapshot());
+System.out.println(&quot;get 13=&quot; + table.get(13) + &quot; checks=&quot; + table.checks);
+</code></pre>
+      <pre class="out">resize 4-&gt;8
+move 13 -&gt; bucket 5
+move 9 -&gt; bucket 1
+move 5 -&gt; bucket 5
+move 1 -&gt; bucket 1
+m=8 n=4 alpha=0.50
+1: 1:PAID -&gt; 9:REFUNDED
+5: 5:CAPTURED -&gt; 13:NEW
+get 13=NEW checks=2</pre>
+      <p>Во время переноса size не изменяется. Таблица содержит те же четыре записи, но средняя длина цепочки упала до 0.50. Поиск 13 теперь делает два сравнения: перед ним оказался 5. В старой цепочке сразу после вставки 13 был головой и находился за одно сравнение. Ключ 1, наоборот, перешёл с четвёртого места на первое. Рост уменьшает общую загрузку, но не обещает улучшить каждый отдельный поиск; порядок узлов может измениться.</p>
+      <h3>Редкий дорогой перенос оплачивает много дешёвых вставок</h3>
+      <p>Перестройка просматривает записи и массив бакетов: O(n + m), в этой модели при ограниченной загрузке — O(n). Поэтому одна вставка, вызвавшая рост, дорога. Если ёмкость увеличивается геометрически, размеры повторных переносов образуют сумму 4 + 8 + 16 + …, ограниченную константой от итогового числа записей. На длинной последовательности вставок расходы на рост дают амортизированное O(1) на запись. Ожидаемая стоимость поиска места при этом отдельно опирается на хорошее распределение хешей.</p>
+      <p>В запросе сервиса амортизация не отменяет паузу. Нужно выделить новый массив, обойти записи и записать ссылки; старое и новое хранилища некоторое время сосуществуют. Если размер пачки известен, разумный резерв ёмкости уменьшает количество переносов. Слишком большой резерв тратит память и увеличивает работу полного обхода бакетов.</p>
+      <div class="trap">
+        <p class="myth">Если поиск замедлился из-за коллизий, достаточно увеличить массив.</p>
+        <p class="fact">Рост помогает разным хешам, которые совпали только по старому индексу. Если все полные хеши равны, они снова выберут один бакет. Увеличение массива не исправляет плохую функцию и не делает хеш уникальным.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: рехеширование не всегда повторно вызывает hashCode</summary>
+        <p>Словом «рехеширование» часто называют перестройку размещения записей. При этом полный хеш может быть сохранён в узле и использован повторно. Меняются индексы или маршрут, а не обязательно функция хеширования. В нашей числовой модели пересчитывается только остаток.</p>
+        <p>Открытая адресация при перестройке вставляет живые записи в новый массив по новым маршрутам; DELETED не переносится. Бакет при поиске уже зависит от новой ёмкости, поэтому оставить записи на прежних позициях нельзя. Подробности оптимизированного resize, пороги и деревья в бакетах JDK разбираются отдельно в <a href="hashmap.html">HashMap</a>.</p>
+      </details>
+    </section>
+
+    <section class="step" id="stable-keys">
+      <h2>Сначала проверь ключ и цену поиска, затем выбирай таблицу</h2>
+      <p>Самый неприятный сбой выглядит так: size положительный, при обходе платёж виден, а get вернул null. Перед увеличением ёмкости проверь, как устроен ключ. Поля, участвующие в equals и hashCode, должны оставаться устойчивыми, пока ключ находится в таблице. Изменение этих полей не вызывает автоматическое перемещение записи.</p>
+      <p>На HashMap JDK 21 покажем особенно показательный случай: ключ изменился с 1 на 33, а номер бакета остался 1. Таблица хранит в узле полный хеш, вычисленный при вставке. При поиске сначала сравнивает его с новым хешем запроса, затем проверяет ссылку или equals. Поэтому даже обращение с тем же самым объектом не спасает запись.</p>
+      <p>Фрагмент HashContractDemo. Конструктор HashMap с начальной ёмкостью 16 здесь приводит к массиву длины 16 после первой вставки. У малых положительных чисел 1 и 33 смешивание <code>h ^ (h &gt;&gt;&gt; 16)</code> оставляет хеш прежним; маска для обоих даёт 1:</p>
+      <pre><code class="language-java">static final class MutableKey {
+    int id;
+    MutableKey(int id) { this.id = id; }
+    @Override public int hashCode() { return id; }
+    @Override public boolean equals(Object other) {
+        return other instanceof MutableKey key &amp;&amp; id == key.id;
+    }
+    @Override public String toString() { return &quot;id=&quot; + id; }
+}
+</code></pre>
+      <pre><code class="language-java">var key = new MutableKey(1);
+var map = new HashMap&lt;MutableKey, String&gt;(16);
+map.put(key, &quot;PAID&quot;);
+key.id = 33; // На JDK 21 оба хеша дают бакет 1 при ёмкости 16.
+System.out.println(&quot;bucket before=&quot; + (1 &amp; 15) + &quot; after=&quot; + (33 &amp; 15));
+System.out.println(&quot;same object=&quot; + map.get(key) + &quot; size=&quot; + map.size());
+System.out.println(&quot;iteration=&quot; + map.keySet());
+key.id = 1; // Восстановленный хеш снова совпадает с сохранённым в узле.
+System.out.println(&quot;restored=&quot; + map.get(key));
+</code></pre>
+      <pre class="out">bucket before=1 after=1
+same object=null size=1
+iteration=[id=33]
+restored=PAID</pre>
+      <p>Восстановление id лишь объясняет результат опыта. Практическое исправление — устойчивый ключ: идентификатор или record из неизменяемых компонентов. Чтобы изменить идентичность записи, её удаляют <em>до</em> изменения старого ключа и вставляют с новым. Объявление record само по себе не замораживает вложенные коллекции: изменяемый List внутри record тоже способен изменить его хеш.</p>
+      <h3>Что измерять, если таблица стала узким местом</h3>
+      <p>Счётчики checks и probes в демо показывают количество просмотренных мест. В своём алгоритме полезно смотреть распределение длин цепочек или числа проб, отдельно для попаданий и промахов. Среднее скрывает редкие длинные маршруты. Сопоставь это с n, m, числом DELETED и моментами расширения: небольшой size ещё не означает дешёвый поиск.</p>
+      <p>В готовой коллекции JDK штатной метрики проб нет. Профиль CPU покажет, уходит ли время в equals, hashCode или обход; профиль выделений — создаёт ли горячий путь много узлов и временных ключей. Расчёт хеша длинной строки или составного объекта может быть O(L) по размеру ключа, а equals — сравнивать данные той же длины. Ожидаемое O(1) по числу записей не обещает постоянную цену обработки ключа любого размера.</p>
+      <table class="mx">
+        <thead><tr><th>Наблюдение</th><th>Причина, которую проверить</th><th>Что меняет ситуацию</th></tr></thead>
+        <tbody>
+          <tr><td>Запись видна при обходе, но не находится</td><td>Мутация ключа, несогласованные equals/hashCode, неверная граница ключа</td><td>Устойчивый ключ и одинаковое правило равенства при записи и чтении</td></tr>
+          <tr><td>Увеличение массива почти не помогает</td><td>Одинаковые полные хеши у многих разных ключей</td><td>Лучшее распределение или другая структура; для входа извне также пределы объёма работы</td></tr>
+          <tr><td>После множества удалений промахи дороги</td><td>Много DELETED при открытой адресации</td><td>Перестройка без маркеров или алгоритм удаления с восстановлением кластера</td></tr>
+          <tr><td>Редкие вставки резко медленнее остальных</td><td>Расширение массива и перенос записей</td><td>Резерв ёмкости, если размер известен; оценка памяти и задержек отдельных операций</td></tr>
+        </tbody>
+      </table>
+      <p>Хеш-таблица хороша для точного поиска по ключу. Для «все платежи между двумя идентификаторами» и отсортированного обхода нужна структура с порядком, например <a href="trees.html">дерево поиска</a>. Для порядка поступления нужна отдельная связь между записями; один массив бакетов такого обещания не даёт. Готовые варианты API обсуждаются в HashMap и LinkedHashMap.</p>
+      <p>Локальная таблица не управляет временем жизни кеша, не сохраняет платежи после падения и сама по себе не согласует доступ потоков. Миллионы забытых ключей займут память даже при идеальном распределении. Для кеша нужны правила удаления и ограничения размера; для параллельного доступа — подходящая координация. А операция «проверить отсутствие, затем списать» требует атомарности всего решения, а не только быстрой функции get.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Хеш выбирает маршрут, а равенство ключей определяет найденную запись. Коллизия не означает дубликат.</li>
+      <li>Цепочки допускают несколько записей на бакет; открытая адресация хранит записи в свободных слотах массива и платит за длинные кластеры.</li>
+      <li>EMPTY заканчивает поиск, DELETED позволяет его продолжить. При вставке маркер запоминают, но проверяют остаток маршрута.</li>
+      <li>Рост меняет индексы и требует переразмещения записей. Амортизированная стоимость не ограничивает задержку отдельной вставки.</li>
+      <li>Ожидаемое O(1) требует подходящего распределения и загрузки. Устойчивые ключи нужны для корректности при любой скорости таблицы.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="q-mechanism" data-freq="3">
+      <h3>Как работает хеш-таблица? Что она делает при коллизии?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я вычисляю хеш ключа и по нему выбираю место начала поиска в массиве. Если несколько ключей попали туда же, таблица хранит их по выбранному правилу: в цепочке узлов или в других слотах по маршруту пробирования. При поиске она проходит тот же путь и сравнивает ключи. Совпадение хеша ещё не означает равенство.</p>
+          <p>При put с равным ключом меняется значение существующей записи. С другим ключом добавляется новая запись, даже если хеш совпал. В Java равные по equals ключи должны иметь одинаковый hashCode. Например, Aa и BB имеют одинаковый хеш, но HashMap хранит оба.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Различаю совпадение полного хеша и совпадение индекса. Разные хеши могут разойтись после роста; одинаковые полные хеши при неизменной функции снова попадут в одно место.</li>
+          <li>Постоянный hashCode формально удовлетворяет требованию «равные дают одинаковый хеш», но разрушает производительность. Хорошее распределение — дополнительное требование к практическому ключу.</li>
+          <li>Хеш не задаёт бизнес-уникальность и не является криптографическим доказательством. Для повторов запросов ключ должен включать нужную область уникальности, например продавца.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="q-strategies" data-freq="3">
+      <h3>Чем цепочки отличаются от открытой адресации? Что такое load factor?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В цепочках массив хранит головы списков, а записи лежат в отдельных узлах. При открытой адресации записи занимают слоты самой таблицы; коллизия запускает поиск других слотов. У цепочек проще удалить найденный узел, у плоской таблицы обычно лучше локальность доступа и меньше отдельных узлов, но сложнее сохранить поиск после удаления.</p>
+          <p>Load factor — n/m. Для цепочек это среднее число записей на бакет, оно может быть больше единицы. Для открытой адресации это доля слотов с живыми записями. Когда свободных мест мало, особенно дорожают промахи и вставки. Порог роста выбирают для конкретного алгоритма, а не по одной универсальной цифре.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Линейное пробирование создаёт первичные кластеры: попадание внутрь занятого участка добавляет запись к его концу. Распределение начальных индексов не описывает всю стоимость проб.</li>
+          <li>Плоская таблица обменивает узлы на резерв пустых слотов и данные о состоянии. Выигрыш памяти зависит от типов ключей и значений, доли заполнения и представления массива.</li>
+          <li>У цепочек малое среднее n/m не исключает одну очень длинную цепочку. Для диагностики нужны хвосты распределения, а не только средняя загрузка.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="q-deletion" data-freq="3">
+      <h3>Почему при открытой адресации нельзя просто очистить удалённый слот?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Пустой слот служит условием остановки поиска. Если ключ сдвинулся за него из-за коллизии, очистка разорвёт путь: запись останется в массиве, а get сообщит, что её нет. Я ставлю маркер DELETED. Поиск проходит через него, а новая вставка может использовать его как свободное место.</p>
+          <p>При вставке важно сначала проверить оставшийся маршрут. Равный ключ может лежать дальше, и тогда нужно обновить его, а не занять DELETED второй копией. Поэтому запоминаю первый маркер и продолжаю до ключа, EMPTY или полного круга.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Маркеры не содержат живые записи, но мешают раннему завершению промахов. Для политики очистки учитываю size + deleted; перестройка той же ёмкости убирает маркеры без увеличения памяти таблицы в устойчивом состоянии.</li>
+          <li>Альтернатива — перестройка части кластера после удаления. Она переносит цену в remove и должна учитывать начальный индекс каждой записи и переход через конец массива.</li>
+          <li>Полный круг ограничивает работу при отсутствии EMPTY. Он также позволяет использовать найденный DELETED, если все остальные слоты заняты.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью">
+        <summary>В кеше 10% живых записей и 85% DELETED. Размер маленький, а get медленный. Нужно удвоить массив?</summary>
+        <p>Для промахов таблица выглядит занятой на 95%: маркеры пропускаются, но не останавливают поиск. Сначала рассмотрю перестройку той же ёмкости с переносом только живых записей. Это вернёт много EMPTY и уменьшит число проб. Рост нужен, если много самих записей или будущая нагрузка требует резерва. Одновременно проверю, не создаёт ли плохой хеш длинные кластеры и после очистки.</p>
+      </details></div>
+    </article>
+
+    <article class="q" id="q-complexity" data-freq="3">
+      <h3>Почему говорят O(1), если бывают коллизии и рехеширование?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это оценка при условиях: ключи хорошо распределяются, загрузка ограничена, вычисление хеша и сравнение ключей считаем постоянными. Тогда ожидаемый маршрут короткий. В худшем случае цепочка содержит n записей, а пробирование проверяет m слотов. Когда m пропорционально n, обе оценки линейны по числу записей.</p>
+          <p>Рост отдельно стоит линейного переноса. При геометрическом увеличении ёмкости общая стоимость переносов за n вставок — O(n), поэтому на одну вставку она даёт амортизированное O(1). Одна конкретная вставка всё ещё может быть дорогой. Ожидаемая оценка и амортизация объясняют разные вещи.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Новые бакеты не исправляют одинаковый полный хеш. При плохом распределении сама последовательность поиска мест может стать квадратичной, даже если суммарные расходы на расширения линейны.</li>
+          <li>Стоимость ключа надо выделять отдельно: длинное содержимое может требовать O(L) для hashCode или equals. Кеширование хеша в узле уменьшает некоторые повторные вычисления, но не делает сравнение разных содержимых бесплатным.</li>
+          <li>Во время расширения важны задержка и пик памяти: новый массив существует одновременно со старым. Обещание амортизации не подходит вместо ограничения времени ответа.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="q-keys" data-freq="3">
+      <h3>Ключ есть при обходе HashMap, но get возвращает null. Что проверишь?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала посмотрю, не менялись ли поля ключа, участвующие в equals и hashCode. Таблица не перемещает запись после изменения объекта. Проверю и согласованность двух методов: равные ключи должны иметь один хеш, иначе запись и чтение расходятся по маршруту.</p>
+          <p>Для идентификатора платежа предпочту неизменяемый ключ с нужной областью уникальности. Например, record из merchantId и requestId. Ещё учту, что HashMap допускает null-значение: get с результатом null нужно отличать от отсутствия через containsKey.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>В HashMap JDK 21 недостаточно сохраниться в том же бакете. Узел хранит полный хеш, и поиск сверяет его до проверки ссылки или equals. Мутация 1 → 33 в примере ломает поиск даже при прежнем индексе 1.</li>
+          <li>Record делает компоненты final, но не замораживает содержимое ссылочных компонентов. Изменение списка внутри ключа может изменить равенство и хеш; нужна неизменяемость значимых данных.</li>
+          <li>Индексация и управление состоянием сервиса — разные задачи. Потокобезопасность, атомарность решения об обработке запроса и сохранение результата после сбоя требуют своих механизмов.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://opendatastructures.org/ods-java/5_Hash_Tables.html">Pat Morin, Open Data Structures, глава 5</a> — основа урока: цепочки, линейное пробирование, удалённые маркеры и перестройка. Порядок объяснения сохранён; реализации и платёжные примеры здесь авторские.</li>
+    <li><a href="https://algs4.cs.princeton.edu/34hash/">Sedgewick, Wayne, Algorithms, §3.4</a> — распределение хешей, загрузка, кластеризация и варианты удаления при линейном пробировании.</li>
+    <li>Java SE 21: <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Object.html#hashCode()">Object.hashCode</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Map.html">Map</a> — равенство, изменяемые ключи, отсутствие и null-значения.</li>
+    <li><a href="https://github.com/openjdk/jdk/blob/jdk-21%2B35/src/java.base/share/classes/java/util/HashMap.java">OpenJDK 21, HashMap.java</a> — Node.hash, смешивание hash и проверка хеша в getNode до сравнения ключей.</li>
+    <li><a href="../examples/hash-tables/README.md">Демо и команды запуска</a>. Устройство JDK — в <a href="hashmap.html">HashMap</a>, поиск с порядком — в <a href="trees.html">Trees</a>, задачи с подсчётами — в <a href="hash-counting.html">Arrays &amp; Hashing</a>.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
