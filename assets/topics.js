@@ -283,7 +283,7 @@ window.KB_TREE = [
       { id: 'basics', title: 'Fundamentals', source: 'System Design Interview т. 1, гл. 1–3; System Design Primer', items: [
         { id: 'sd-approach', freq: 3, status: 'draft', title: 'Interview Framework',
           scope: 'требования, API, модель данных, высокоуровневая схема, узкие места, компромиссы' },
-        { id: 'sd-estimation', freq: 2, status: 'empty', title: 'Back-of-the-envelope',
+        { id: 'sd-estimation', freq: 2, status: 'draft', title: 'Back-of-the-envelope',
           scope: 'RPS, объём данных, пропускная способность, latency numbers, степени двойки' },
         { id: 'scalability', freq: 2, status: 'empty', title: 'Scalability',
           scope: 'вертикальное и горизонтальное масштабирование, stateless, latency и throughput' },
