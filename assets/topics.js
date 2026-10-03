@@ -597,7 +597,7 @@ window.KB_TREE = [
       { id: 'containers', title: 'Containers', source: 'Docker Docs; Kubernetes Documentation: Concepts', items: [
         { id: 'docker', freq: 2, status: 'draft', title: 'Docker',
           scope: 'образ и контейнер, слои, Dockerfile для Java, multi-stage build, контейнер и виртуалка, namespaces и cgroups' },
-        { id: 'kubernetes', freq: 2, status: 'empty', title: 'Kubernetes Basics',
+        { id: 'kubernetes', freq: 2, status: 'draft', title: 'Kubernetes Basics',
           scope: 'pod, deployment, service, ingress, ConfigMap и Secret, namespace' },
         { id: 'k8s-java', freq: 2, status: 'empty', title: 'Java in Kubernetes',
           scope: 'liveness, readiness и startup probes, requests и limits, память JVM в контейнере, graceful shutdown, HPA' },
