@@ -1,0 +1,1522 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Linked List · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="linked-list">
+<main class="page">
+  <header class="topic-head"><h1>Linked List</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>В связном списке порядок задают поля next у отдельных узлов. Передвинуть локальную ссылку и изменить next — разные действия: первое выбирает другой узел, второе меняет маршрут для всех, кто видит тот же объект. Алгоритм должен удержать необработанный остаток до перезаписи ссылок. При смене первого узла он возвращает новую голову. Два указателя помогают найти нужное место, но их скорости и точка остановки требуют своего объяснения.</p>
+    </div>
+
+    <section class="step" id="references-and-edges">
+      <h2>Передвижение ссылки не меняет список, запись next меняет его для всех</h2>
+      <p>Очередь платежей хранит A:10 → B:20 → C:30 → null. В задаче нужно поменять порядок операций, сохранив сами объекты. Можно собрать значения в массив, развернуть его и создать новые узлы: O(n) времени и памяти, но внешние ссылки останутся на старых объектах. Если нужен именно тот же набор узлов, работать придётся с их связями.</p>
+      <p>head — ссылка на первый узел; пустой список задаётся null. У узла есть значение и ссылка next. Последний next равен null. Это <b>наш собственный односвязный Node</b>, а не внутренний узел java.util.LinkedList. Буква id нужна для наблюдения личности объекта: два узла с одним value остаются разными операциями.</p>
+      <p>Для опытов используем один и тот же Node и вспомогательные методы. nodes создаёт небольшую цепочку A, B, C; show печатает путь и отмечает повторное посещение объекта, чтобы демо цикла не зависло. Память печати не входит в оценку памяти алгоритмов. Полные файлы лежат в <a href="../examples/linked-list/README.md">examples/linked-list</a>, запускаются java ИмяDemo.java на JDK 21:</p>
+      <pre><code class="language-java">static final class Node {
+    final String id; // Имя объекта для трассы; совпадение value не означает один объект.
+    final int value;
+    Node next;
+    Node(String id, int value) { this.id = id; this.value = value; }
+}
+
+static Node[] nodes(int... values) {
+    Node[] result = new Node[values.length];
+    for (int i = 0; i &lt; values.length; i++) {
+        result[i] = new Node(i &lt; 26 ? String.valueOf((char) (&#x27;A&#x27; + i)) : &quot;N&quot; + i, values[i]);
+        if (i &gt; 0) result[i - 1].next = result[i];
+    }
+    return result;
+}
+
+static Node head(Node[] values) { return values.length == 0 ? null : values[0]; }
+
+static String id(Node n) { return n == null ? &quot;null&quot; : n.id; }
+
+static String show(Node n) {
+    List&lt;String&gt; result = new ArrayList&lt;&gt;();
+    Set&lt;Node&gt; seen = Collections.newSetFromMap(new IdentityHashMap&lt;&gt;());
+    while (n != null) {
+        if (!seen.add(n)) { result.add(&quot;cycle(&quot; + n.id + &quot;)&quot;); break; }
+        result.add(n.id + &quot;:&quot; + n.value);
+        n = n.next;
+    }
+    return result.toString(); // Только печать использует O(n) память, не алгоритм.
+}
+</code></pre>
+      <p>Присваивание cursor = cursor.next оставляет прежние поля next нетронутыми. Присваивание локальному параметру head тоже не переименовывает переменную у вызывающего: Java передаёт копию ссылки. А head.next = null меняет общий объект A и обрывает путь через него:</p>
+      <pre><code class="language-java">static void reset(Node head) { head = null; }
+
+static void cut(Node head) { head.next = null; }
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== local references and fields ==&quot;);
+Node[] first = nodes(10, 20, 30);
+Node head = first[0], alias = first[1], cursor = head;
+cursor = cursor.next;
+reset(head);
+System.out.println(&quot;cursor=&quot; + id(cursor) + &quot; head=&quot; + id(head));
+cut(head);
+System.out.println(&quot;head after cut=&quot; + show(head));
+System.out.println(&quot;saved alias=&quot; + show(alias));
+</code></pre>
+      <pre class="out">== local references and fields ==
+cursor=B head=A
+head after cut=[A:10]
+saved alias=[B:20, C:30]</pre>
+      <p>Внешняя голова осталась A после reset. Но после cut из неё виден только A. Сохранённая ссылка на B всё ещё даёт B→C: эти узлы не исчезли от одной записи в другом объекте. Изменился путь, по которому их можно найти.</p>
+      <p>Проход по m узлам стоит O(m), доступ к i-му узлу от головы — O(i). Одна запись next стоит O(1), если нужный узел уже найден. У односвязного узла нет ссылки назад: для удаления узла из цепочки обычно нужен его предшественник. Полезно заранее сказать, что алгоритм получает и какие ссылки ему приходится искать.</p>
+    </section>
+
+    <section class="step" id="reverse-two-chains">
+      <h2>Разворот сохраняет продолжение, затем переносит узел в обратную цепочку</h2>
+      <p>Для ациклического списка обойдёмся тремя ссылками: prev, current и сохранённым next. Перед итерацией prev ведёт в уже развёрнутый префикс, current — в ещё не обработанную часть исходного порядка. Эти две части содержат все исходные узлы, не пересекаются и заканчиваются null. В начале первая часть пустая.</p>
+      <p>Чтобы перенести current, сначала сохрани current.next. Затем запиши current.next = prev. Только после этого сдвигай prev на current, а current на сохранённое продолжение. Запись поля разрушает старое ребро, но next удерживает остаток. В конце current пуст, а prev содержит весь список в обратном порядке.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 268" role="img" aria-label="Три узла A10,B20,C30 остаются на своих местах. Сначала prev=null,current=A. Сохраняем B, меняем A.next наnull, двигаем prev=A,current=B. Следующие итерации меняют B.next наA и C.next наB. Возвращается C.">
+      <defs>
+      <marker id="lr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="lr-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="lr-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">СОХРАНИ next ДО ПЕРЕНАПРАВЛЕНИЯ current.next</text>
+      <g data-s="1">
+      <rect x="80" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="128" y="122" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="128" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="290" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="338" y="122" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="338" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="500" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="548" y="122" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="548" y="143" class="dg-n" text-anchor="middle">next</text>
+      <text x="20" y="130" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="130" class="dg-n" text-anchor="start">null</text>
+      <path d="M180 126 L286 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <path d="M390 126 L496 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <path d="M600 126 L664 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="74" class="dg-n" text-anchor="start">prev=null</text>
+      <text x="128" y="74" class="dg-n" text-anchor="middle">current</text>
+      <path d="M128 82 L128 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="204" class="dg-s" text-anchor="start">prev пуст; current хранит всю исходную цепочку</text>
+      <text x="28" y="240" class="dg-n" text-anchor="start">зелёные рёбра перенаправлены; исходные узлы не заменялись</text>
+      </g>
+      <g data-s="2">
+      <rect x="80" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="128" y="122" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="128" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="290" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="338" y="122" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="338" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="500" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="548" y="122" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="548" y="143" class="dg-n" text-anchor="middle">next</text>
+      <text x="20" y="130" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="130" class="dg-n" text-anchor="start">null</text>
+      <path d="M180 126 L286 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <path d="M390 126 L496 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <path d="M600 126 L664 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="74" class="dg-n" text-anchor="start">prev=null</text>
+      <text x="128" y="74" class="dg-n" text-anchor="middle">current</text>
+      <path d="M128 82 L128 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="338" y="50" class="dg-n" text-anchor="middle">saved next</text>
+      <path d="M338 58 L338 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="204" class="dg-s" text-anchor="start">next=B удерживает оставшуюся цепочку B→C</text>
+      <text x="28" y="240" class="dg-n" text-anchor="start">зелёные рёбра перенаправлены; исходные узлы не заменялись</text>
+      </g>
+      <g data-s="3">
+      <rect x="80" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="128" y="122" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="128" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="290" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="338" y="122" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="338" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="500" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="548" y="122" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="548" y="143" class="dg-n" text-anchor="middle">next</text>
+      <text x="20" y="130" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="130" class="dg-n" text-anchor="start">null</text>
+      <path d="M76 126 L50 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <path d="M390 126 L496 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <path d="M600 126 L664 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="74" class="dg-n" text-anchor="start">prev=null</text>
+      <text x="128" y="74" class="dg-n" text-anchor="middle">current</text>
+      <path d="M128 82 L128 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="338" y="50" class="dg-n" text-anchor="middle">saved next</text>
+      <path d="M338 58 L338 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="204" class="dg-s" text-anchor="start">A.next=null; продолжение сохранено отдельно в next</text>
+      <text x="28" y="240" class="dg-n" text-anchor="start">зелёные рёбра перенаправлены; исходные узлы не заменялись</text>
+      </g>
+      <g data-s="4">
+      <rect x="80" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="128" y="122" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="128" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="290" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="338" y="122" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="338" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="500" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="548" y="122" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="548" y="143" class="dg-n" text-anchor="middle">next</text>
+      <text x="20" y="130" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="130" class="dg-n" text-anchor="start">null</text>
+      <path d="M76 126 L50 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <path d="M390 126 L496 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <path d="M600 126 L664 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="128" y="74" class="dg-n" text-anchor="middle">prev</text>
+      <path d="M128 82 L128 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="338" y="74" class="dg-n" text-anchor="middle">current</text>
+      <path d="M338 82 L338 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="204" class="dg-s" text-anchor="start">prev=A; current=B; две части снова готовы к итерации</text>
+      <text x="28" y="240" class="dg-n" text-anchor="start">зелёные рёбра перенаправлены; исходные узлы не заменялись</text>
+      </g>
+      <g data-s="5">
+      <rect x="80" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="128" y="122" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="128" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="290" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="338" y="122" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="338" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="500" y="100" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="548" y="122" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="548" y="143" class="dg-n" text-anchor="middle">next</text>
+      <text x="20" y="130" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="130" class="dg-n" text-anchor="start">null</text>
+      <path d="M76 126 L50 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <path d="M286 126 L180 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <path d="M600 126 L664 126" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="338" y="74" class="dg-n" text-anchor="middle">prev</text>
+      <path d="M338 82 L338 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="548" y="74" class="dg-n" text-anchor="middle">current</text>
+      <path d="M548 82 L548 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="28" y="204" class="dg-s" text-anchor="start">после второго узла: prev=B→A, current=C</text>
+      <text x="28" y="240" class="dg-n" text-anchor="start">зелёные рёбра перенаправлены; исходные узлы не заменялись</text>
+      </g>
+      <g data-s="6">
+      <rect x="80" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="128" y="122" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="128" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="290" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="338" y="122" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="338" y="143" class="dg-n" text-anchor="middle">next</text>
+      <rect x="500" y="100" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="548" y="122" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="548" y="143" class="dg-n" text-anchor="middle">next</text>
+      <text x="20" y="130" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="130" class="dg-n" text-anchor="start">null</text>
+      <path d="M76 126 L50 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <path d="M286 126 L180 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <path d="M496 126 L390 126" class="dg-line ok" marker-end="url(#lr-ok)"/>
+      <text x="548" y="74" class="dg-n" text-anchor="middle">prev</text>
+      <path d="M548 82 L548 96" class="dg-line" marker-end="url(#lr-n)"/>
+      <text x="610" y="74" class="dg-n" text-anchor="start">current=null</text>
+      <text x="28" y="204" class="dg-s" text-anchor="start">после третьего узла: prev=C→B→A, current=null</text>
+      <text x="28" y="240" class="dg-n" text-anchor="start">зелёные рёбра перенаправлены; исходные узлы не заменялись</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>Начало: развёрнутой части нет, current ведёт в A→B→C. Все три исходных узла ещё впереди.</li>
+    <li>Сохранили current.next в next: это B. Поле A.next пока не изменилось, но остаток уже удерживается отдельной ссылкой.</li>
+    <li>Записали A.next = prev, то есть null. По A теперь нельзя попасть в B, но next по-прежнему держит B→C.</li>
+    <li>Сдвинули prev в A, current в B. Инвариант восстановлен: prev содержит развёрнутый префикс, current — необработанный остаток.</li>
+    <li>Вторая итерация сохранила C и перенаправила B.next в A. Теперь prev ведёт в B→A, current в C.</li>
+    <li>Третья итерация сохранила null и перенаправила C.next в B. current пуст, prev=C — новая голова всей цепочки.</li>
+  </ol>
+  <figcaption>Присваивание переменной передвигает ссылку; присваивание поля меняет граф объектов. Сохранённый next переживает уничтожение старого ребра.</figcaption>
+</figure>
+      <p>Фрагменты <a href="../examples/linked-list/ReverseDemo.java">ReverseDemo.java</a>. Трасса показывает сохранение продолжения, смену ребра и восстановление инварианта:</p>
+      <pre><code class="language-java">static Node reverse(Node head, boolean trace) {
+    Node prev = null, current = head;
+    while (current != null) {
+        Node next = current.next; // Сохраняем продолжение до перезаписи поля.
+        if (trace) System.out.println(&quot;save current=&quot; + id(current) + &quot; next=&quot; + id(next));
+        current.next = prev; // Один узел переходит в развёрнутую часть.
+        if (trace) System.out.println(&quot;link &quot; + id(current) + &quot;.next=&quot; + id(prev));
+        prev = current;
+        current = next;
+        if (trace) System.out.println(&quot;prev=&quot; + id(prev) + &quot; current=&quot; + id(current));
+    }
+    return prev; // Новая голова — последний обработанный узел.
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== reverse reuses nodes ==&quot;);
+Node[] original = nodes(10, 20, 30);
+Node oldHead = original[0], oldMiddle = original[1];
+Node reversed = reverse(oldHead, true);
+System.out.println(&quot;new head is original C=&quot; + (reversed == original[2]));
+System.out.println(&quot;result=&quot; + show(reversed));
+System.out.println(&quot;old head=&quot; + show(oldHead));
+System.out.println(&quot;old middle=&quot; + show(oldMiddle));
+</code></pre>
+      <pre class="out">== reverse reuses nodes ==
+save current=A next=B
+link A.next=null
+prev=A current=B
+save current=B next=C
+link B.next=A
+prev=B current=C
+save current=C next=null
+link C.next=B
+prev=C current=null
+new head is original C=true
+result=[C:30, B:20, A:10]
+old head=[A:10]
+old middle=[B:20, A:10]</pre>
+      <p>Новой головой стал исходный объект C, а не его копия. Исходная переменная oldHead всё ещё держит A, который теперь хвост. Ссылка oldMiddle держит B, но видит другой путь B→A. Значения остались прежними; менялись только ссылки.</p>
+      <p>Память O(1): постоянное число ссылок, новых узлов нет. Время O(n): каждый узел переносится ровно один раз. У рекурсивного разворота останутся O(n) кадров стека, а допустимая глубина зависит от стека потока. Возврат головы должен быть использован вызывающим: head = reverse(head). Старая head сама не начнёт указывать на C.</p>
+      <h3>После перезаписи поля исходный next уже нельзя прочитать</h3>
+      <pre><code class="language-java">static Node wrongReverse(Node head) {
+    Node prev = null, current = head;
+    while (current != null) {
+        current.next = prev;
+        Node next = current.next; // Ошибка: исходное продолжение уже потеряно.
+        prev = current;
+        current = next;
+    }
+    return prev;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== wrong order loses remainder ==&quot;);
+Node[] broken = nodes(10, 20, 30);
+System.out.println(&quot;wrong result=&quot; + show(wrongReverse(broken[0])));
+System.out.println(&quot;saved B still sees=&quot; + show(broken[1]));
+</code></pre>
+      <pre class="out">== wrong order loses remainder ==
+wrong result=[A:10]
+saved B still sees=[B:20, C:30]</pre>
+      <p>Ошибочная версия вернула лишь A. На первой итерации prev был null, значит, current.next стал null. Позднее чтение скопировало уже это новое значение и остановило обход. B→C ещё виден через отдельно сохранённый исходный B, но результата в возвращённой цепочке он не составляет.</p>
+      <pre><code class="language-java">System.out.println(&quot;== empty and single ==&quot;);
+System.out.println(&quot;empty=&quot; + id(reverse(null, false)));
+Node single = new Node(&quot;S&quot;, 7);
+System.out.println(&quot;single reused=&quot; + (reverse(single, false) == single) + &quot; next=&quot; + id(single.next));
+</code></pre>
+      <pre class="out">== empty and single ==
+empty=null
+single reused=true next=null</pre>
+      <p>Пустой список не входит в цикл и возвращает null. Единственный узел получает next = null и возвращается тем же объектом. Ацикличность здесь — часть условия: при повторном посещении узла доказательство «каждый переносится один раз» исчезает. Циклическую структуру сначала распознай, а не передавай в этот разворот.</p>
+    </section>
+
+    <section class="step" id="relative-speeds">
+      <h2>Относительная скорость находит середину и цикл, но встреча ещё не даёт вход</h2>
+      <p>Если длина заранее неизвестна, slow идёт по одному ребру, fast по двум. В ациклической цепочке, когда fast достиг конца, slow прошёл примерно половину пути. Проверка fast != null &amp;&amp; fast.next != null защищает обе операции fast.next.next; short-circuit не даёт читать next у null.</p>
+      <p>Фрагменты <a href="../examples/linked-list/RunnerDemo.java">RunnerDemo.java</a>. В этом соглашении оба начинаются в голове, а при чётной длине возвращается <b>вторая</b> середина:</p>
+      <pre><code class="language-java">static Node middle(Node head) {
+    Node slow = head, fast = head;
+    while (fast != null &amp;&amp; fast.next != null) {
+        slow = slow.next;
+        fast = fast.next.next;
+    }
+    return slow; // При чётной длине — вторая из двух середин.
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== middle depends on loop convention ==&quot;);
+System.out.println(&quot;length 5 middle=&quot; + id(middle(head(nodes(10, 20, 30, 40, 50)))));
+System.out.println(&quot;length 4 middle=&quot; + id(middle(head(nodes(10, 20, 30, 40)))));
+System.out.println(&quot;empty middle=&quot; + id(middle(null)));
+</code></pre>
+      <pre class="out">== middle depends on loop convention ==
+length 5 middle=C
+length 4 middle=C
+empty middle=null</pre>
+      <p>Для четырёх узлов A,B,C,D результат C. Чтобы выбирать первую середину, можно изменить начальное положение fast или условие продолжения, но тогда нужно заново проверить длины 1 и 2. На циклическом входе такой поиск конца неприменим: конца null нет.</p>
+      <p>У цикла проверяем совпадение ссылок после движения. Пока slow ещё до входа, повторения там нет. Когда оба внутри, fast за итерацию сокращает отставание по кругу на одно ребро и за не больше чем длину цикла догонит slow. Само начальное slow = fast = head ничего не доказывает — оно есть и у обычной цепочки.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 274" role="img" aria-label="A→B→C→D→E→C: два узла до цикла и три в цикле. Fast движется по два ребра, slow по одному, после трёх шагов они встречаются в D. Один указатель сбрасывается в A. При движении обоих по одному они через два шага встречаются в C.">
+      <defs>
+      <marker id="lf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="lf-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="lf-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">ВСТРЕЧА В ЦИКЛЕ И ВХОД В ЦИКЛ — РАЗНЫЕ УЗЛЫ</text>
+      <g data-s="1">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="66" y="46" class="dg-n" text-anchor="middle">slow</text>
+      <path d="M66 54 L66 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="110" y="66" class="dg-n" text-anchor="middle">fast</text>
+      <path d="M110 74 L110 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-s" text-anchor="start">начало: равенство указателей ещё не доказывает цикл</text>
+      </g>
+      <g data-s="2">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="196" y="46" class="dg-n" text-anchor="middle">slow</text>
+      <path d="M196 54 L196 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="370" y="66" class="dg-n" text-anchor="middle">fast</text>
+      <path d="M370 74 L370 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-s" text-anchor="start">1 шаг: slow=B; fast=C</text>
+      </g>
+      <g data-s="3">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="326" y="46" class="dg-n" text-anchor="middle">slow</text>
+      <path d="M326 54 L326 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="630" y="66" class="dg-n" text-anchor="middle">fast</text>
+      <path d="M630 74 L630 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-s" text-anchor="start">2 шага: slow=C; fast=E</text>
+      </g>
+      <g data-s="4">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="456" y="46" class="dg-n" text-anchor="middle">slow</text>
+      <path d="M456 54 L456 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="500" y="66" class="dg-n" text-anchor="middle">fast</text>
+      <path d="M500 74 L500 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-s" text-anchor="start">3 шага: slow=fast=D, встретились</text>
+      </g>
+      <g data-s="5">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="66" y="46" class="dg-n" text-anchor="middle">finder</text>
+      <path d="M66 54 L66 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="500" y="66" class="dg-n" text-anchor="middle">meet</text>
+      <path d="M500 74 L500 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-s" text-anchor="start">finder=A; meet=D; теперь оба идут по одному ребру</text>
+      </g>
+      <g data-s="6">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="196" y="46" class="dg-n" text-anchor="middle">finder</text>
+      <path d="M196 54 L196 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="630" y="66" class="dg-n" text-anchor="middle">meet</text>
+      <path d="M630 74 L630 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-s" text-anchor="start">finder=B; meet=E</text>
+      </g>
+      <g data-s="7">
+      <rect x="40" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="88" y="108" class="dg-in" text-anchor="middle">A: 10</text>
+      <text x="88" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="170" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="218" y="108" class="dg-in" text-anchor="middle">B: 20</text>
+      <text x="218" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="300" y="86" width="96" height="52" rx="6" class="dg-cell hit"/>
+      <text x="348" y="108" class="dg-in" text-anchor="middle">C: 30</text>
+      <text x="348" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="430" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="478" y="108" class="dg-in" text-anchor="middle">D: 40</text>
+      <text x="478" y="129" class="dg-n" text-anchor="middle">next</text>
+      <rect x="560" y="86" width="96" height="52" rx="6" class="dg-cell"/>
+      <text x="608" y="108" class="dg-in" text-anchor="middle">E: 50</text>
+      <text x="608" y="129" class="dg-n" text-anchor="middle">next</text>
+      <path d="M140 112 L166 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M270 112 L296 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M400 112 L426 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M530 112 L556 112" class="dg-line" marker-end="url(#lf-n)"/>
+      <path d="M608 142 C608 190 348 190 348 142" class="dg-line ok" marker-end="url(#lf-ok)"/>
+      <text x="410" y="206" class="dg-n" text-anchor="start">E.next=C</text>
+      <text x="326" y="46" class="dg-n" text-anchor="middle">finder</text>
+      <path d="M326 54 L326 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="370" y="66" class="dg-n" text-anchor="middle">meet</text>
+      <path d="M370 74 L370 82" class="dg-line" marker-end="url(#lf-n)"/>
+      <text x="28" y="246" class="dg-ok" text-anchor="start">finder=meet=C: это вход в цикл</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>slow и fast начинаются в A. Начальное равенство есть у любого непустого списка, поэтому на цикл проверяем после движения.</li>
+    <li>slow сделал одно ребро, fast два: они в B и C.</li>
+    <li>slow сделал ещё одно, fast ещё два: они в C и E. Теперь оба внутри цикла.</li>
+    <li>Следующий шаг дал D для обоих. Цикл доказан, но D не его вход: C находится раньше.</li>
+    <li>Ставим finder в голову A; вторую ссылку оставляем в месте встречи D. Скорости теперь одинаковые, по одному ребру.</li>
+    <li>После одного перехода finder=B, meet=E. Первый указатель ещё вне цикла.</li>
+    <li>После второго перехода оба в C. От головы до входа два ребра; от D за два ребра по циклу тоже приходим в C.</li>
+  </ol>
+  <figcaption>Граф всё время один и тот же: алгоритм не меняет next. Проверяется совпадение объектов, а не их значений.</figcaption>
+</figure>
+      <pre><code class="language-java">static Node entry(Node head, boolean trace) {
+    Node slow = head, fast = head;
+    int step = 0;
+    while (fast != null &amp;&amp; fast.next != null) { // Проверки защищают оба перехода fast.
+        slow = slow.next;
+        fast = fast.next.next;
+        if (trace) System.out.println(&quot;step=&quot; + ++step + &quot; slow=&quot; + id(slow) + &quot; fast=&quot; + id(fast));
+        if (slow == fast) { // Сравниваем ссылки, не суммы платежей.
+            Node finder = head;
+            if (trace) System.out.println(&quot;reset finder=&quot; + id(finder) + &quot; meet=&quot; + id(slow));
+            while (finder != slow) {
+                finder = finder.next;
+                slow = slow.next;
+                if (trace) System.out.println(&quot;finder=&quot; + id(finder) + &quot; meet=&quot; + id(slow));
+            }
+            return finder;
+        }
+    }
+    return null;
+}
+
+static boolean wrongValueCycle(Node head) {
+    Node slow = head, fast = head;
+    while (fast != null &amp;&amp; fast.next != null) {
+        slow = slow.next;
+        fast = fast.next.next;
+        if (fast != null &amp;&amp; slow.value == fast.value) return true; // Ошибка: разные объекты имеют одинаковые value.
+    }
+    return false;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== meet is not the entry ==&quot;);
+Node[] ring = nodes(10, 20, 30, 40, 50);
+ring[4].next = ring[2]; // E ведёт в C: два узла до цикла, три узла в цикле.
+System.out.println(&quot;ring=&quot; + show(ring[0]));
+System.out.println(&quot;entry=&quot; + id(entry(ring[0], true)));
+Node equalValues = head(nodes(7, 7, 7));
+System.out.println(&quot;equal values wrong=&quot; + wrongValueCycle(equalValues));
+System.out.println(&quot;equal values actual=&quot; + (entry(equalValues, false) != null));
+Node self = new Node(&quot;S&quot;, 1); self.next = self;
+System.out.println(&quot;self entry=&quot; + id(entry(self, false)));
+System.out.println(&quot;empty entry=&quot; + id(entry(null, false)));
+</code></pre>
+      <pre class="out">== meet is not the entry ==
+ring=[A:10, B:20, C:30, D:40, E:50, cycle(C)]
+step=1 slow=B fast=C
+step=2 slow=C fast=E
+step=3 slow=D fast=D
+reset finder=A meet=D
+finder=B meet=E
+finder=C meet=C
+entry=C
+equal values wrong=true
+equal values actual=false
+self entry=S
+empty entry=null</pre>
+      <p>На нашем графе встретились в D, а цикл начинается в C. Два одинаковых value в ациклическом списке дали ложный ответ ошибочной версии: она сравнила суммы вместо объектов. Корректная версия сравнивает slow == fast и не меняет next. Самопетля у S обнаружилась и вернула S.</p>
+      <h3>Почему возврат одного указателя в голову даёт вход</h3>
+      <p>Обозначим μ — число рёбер от головы до входа, λ — длину цикла. До встречи slow сделал t шагов, fast — 2t. Их разность t кратна λ, иначе они стояли бы в разных местах круга. Если x — смещение места встречи от входа, то x ≡ t − μ по модулю λ. Получается μ + x ≡ 0 по модулю λ.</p>
+      <p>Теперь finder из головы идёт по одному ребру, второй указатель идёт по одному от встречи. Через μ шагов первый достигнет входа. Второй за это время сместится из x на μ и тоже попадёт во вход. До этого finder стоит вне цикла, поэтому встреча раньше невозможна. В примере μ = 2, λ = 3, встреча D имеет x = 1: μ + x = 3.</p>
+      <p>Первый проход занимает O(μ + λ), второй O(μ), память O(1). Если нужен только факт цикла, второй проход не нужен. Если нужна длина цикла, от места встречи можно пройти один круг и сосчитать рёбра. Для стабильной структуры понятия входа и длины однозначны; при параллельной перезаписи next это доказательство уже не описывает один неизменный граф.</p>
+    </section>
+
+    <section class="step" id="merge-with-dummy">
+      <h2>Служебная голова и хвост собирают слияние из исходных узлов</h2>
+      <p>Пришли две очереди, отсортированные по приоритету: A1:1→A3:3→A5:5 и B2:2→B3:3→B6:6. Они ациклические и не имеют общих узлов. Нужно собрать одну отсортированную цепочку из тех же объектов. Самый маленький ещё не выбранный элемент находится в голове одной из очередей: глубже по ней меньшего уже не будет.</p>
+      <p>Без служебного узла первый выбранный элемент потребовал бы отдельной ветки для головы. Создадим dummy, tail сначала указывает на него. Каждый шаг выбирает меньшую голову, сдвигает соответствующий вход, записывает tail.next и двигает tail. Возвращаем dummy.next; значение служебного узла не сравнивается с платежами.</p>
+      <p>Инвариант: цепочка от dummy.next до tail содержит уже выбранные узлы в отсортированном порядке, а a и b задают головы оставшихся входов. Поле tail.next <b>ещё может указывать в необработанный остаток</b> выбранного списка. Следующая запись его заменит. Доказательство использует границу tail, а не требует null после каждого шага.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 392" role="img" aria-label="Два отдельных списка A1→A3→A5 и B2→B3→B6 сливаются через dummy D. Выбираются A1,B2,A3,B3,A5, затем остаток B6. На равных3 первым выбирается A3. Узлы не создаются заново; меняются только next. Tail после присоединения остатка остаётся в A5.">
+      <defs>
+      <marker id="lm-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="lm-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="lm-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">СЛИЯНИЕ СОХРАНЯЕТ УЗЛЫ И ПЕРЕНАПРАВЛЯЕТ next</text>
+      <g data-s="1">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M76 208 L76 234" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="56" y="254" class="dg-n" text-anchor="start">null</text>
+      <path d="M274 98 L356 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M454 98 L536 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 98 L664 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M274 258 L356 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M454 258 L536 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M105 236 L105 208" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="115" y="228" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=A1; b=B2; tail=DUMMY</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">зелёные узлы выбраны; tail.next ещё может вести в остаток</text>
+      </g>
+      <g data-s="2">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M122 176 C148 176 148 98 176 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M274 98 L356 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M454 98 L536 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 98 L664 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M274 258 L356 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M454 258 L536 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M257 158 L257 130" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="267" y="150" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=A3; b=B2; tail=A1</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">зелёные узлы выбраны; tail.next ещё может вести в остаток</text>
+      </g>
+      <g data-s="3">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M122 176 C148 176 148 98 176 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M225 130 L225 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M454 98 L536 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 98 L664 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M274 258 L356 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M454 258 L536 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M257 318 L257 290" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="267" y="310" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=A3; b=B3; tail=B2</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">зелёные узлы выбраны; tail.next ещё может вести в остаток</text>
+      </g>
+      <g data-s="4">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M122 176 C148 176 148 98 176 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M225 130 L225 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M454 98 L536 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 98 L664 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M274 258 C312 258 322 98 356 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M454 258 L536 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M437 158 L437 130" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="447" y="150" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=A5; b=B3; tail=A3</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">зелёные узлы выбраны; tail.next ещё может вести в остаток</text>
+      </g>
+      <g data-s="5">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M122 176 C148 176 148 98 176 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M225 130 L225 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M405 130 L405 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M634 98 L664 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M274 258 C312 258 322 98 356 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M454 258 L536 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M437 318 L437 290" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="447" y="310" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=A5; b=B6; tail=B3</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">зелёные узлы выбраны; tail.next ещё может вести в остаток</text>
+      </g>
+      <g data-s="6">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M122 176 C148 176 148 98 176 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M225 130 L225 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M405 130 L405 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M634 98 L664 98" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M274 258 C312 258 322 98 356 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M454 258 C492 258 502 98 536 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M617 158 L617 130" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="627" y="150" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=null; b=B6; tail=A5</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">зелёные узлы выбраны; tail.next ещё может вести в остаток</text>
+      </g>
+      <g data-s="7">
+      <rect x="180" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="92" class="dg-in" text-anchor="middle">A1</text>
+      <text x="225" y="114" class="dg-n" text-anchor="middle">1</text>
+      <rect x="360" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="92" class="dg-in" text-anchor="middle">A3</text>
+      <text x="405" y="114" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="70" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="585" y="92" class="dg-in" text-anchor="middle">A5</text>
+      <text x="585" y="114" class="dg-n" text-anchor="middle">5</text>
+      <rect x="180" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="225" y="252" class="dg-in" text-anchor="middle">B2</text>
+      <text x="225" y="274" class="dg-n" text-anchor="middle">2</text>
+      <rect x="360" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="405" y="252" class="dg-in" text-anchor="middle">B3</text>
+      <text x="405" y="274" class="dg-n" text-anchor="middle">3</text>
+      <rect x="540" y="230" width="90" height="56" rx="6" class="dg-cell hit"/>
+      <text x="585" y="252" class="dg-in" text-anchor="middle">B6</text>
+      <text x="585" y="274" class="dg-n" text-anchor="middle">6</text>
+      <rect x="28" y="148" width="90" height="56" rx="6" class="dg-box"/>
+      <text x="73" y="170" class="dg-in" text-anchor="middle">D</text>
+      <text x="73" y="192" class="dg-n" text-anchor="middle">0</text>
+      <text x="668" y="104" class="dg-n" text-anchor="start">null</text>
+      <text x="668" y="264" class="dg-n" text-anchor="start">null</text>
+      <path d="M122 176 C148 176 148 98 176 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M225 130 L225 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M405 130 L405 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M585 130 L585 226" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M274 258 C312 258 322 98 356 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M454 258 C492 258 502 98 536 98" class="dg-line ok" marker-end="url(#lm-ok)"/>
+      <path d="M634 258 L664 258" class="dg-line" marker-end="url(#lm-n)"/>
+      <path d="M617 158 L617 130" class="dg-line" marker-end="url(#lm-n)"/>
+      <text x="627" y="150" class="dg-n" text-anchor="start">tail</text>
+      <text x="28" y="334" class="dg-s" text-anchor="start">a=null; b=B6; tail=A5</text>
+      <text x="28" y="364" class="dg-n" text-anchor="start">возвращаем D.next=A1; служебный D в ответ не входит</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>D.next=null, tail=D. Две головы A1 и B2 ещё не выбраны. Их исходные связи видны серыми стрелками.</li>
+    <li>1 ≤ 2: присоединили A1, tail=A1, a=A3. A1.next пока всё ещё ведёт в A3: хвост не обязан уже завершаться null.</li>
+    <li>2 < 3: перезаписали A1.next в B2. tail=B2, b=B3. У B2 пока остаётся его старая ссылка в B3.</li>
+    <li>3 ≤ 3: присоединили A3 из первого списка, заменив B2.next. a=A5, tail=A3. Это правило сохраняет порядок равных значений.</li>
+    <li>3 < 5: присоединили B3, заменив A3.next. b=B6, tail=B3.</li>
+    <li>5 ≤ 6: присоединили A5, заменив B3.next. Первый список закончился, цикл выбора завершён.</li>
+    <li>Одной записью A5.next=B6 присоединили весь оставшийся второй список. Tail двигать уже не нужно. D.next указывает на A1 — голову результата.</li>
+  </ol>
+  <figcaption>Объекты стоят на прежних местах, меняется маршрут. Пока цикл работает, готовый префикс заканчивается на tail; у tail сохраняется ссылка на часть ещё не обработанного входа.</figcaption>
+</figure>
+      <p>Фрагменты <a href="../examples/linked-list/MergeDemo.java">MergeDemo.java</a>. На равных выбираем из первого списка через ≤ — это сохраняет порядок внутри каждого входа и ставит равные узлы первого раньше равных узлов второго:</p>
+      <pre><code class="language-java">static Node merge(Node a, Node b, boolean trace) {
+    Node dummy = new Node(&quot;DUMMY&quot;, 0), tail = dummy;
+    while (a != null &amp;&amp; b != null) {
+        Node chosen;
+        if (a.value &lt;= b.value) { chosen = a; a = a.next; } // При равенстве первый список идёт раньше.
+        else { chosen = b; b = b.next; }
+        tail.next = chosen; // Присоединяем исходный объект, не копируем его value.
+        tail = chosen;
+        if (trace) System.out.println(&quot;take=&quot; + id(chosen) + &quot; a=&quot; + id(a) + &quot; b=&quot; + id(b) + &quot; tail=&quot; + id(tail));
+    }
+    tail.next = a != null ? a : b; // Оставшаяся цепочка уже отсортирована.
+    if (trace) System.out.println(&quot;append=&quot; + id(tail.next) + &quot; tail=&quot; + id(tail));
+    return dummy.next; // Сам служебный узел не входит в результат.
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== sorted merge rewires original nodes ==&quot;);
+Node a1 = new Node(&quot;A1&quot;, 1), a3 = new Node(&quot;A3&quot;, 3), a5 = new Node(&quot;A5&quot;, 5);
+a1.next = a3; a3.next = a5;
+Node b2 = new Node(&quot;B2&quot;, 2), b3 = new Node(&quot;B3&quot;, 3), b6 = new Node(&quot;B6&quot;, 6);
+b2.next = b3; b3.next = b6;
+Node merged = merge(a1, b2, true);
+System.out.println(&quot;merged=&quot; + show(merged));
+System.out.println(&quot;head reused=&quot; + (merged == a1));
+System.out.println(&quot;equal values A3 before B3=&quot; + (a3.next == b3));
+System.out.println(&quot;old B2 alias=&quot; + show(b2));
+</code></pre>
+      <pre class="out">== sorted merge rewires original nodes ==
+take=A1 a=A3 b=B2 tail=A1
+take=B2 a=A3 b=B3 tail=B2
+take=A3 a=A5 b=B3 tail=A3
+take=B3 a=A5 b=B6 tail=B3
+take=A5 a=null b=B6 tail=A5
+append=B6 tail=A5
+merged=[A1:1, B2:2, A3:3, B3:3, A5:5, B6:6]
+head reused=true
+equal values A3 before B3=true
+old B2 alias=[B2:2, A3:3, B3:3, A5:5, B6:6]</pre>
+      <p>Оба узла со значением 3 остались в результате: A3 перед B3. Проверка a3.next == b3 подтверждает именно их личности. Старая ссылка b2 теперь видит чередующийся хвост общей цепочки. У метода копировались параметры a и b, но запись next меняла исходные объекты, поэтому прежние списки больше не независимы.</p>
+      <p>Когда один вход закончился, другой остаток уже отсортирован и не меньше выбранного хвоста. Его присоединяем одной записью. Время O(m + n), дополнительная память O(1), включая один dummy. При пустом одном входе можно сразу вернуть другую голову; в показанной версии тот же эффект даёт финальное присоединение:</p>
+      <pre><code class="language-java">System.out.println(&quot;== empty inputs reuse remainder ==&quot;);
+Node only = new Node(&quot;X&quot;, 5);
+System.out.println(&quot;reused=&quot; + (merge(null, only, false) == only));
+System.out.println(&quot;both empty=&quot; + show(merge(null, null, false)));
+</code></pre>
+      <pre class="out">== empty inputs reuse remainder ==
+reused=true
+both empty=[]</pre>
+      <p>Копирование только значений в новые узлы означало бы другой результат и O(m + n) дополнительной памяти. Оно подходит, когда старые очереди должны остаться прежними. Выбор между переносом и копированием следует из владения объектами, а не из желания показать более короткий код.</p>
+    </section>
+
+    <section class="step" id="gap-before-removal">
+      <h2>Фиксированный отрыв оставляет медленный указатель перед удаляемым узлом</h2>
+      <p>Нужно убрать n-й узел с конца за один проход, причём n допустимо: 1 ≤ n ≤ длина. Поле предшественника должно начать указывать на следующий после удаляемого узел. Самой голове предшественник тоже нужен, поэтому перед ней ставим dummy.</p>
+      <p>slow и fast начинаются в dummy. Сначала fast делает <b>n + 1 переходов</b>. Затем оба двигаются по одному, сохраняя этот отрыв, пока fast не станет null. Нумеруем настоящие узлы с нуля; у dummy позиция −1. Для цепочки из L узлов slow остановится на позиции L − n − 1. Его следующий узел — как раз позиция L − n, то есть n-й с конца. Для удаления головы slow останется в dummy.</p>
+      <pre><code class="language-java">static Node remove(Node head, int n, boolean trace) {
+    Node dummy = new Node(&quot;DUMMY&quot;, 0);
+    dummy.next = head;
+    Node slow = dummy, fast = dummy;
+    for (int i = 0; i &lt;= n; i++) {
+        if (fast == null) throw new IllegalArgumentException(&quot;n exceeds length&quot;);
+        fast = fast.next; // n+1 переходов: slow в конце окажется перед нужным узлом.
+    }
+    if (trace) System.out.println(&quot;gap=&quot; + (n + 1) + &quot; slow=&quot; + id(slow) + &quot; fast=&quot; + id(fast));
+    while (fast != null) {
+        slow = slow.next;
+        fast = fast.next;
+        if (trace) System.out.println(&quot;slow=&quot; + id(slow) + &quot; fast=&quot; + id(fast));
+    }
+    if (trace) System.out.println(&quot;bypass=&quot; + id(slow.next));
+    slow.next = slow.next.next; // Меняем входящую ссылку, value узлов не трогаем.
+    return dummy.next;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== fixed gap locates predecessor ==&quot;);
+Node[] pending = nodes(10, 20, 30, 40, 50);
+Node without = remove(pending[0], 2, true);
+System.out.println(&quot;result=&quot; + show(without));
+System.out.println(&quot;removed alias=&quot; + show(pending[3]));
+</code></pre>
+      <pre class="out">== fixed gap locates predecessor ==
+gap=3 slow=DUMMY fast=C
+slow=A fast=D
+slow=B fast=E
+slow=C fast=null
+bypass=D
+result=[A:10, B:20, C:30, E:50]
+removed alias=[D:40, E:50]</pre>
+      <p>Для пяти узлов и n = 2 сначала fast стоит в C, slow в dummy. Вместе они делают ещё три перехода: fast приходит в null, slow в C. Следующий D — второй с конца. Новая C.next = E убирает D из пути, который возвращается вызывающему.</p>
+      <p>Но сохранённая ссылка на D всё ещё видит D→E. Обход исключил один узел из возвращённой цепочки, а не уничтожил объект и все чужие ссылки. Если по условиям владения удалённый узел должен быть отдельно отсоединён от остатка, сохрани его и явно обнули его next после обхода. Здесь задача такого требования не содержит.</p>
+      <pre><code class="language-java">System.out.println(&quot;== dummy can replace the head ==&quot;);
+Node[] pair = nodes(10, 20);
+Node newHead = remove(pair[0], 2, false);
+System.out.println(&quot;new head=&quot; + show(newHead));
+System.out.println(&quot;old caller head=&quot; + show(pair[0]));
+System.out.println(&quot;remove only=&quot; + show(remove(new Node(&quot;S&quot;, 1), 1, false)));
+</code></pre>
+      <pre class="out">== dummy can replace the head ==
+new head=[B:20]
+old caller head=[A:10, B:20]
+remove only=[]</pre>
+      <p>Удаление головы из пары вернуло B, а прежняя переменная вызывающего осталась на A→B. Для одиночного узла результат null. Это та же причина, по которой разворот возвращал новую голову: обновляется dummy.next, не локальная переменная вызывающего.</p>
+      <div class="trap"><p class="myth">Отрыв n и n + 1 можно поменять, сохранив ту же остановку.</p><p class="fact">В показанном варианте fast идёт до null и отрыв n + 1 оставляет slow на предшественнике. Другой вариант допускает отрыв n, но останавливается на fast.next == null. Смешение оставит slow на удаляемом узле или рядом с ним. Проверь удаление единственного, первого и последнего узла.</p></div>
+      <p>Время O(L), память O(1). Первый участок пути fast и совместное движение вместе проходят цепочку один раз. Версия в демо отвергает слишком большое n при создании отрыва; в задаче допустимость n задана условием, поэтому решение обходится без этой проверки.</p>
+    </section>
+
+    <section class="step" id="ownership-and-tests">
+      <h2>Правильные значения ещё не доказывают правильность связей</h2>
+      <p>На собеседовании уточни, разрешено ли менять вход, существуют ли внешние ссылки на узлы и могут ли списки пересекаться. Разворот и слияние здесь меняют исходные next. Поиск входа в цикл только читает их. Слияние принимает <b>отдельные</b> цепочки, а не просто две разные переменные head.</p>
+      <p>Это существенное условие. В последнем фрагменте MergeDemo головы A и B различны, но обе ведут в один S. Обычное слияние при встрече одинаковых ссылок выберет S из одного входа и затем присоединит тот же S как остаток второго:</p>
+      <pre><code class="language-java">System.out.println(&quot;== shared suffix violates ownership ==&quot;);
+Node shared = new Node(&quot;S&quot;, 3);
+Node a = new Node(&quot;A&quot;, 1), b = new Node(&quot;B&quot;, 2);
+a.next = shared; b.next = shared;
+Node broken = merge(a, b, false); // Вызов намеренно нарушает условие отдельных списков.
+System.out.println(&quot;shared result=&quot; + show(broken));
+System.out.println(&quot;S.next is S=&quot; + (shared.next == shared));
+</code></pre>
+      <pre class="out">== shared suffix violates ownership ==
+shared result=[A:1, B:2, S:3, cycle(S)]
+S.next is S=true</pre>
+      <p>Получилась самопетля S.next = S. Обычный обход до null больше не завершится; show обнаружил повтор объекта и напечатал cycle(S). Если пересечения допустимы, надо отдельно определить смысл результата: возвращать один общий хвост или копировать значения. Простая подмена сравнения ≤ на &lt; не устраняет проблему одного общего объекта.</p>
+      <p>Проверяй структуру вместе со значениями. В задачах ниже каждый результат сравнивается с исходными узлами через ==, затем проверяется отсутствие лишнего хвоста. Это ловит новые копии, потерю узлов и циклы. Для CycleEntry дополнительно сохранены все next до вызова: после него связи должны остаться прежними. Одинаковые value включены в проверки, чтобы сравнение значений не маскировало ошибку личности.</p>
+      <table class="mx">
+        <thead><tr><th>Операция</th><th>Условие</th><th>Время / память</th></tr></thead>
+        <tbody>
+          <tr><td>Разворот узлов</td><td>Ациклический вход, изменение разрешено</td><td>O(n) / O(1)</td></tr>
+          <tr><td>Середина</td><td>Есть конец null; выбран смысл чётной середины</td><td>O(n) / O(1)</td></tr>
+          <tr><td>Вход в цикл</td><td>Стабильные next; сравниваем объекты</td><td>O(μ + λ) / O(1) для циклического входа</td></tr>
+          <tr><td>Слияние</td><td>Два отсортированных отдельных списка</td><td>O(m + n) / O(1)</td></tr>
+          <tr><td>n-й с конца</td><td>Ациклический вход длины L; n допустимо</td><td>O(L) / O(1)</td></tr>
+        </tbody>
+      </table>
+      <p>Локальная перенастройка ребра быстрая, но поиск предшественника часто доминирует. «Удаление O(1)» без указания уже известного узла и нужных ссылок — неполная оценка. В двусвязном списке доступен prev, но появляются дополнительные поля и ещё связи, которые нужно поддержать. В Java LinkedList это внутренняя структура, публичный API собственные узлы не выдаёт.</p>
+      <p>Для частого доступа по индексу, компактного хранения и последовательного чтения чаще удобнее массив или ArrayList. У списка отдельные объекты и переходы по ссылкам; O(n) прохода не означает такое же реальное время, как у массива. Условия выбора и стандартные коллекции разобраны в <a href="arrays-lists.html">Arrays &amp; Lists</a>. Для обычной очереди задач без необходимости держать узлы начни с подходящей стандартной коллекции.</p>
+      <p>Эти алгоритмы требуют стабильной структуры и разрешённого доступа к next. Параллельное изменение нескольких рёбер требует согласованного протокола, отдельные volatile-поля не делают разворот атомарным. Постоянная память также не означает неизменяемый вход. Перед кодом назови инвариант, после каждой записи объясни, какая ссылка теперь удерживает остаток, а в конце проверь и голову, и хвост.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Локальная ссылка выбирает узел, поле next задаёт маршрут. Внешние ссылки на те же объекты видят изменения маршрута.</li>
+        <li>При развороте сохрани продолжение до перезаписи next. Возвращаемая голова отличается от старой ссылки у вызывающего.</li>
+        <li>Fast/slow сравниваются по личности. Встреча доказывает цикл; второй проход с равными скоростями находит вход.</li>
+        <li>Dummy задаёт предшественника первого узла. Tail отделяет уже собранный префикс от остатка, даже если его next ещё не null.</li>
+        <li>Проверяй владение, отдельность списков и целостность графа: правильный набор значений может скрывать копии, потери и циклы.</li>
+      </ul>
+    </div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>Задачи</h2>
+    <article class="q" id="reverse-original-nodes" data-freq="2" data-type="task">
+  <h3>Развернуть цепочку из тех же узлов</h3>
+  <div class="task">
+    <p>Дана голова ациклического односвязного списка из не более 100 000 узлов. Верни новую голову после разворота. Нужно перенаправлять исходные next, не создавать новые узлы и не менять значения. Пустой список допустим. Требуется O(n) время и O(1) дополнительная память, без рекурсивного стека.</p>
+    <pre class="io">A:10 → B:20 → C:30 → null  →  C:30 → B:20 → A:10 → null
+null → null
+S:7 → null → тот же S:7 → null</pre>
+    <p class="src"><a href="https://leetcode.com/problems/reverse-linked-list/">LeetCode 206 · easy · итеративный разворот с сохранением личности узлов</a></p>
+    <details><summary>Заготовка: ReverseList.java; запусти java ReverseList.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class ReverseList {
+    static final class Node {
+        final String id; // Имя объекта для трассы; совпадение value не означает один объект.
+        final int value;
+        Node next;
+        Node(String id, int value) { this.id = id; this.value = value; }
+    }
+
+    static Node solve(Node head) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+    public static void main(String[] args) {
+        test(); test(1); test(1, 2); test(10, 20, 30); test(7, 7, 7);
+        test(Integer.MIN_VALUE, 0, Integer.MAX_VALUE);
+        test(new int[10_000]);
+    }
+
+    static void test(int... values) {
+        Node[] input = nodes(values);
+        Node got = solve(head(input)), current = got;
+        for (int i = input.length - 1; i &gt;= 0; i--) {
+            if (current != input[i]) throw new AssertionError(&quot;wrong identity at &quot; + i);
+            current = current.next;
+        }
+        if (current != null) throw new AssertionError(&quot;extra nodes or cycle&quot;);
+        System.out.println(&quot;OK length=&quot; + values.length + &quot; head=&quot; + id(got));
+    }
+
+    static Node[] nodes(int... values) {
+        Node[] result = new Node[values.length];
+        for (int i = 0; i &lt; values.length; i++) {
+            result[i] = new Node(i &lt; 26 ? String.valueOf((char) (&#x27;A&#x27; + i)) : &quot;N&quot; + i, values[i]);
+            if (i &gt; 0) result[i - 1].next = result[i];
+        }
+        return result;
+    }
+
+    static Node head(Node[] values) { return values.length == 0 ? null : values[0]; }
+    static String id(Node n) { return n == null ? &quot;null&quot; : n.id; }
+
+    static String show(Node n) {
+        List&lt;String&gt; result = new ArrayList&lt;&gt;();
+        Set&lt;Node&gt; seen = Collections.newSetFromMap(new IdentityHashMap&lt;&gt;());
+        while (n != null) {
+            if (!seen.add(n)) { result.add(&quot;cycle(&quot; + n.id + &quot;)&quot;); break; }
+            result.add(n.id + &quot;:&quot; + n.value);
+            n = n.next;
+        }
+        return result.toString(); // Только печать использует O(n) память, не алгоритм.
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Перед каждой итерацией храни две цепочки: уже развёрнутую и ещё исходную. Следующий узел станет недоступен через current после записи его next.</p></details>
+    <details><summary>Подсказка 2</summary><p>Сохрани next, затем current.next = prev, затем сдвинь prev и current. Когда current станет null, верни prev.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Каждый шаг отрезает один исходный узел от остатка и ставит его перед развёрнутым префиксом. Сохранённая временная ссылка удерживает продолжение до изменения ребра. После последнего шага prev содержит все исходные объекты.</p>
+
+      <pre><code class="language-java">static Node solve(Node head) {
+    Node prev = null, current = head;
+    while (current != null) {
+        Node next = current.next; // До перенаправления сохраняем необработанный остаток.
+        current.next = prev;
+        prev = current;
+        current = next;
+    }
+    return prev;
+}
+</code></pre>
+      <pre class="out">OK length=0 head=null
+OK length=1 head=A
+OK length=2 head=B
+OK length=3 head=C
+OK length=3 head=C
+OK length=3 head=C
+OK length=10000 head=N9999</pre>
+      <p>O(n) времени, O(1) дополнительной памяти. Узлы не выделяются заново. Заготовка проверяет каждую позицию через == с исходным объектом, после ожидаемого хвоста требует null. Длинная проверка на 10 000 узлов не печатает весь список.</p>
+    </div>
+    <div data-level="senior"><p>Если вызывающий не сохранил результат, его прежняя голова останется хвостом. Любая внешняя ссылка на внутренний узел будет видеть изменённое продолжение. Для API, которое обязано сохранить исходный граф, нужно копирование, а это уже O(n) памяти.</p></div>
+  </details>
+</article>
+
+<article class="q" id="find-cycle-entry" data-freq="2" data-type="task">
+  <h3>Вернуть сам узел входа в цикл</h3>
+  <div class="task">
+    <p>Дана голова односвязной структуры из не более 100 000 различных узлов. Последний узел может вести в один из прежних; если цикла нет, цепочка заканчивается null. Верни ссылку на первый узел цикла или null. Поля next и значения менять нельзя. Пустой вход допустим. Требуется O(n) времени и O(1) дополнительной памяти.</p>
+    <pre class="io">A → B → C → D → E → C  →  тот же объект C
+S → S  →  тот же S
+A:7 → B:7 → C:7 → null  →  null</pre>
+    <p class="src"><a href="https://leetcode.com/problems/linked-list-cycle-ii/">LeetCode 142 · medium · pos задаёт связи только в тесте, не передаётся решению</a></p>
+    <details><summary>Заготовка: CycleEntry.java; запусти java CycleEntry.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class CycleEntry {
+    static final class Node {
+        final String id; // Имя объекта для трассы; совпадение value не означает один объект.
+        final int value;
+        Node next;
+        Node(String id, int value) { this.id = id; this.value = value; }
+    }
+
+    static Node solve(Node head) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+    public static void main(String[] args) {
+        test(new int[0], -1); test(new int[]{1}, -1); test(new int[]{1}, 0);
+        test(new int[]{1, 2}, 0); test(new int[]{1, 2}, 1);
+        test(new int[]{10, 20, 30, 40, 50}, 2);
+        test(new int[]{10, 20, 30, 40, 50}, 0);
+        test(new int[]{7, 7, 7}, -1);
+        test(new int[3_000], 2_700);
+    }
+
+    static void test(int[] values, int entryIndex) {
+        Node[] input = nodes(values);
+        Node want = entryIndex &lt; 0 ? null : input[entryIndex];
+        if (want != null) input[input.length - 1].next = want;
+        Node[] links = Arrays.stream(input).map(n -&gt; n.next).toArray(Node[]::new);
+        Node got = solve(head(input));
+        if (got != want) throw new AssertionError(&quot;got &quot; + id(got) + &quot;, want &quot; + id(want));
+        for (int i = 0; i &lt; input.length; i++) if (input[i].next != links[i]) throw new AssertionError(&quot;input changed&quot;);
+        System.out.println(&quot;OK entry=&quot; + id(got));
+    }
+
+    static Node[] nodes(int... values) {
+        Node[] result = new Node[values.length];
+        for (int i = 0; i &lt; values.length; i++) {
+            result[i] = new Node(i &lt; 26 ? String.valueOf((char) (&#x27;A&#x27; + i)) : &quot;N&quot; + i, values[i]);
+            if (i &gt; 0) result[i - 1].next = result[i];
+        }
+        return result;
+    }
+
+    static Node head(Node[] values) { return values.length == 0 ? null : values[0]; }
+    static String id(Node n) { return n == null ? &quot;null&quot; : n.id; }
+
+    static String show(Node n) {
+        List&lt;String&gt; result = new ArrayList&lt;&gt;();
+        Set&lt;Node&gt; seen = Collections.newSetFromMap(new IdentityHashMap&lt;&gt;());
+        while (n != null) {
+            if (!seen.add(n)) { result.add(&quot;cycle(&quot; + n.id + &quot;)&quot;); break; }
+            result.add(n.id + &quot;:&quot; + n.value);
+            n = n.next;
+        }
+        return result.toString(); // Только печать использует O(n) память, не алгоритм.
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Сначала движением по одному и двум рёбрам найди совпадение объектов. Проверяй после движения и сначала защищай fast и fast.next от null.</p></details>
+    <details><summary>Подсказка 2</summary><p>После встречи поставь один указатель в голову. Оба теперь движутся по одному ребру. Следующая встреча — вход в цикл; возвращай узел, а не его value.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Встреча доказывает цикл, но обычно находится глубже входа. Число шагов slow до встречи кратно длине цикла. Поэтому расстояние от головы до входа компенсирует смещение места встречи: сброс одного указателя в голову и равные скорости сводят их во входе.</p>
+
+      <pre><code class="language-java">static Node solve(Node head) {
+    Node slow = head, fast = head;
+    while (fast != null &amp;&amp; fast.next != null) {
+        slow = slow.next; fast = fast.next.next;
+        if (slow == fast) {
+            Node finder = head;
+            while (finder != slow) { finder = finder.next; slow = slow.next; }
+            return finder; // Это сам узел входа, а не его value.
+        }
+    }
+    return null;
+}
+</code></pre>
+      <pre class="out">OK entry=null
+OK entry=null
+OK entry=A
+OK entry=A
+OK entry=B
+OK entry=C
+OK entry=A
+OK entry=null
+OK entry=N2700</pre>
+      <p>O(n) времени по числу различных достижимых узлов, O(1) памяти. Для циклического входа точнее O(μ + λ), для ациклического O(n). Проверки сравнивают результат с ожидаемой ссылкой и отдельно подтверждают неизменность каждого next.</p>
+    </div>
+    <div data-level="senior"><p>Чтобы найти длину цикла, удержи место встречи и обойди один круг до того же объекта, считая переходы. Для задачи «есть ли цикл» второй проход лишний. Здесь структура функциональная: у каждого узла один next; для общего графа с несколькими исходящими рёбрами этого доказательства недостаточно.</p></div>
+  </details>
+</article>
+
+<article class="q" id="merge-disjoint-sorted" data-freq="2" data-type="task">
+  <h3>Слить два отдельных отсортированных списка</h3>
+  <div class="task">
+    <p>Даны две ациклические головы a и b. Значения в каждом списке не убывают; узлы между списками не пересекаются. Всего не более 100 000 узлов. Собери одну отсортированную цепочку, перенаправляя исходные next. При равных значениях узлы первого списка должны идти раньше узлов второго; порядок внутри каждого сохранить. Пустые входы допустимы. Требуется O(m + n) время и O(1) дополнительная память; один dummy разрешён.</p>
+    <pre class="io">A0:1 → A1:3 → A2:5; B0:2 → B1:3 → B2:6
+→ A0:1 → B0:2 → A1:3 → B1:3 → A2:5 → B2:6
+null; X:5 → null  →  тот же X:5 → null</pre>
+    <p class="src"><a href="https://leetcode.com/problems/merge-two-sorted-lists/">LeetCode 21 · easy · добавлены явное владение и порядок равных узлов</a></p>
+    <details><summary>Заготовка: MergeLists.java; запусти java MergeLists.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class MergeLists {
+    static final class Node {
+        final String id; // Имя объекта для трассы; совпадение value не означает один объект.
+        final int value;
+        Node next;
+        Node(String id, int value) { this.id = id; this.value = value; }
+    }
+
+    static Node solve(Node a, Node b) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+    public static void main(String[] args) {
+        test(new int[0], new int[0]);
+        test(new int[0], new int[]{1}, &quot;B0&quot;);
+        test(new int[]{1}, new int[0], &quot;A0&quot;);
+        test(new int[]{1, 3, 5}, new int[]{2, 3, 6}, &quot;A0&quot;, &quot;B0&quot;, &quot;A1&quot;, &quot;B1&quot;, &quot;A2&quot;, &quot;B2&quot;);
+        test(new int[]{2, 2}, new int[]{2, 2}, &quot;A0&quot;, &quot;A1&quot;, &quot;B0&quot;, &quot;B1&quot;);
+        test(new int[]{Integer.MIN_VALUE, Integer.MAX_VALUE}, new int[]{0}, &quot;A0&quot;, &quot;B0&quot;, &quot;A1&quot;);
+        test(new int[]{9}, new int[]{1, 2, 3, 4}, &quot;B0&quot;, &quot;B1&quot;, &quot;B2&quot;, &quot;B3&quot;, &quot;A0&quot;);
+        test(new int[]{-5, -1}, new int[]{-5, 0}, &quot;A0&quot;, &quot;B0&quot;, &quot;A1&quot;, &quot;B1&quot;);
+    }
+
+    static void test(int[] first, int[] second, String... order) {
+        Map&lt;String, Node&gt; original = new HashMap&lt;&gt;();
+        Node a = named(&quot;A&quot;, first, original), b = named(&quot;B&quot;, second, original);
+        if (order.length != original.size()) throw new AssertionError(&quot;incomplete expected order&quot;);
+        Node got = solve(a, b), current = got;
+        for (String label : order) {
+            if (current != original.get(label)) throw new AssertionError(&quot;wrong identity: expected &quot; + label);
+            current = current.next;
+        }
+        if (current != null) throw new AssertionError(&quot;extra nodes or cycle&quot;);
+        System.out.println(&quot;OK &quot; + show(got));
+    }
+
+    static Node named(String prefix, int[] values, Map&lt;String, Node&gt; original) {
+        Node result = null, tail = null;
+        for (int i = 0; i &lt; values.length; i++) {
+            Node n = new Node(prefix + i, values[i]); original.put(n.id, n);
+            if (tail == null) result = n; else tail.next = n;
+            tail = n;
+        }
+        return result;
+    }
+
+    static Node[] nodes(int... values) {
+        Node[] result = new Node[values.length];
+        for (int i = 0; i &lt; values.length; i++) {
+            result[i] = new Node(i &lt; 26 ? String.valueOf((char) (&#x27;A&#x27; + i)) : &quot;N&quot; + i, values[i]);
+            if (i &gt; 0) result[i - 1].next = result[i];
+        }
+        return result;
+    }
+
+    static Node head(Node[] values) { return values.length == 0 ? null : values[0]; }
+    static String id(Node n) { return n == null ? &quot;null&quot; : n.id; }
+
+    static String show(Node n) {
+        List&lt;String&gt; result = new ArrayList&lt;&gt;();
+        Set&lt;Node&gt; seen = Collections.newSetFromMap(new IdentityHashMap&lt;&gt;());
+        while (n != null) {
+            if (!seen.add(n)) { result.add(&quot;cycle(&quot; + n.id + &quot;)&quot;); break; }
+            result.add(n.id + &quot;:&quot; + n.value);
+            n = n.next;
+        }
+        return result.toString(); // Только печать использует O(n) память, не алгоритм.
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Наименьший ещё не выбранный узел — одна из двух текущих голов. Служебная голова позволит присоединять первый узел так же, как все остальные.</p></details>
+    <details><summary>Подсказка 2</summary><p>При a.value ≤ b.value присоединяй a и сдвигай a. Иначе присоединяй b. После каждого выбора двигай tail; после завершения одного входа присоедини второй остаток целиком.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Tail ограничивает уже выбранный отсортированный префикс, головы входов ограничивают остатки. Выбираем минимальную голову, сохраняя порядок, и переставляем ребро предыдущего хвоста. При завершении одного входа весь второй остаток уже подходит.</p>
+
+      <pre><code class="language-java">static Node solve(Node a, Node b) {
+    Node dummy = new Node(&quot;DUMMY&quot;, 0), tail = dummy;
+    while (a != null &amp;&amp; b != null) {
+        if (a.value &lt;= b.value) { tail.next = a; a = a.next; }
+        else { tail.next = b; b = b.next; }
+        tail = tail.next; // Готовый префикс растёт на один исходный узел.
+    }
+    tail.next = a != null ? a : b;
+    return dummy.next;
+}
+</code></pre>
+      <pre class="out">OK []
+OK [B0:1]
+OK [A0:1]
+OK [A0:1, B0:2, A1:3, B1:3, A2:5, B2:6]
+OK [A0:2, A1:2, B0:2, B1:2]
+OK [A0:-2147483648, B0:0, A1:2147483647]
+OK [B0:1, B1:2, B2:3, B3:4, A0:9]
+OK [A0:-5, B0:-5, A1:-1, B1:0]</pre>
+      <p>O(m + n) времени, O(1) дополнительной памяти, включая dummy. Служебный узел не возвращается. Проверки задают ожидаемый порядок исходных объектов, включая равные значения; новые копии с теми же value не пройдут.</p>
+    </div>
+    <div data-level="senior"><p>Слияние изменяет доступные через старые головы пути, поэтому входы нельзя считать прежними независимыми списками. Общий хвост нарушает условие: обычный алгоритм способен создать самопетлю. Если исходные структуры должны сохраниться, копируй узлы; если пересечения допустимы, сначала определи, как должен выглядеть один общий объект в результате.</p></div>
+  </details>
+</article>
+
+<article class="q" id="remove-nth-from-end" data-freq="2" data-type="task">
+  <h3>Удалить n-й узел с конца одним проходом</h3>
+  <div class="task">
+    <p>Дан непустой ациклический список длины L ≤ 100 000 и допустимое n, 1 ≤ n ≤ L. Верни голову цепочки без n-го узла с конца. Остальные исходные узлы и их порядок сохранить, значения не менять. Разрешён один dummy. Требуется O(L) время и O(1) дополнительная память. Удаляемый объект не требуется обнулять или уничтожать.</p>
+    <pre class="io">A:10 → B:20 → C:30 → D:40 → E:50, n=2
+→ A:10 → B:20 → C:30 → E:50
+A:1 → B:2, n=2 → B:2
+S:1, n=1 → null</pre>
+    <p class="src"><a href="https://leetcode.com/problems/remove-nth-node-from-end-of-list/">LeetCode 19 · medium · допустимость n задана условием</a></p>
+    <details><summary>Заготовка: RemoveNth.java; запусти java RemoveNth.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class RemoveNth {
+    static final class Node {
+        final String id; // Имя объекта для трассы; совпадение value не означает один объект.
+        final int value;
+        Node next;
+        Node(String id, int value) { this.id = id; this.value = value; }
+    }
+
+    static Node solve(Node head, int n) {
+        // Напиши решение.
+        throw new UnsupportedOperationException(&quot;TODO&quot;);
+    }
+    public static void main(String[] args) {
+        test(new int[]{1}, 1); test(new int[]{1, 2}, 2); test(new int[]{1, 2}, 1);
+        test(new int[]{10, 20, 30, 40, 50}, 2);
+        test(new int[]{10, 20, 30, 40, 50}, 5);
+        test(new int[]{10, 20, 30, 40, 50}, 1);
+        test(new int[]{7, 7, 7}, 2);
+        test(new int[]{Integer.MIN_VALUE, Integer.MAX_VALUE}, 1);
+    }
+
+    static void test(int[] values, int n) {
+        Node[] input = nodes(values);
+        int removed = values.length - n;
+        Node got = solve(input[0], n), current = got;
+        for (int i = 0; i &lt; input.length; i++) {
+            if (i == removed) continue;
+            if (current != input[i]) throw new AssertionError(&quot;wrong identity at &quot; + i);
+            current = current.next;
+        }
+        if (current != null) throw new AssertionError(&quot;extra nodes or cycle&quot;);
+        System.out.println(&quot;OK &quot; + show(got));
+    }
+
+    static Node[] nodes(int... values) {
+        Node[] result = new Node[values.length];
+        for (int i = 0; i &lt; values.length; i++) {
+            result[i] = new Node(i &lt; 26 ? String.valueOf((char) (&#x27;A&#x27; + i)) : &quot;N&quot; + i, values[i]);
+            if (i &gt; 0) result[i - 1].next = result[i];
+        }
+        return result;
+    }
+
+    static Node head(Node[] values) { return values.length == 0 ? null : values[0]; }
+    static String id(Node n) { return n == null ? &quot;null&quot; : n.id; }
+
+    static String show(Node n) {
+        List&lt;String&gt; result = new ArrayList&lt;&gt;();
+        Set&lt;Node&gt; seen = Collections.newSetFromMap(new IdentityHashMap&lt;&gt;());
+        while (n != null) {
+            if (!seen.add(n)) { result.add(&quot;cycle(&quot; + n.id + &quot;)&quot;); break; }
+            result.add(n.id + &quot;:&quot; + n.value);
+            n = n.next;
+        }
+        return result.toString(); // Только печать использует O(n) память, не алгоритм.
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Чтобы обойти удаляемый узел, нужна ссылка на его предшественника. Dummy даёт такого предшественника даже первой настоящей голове.</p></details>
+    <details><summary>Подсказка 2</summary><p>Начни оба указателя с dummy. Fast сделает n + 1 переходов, затем оба идут по одному до fast == null. Теперь slow.next — удаляемый узел.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <div data-level="middle">
+      <p>Фиксированный отрыв превращает достижение конца одним указателем в известное положение другого. Отрыв n + 1 и остановка на null оставляют slow перед n-м с конца. Одна запись next обходит узел, возврат dummy.next покрывает удаление головы.</p>
+      <figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 254" role="img" aria-label="В DUMMY→A→B→C→D→E→null при n=2 быстрый указатель находится наnull, медленный наC. Между ними три перехода, поэтому следующий после медленного узел D — второй с конца. Удаление перенаправляет C.next в E.">
+      <defs>
+      <marker id="lg-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="lg-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="lg-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">ОТРЫВ n+1 ОСТАВЛЯЕТ slow ПЕРЕД НУЖНЫМ УЗЛОМ</text>
+      <rect x="28" y="96" width="70" height="54" rx="6" class="dg-box"/>
+      <text x="63" y="119" class="dg-in" text-anchor="middle">D₀</text>
+      <text x="63" y="140" class="dg-n" text-anchor="middle">0</text>
+      <path d="M102 123 L128 123" class="dg-line" marker-end="url(#lg-n)"/>
+      <rect x="132" y="96" width="70" height="54" rx="6" class="dg-cell"/>
+      <text x="167" y="119" class="dg-in" text-anchor="middle">A</text>
+      <text x="167" y="140" class="dg-n" text-anchor="middle">10</text>
+      <path d="M206 123 L232 123" class="dg-line" marker-end="url(#lg-n)"/>
+      <rect x="236" y="96" width="70" height="54" rx="6" class="dg-cell"/>
+      <text x="271" y="119" class="dg-in" text-anchor="middle">B</text>
+      <text x="271" y="140" class="dg-n" text-anchor="middle">20</text>
+      <path d="M310 123 L336 123" class="dg-line" marker-end="url(#lg-n)"/>
+      <rect x="340" y="96" width="70" height="54" rx="6" class="dg-cell"/>
+      <text x="375" y="119" class="dg-in" text-anchor="middle">C</text>
+      <text x="375" y="140" class="dg-n" text-anchor="middle">30</text>
+      <path d="M414 123 L440 123" class="dg-line" marker-end="url(#lg-n)"/>
+      <rect x="444" y="96" width="70" height="54" rx="6" class="dg-cell hit"/>
+      <text x="479" y="119" class="dg-in" text-anchor="middle">D</text>
+      <text x="479" y="140" class="dg-n" text-anchor="middle">40</text>
+      <path d="M518 123 L544 123" class="dg-line" marker-end="url(#lg-n)"/>
+      <rect x="548" y="96" width="70" height="54" rx="6" class="dg-cell"/>
+      <text x="583" y="119" class="dg-in" text-anchor="middle">E</text>
+      <text x="583" y="140" class="dg-n" text-anchor="middle">50</text>
+      <path d="M622 123 L662 123" class="dg-line" marker-end="url(#lg-n)"/>
+      <text x="668" y="128" class="dg-n" text-anchor="start">null</text>
+      <text x="375" y="54" class="dg-n" text-anchor="middle">slow</text>
+      <path d="M375 62 L375 92" class="dg-line" marker-end="url(#lg-n)"/>
+      <text x="638" y="54" class="dg-n" text-anchor="start">fast=null</text>
+      <text x="28" y="190" class="dg-in" text-anchor="start">для n=2: C → D → E → null, отрыв в три перехода</text>
+      <text x="28" y="226" class="dg-s" text-anchor="start">slow.next=D: чтобы убрать D, запиши C.next=E</text>
+    </svg>
+  </div>
+  <figcaption>Служебный D₀ отличается от настоящего узла D. Он задаёт предшественника даже тогда, когда удалить нужно голову.</figcaption>
+</figure>
+      <pre><code class="language-java">static Node solve(Node head, int n) {
+    Node dummy = new Node(&quot;DUMMY&quot;, 0); dummy.next = head;
+    Node slow = dummy, fast = dummy;
+    for (int i = 0; i &lt;= n; i++) fast = fast.next; // n+1 переходов, n допустимо по условию.
+    while (fast != null) { slow = slow.next; fast = fast.next; }
+    slow.next = slow.next.next; // slow — предшественник, включая dummy для удаления головы.
+    return dummy.next;
+}
+</code></pre>
+      <pre class="out">OK []
+OK [B:2]
+OK [A:1]
+OK [A:10, B:20, C:30, E:50]
+OK [B:20, C:30, D:40, E:50]
+OK [A:10, B:20, C:30, D:40]
+OK [A:7, C:7]
+OK [A:-2147483648]</pre>
+      <p>O(L) времени, O(1) дополнительной памяти. Для n = L быстрый указатель достигает null уже при создании отрыва, поэтому slow остаётся в dummy. При L = 1 результат null. Проверки требуют все прежние узлы, кроме одного, в исходном порядке.</p>
+    </div>
+    <div data-level="senior"><p>Внешняя ссылка на удаляемый объект остаётся допустимой и может всё ещё вести в его прежний хвост. Удаление из этой цепочки не означает освобождение памяти: достижимость определяется всеми ссылками. Если API принимает произвольное n, вначале проверь положительность и при создании отрыва отвергни выход за длину.</p></div>
+  </details>
+</article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://algs4.cs.princeton.edu/13stacks/">Sedgewick &amp; Wayne, Algorithms, §1.3: Linked Lists</a> — основа урока: узлы, изменение ссылок, голова, хвост и проход по цепочке.</li>
+      <li><a href="https://cp-algorithms.com/others/tortoise_and_hare.html">CP-Algorithms: Floyd’s Linked List Cycle Finding Algorithm</a> — две фазы и доказательство возврата к входу через длину цикла.</li>
+      <li><a href="https://leetcode.com/problems/reverse-linked-list/">LeetCode 206: Reverse Linked List</a> и <a href="https://leetcode.com/problems/linked-list-cycle-ii/">142: Linked List Cycle II</a> — условия разворота и возврата узла входа.</li>
+      <li><a href="https://leetcode.com/problems/merge-two-sorted-lists/">LeetCode 21: Merge Two Sorted Lists</a> и <a href="https://leetcode.com/problems/remove-nth-node-from-end-of-list/">19: Remove Nth Node From End</a> — перенос исходных узлов и задача на отрыв указателей.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/LinkedList.html">JDK 21: LinkedList</a> — двусвязная реализация, проход при доступе по индексу и границы стандартного API.</li>
+    </ul>
+  </div>
+</main>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
