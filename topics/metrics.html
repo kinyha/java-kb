@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Metrics · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="metrics">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Metrics</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Метрика — число во времени с набором меток. Prometheus сам опрашивает сервисы (pull) и хранит ряды; в Java метрики пишут через Micrometer. Типы: counter только растёт и сбрасывается при перезапуске, поэтому его читают через <code>rate()</code>, которая учитывает сброс; gauge — текущее значение; histogram — счётчики по корзинам задержки, из которых <code>histogram_quantile</code> считает перцентиль по всем экземплярам. Перцентили нельзя усреднять: среднее p99 двух экземпляров в демо — 185 мс, а настоящий общий p99 — 313 мс. Каждое уникальное сочетание меток — отдельный ряд: метка с id пользователя дала 1 000 рядов у одного счётчика, а одна гистограмма — 69 рядов корзин на каждое сочетание меток. Число рядов — главная цена метрик.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Средняя задержка на дашборде в норме, а пользователи жалуются</h2>
+      <p>На дашборде сервиса платежей — среднее по экземплярам p99, построенное из перцентилей, которые каждый экземпляр считает сам. Один экземпляр медленный, но получает мало трафика, и среднее выглядит терпимо. После деплоя график общего числа запросов проваливается вниз — счётчики перезапущенных экземпляров начались с нуля. А в прошлом месяце Prometheus упал по памяти: кто-то добавил к метрике метку с номером заказа.</p>
+      <p>Тема разбирает модель Prometheus, типы метрик и то, как их правильно читать и агрегировать. Демо <a href="../examples/metrics/MetricsDemo.java">MetricsDemo.java</a> запускает два экземпляра сервиса со своими реестрами Micrometer 1.15: A — 250 запросов в секунду по ~10 мс, B — 5 в секунду по ~300 мс; на 20-й секунде B перезапускается. Prometheus 3.6 в Docker опрашивает их раз в секунду, итоги снимаются PromQL-запросами к его API. Обзор сигналов — в <a href="observability.html">Observability Overview</a>, SLO и алерты — в <a href="availability.html">Availability &amp; SLO</a>.</p>
+    </section>
+
+    <section class="step" id="model">
+      <h2>Pull-модель и типы метрик</h2>
+<pre><code class="language-java">Timer timer = Timer.builder("http.server.requests").tag("uri", "/payments")
+        .publishPercentileHistogram()           // корзины для histogram_quantile в Prometheus
+        .register(registry);
+timer.record(Duration.ofMillis(10));
+
+// /metrics: текст в формате Prometheus. Prometheus 3 отвергает ответ без Content-Type.
+ex.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+byte[] b = registry.scrape().getBytes(StandardCharsets.UTF_8);</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Prometheus раз в секунду опрашивает /metrics двух экземпляров и сохраняет ряды с метками instance. Запрос PromQL объединяет ряды: rate по счётчику, histogram_quantile по корзинам.">
+            <defs><marker id="mt-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="30" width="170" height="56" rx="9" class="dg-box"/>
+            <text x="105" y="54" class="dg-in" text-anchor="middle">экземпляр A</text>
+            <text x="105" y="72" class="dg-n" text-anchor="middle">/metrics · 250 r/s, 10 мс</text>
+            <rect x="20" y="110" width="170" height="56" rx="9" class="dg-box"/>
+            <text x="105" y="134" class="dg-in" text-anchor="middle">экземпляр B</text>
+            <text x="105" y="152" class="dg-n" text-anchor="middle">/metrics · 5 r/s, 300 мс</text>
+            <rect x="290" y="64" width="150" height="66" rx="9" class="dg-cell"/>
+            <text x="365" y="90" class="dg-in" text-anchor="middle">Prometheus</text>
+            <text x="365" y="110" class="dg-n" text-anchor="middle">ряды по меткам</text>
+            <path data-s="1-" d="M288 84 L 192 60" class="dg-line" marker-end="url(#mt-a)"/>
+            <path data-s="1-" d="M288 112 L 192 136" class="dg-line" marker-end="url(#mt-a)"/>
+            <text data-s="1-" x="240" y="56" class="dg-n" text-anchor="middle">GET 1/с</text>
+            <rect data-s="2" x="500" y="40" width="200" height="40" rx="8" class="dg-box"/>
+            <text data-s="2" x="600" y="65" class="dg-in" text-anchor="middle">rate(count[20s])</text>
+            <rect data-s="2" x="500" y="114" width="200" height="40" rx="8" class="dg-box"/>
+            <text data-s="2" x="600" y="139" class="dg-in" text-anchor="middle">histogram_quantile</text>
+            <path data-s="2" d="M440 86 L 498 62" class="dg-line" marker-end="url(#mt-a)"/>
+            <path data-s="2" d="M440 108 L 498 132" class="dg-line" marker-end="url(#mt-a)"/>
+            <text data-s="1" x="20" y="192" class="dg-t">Prometheus сам приходит за метриками; сервис только отдаёт текущие значения.</text>
+            <text data-s="2" x="20" y="192" class="dg-t">Запросы PromQL считают скорость и перцентили по сохранённым рядам.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Каждый экземпляр держит в памяти текущие значения метрик и отдаёт их по /metrics. Prometheus по расписанию приходит за ними и добавляет к каждому ряду метку <code>instance</code>. Не пришёл ответ — метрика <code>up</code> становится 0, и это само по себе сигнал.</li>
+          <li>Вычисления делает Prometheus по сохранённым рядам: скорость счётчика, перцентиль по корзинам, сумма по экземплярам. Сервису не нужно знать, как его метрики будут агрегировать.</li>
+        </ol>
+      </figure>
+      <table class="mx">
+        <thead><tr><th>Тип</th><th>Что хранит</th><th>Как читать</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td>Counter</td><td>Только растёт, сброс при перезапуске</td><td><code>rate()</code>, <code>increase()</code>, никогда — сырое значение</td><td>Запросы, ошибки, отправленные письма</td></tr>
+          <tr><td>Gauge</td><td>Текущее значение, растёт и падает</td><td>Как есть, <code>max_over_time</code></td><td>Размер очереди, занятые соединения, heap</td></tr>
+          <tr><td>Histogram</td><td>Счётчики по корзинам, сумма и количество</td><td><code>histogram_quantile</code> по <code>rate</code> корзин</td><td>Задержка, размер ответа</td></tr>
+          <tr><td>Summary</td><td>Перцентили, посчитанные в процессе</td><td>Только по одному экземпляру</td><td>Когда агрегация не нужна</td></tr>
+        </tbody>
+      </table>
+      <p>Pull-модель удобна тем, что Prometheus сам знает, кого опрашивать (обнаружение целей через Kubernetes), и отличает «сервис молчит» от «сервис мёртв». Для коротких задач, которые не доживут до опроса, есть Pushgateway или отправка по OTLP. Prometheus 3 строже к формату: при первом прогоне демо обе цели были в состоянии down с ошибкой «non-compliant scrape target sending blank Content-Type» — самописный обработчик не выставлял заголовок. Spring Boot Actuator и библиотеки Prometheus выставляют его сами.</p>
+    </section>
+
+    <section class="step" id="counters">
+      <h2>Счётчик сбрасывается при перезапуске, rate это учитывает</h2>
+      <pre class="out">== counter reset when B restarted
+   raw counter of B now         b=100
+   resets of B in 45 s          b=1
+   increase of B over 40 s      b=189</pre>
+      <p>Экземпляр B за 40 секунд обработал 200 запросов, но на 20-й секунде перезапустился, и его счётчик начался заново — сейчас он показывает 100. График сырого значения провалился бы в момент перезапуска, а сумма сырых счётчиков по экземплярам после деплоя уменьшилась бы. <code>resets()</code> нашла один сброс, а <code>increase()</code> за 40 секунд — 189: функция замечает, что значение уменьшилось, считает это сбросом и продолжает суммировать прирост. Не ровно 200, потому что <code>rate</code> и <code>increase</code> экстраполируют по точкам опроса внутри окна. Поэтому счётчики всегда читают через <code>rate</code> или <code>increase</code>, а окно делают не меньше нескольких интервалов опроса.</p>
+    </section>
+
+    <section class="step" id="histograms">
+      <h2>Перцентили не усредняют — их считают по объединённым корзинам</h2>
+      <pre class="out">== PromQL over the last 20 s
+   requests/s by instance       a=224  b=4.525
+   p99 from merged histograms   0.313
+   p99 of each instance         a=0.013  b=0.357
+   avg of per-instance p99      0.185</pre>
+<pre><code class="language-promql">histogram_quantile(0.99, sum by (le) (rate(http_server_requests_seconds_bucket[20s])))           # верно
+avg(histogram_quantile(0.99, sum by (instance, le) (rate(http_server_requests_seconds_bucket[20s]))))  # неверно</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Корзины гистограмм за 20 секунд. У A около 4480 запросов не дольше 13 миллисекунд. У B около 90 запросов в корзине от 268 до 358 миллисекунд. Сумма — 4570 запросов; 99-й процент — 4525-й, он попадает в корзину B на её середину, и линейная интерполяция даёт 313 миллисекунд.">
+            <text x="20" y="22" class="dg-cap">ЗАПРОСЫ ЗА 20 С ПО КОРЗИНАМ ЗАДЕРЖКИ</text>
+            <text x="20" y="62" class="dg-in">A</text>
+            <text x="20" y="112" class="dg-in">B</text>
+            <text x="20" y="162" class="dg-in">A + B</text>
+            <rect x="60" y="44" width="460" height="28" rx="4" class="dg-cell hit"/>
+            <text x="290" y="63" class="dg-in" text-anchor="middle">≈ 4 480 запросов, корзины до 13 мс</text>
+            <rect data-s="2-" x="530" y="94" width="160" height="28" rx="4" class="dg-cell miss"/>
+            <text data-s="2-" x="610" y="113" class="dg-in" text-anchor="middle">≈ 90 в (268, 358] мс</text>
+            <rect data-s="3" x="60" y="144" width="460" height="28" rx="4" class="dg-cell hit"/>
+            <rect data-s="3" x="530" y="144" width="160" height="28" rx="4" class="dg-cell miss"/>
+            <path data-s="3" d="M610 136 L 610 180" class="dg-line bad" style="stroke-width:2"/>
+            <text data-s="3" x="600" y="196" class="dg-bad" text-anchor="end">4 525-й запрос: 268 + 45/90 × 90 ≈ 313 мс</text>
+            <text data-s="1" x="20" y="200" class="dg-t">Быстрый экземпляр: все запросы в нижних корзинах.</text>
+            <text data-s="2" x="20" y="200" class="dg-t">Медленный: 2 % общего трафика, все в одной корзине около 300 мс.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>У экземпляра A за окно около 4 480 запросов, все в корзинах до 13 мс. Корзины накопительные: каждая считает запросы не дольше своей границы <code>le</code>.</li>
+          <li>У B около 90 запросов, все в корзине (268, 358] мс — так легли границы Micrometer вокруг 300 мс.</li>
+          <li>Корзины складываются по одинаковым границам. 99 % от 4 570 — 4 525-й запрос: первые 4 480 — быстрые, значит, искомый — 45-й из 90 в корзине B. <code>histogram_quantile</code> считает запросы распределёнными внутри корзины равномерно: 268 + 0,5 × 90 ≈ 313 мс — ровно то, что вернул Prometheus.</li>
+        </ol>
+      </figure>
+      <p>Из всех запросов 2 % — медленные запросы B. Значит, каждый сотый запрос пользователя — около 300 мс, и правильный p99 по объединённым корзинам — 313 мс. p99 каждого экземпляра — 13 мс у A и 357 мс у B, их среднее — 185 мс: такой задержки нет ни у одного запроса, и она на 40 % ниже настоящей. Среднее перцентилей не учитывает, сколько запросов за каждым стоит. Корзины же — счётчики, их можно складывать между экземплярами, и <code>histogram_quantile</code> считает перцентиль по общему распределению. Поэтому для задержки используют гистограммы, а summary — перцентили, посчитанные в процессе, — годятся только для одного экземпляра. В Micrometer 1.15 с включённой гистограммой реестр Prometheus и не отдаёт перцентили, посчитанные в процессе.</p>
+      <p>Скорость A — 224 в секунду вместо 250, потому что в 20-секундное окно попали 2,5 секунды после остановки нагрузки. А p99 у B — 357 мс при реальных 290–310: <code>histogram_quantile</code> предполагает равномерное распределение внутри корзины и интерполирует между её границами. Точность ограничена шириной корзин, поэтому их границы подбирают под SLO: если цель «p99 &lt; 300 мс», нужна граница ровно на 300 мс.</p>
+      <p>Prometheus 3 поддерживает и нативные гистограммы: корзины с экспоненциальными границами, которые хранятся одним рядом, а не рядом на корзину. Они точнее и дешевле по кардинальности, но требуют поддержки в клиенте и формате обмена; классические гистограммы с метками <code>le</code> по-прежнему самый совместимый вариант.</p>
+    </section>
+
+    <section class="step" id="cardinality">
+      <h2>Кардинальность: каждое сочетание меток — отдельный ряд</h2>
+      <pre class="out">== series count
+   orders{user_id=...} series   1000
+   buckets of one timer         69</pre>
+      <p>Счётчик заказов с меткой <code>user_id</code> для 1 000 пользователей — 1 000 рядов, для миллиона — миллион, и каждый ряд Prometheus держит в памяти. Гистограмма Micrometer по умолчанию — 69 рядов корзин на каждое сочетание меток, и метки перемножаются: 69 корзин × 20 URI × 5 кодов ответа × 3 метода × 30 экземпляров — уже 621 000 рядов у одной метрики. Правило: в метки кладут только ограниченные наборы значений — шаблон URI (<code>/orders/{id}</code>, а не <code>/orders/42</code>), класс кода ответа, имя метода. Идентификаторы пользователей, заказов, запросов — в логи и трассы. Корзины ограничивают через <code>serviceLevelObjectives</code> или <code>minimumExpectedValue</code> и <code>maximumExpectedValue</code>.</p>
+      <p>Что собирать: для сервисов — RED (rate, errors, duration) по каждому эндпоинту и вызову зависимостей; для ресурсов — USE (utilization, saturation, errors): пулы соединений, очереди, потоки. Micrometer в Spring Boot сразу отдаёт метрики JVM — heap, паузы GC, потоки, — HTTP-сервера, HikariCP и клиентов. Grafana строит дашборды по PromQL, а алерты строят по SLO и скорости сжигания бюджета, как в <a href="incidents.html">Alerting &amp; Incidents</a>.</p>
+      <div class="trap">
+        <p class="myth">Общий p99 сервиса — это среднее p99 его экземпляров.</p>
+        <p class="fact">Среднее перцентилей не учитывает, сколько запросов обработал каждый экземпляр. В демо среднее p99 — 185 мс, а p99 по объединённым корзинам гистограмм — 313 мс. Перцентили по нескольким экземплярам считают только из гистограмм.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Prometheus опрашивает /metrics (pull); Prometheus 3 требует Content-Type, иначе цель down.</li>
+        <li>Counter читают через rate/increase: B перезапустился, сырой счётчик 100, resets 1, increase за 40 с — 189.</li>
+        <li>Перцентили считают histogram_quantile по сумме корзин: 313 мс; среднее p99 экземпляров — неверные 185 мс.</li>
+        <li>Точность перцентиля — ширина корзины: B показал 357 мс при реальных ~300; границы — под SLO.</li>
+        <li>Кардинальность: метка user_id — 1 000 рядов, гистограмма — 69 рядов на сочетание меток; идентификаторы — в логи.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="mt-types" data-freq="3">
+      <h3>Какие типы метрик есть в Prometheus и как их читать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Counter — только растёт, сбрасывается при перезапуске; читают через rate или increase. Gauge — текущее значение, растёт и падает. Histogram — счётчики по корзинам значений, из них histogram_quantile считает перцентили, и их можно агрегировать по экземплярам. Summary — перцентили, посчитанные в процессе, не агрегируются.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>rate учитывает сбросы счётчика и экстраполирует внутри окна.</li>
+            <li>Точность histogram_quantile — ширина корзины; границы подбирают под SLO.</li>
+            <li>Pull-модель: up=0 — отдельный сигнал отказа.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="mt-cardinality" data-freq="2">
+      <h3>Что такое кардинальность метрик и почему она опасна?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Число уникальных сочетаний меток — каждое становится отдельным рядом, который Prometheus хранит в памяти. Метка с неограниченными значениями (id пользователя, заказа, полный путь с параметрами) создаёт миллионы рядов и роняет систему мониторинга. В метки кладут только ограниченные наборы: шаблон пути, класс статуса, метод.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Метки перемножаются, гистограмма умножает ещё на число корзин.</li>
+            <li>Идентификаторы — в логи и трассы, связь с метриками — через exemplars.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой метрикой?</summary>
+          <pre><code class="language-java">Timer.builder("payment.duration")
+     .tag("path", request.getRequestURI())        // /payments/81723/confirm
+     .tag("user", userId)
+     .tag("status", String.valueOf(code))
+     .publishPercentiles(0.5, 0.99)
+     .register(registry)
+     .record(elapsed);</code></pre>
+          <p>Путь с идентификатором платежа и id пользователя дают новый ряд почти на каждый запрос — неограниченная кардинальность. Перцентили, посчитанные в процессе, нельзя агрегировать по экземплярам. Нужно: шаблон пути (<code>/payments/{id}/confirm</code>), без user, статус как класс или код, <code>publishPercentileHistogram()</code> с границами под SLO, а идентификаторы — в логи и трассы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="mt-red" data-freq="2">
+      <h3>Какие метрики собирать для сервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>RED для каждого эндпоинта и каждой зависимости: скорость запросов, доля ошибок, распределение задержки гистограммой. USE для ресурсов: загрузка, насыщение, ошибки — пулы соединений, потоки, очереди, CPU и память. Метрики JVM: heap, паузы GC, потоки. Бизнес-метрики: успешные платежи в минуту.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Насыщение пулов и очередей предупреждает раньше, чем растут ошибки.</li>
+            <li>Алерты — по SLO и скорости сжигания бюджета, а не по каждому графику.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://prometheus.io/docs/concepts/metric_types/">Prometheus: Metric types</a>, <a href="https://prometheus.io/docs/practices/histograms/">Histograms and summaries</a>.</li>
+      <li><a href="https://prometheus.io/docs/prometheus/latest/querying/functions/">PromQL functions</a> — rate, increase, resets, histogram_quantile.</li>
+      <li><a href="https://docs.micrometer.io/micrometer/reference/concepts/histogram-quantiles.html">Micrometer: Histograms and percentiles</a>.</li>
+      <li>Brendan Gregg, «The USE Method»; Tom Wilkie, «The RED Method».</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -611,7 +611,7 @@ window.KB_TREE = [
       { id: 'run', title: 'Observability', source: 'Google SRE Book: Monitoring Distributed Systems; OpenTelemetry Documentation', items: [
         { id: 'observability', freq: 3, status: 'draft', title: 'Overview',
           scope: 'логи, метрики и трейсы, централизованные логи, correlation id, golden signals' },
-        { id: 'metrics', freq: 2, status: 'empty', title: 'Metrics',
+        { id: 'metrics', freq: 2, status: 'draft', title: 'Metrics',
           scope: 'Prometheus и pull-модель, counter, gauge и histogram, RED и USE, Grafana' },
         { id: 'tracing', freq: 2, status: 'empty', title: 'Tracing',
           scope: 'OpenTelemetry, span и trace, передача контекста между сервисами, sampling' },
