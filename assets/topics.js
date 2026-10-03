@@ -37,7 +37,7 @@ window.KB_TREE = [
               scope: 'partition, выбор pivot, повторы и трёхстороннее разбиение, худший случай, стек, quickselect' },
             { id: 'heap-sort', freq: 1, status: 'draft', title: 'Heap Sort',
               scope: 'max-heap, sift-down, линейный heapify, отсортированный суффикс, O(n log n) и O(1) памяти' },
-            { id: 'java-sorting', freq: 2, status: 'empty', title: 'Sorting in Java',
+            { id: 'java-sorting', freq: 2, status: 'draft', title: 'Sorting in Java',
               scope: 'Arrays.sort и List.sort, TimSort, dual-pivot quicksort, стабильность, Comparator, parallelSort' },
           ],
         },

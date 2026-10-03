@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sorting in Java · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="java-sorting">
+<main class="page">
+  <header class="topic-head"><h1>Sorting in Java</h1></header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сортировка в Java начинается с двух решений: какой порядок нужен и какие данные можно менять. Стабильность сохраняет входной порядок равных элементов, а второй ключ задаёт порядок между ними. Затем имеет смысл выбирать реализацию: сортировка объектов учитывает уже упорядоченные участки, примитивы идут другим путём, а параллельная сортировка расходует память и общий пул потоков. Имена алгоритмов объясняют цену операции; требуемый результат задают API и компаратор.</p>
+    </div>
+
+    <section class="step" id="mutation">
+      <h2>Сортируя представление массива, сервис меняет сам массив</h2>
+      <p>Сервис сверки получил платежи в порядке поступления. Для отчёта суммы нужны по возрастанию, а журнал должен сохранить исходный порядок. Разработчик оборачивает массив в <code>Arrays.asList</code> и сортирует «список для отчёта». После этого порядок в журнале тоже меняется. У массива и списка общее хранилище элементов.</p>
+      <p>Примеры этого и следующих шагов — фрагменты <a href="../examples/java-sorting/SortingDemo.java">SortingDemo.java</a>. Запуск: <code>java examples/java-sorting/SortingDemo.java</code> на JDK 21. Платёж хранит сумму в целых единицах; буква — его идентификатор. Ниже общая обвязка, чтобы по выводу было видно, какие платежи переставились.</p>
+      <pre><code class="language-java">record Payment(String id, int amount) {
+    @Override public String toString() { return id + ":" + amount; }
+}
+static Payment[] fixture() {
+    return new Payment[]{new Payment("C", 200), new Payment("A", 100),
+            new Payment("B", 200), new Payment("D", 100)};
+}
+static void report(String name, Runnable operation) {
+    try { operation.run(); }
+    catch (RuntimeException e) {
+        System.out.println(name + ": " + e.getClass().getSimpleName());
+    }
+}
+
+var byAmount = Comparator.comparingInt(Payment::amount);
+Payment[] original = fixture();
+List&lt;Payment&gt; view = Arrays.asList(original); // Хранит переданный массив.
+view.sort(byAmount);                        // Переставляет его элементы.
+System.out.println("array after view.sort: " + Arrays.toString(original));
+report("view.add", () -&gt; view.add(new Payment("E", 50)));
+
+List&lt;Payment&gt; immutable = List.of(fixture()); // Этот список менять нельзя.
+report("List.of.sort", () -&gt; immutable.sort(byAmount));
+List&lt;Payment&gt; copy = new ArrayList&lt;&gt;(immutable); // Копия набора ссылок.
+copy.sort(byAmount);
+System.out.println("sorted copy: " + copy);
+System.out.println("original list: " + immutable);</code></pre>
+      <pre class="out">array after view.sort: [A:100, D:100, C:200, B:200]
+view.add: UnsupportedOperationException
+List.of.sort: UnsupportedOperationException
+sorted copy: [A:100, D:100, C:200, B:200]
+original list: [C:200, A:100, B:200, D:100]</pre>
+      <p>Фиксированный размер и запрет изменений — разные свойства. <code>Arrays.asList</code> допускает замену элементов и сортировку, но не добавление нового слота. <code>List.of</code> запрещает и перестановку. Метод <code>List.sort</code> требует возможности заменять элементы; увеличивать размер ему не нужно.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 290" role="img" aria-label="Сверху список Arrays.asList ссылается на исходный массив; сортировка списка переставляет A, D, C и B в этом же массиве. Снизу исходный List.of хранит C, A, B и D, а отдельный ArrayList хранит A, D, C и B: копирование отделило слоты, но не создало новые объекты платежей.">
+            <defs><marker id="js-view-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="46" width="180" height="44" rx="7" class="dg-box"/>
+            <rect x="300" y="46" width="380" height="44" rx="7" class="dg-box"/>
+            <rect x="314" y="55" width="82" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="404" y="55" width="82" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="494" y="55" width="82" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="584" y="55" width="82" height="26" rx="4" class="dg-cell hit"/>
+            <path d="M200 68 L296 68" class="dg-line" marker-end="url(#js-view-arrow)"/>
+            <path d="M20 125 L700 125" class="dg-sep"/>
+            <rect x="20" y="162" width="250" height="94" rx="7" class="dg-box"/>
+            <rect x="430" y="162" width="250" height="94" rx="7" class="dg-box"/>
+            <g class="dg-cell">
+              <rect x="34" y="211" width="50" height="30" rx="4"/><rect x="91" y="211" width="50" height="30" rx="4"/><rect x="148" y="211" width="50" height="30" rx="4"/><rect x="205" y="211" width="50" height="30" rx="4"/>
+              <rect x="444" y="211" width="50" height="30" rx="4"/><rect x="501" y="211" width="50" height="30" rx="4"/><rect x="558" y="211" width="50" height="30" rx="4"/><rect x="615" y="211" width="50" height="30" rx="4"/>
+            </g>
+            <path d="M270 193 L426 193" class="dg-line" marker-end="url(#js-view-arrow)"/>
+            <text x="20" y="26" class="dg-cap">ОБЩИЕ СЛОТЫ</text>
+            <text x="110" y="73" class="dg-in" text-anchor="middle">Arrays.asList</text>
+            <text x="212" y="48" class="dg-n">тот же массив</text>
+            <g class="dg-in" text-anchor="middle"><text x="355" y="73">A:100</text><text x="445" y="73">D:100</text><text x="535" y="73">C:200</text><text x="625" y="73">B:200</text></g>
+            <text x="300" y="111" class="dg-s">original после view.sort()</text>
+            <text x="20" y="148" class="dg-cap">ОТДЕЛЬНЫЕ СЛОТЫ</text>
+            <text x="34" y="186" class="dg-in">List.of: исходный</text>
+            <text x="444" y="186" class="dg-in">ArrayList: сортируем</text>
+            <text x="290" y="180" class="dg-n">копия ссылок</text>
+            <g class="dg-in" text-anchor="middle"><text x="59" y="231">C</text><text x="116" y="231">A</text><text x="173" y="231">B</text><text x="230" y="231">D</text><text x="469" y="231">A</text><text x="526" y="231">D</text><text x="583" y="231">C</text><text x="640" y="231">B</text></g>
+            <text x="20" y="276" class="dg-s">Перестановка копии не меняет порядок исходного списка.</text>
+          </svg>
+        </div>
+        <figcaption>Копия списка отделяет его слоты. Объекты Payment остаются общими; изменение полей изменяемого платежа было бы видно из обеих коллекций.</figcaption>
+      </figure>
+      <p>В демо платежи — неизменяемые <code>record</code>, поэтому поверхностной копии достаточно. Для общего изменяемого списка сама операция копирования тоже требует согласованного чтения: <code>new ArrayList&lt;&gt;(shared)</code> не создаёт атомарный снимок, если другой поток одновременно меняет <code>shared</code>.</p>
+      <h3>Диапазон задаётся правой границей, которая не входит в сортировку</h3>
+      <pre><code class="language-java">int[] amounts = {999, 3, 1, 2, -999};
+Arrays.sort(amounts, 1, 4); // Сортируются индексы 1, 2, 3. Края сохраняются.
+System.out.println("range: " + Arrays.toString(amounts));
+report("from&gt;to", () -&gt; Arrays.sort(amounts, 4, 1));
+report("from&lt;0", () -&gt; Arrays.sort(amounts, -1, 2));</code></pre>
+      <pre class="out">range: [999, 1, 2, 3, -999]
+from&gt;to: IllegalArgumentException
+from&lt;0: ArrayIndexOutOfBoundsException</pre>
+      <p>Для <code>sort(a, from, to)</code> диапазон — <code>[from, to)</code>. Пустой корректный диапазон допустим, <code>to == a.length</code> тоже допустимо. Отрицательная граница или граница за массивом — ошибка индекса. Обратный диапазон — ошибка аргументов. Такой интерфейс позволяет сортировать страницу внутри буфера, не трогая служебные элементы по краям.</p>
+    </section>
+
+    <section class="step" id="ordering">
+      <h2>Стабильность сохраняет входной порядок, а второй ключ задаёт новый</h2>
+      <p>В отчёте суммы <code>100</code> должны идти раньше <code>200</code>. Этого правила недостаточно, чтобы решить, какой из двух платежей по <code>200</code> показывать первым. Для компаратора по сумме платежи <code>C</code> и <code>B</code> равны. Стабильная сортировка оставит их в порядке поступления: сначала <code>C</code>. Сортировка по сумме и идентификатору поставит сначала <code>B</code>.</p>
+      <pre><code class="language-java">var byAmount = Comparator.comparingInt(Payment::amount);
+Payment[] a = fixture(); // C:200, A:100, B:200, D:100.
+Arrays.sort(a, byAmount); // compare(C, B) == 0; сохраняем их входной порядок.
+System.out.println("stable: " + Arrays.toString(a));
+a = fixture();
+Arrays.sort(a, byAmount.thenComparing(Payment::id)); // Сначала сумма, затем id.
+System.out.println("tie key: " + Arrays.toString(a));</code></pre>
+      <pre class="out">stable: [A:100, D:100, C:200, B:200]
+tie key: [A:100, D:100, B:200, C:200]</pre>
+      <p><b>Равенство здесь означает <code>compare(x, y) == 0</code></b>, а не <code>x.equals(y)</code>. Наши <code>C:200</code> и <code>B:200</code> — разные записи и разные платежи, но по первому компаратору равны. Стабильность — гарантия объектных <code>Arrays.sort</code> и <code>List.sort</code>. Она полезна при нескольких последовательных сортировках: сначала по младшему ключу, затем стабильной сортировкой по старшему. Одна цепочка <code>thenComparing</code> обычно яснее и делает меньше проходов.</p>
+      <p>Если входной порядок случайный, стабильный результат тоже будет зависеть от этого случая. Например, SQL-запрос без <code>ORDER BY</code> не задаёт порядок равных сумм. Для повторяемой выгрузки сервису нужен явный последний ключ, обычно уникальный <code>id</code>. Для сортировки событий по времени сначала задают <code>createdAt</code>, а <code>id</code> добавляют при совпадении времени. Стабильность сама не превращает входной список в хронологию.</p>
+      <h3>Компаратор задаёт согласованный порядок на всех данных</h3>
+      <p>Знак результата сравнения говорит «раньше», «равен» или «позже». Величина результата не важна. Сравнение должно менять знак при перестановке аргументов и быть транзитивным: если <code>a &lt; b</code> и <code>b &lt; c</code>, то <code>a &lt; c</code>. Для равных по компаратору элементов сравнение с любым третьим должно иметь одинаковый знак. Иначе алгоритм не может построить согласованный отсортированный ряд.</p>
+      <pre><code class="language-java">report("natural Payment", () -&gt; Arrays.sort(fixture())); // У record нет Comparable.
+System.out.println("subtract MAX-(-1): " + (Integer.MAX_VALUE - (-1)));
+System.out.println("compare MAX,-1: " + Integer.compare(Integer.MAX_VALUE, -1));
+// (x, y) -&gt; x.amount() - y.amount() может переполниться.
+// comparingInt(Payment::amount) сравнивает int без вычитания.</code></pre>
+      <pre class="out">natural Payment: ClassCastException
+subtract MAX-(-1): -2147483648
+compare MAX,-1: 1</pre>
+      <p>Переполнение разворачивает порядок: максимальное положительное число вдруг оказывается меньше <code>-1</code>. Для <code>long</code> опасно ещё и приводить разность к <code>int</code>. Используй <code>Integer.compare</code>, <code>Long.compare</code> или <code>comparingInt/comparingLong</code>. Естественный порядок появляется только у типов с <code>Comparable</code>; объявление <code>record</code> его автоматически не создаёт.</p>
+      <div class="note warn"><p>Компаратор по статусу, который читает меняющийся объект или текущее время, может давать разные ответы для одной пары. Сортировка может обнаружить часть нарушений и бросить <code>IllegalArgumentException</code>, но это лишь частичная диагностика. Исключение — полезный симптом, успешный запуск — слабое доказательство корректности компаратора. Нужные для сравнения поля лучше зафиксировать до сортировки.</p></div>
+    </section>
+
+    <section class="step" id="algorithms">
+      <h2>Объекты и примитивы сортируются разными способами</h2>
+      <p>Объект хранит не только ключ, но и остальные данные платежа. Его положение среди равных ключей может иметь смысл, поэтому объектный API гарантирует стабильность. У двух одинаковых значений <code>int</code> нет различимого идентификатора: перестановку равных значений наблюдать нельзя. Для них JDK может выбрать иной алгоритм и иной расход памяти.</p>
+      <table class="mx">
+        <thead><tr><th>Вызов</th><th>Что делает JDK 21</th><th>Что учитывать</th></tr></thead>
+        <tbody>
+          <tr><td><code>Arrays.sort(Payment[], cmp)</code></td><td>В обычном режиме TimSort: распознаёт упорядоченные участки и сливает их.</td><td>Стабильный результат; временный буфер ссылок.</td></tr>
+          <tr><td><code>Arrays.sort(int[])</code></td><td>Гибрид в <code>DualPivotQuicksort</code>: разделение, вставки, распознавание серий; при глубокой рекурсии — Heap Sort.</td><td>Назвать только «два опорных элемента» недостаточно для оценки всех входов.</td></tr>
+          <tr><td><code>Arrays.sort(byte[])</code></td><td>На достаточно большом массиве сортировка подсчётом; на маленьком — вставками.</td><td>Для всех примитивов нельзя обещать один алгоритм.</td></tr>
+          <tr><td><code>ArrayList.sort(cmp)</code></td><td>Передаёт занятую часть внутреннего массива в <code>Arrays.sort</code>.</td><td>Переставляет ссылки прямо внутри списка.</td></tr>
+          <tr><td>Метод по умолчанию <code>List.sort(cmp)</code></td><td>Копирует элементы в массив, сортирует, записывает обратно через итератор.</td><td>Подходит и связному списку; не обходит его по индексам на каждом сравнении.</td></tr>
+        </tbody>
+      </table>
+      <p>Это устройство OpenJDK 21, а не обязательные для всех будущих JDK имена алгоритмов. Выбирать по API стоит гарантии порядка, изменения данных и допустимости <code>null</code>. Обсуждать стоимость реализации — с названием версии. Не превращай знание <code>TimSort</code> в обещание, что любой сторонний <code>List</code> использует его: реализация списка может переопределить <code>sort</code>.</p>
+      <h3>TimSort использует порядок, который уже есть</h3>
+      <p>При последовательном просмотре TimSort ищет <b>серии</b>: участки по возрастанию или строго по убыванию. Убывающую серию разворачивает, короткую достраивает вставками. Полученные отсортированные серии складывает в стек и постепенно сливает. На случайных данных приходится работать со многими сериями. Полностью отсортированный массив уже является одной серией: сортировка почти целиком превращается в проверку соседей.</p>
+      <pre><code class="language-java">Integer[] ascending = new Integer[128], descendingValues = new Integer[128];
+for (int i = 0; i &lt; 128; i++) {
+    ascending[i] = i;
+    descendingValues[i] = 127 - i;
+}
+long[] count = {0};
+Comparator&lt;Integer&gt; counted = (x, y) -&gt; {
+    count[0]++; // Последовательный вызов: считаем обращения к компаратору.
+    return Integer.compare(x, y);
+};
+Arrays.sort(ascending, counted);
+System.out.println("ascending: " + count[0]);
+count[0] = 0;
+Arrays.sort(descendingValues, counted);
+System.out.println("descending: " + count[0]);</code></pre>
+      <pre class="out">ascending: 127
+descending: 127</pre>
+      <p>Для <code>128</code> элементов достаточно <code>127</code> сравнений соседей, чтобы распознать одну серию. На убывающем массиве после этого переставляются ссылки, но дополнительные вызовы компаратора не нужны. Это наблюдение о работе алгоритма, а не измерение скорости в наносекундах.</p>
+      <details class="deep">
+        <summary>Почему разворачивают только строго убывающую серию</summary>
+        <p>Если развернуть <code>[C:200, B:200, A:100]</code> целиком, равные <code>C</code> и <code>B</code> поменяются местами. Это нарушило бы стабильность. Поэтому в возрастающую серию входят равные соседние элементы, а убывающая серия требует строгого уменьшения. При слиянии равных ключей раньше берётся элемент из более ранней серии.</p>
+        <p>Для слияния TimSort копирует меньшую из двух серий во временный буфер. Когда одна серия долго выигрывает сравнения, режим «галопирования» ищет границу сразу для нескольких элементов, вместо попеременного сравнения каждого. Правила стека удерживают размеры серий в таком соотношении, чтобы не сливать большую серию с крошечными снова и снова. В худшем случае работа занимает <code>O(n log n)</code>, временное хранилище может дойти примерно до <code>n/2</code> ссылок; на удачных входах расход меньше.</p>
+      </details>
+      <details class="deep">
+        <summary>Почему Arrays.sort(int[]) нельзя приравнять к учебному Quick Sort</summary>
+        <p>Учебная сортировка с последним опорным элементом может уйти в <code>O(n²)</code> на упорядоченном входе. В OpenJDK 21 <code>DualPivotQuicksort</code> выбирает ветви по размеру, распределению и глубине работы. Маленькие участки сортирует вставками, подходящие серии может сливать, а чрезмерную глубину прерывает Heap Sort. Схему одного разделения смотри в <a href="quick-sort.html">Quick Sort</a>, построение кучи — в <a href="heap-sort.html">Heap Sort</a>.</p>
+        <p>Даже примитивная сортировка JDK не означает «только перестановки и O(1) дополнительной памяти на любом входе»: некоторые ветви используют буфер для слияния. Для <code>byte</code>, <code>short</code> и <code>char</code> конечный диапазон значений позволяет применять подсчёт. Граница выбора — деталь реализации, которую не стоит переносить с одного типа массива на другой.</p>
+      </details>
+    </section>
+
+    <section class="step" id="direction">
+      <h2>reversed разворачивает ровно тот порядок, который уже собран</h2>
+      <p>Отчёт требует суммы по убыванию, идентификаторы по возрастанию, отсутствующие платежи в конце. Здесь три отдельных правила. Если собрать их все, а потом вызвать <code>reversed()</code>, развернутся все три: идентификаторы тоже пойдут по убыванию, а <code>null</code> переедет в начало.</p>
+      <pre><code class="language-java">var byAmount = Comparator.comparingInt(Payment::amount);
+Comparator&lt;Payment&gt; descending = Comparator.nullsLast(
+        byAmount.reversed().thenComparing(Payment::id)); // Развернули только сумму.
+Payment[] nullable = {new Payment("B", 100), null,
+        new Payment("A", 100), new Payment("C", 200)};
+Arrays.sort(nullable, descending);
+System.out.println("amount desc, id asc, null last: " + Arrays.toString(nullable));
+
+Arrays.sort(nullable,
+        Comparator.nullsLast(byAmount.thenComparing(Payment::id)).reversed());
+System.out.println("whole comparator reversed: " + Arrays.toString(nullable));</code></pre>
+      <pre class="out">amount desc, id asc, null last: [C:200, A:100, B:100, null]
+whole comparator reversed: [null, C:200, B:100, A:100]</pre>
+      <p><code>nullsLast</code> сравнивает отсутствие объекта раньше, чем вызывает внутренний компаратор. Поэтому <code>Payment::amount</code> получает только реальные платежи. Если объект есть, но может отсутствовать его поле, обёртка нужна на уровне поля: например, <code>comparing(Payment::id, nullsLast(naturalOrder()))</code>. Обёртка всего объекта не защитит от <code>null</code> внутри <code>id</code>.</p>
+      <p>Сортировка не очищает данные. Без подходящей обёртки естественный порядок или извлечение поля из <code>null</code> может дать <code>NullPointerException</code>. Для платёжного отчёта часто лучше заранее отвергнуть отсутствие обязательного платежа. Компаратор с <code>nullsLast</code> подходит, если пустое значение имеет осмысленное место в результате.</p>
+      <h3>У чисел с плавающей точкой тоже есть заданный полный порядок</h3>
+      <pre><code class="language-java">double[] special = {Double.NaN, 0.0, -0.0, Double.NEGATIVE_INFINITY, 2.0};
+Arrays.sort(special);
+System.out.println(Arrays.toString(special));</code></pre>
+      <pre class="out">[-Infinity, -0.0, 0.0, 2.0, NaN]</pre>
+      <p>Для сортировки <code>double[]</code> значение <code>-0.0</code> идёт перед <code>+0.0</code>, а <code>NaN</code> — после числовых значений. Это отличается от обычных проверок <code>&lt;</code> и <code>==</code>: сравнения с <code>NaN</code> ими не образуют нужный порядок. Для компаратора обёрток используй <code>Double.compare</code> или <code>comparingDouble</code>. Денежные суммы в сервисе по-прежнему лучше сравнивать как целые минимальные единицы или подходящий десятичный тип: порядок сортировки не исправляет ошибки представления денег.</p>
+    </section>
+
+    <section class="step" id="parallel">
+      <h2>parallelSort делит работу, но остаётся клиентом общего пула</h2>
+      <p>Для большой выгрузки хочется добавить слово <code>parallel</code> и получить ускорение. Параллельная сортировка сначала должна разделить диапазон, затем отсортировать части, затем слить их. Создание задач и движение данных стоят времени. Компаратор может выполняться одновременно в разных потоках, а сортировка конкурирует за общий пул с другими задачами сервиса.</p>
+      <p>В объектной реализации OpenJDK 21 диапазон до <code>8192</code> элементов включительно сортируется последовательно. При <code>ForkJoinPool.getCommonPoolParallelism() == 1</code> последовательная ветка выбирается и для большого массива. Иначе размер частей зависит от размера диапазона и параллелизма пула. Эти числа относятся к объектной ветке JDK 21: переносить их на <code>int[]</code> или другую версию нельзя.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="Параллельная сортировка 32768 объектов в JDK 21 при parallelism 2. Четыре четверти исходного массива A сортируются независимо. Две пары сливаются в половины буфера W, затем половины сливаются обратно в A. На каждом шаге показаны актуальные границы отсортированных участков и направление записи.">
+            <defs><marker id="js-merge-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker></defs>
+            <text x="20" y="26" class="dg-cap">32768 ОБЪЕКТОВ, PARALLELISM = 2</text>
+            <text x="20" y="81" class="dg-in">A</text>
+            <text x="20" y="188" class="dg-in">W</text>
+            <rect x="65" y="55" width="620" height="44" rx="6" class="dg-sep" fill="none"/>
+            <rect x="65" y="162" width="620" height="44" rx="6" class="dg-sep" fill="none"/>
+            <g data-s="1-2">
+              <rect x="65" y="55" width="155" height="44" class="dg-cell"/><rect x="220" y="55" width="155" height="44" class="dg-cell"/><rect x="375" y="55" width="155" height="44" class="dg-cell"/><rect x="530" y="55" width="155" height="44" class="dg-cell"/>
+            </g>
+            <g data-s="2">
+              <rect x="65" y="55" width="155" height="44" class="dg-cell hit"/><rect x="220" y="55" width="155" height="44" class="dg-cell hit"/><rect x="375" y="55" width="155" height="44" class="dg-cell hit"/><rect x="530" y="55" width="155" height="44" class="dg-cell hit"/>
+            </g>
+            <g data-s="3-4">
+              <rect x="65" y="162" width="310" height="44" class="dg-cell hit"/><rect x="375" y="162" width="310" height="44" class="dg-cell hit"/>
+            </g>
+            <g data-s="3">
+              <rect x="65" y="55" width="155" height="44" class="dg-cell hit"/><rect x="220" y="55" width="155" height="44" class="dg-cell hit"/><rect x="375" y="55" width="155" height="44" class="dg-cell hit"/><rect x="530" y="55" width="155" height="44" class="dg-cell hit"/>
+              <path d="M220 103 L220 158" class="dg-line ok" marker-end="url(#js-merge-arrow)"/>
+              <path d="M530 103 L530 158" class="dg-line ok" marker-end="url(#js-merge-arrow)"/>
+              <text x="230" y="134" class="dg-n">слияние</text><text x="540" y="134" class="dg-n">слияние</text>
+            </g>
+            <g data-s="4">
+              <rect x="65" y="55" width="620" height="44" class="dg-cell hit"/>
+              <path d="M375 158 L375 103" class="dg-line ok" marker-end="url(#js-merge-arrow)"/>
+              <text x="385" y="134" class="dg-n">слияние обратно</text>
+              <text x="375" y="81" class="dg-in" text-anchor="middle">[0, 32768): весь диапазон отсортирован</text>
+            </g>
+            <g data-s="1-3" class="dg-n" text-anchor="middle"><text x="142" y="81">[0, 8192)</text><text x="297" y="81">[8192, 16384)</text><text x="452" y="81">[16384, 24576)</text><text x="607" y="81">[24576, 32768)</text></g>
+            <g data-s="1-2"><text x="375" y="189" class="dg-s" text-anchor="middle">буфер ещё не содержит готовых слияний</text></g>
+            <g data-s="3-4" class="dg-in" text-anchor="middle"><text x="220" y="189">[0, 16384)</text><text x="530" y="189">[16384, 32768)</text></g>
+            <g data-s="1"><text x="20" y="239" class="dg-t">Готовых серий: 0; четыре части по 8192.</text><text x="20" y="263" class="dg-s">Размер листа = max(8192, 32768 / (2 × 4)).</text></g>
+            <g data-s="2"><text x="20" y="239" class="dg-t">В A готовы четыре серии по 8192.</text><text x="20" y="263" class="dg-s">Сортировки листьев заканчиваются TimSort.</text></g>
+            <g data-s="3"><text x="20" y="239" class="dg-t">В W готовы две серии по 16384.</text><text x="20" y="263" class="dg-s">Каждая пара четвертей слилась в свою половину W.</text></g>
+            <g data-s="4"><text x="20" y="239" class="dg-t">В A готова одна серия из 32768 элементов.</text><text x="20" y="263" class="dg-s">Слоты W больше не нужны вызывающему коду.</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Диапазон разбит на четыре части по 8192. Буфер W выделен отдельно; на этом уровне алгоритму предстоят четыре сортировки листьев.</li>
+          <li>Четыре части массива A отсортированы. Два рабочих потока и вызывающий поток могут участвовать в выполнении; четыре части не означают четыре выделенных потока.</li>
+          <li>Две пары соседних частей сливаются в W. Теперь там два готовых участка по 16384; исходные четыре отсортированные части остаются в A.</li>
+          <li>Две половины W сливаются обратно в A. Вызов завершён, вызывающий видит весь отсортированный диапазон; временный буфер можно освобождать.</li>
+        </ol>
+      </figure>
+      <p>Схема показывает уровни зависимостей. На реальном выполнении одна пара может начать сливаться, пока другая ещё сортируется. Важен порядок для каждой ветви: слияние ждёт готовности обеих входных серий. Общий пул предоставляет исполнителей, а буфер — место для слияния. Объектов платежей не копируют: копируют ссылки.</p>
+      <h3>Запуск показывает, какая ветка действительно работала</h3>
+      <p>Полный <a href="../examples/java-sorting/ParallelSortDemo.java">ParallelSortDemo.java</a> ниже. Каждый <code>id</code> совпадает с входным индексом. Поэтому возрастание <code>id</code> внутри равных сумм проверяет сохранение входного порядка. Потоки записываем в потокобезопасное множество: обычный <code>HashSet</code> внутри компаратора сделал бы само наблюдение ошибочным.</p>
+      <pre><code class="language-java">import java.util.*;
+import java.util.concurrent.*;
+
+public class ParallelSortDemo {
+    record Payment(int id, int amount) {}
+    static void run(int size) {
+        Set&lt;String&gt; threads = new ConcurrentSkipListSet&lt;&gt;();
+        var random = new SplittableRandom(42);
+        Payment[] a = new Payment[size];
+        for (int i = 0; i &lt; size; i++) a[i] = new Payment(i, random.nextInt(10));
+        Comparator&lt;Payment&gt; comparator = (x, y) -&gt; {
+            threads.add(Thread.currentThread().getName());
+            return Integer.compare(x.amount, y.amount); // Ответ не зависит от потока.
+        };
+        Payment[] explicitOrder = a.clone();
+        Arrays.parallelSort(a, comparator);
+        boolean ordered = true, stable = true;
+        for (int i = 1; i &lt; size; i++) {
+            ordered &amp;= a[i - 1].amount &lt;= a[i].amount;
+            if (a[i - 1].amount == a[i].amount) stable &amp;= a[i - 1].id &lt; a[i].id;
+        }
+        if (!ordered) throw new AssertionError("order");
+        System.out.println("n=" + size + " ordered=" + ordered + " stable=" + stable);
+        System.out.println("comparison threads=" + threads);
+        Arrays.parallelSort(explicitOrder, Comparator.comparingInt(Payment::amount)
+                .thenComparingInt(Payment::id)); // Задаём второй ключ явно.
+        boolean idsAscending = true;
+        for (int i = 1; i &lt; size; i++) {
+            if (explicitOrder[i - 1].amount == explicitOrder[i].amount)
+                idsAscending &amp;= explicitOrder[i - 1].id &lt; explicitOrder[i].id;
+        }
+        if (!idsAscending) throw new AssertionError("explicit tie key");
+        System.out.println("explicit id order=" + idsAscending);
+    }
+    public static void main(String[] args) {
+        System.out.println("common parallelism=" + ForkJoinPool.getCommonPoolParallelism());
+        run(8192);
+        run(32768);
+    }
+}</code></pre>
+      <p>Реальный запуск на <b>JBR 21.0.11+10</b> с явным параллелизмом общего пула:</p>
+      <pre><code class="language-bash">java -Djava.util.concurrent.ForkJoinPool.common.parallelism=2 examples/java-sorting/ParallelSortDemo.java</code></pre>
+      <pre class="out">common parallelism=2
+n=8192 ordered=true stable=true
+comparison threads=[main]
+explicit id order=true
+n=32768 ordered=true stable=false
+comparison threads=[ForkJoinPool.commonPool-worker-1, ForkJoinPool.commonPool-worker-2, main]
+explicit id order=true</pre>
+      <p>Размер <code>8192</code> остался в последовательной ветке. При <code>32768</code> сравнения выполнялись и в вызывающем потоке, и в рабочих потоках общего пула. Их точные имена и участие зависят от планировщика; это снимок запуска, а не обещание использовать каждый рабочий поток.</p>
+      <div class="note warn">
+        <p><code>stable=false</code> в этом запуске — <b>нарушение гарантии API</b>. Документация объектного <code>Arrays.parallelSort</code> обещает стабильность. В OpenJDK зарегистрирована <a href="https://bugs.openjdk.org/browse/JDK-8076446">JDK-8076446</a>: параллельное слияние может менять порядок равных элементов. Наш корректный компаратор воспроизводит эту проблему в указанной сборке. Это не основание учить, что parallelSort «по определению нестабилен».</p>
+        <p>Если отчёт требует сохранения входного порядка, последовательный объектный <code>Arrays.sort</code> решает эту задачу. Если результат должен задаваться бизнес-ключами, добавь их в компаратор. В нашем примере <code>id</code> одновременно задаёт второй ключ и совпадает с входным индексом; в другом сервисе эти два порядка могут различаться. При смене JDK пример позволяет проверить именно нужный сценарий.</p>
+      </div>
+      <p>Теперь оставим тот же большой массив, но зададим параллелизм <code>1</code> до инициализации пула:</p>
+      <pre><code class="language-bash">java -Djava.util.concurrent.ForkJoinPool.common.parallelism=1 examples/java-sorting/ParallelSortDemo.java</code></pre>
+      <pre class="out">common parallelism=1
+n=8192 ordered=true stable=true
+comparison threads=[main]
+explicit id order=true
+n=32768 ordered=true stable=true
+comparison threads=[main]
+explicit id order=true</pre>
+      <p>Для этих запусков слово <code>parallel</code> в имени метода не заставляет создавать параллельную работу. Менять глобальный параллелизм ради одного отчёта опасно: параметр затрагивает других пользователей общего пула. У самого <code>Arrays.parallelSort</code> нет аргумента для передачи отдельного пула.</p>
+      <h3>Ускорение имеет смысл измерять на данных сервиса</h3>
+      <p>Параллельная сортировка объектов использует до <code>O(n)</code> дополнительных ссылок для слияния. Если сервис сначала скопировал исходный массив, а потом начал параллельную сортировку копии, в памяти могут одновременно жить исходные слоты, копия и рабочий буфер. При выгрузке миллионов платежей это влияет и на память, и на работу GC. Возможность выполнить задачу быстрее не означает возможность выполнить больше таких задач одновременно.</p>
+      <p>Не вызывай банк, базу или HTTP из компаратора: один элемент может сравниваться много раз, а в параллельной ветке — одновременно. Сначала получи нужные ключи, затем сравнивай локальные неизменяемые данные. То же касается дорогого разбора строки даты: подготовленный ключ часто даёт больший выигрыш, чем дополнительные потоки.</p>
+      <p>Сравнивать <code>sort</code> и <code>parallelSort</code> стоит на одинаковых свежих входах, с учётом размера, числа повторов, готовых серий и конкурирующей нагрузки. Повторная сортировка уже отсортированного массива измеряет другой сценарий. Для измерения коротких операций нужен корректный прогрев и инструмент вроде JMH; два вызова <code>nanoTime</code> в демонстрации механизма не дают надёжной рекомендации для прода.</p>
+      <p>Если нужны только несколько крупнейших платежей, полная сортировка может быть лишней: куча размера <code>k</code> или выбор элемента дают другую цену. Если выгрузка уже читается из БД, сначала проверь, может ли нужный порядок и ограничение объёма дать запрос с индексом. Алгоритмы этих вариантов разобраны в соседних темах; API сортировки полезен для диапазона, который действительно нужно целиком упорядочить в памяти.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Arrays.sort меняет массив, List.sort меняет список. Arrays.asList разделяет слоты с переданным массивом; копия списка отделяет порядок, но сохраняет ссылки на объекты.</li>
+      <li>Стабильность сохраняет входной порядок при compare == 0. Для заданного порядка равных сумм нужен следующий ключ.</li>
+      <li>Согласованный компаратор сравнивает значения без переполнения, задаёт правила null и не читает меняющиеся во время сортировки ключи.</li>
+      <li>В JDK 21 объекты обычно сортирует TimSort, а примитивы — специализированные гибриды. Название алгоритма является деталью реализации.</li>
+      <li>parallelSort использует общий пул и рабочий буфер. Проверяй реальную ветку, требуемые гарантии и эффект на нагрузке сервиса.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="q-api" data-freq="2">
+      <h3>Чем отличаются Arrays.sort, List.sort и Collections.sort?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Arrays.sort переставляет элементы массива. Для примитивного массива сортируется само значение, для объектного — ссылка на объект. List.sort переставляет элементы списка и требует возможности заменять их. Добавлять элементы ему не нужно, поэтому список фиксированного размера из Arrays.asList подходит, а List.of — нет.</p>
+          <p>Collections.sort — удобный вход для списка, который в современной JDK делегирует в List.sort. Я выбираю API по типу данных и по тому, можно ли менять вход. Для отдельного отчёта сначала делаю копию, если исходный порядок нужен другим частям сервиса.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Метод List.sort по умолчанию сортирует массив-копию и записывает результат итератором. Это защищает связный список от многократного дорогого доступа по индексу; ArrayList переопределяет метод и сортирует свой внутренний массив.</li>
+          <li>Поверхностная копия коллекции не изолирует изменяемые поля объектов. Для воспроизводимого отчёта иногда нужен отдельный снимок ключей, а не только копия слотов.</li>
+          <li>Сортировку общего массива или списка надо согласовывать с читателями. Контроль modCount у ArrayList помогает обнаружить часть конфликтов, но не превращает операцию в потокобезопасную транзакцию.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="q-stable" data-freq="2">
+      <h3>Что значит «стабильная сортировка»? Заменяет ли она thenComparing?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Стабильная сортировка сохраняет входной порядок элементов, для которых компаратор вернул ноль. У двух платежей с одной суммой могут быть разные id, но компаратор по сумме считает их равными. Объектные Arrays.sort и List.sort оставят их в прежнем порядке.</p>
+          <p>thenComparing задаёт дополнительное правило. Если мне нужны сумма и затем id, я явно собираю эту цепочку. Стабильность полезна, когда входной порядок уже имеет смысл; случайный порядок чтения из базы она не делает осмысленным.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Можно сначала сортировать по младшему ключу, а затем стабильной сортировкой по старшему. Это работает благодаря сохранению порядка равных групп, но единый компаратор обычно яснее.</li>
+          <li>Для пагинации и повторяемой выгрузки последний ключ должен различать строки, например уникальный id. Иначе добавление или удаление равной строки может менять границы страниц независимо от стабильности сортировки.</li>
+          <li>API объектного parallelSort тоже обещает стабильность. Наблюдаемое нарушение в конкретной JDK — ошибка реализации, как в нашем воспроизведении JDK-8076446; его надо отделять от правильного ответа о гарантиях API.</li>
+        </ul></div>
+      </div>
+    </article>
+
+    <article class="q" id="q-comparator" data-freq="2">
+      <h3>Какие ошибки в Comparator ломают сортировку?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Частая ошибка — вернуть разность чисел: она может переполниться и дать неправильный знак. Я использую compare или comparingInt/comparingLong. Затем проверяю транзитивность, симметрию знака и поведение равных элементов. Компаратор должен задавать один порядок на всех входных данных.</p>
+          <p>Отдельно задаю null и направление каждого ключа. reversed на готовой цепочке разворачивает всё, включая второй ключ и расположение null. Ещё компаратор должен давать постоянный ответ для одной пары во время сортировки: читать меняющийся статус из сервиса здесь опасно.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Равенство по компаратору может отличаться от equals. Для сортировки платежей только по сумме это допустимо; для TreeSet тот же компаратор означает, что второй платёж с равной суммой не добавится как отдельный элемент. Смысл compare == 0 зависит от потребителя.</li>
+          <li>Метод сравнения может вызываться многократно и в разных потоках. Извлечение дорогих ключей лучше выполнить заранее; побочные эффекты внутри компаратора требуют отдельного обоснования.</li>
+          <li>Нарушение порядка может привести к IllegalArgumentException, но отсутствие исключения не подтверждает весь контракт. Особенно важны граничные числа, равные ключи и сравнение каждой пары в обе стороны.</li>
+        </ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью">
+        <summary>Две задачи требуют противоположного порядка null. Можно ли заменить сортировку по убыванию на «отсортировать по возрастанию и развернуть список»?</summary>
+        <p>Только если действительно требуется разворот всех правил. При развороте готового списка null из конца попадут в начало, а порядок внутри равных групп тоже развернётся. Если суммы должны идти по убыванию, id по возрастанию и null в конце, правильнее сразу задать эти три условия компаратором. Разворот списка не является стабильной заменой смене направления одного ключа.</p>
+      </details></div>
+    </article>
+
+    <article class="q" id="q-internals" data-freq="2">
+      <h3>Какие алгоритмы использует Java и когда имеет смысл parallelSort?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В обычном режиме OpenJDK 21 объектный Arrays.sort использует стабильный TimSort: ищет готовые упорядоченные серии и сливает их. Поэтому уже отсортированные данные могут обрабатываться почти линейно. Для int[] работает гибрид Dual-Pivot Quicksort с дополнительными ветвями; для других примитивов выбор может отличаться.</p>
+          <p>parallelSort делит диапазон и сливает отсортированные части с участием общего ForkJoinPool. Для большого массива это может помочь, но на небольшом входе цена задач и слияния съест выигрыш. В сервисе я смотрю ещё на рабочую память, стоимость компаратора и конкуренцию за пул.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Порог 8192 относится к объектной ветке JDK 21. При parallelism == 1 даже большой объектный массив идёт по последовательному пути; число задач не равно числу потоков.</li>
+          <li>TimSort хранит серии и временный буфер для слияния. Для примитивной сортировки OpenJDK 21 тоже нельзя обещать одну постоянную оценку дополнительной памяти: распознавание серий может включать буферизованную ветку.</li>
+          <li>Сравнение вариантов должно учитывать одинаковые свежие данные и нагрузку соседей. Если нужно только k лучших элементов, сначала рассмотрю выбор или ограниченную кучу, а не ускорение полной сортировки.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li>Основа урока — <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Arrays.html">Arrays, JDK 21</a>: sort, диапазоны, гарантии стабильности, parallelSort и порядок float/double.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/List.html#sort(java.util.Comparator)">List.sort</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Comparator.html">Comparator</a>: запись результата в список, порядок сравнения, nullsLast, reversed и thenComparing.</li>
+    <li>Исходники OpenJDK 21: <a href="https://github.com/openjdk/jdk/blob/jdk-21%2B35/src/java.base/share/classes/java/util/TimSort.java">TimSort</a>, <a href="https://github.com/openjdk/jdk/blob/jdk-21%2B35/src/java.base/share/classes/java/util/DualPivotQuicksort.java">DualPivotQuicksort</a>, <a href="https://github.com/openjdk/jdk/blob/jdk-21%2B35/src/java.base/share/classes/java/util/ArraysParallelSortHelpers.java">ArraysParallelSortHelpers</a>. Смотри распознавание серий, Heap Sort при глубокой рекурсии и движение ссылок между массивом и буфером.</li>
+    <li><a href="https://bugs.openjdk.org/browse/JDK-8076446">JDK-8076446: Arrays.parallelSort is not stable</a>: зарегистрированное нарушение стабильности параллельного слияния. Демо страницы воспроизведено на JBR 21.0.11+10, а не заявлено для каждой будущей версии.</li>
+    <li><a href="../examples/java-sorting/README.md">Команды запуска двух демо</a>; <a href="merge-sort.html">Merge Sort</a>, <a href="quick-sort.html">Quick Sort</a>, <a href="heap-sort.html">Heap Sort</a> — устройство базовых алгоритмов.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
