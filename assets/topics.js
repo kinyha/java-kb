@@ -301,7 +301,7 @@ window.KB_TREE = [
           scope: 'token bucket, leaky bucket, fixed и sliding window, распределённый лимит на Redis' },
         { id: 'consistent-hashing', freq: 2, status: 'draft', title: 'Consistent Hashing',
           scope: 'кольцо хешей, виртуальные узлы, перераспределение ключей при добавлении узла' },
-        { id: 'id-generation', freq: 1, status: 'empty', title: 'Unique ID Generation',
+        { id: 'id-generation', freq: 1, status: 'draft', title: 'Unique ID Generation',
           scope: 'автоинкремент, UUID v4 и v7, Snowflake, сортируемость и коллизии' },
         { id: 'background-jobs', freq: 1, status: 'empty', title: 'Background Jobs',
           scope: 'очереди задач, планировщики, повторы, async request-reply, возврат результата' },

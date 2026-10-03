@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Unique ID Generation · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="id-generation">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Unique ID Generation</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Идентификатор выбирают по пяти свойствам: уникален ли без координации, растёт ли со временем, сколько места занимает, раскрывает ли что-то наружу и что будет при сбое часов. Последовательность базы компактна и монотонна, но требует одного источника и выдаёт число заказов. UUID v4 генерируется где угодно, но случаен, и вставка в B-tree идёт в случайные страницы: индекс в демо на 1 млн строк занял 39 МБ с 30 % пустоты против 21 МБ у bigserial. UUID v7 начинается с времени и вставляется в правый край индекса — но только если внутри миллисекунды он монотонен: наивный v7 дал те же 31 % пустоты, монотонный — 10 %. Snowflake упаковывает время, номер узла и счётчик в 64 бита и ломается, если часы идут назад.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Заказ 1042 рассказал конкурентам, сколько у нас продаж</h2>
+      <p>Интернет-магазин выдавал заказам номера из последовательности базы: 1041, 1042, 1043. Конкурент сделал два заказа с разницей в неделю и вычел номера — получил число продаж за неделю. Затем сервис заказов разделили на два региона со своими базами, и последовательности начали выдавать одинаковые номера. Пришлось переходить на UUID — и после миграции вставка в таблицу заказов замедлилась, а индекс первичного ключа вырос почти вдвое.</p>
+      <p>Тема разбирает схемы генерации, их поведение в B-tree индексе и устройство Snowflake. Устройство B-tree и страниц — в <a href="indexes.html">Indexes</a>, шардирование, при котором идентификатор должен быть уникален между шардами, — в <a href="sharding.html">Sharding</a>. Демо <a href="../examples/id-generation/IdDemo.java">IdDemo.java</a> вставляет миллион строк в PostgreSQL 17 с разными ключами и генерирует Snowflake.</p>
+    </section>
+
+    <section class="step" id="schemes">
+      <h2>Пять свойств, по которым выбирают схему</h2>
+      <table class="mx">
+        <thead><tr><th>Схема</th><th>Размер</th><th>Без координации</th><th>Растёт со временем</th><th>Что раскрывает</th></tr></thead>
+        <tbody>
+          <tr><td>Последовательность базы</td><td>8 байт</td><td>Нет: один источник</td><td>Да</td><td>Число записей и темп</td></tr>
+          <tr><td>UUID v4</td><td>16 байт</td><td>Да</td><td>Нет, случаен</td><td>Ничего</td></tr>
+          <tr><td>UUID v7</td><td>16 байт</td><td>Да</td><td>Да, по миллисекундам</td><td>Время создания</td></tr>
+          <tr><td>Snowflake</td><td>8 байт</td><td>Да, при уникальном номере узла</td><td>Да</td><td>Время, узел</td></tr>
+          <tr><td>Блоки из базы (hi/lo)</td><td>8 байт</td><td>Почти: поход в базу раз на блок</td><td>Примерно</td><td>Число записей</td></tr>
+        </tbody>
+      </table>
+<pre class="out">== sample ids
+   v4: 34267866-11d8-4124-bb11-75742f2c2989  eb0bc2b5-3763-4e57-8c8e-15b26aaa14cc
+   v7: 01a101c5-6bdc-7359-bf5d-e1aa900e7391  01a101c5-6be0-7608-b30b-d2550e282e18  version 7</pre>
+      <p>Два v4 не имеют ничего общего. Два v7, созданных с паузой в 2 мс, совпадают в первых 12 шестнадцатеричных цифрах — это 48 бит миллисекунд Unix-времени, — а цифра <code>7</code> в третьей группе означает версию. Значения случайные и меняются при каждом запуске.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 170" role="img" aria-label="Раскладка битов. UUID v7: 48 бит миллисекунд, 4 бита версии, 12 бит rand_a или счётчика, 2 бита варианта, 62 случайных бита. Snowflake: 1 бит знака, 41 бит миллисекунд от своей эпохи, 10 бит номера узла, 12 бит счётчика.">
+            <text x="20" y="22" class="dg-cap">UUID V7, 128 БИТ</text>
+            <rect x="20" y="32" width="240" height="34" rx="5" class="dg-cell hit"/>
+            <text x="140" y="54" class="dg-in" text-anchor="middle">48: unix ms</text>
+            <rect x="262" y="32" width="30" height="34" rx="5" class="dg-cell"/>
+            <text x="277" y="54" class="dg-n" text-anchor="middle">ver</text>
+            <rect x="294" y="32" width="96" height="34" rx="5" class="dg-cell"/>
+            <text x="342" y="54" class="dg-n" text-anchor="middle">12: счётчик</text>
+            <rect x="392" y="32" width="24" height="34" rx="5" class="dg-cell"/>
+            <text x="404" y="54" class="dg-n" text-anchor="middle">var</text>
+            <rect x="418" y="32" width="282" height="34" rx="5" class="dg-cell"/>
+            <text x="559" y="54" class="dg-n" text-anchor="middle">62: случайные</text>
+            <text x="20" y="98" class="dg-cap">SNOWFLAKE, 64 БИТА</text>
+            <rect x="20" y="108" width="24" height="34" rx="5" class="dg-cell"/>
+            <text x="32" y="130" class="dg-n" text-anchor="middle">0</text>
+            <rect x="46" y="108" width="380" height="34" rx="5" class="dg-cell hit"/>
+            <text x="236" y="130" class="dg-in" text-anchor="middle">41: ms от своей эпохи (~69 лет)</text>
+            <rect x="428" y="108" width="130" height="34" rx="5" class="dg-cell"/>
+            <text x="493" y="130" class="dg-in" text-anchor="middle">10: узел</text>
+            <rect x="560" y="108" width="140" height="34" rx="5" class="dg-cell"/>
+            <text x="630" y="130" class="dg-in" text-anchor="middle">12: счётчик</text>
+            <text x="20" y="162" class="dg-s">Время в старших битах — поэтому значения растут и вставляются в правый край индекса.</text>
+          </svg>
+        </div>
+      </figure>
+    </section>
+
+    <section class="step" id="btree">
+      <h2>Случайный ключ раздувает B-tree, упорядоченный — нет</h2>
+      <pre class="out">== insert 1,000,000 rows into a table with a primary key, PostgreSQL 17
+   bigserial    890 ms   pk index 21 MB    free space in leaf pages 10%
+   uuid v4     1713 ms   pk index 39 MB    free space in leaf pages 30%
+   uuid v7     1315 ms   pk index 39 MB    free space in leaf pages 31%
+   v7 mono     1013 ms   pk index 30 MB    free space in leaf pages 10%</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Листовые страницы B-tree. Возрастающие ключи всегда попадают в правую страницу; когда она заполнена, PostgreSQL оставляет её заполненной на 90 процентов и открывает новую. Случайные ключи попадают в любые страницы; полная страница делится пополам, и в индексе много наполовину пустых страниц.">
+            <text x="20" y="22" class="dg-cap">ВОЗРАСТАЮЩИЕ: BIGSERIAL, V7 MONO</text>
+            <rect x="20" y="34" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect x="20" y="34" width="108" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="150" y="34" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect x="150" y="34" width="108" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="-1" x="280" y="34" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="-1" x="280" y="34" width="120" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="2-" x="280" y="34" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="2-" x="280" y="34" width="108" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="2-" x="410" y="34" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="2-" x="410" y="34" width="14" height="30" rx="5" class="dg-cell hit"/>
+            <text data-s="1" x="410" y="54" class="dg-n">← новый ключ: в правый край</text>
+            <text data-s="2-" x="540" y="54" class="dg-ok">90 % / новая</text>
+            <text x="20" y="104" class="dg-cap">СЛУЧАЙНЫЕ: V4, V7 БЕЗ СЧЁТЧИКА</text>
+            <rect x="20" y="116" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect x="20" y="116" width="80" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="-2" x="150" y="116" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="-2" x="150" y="116" width="120" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="3" x="150" y="116" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="3" x="150" y="116" width="60" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="3" x="280" y="116" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="3" x="280" y="116" width="62" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="410" y="116" width="120" height="30" rx="5" class="dg-cell"/>
+            <rect x="410" y="116" width="72" height="30" rx="5" class="dg-cell hit"/>
+            <text data-s="2" x="150" y="166" class="dg-bad">новый ключ попал в середину, страница полна</text>
+            <text data-s="3" x="150" y="166" class="dg-bad">деление пополам: две страницы по 50 %</text>
+            <text data-s="1" x="20" y="192" class="dg-t">Возрастающий ключ всегда идёт в последнюю страницу.</text>
+            <text data-s="2" x="20" y="192" class="dg-t">Правая страница полна: делится 90/10. Случайный ключ попал в полную страницу в середине.</text>
+            <text data-s="3" x="20" y="192" class="dg-t">Случайная вставка делит страницу пополам; со временем страницы заполнены на 50–100 %.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Возрастающий ключ больше всех существующих, поэтому всегда попадает в самую правую листовую страницу. Остальные страницы не трогаются.</li>
+          <li>Когда правая страница заполнена, PostgreSQL видит, что вставка идёт в правый край, и делит её не пополам: старая остаётся заполненной на fillfactor индекса (90 % по умолчанию), новые ключи идут в новую страницу. Случайный ключ тем временем попадает в произвольную, уже полную страницу.</li>
+          <li>Полная страница в середине делится пополам, и обе половины ждут, пока туда случайно попадут новые ключи. В итоге в индексе 30 % пустого места, а вставка трогает случайные страницы по всему индексу.</li>
+        </ol>
+      </figure>
+      <p>Числа демо это подтверждают. У bigserial и монотонного v7 в листовых страницах 10 % пустоты — ровно fillfactor 90. У v4 — 30 %, а индекс вдвое больше bigserial: 39 МБ против 21 МБ, из них около 9 МБ — разница в размере ключа (16 байт против 8), остальное — пустота от делений пополам. Время вставки плавает от запуска к запуску на сотни миллисекунд, а размеры и пустота повторяются.</p>
+      <p>Самое поучительное — строка <code>uuid v7</code>. Демо генерирует около тысячи идентификаторов в миллисекунду, а в наивной реализации 12 бит после времени случайны. Внутри миллисекунды порядок случаен, и индекс ведёт себя как при v4. RFC 9562 предлагает для этого монотонный счётчик или долю миллисекунды в этих битах; так сделан <code>uuidV7Monotonic</code>, и пустота вернулась к 10 %. PostgreSQL 18 добавил функцию <code>uuidv7()</code>, которая кладёт в эти биты долю миллисекунды и гарантирует возрастание в пределах сеанса.</p>
+<pre><code class="language-java">// Монотонный v7 (RFC 9562, метод 1): в 12 битах rand_a — счётчик внутри миллисекунды.
+static synchronized UUID uuidV7Monotonic() {
+    long ms = System.currentTimeMillis();
+    if (ms &lt;= lastMs) { ms = lastMs; if (++counter &gt; 0xfff) { ms++; counter = 0; } }  // переполнение — следующая мс
+    else counter = 0;
+    lastMs = ms;
+    long hi = (ms &lt;&lt; 16) | 0x7000L | counter;                                     // время, версия 7, счётчик
+    long lo = (rnd.nextLong() &amp; 0x3fffffffffffffffL) | 0x8000000000000000L;      // вариант 10, случайные биты
+    return new UUID(hi, lo);
+}</code></pre>
+      <p>На миллионе строк весь индекс помещается в память, поэтому разница во времени умеренная. Когда индекс таблицы в сотни гигабайт перерастает память, случайная вставка v4 требует читать с диска случайную страницу почти на каждую строку, а упорядоченная работает с горячим правым краем — тогда разница становится кратной. Это видно в росте чтений из <code>pg_stat_io</code> и в задержках вставки, но в этом демо не измерялось.</p>
+    </section>
+
+    <section class="step" id="snowflake">
+      <h2>Snowflake: время, узел и счётчик в одном long</h2>
+<pre><code class="language-java">synchronized long next() {
+    long ms = System.currentTimeMillis();
+    if (ms &lt; lastMs) throw new IllegalStateException("refusing ids for " + (lastMs - ms) + " ms");
+    if (ms == lastMs) {
+        seq = (seq + 1) &amp; 0xfff;
+        if (seq == 0) while ((ms = System.currentTimeMillis()) &lt;= lastMs) { }   // 4096 за мс исчерпаны: ждём
+    } else seq = 0;
+    lastMs = ms;
+    return ((ms - EPOCH) &lt;&lt; 22) | (node &lt;&lt; 12) | seq;
+}</code></pre>
+      <pre class="out">== snowflake: 41 bits ms, 10 bits node, 12 bits sequence
+   two ids: 232119003257008128 232119003257008129 increasing true
+   decoded: node 7, seq 0/1
+   clock moved back: refusing ids for N ms</pre>
+      <p>Snowflake из Twitter даёт 64-битный растущий идентификатор без обращения к общему источнику: 41 бит миллисекунд от собственной эпохи (хватает примерно на 69 лет), 10 бит номера узла (1 024 узла) и 12 бит счётчика (4 096 значений на узел за миллисекунду). Уникальность держится на двух условиях. Номера узлов не должны совпадать — их раздают из конфигурации, порядковый номер пода StatefulSet в Kubernetes или аренду в ZooKeeper и etcd. И часы не должны идти назад: если NTP отвёл время, генератор выдал бы уже выданные значения, поэтому он отказывается работать до момента, когда часы догонят последнее время. Демо имитирует сдвиг часов на 5 мс; число миллисекунд ожидания зависит от момента и заменено на N.</p>
+      <p>Близкий по идее способ — блоки из базы: сервис берёт у последовательности сразу 50 значений и раздаёт их из памяти. Так работает <code>allocationSize = 50</code> у <code>@SequenceGenerator</code> в Hibernate: последовательность увеличивается с шагом 50, и база участвует один раз на блок. Значения нескольких экземпляров перемешиваются во времени, а при перезапуске остаток блока пропадает — в последовательности появляются дыры, что нормально.</p>
+      <div class="trap">
+        <p class="myth">UUID v7 упорядочен по времени, поэтому любая реализация вставляется в индекс так же плотно, как bigserial.</p>
+        <p class="fact">Упорядочены только миллисекунды. Демо генерирует около тысячи идентификаторов в миллисекунду, и наивный v7 со случайными битами после времени дал 31 % пустоты — как v4. Монотонный счётчик в этих битах вернул 10 %, как у bigserial.</p>
+      </div>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>Что выбрать</h2>
+      <p>Одна база и внутренние идентификаторы — <code>bigserial</code> или <code>identity</code>: компактно и быстро, а наружу отдают отдельный неугадываемый идентификатор. Несколько источников записи, генерация на клиенте до вставки, слияние данных из разных баз — монотонный UUID v7: уникален без координации и дружит с индексом. Нужен 64-битный растущий номер при большом числе узлов — Snowflake с надёжной раздачей номеров узлов и мониторингом часов. Публичные идентификаторы не должны раскрывать объёмы: последовательность раскрывает число записей, а v7 и Snowflake — время создания. Если и это чувствительно, наружу отдают v4 или зашифрованный внутренний номер.</p>
+      <p>Идентификатор как ключ идемпотентности — отдельная тема: если клиент создаёт его до запроса, повтор запроса приходит с тем же идентификатором, и вставка с конфликтом по ключу становится естественной защитой от дублей, как в <a href="idempotency.html">Idempotency</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Свойства схемы: уникальность без координации, рост со временем, размер, что раскрывает, поведение при сбое часов.</li>
+        <li>1 млн строк: bigserial — индекс 21 МБ и 10 % пустоты; v4 — 39 МБ и 30 %; монотонный v7 — 30 МБ и 10 %.</li>
+        <li>Наивный v7 со случайными битами внутри миллисекунды дал 31 % пустоты — как v4.</li>
+        <li>Snowflake: 41 бит времени, 10 бит узла, 12 бит счётчика; при часах, ушедших назад, генератор должен отказать.</li>
+        <li>Последовательность раскрывает число записей, v7 и Snowflake — время создания.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="id-uuid" data-freq="3">
+      <h3>UUID или автоинкремент для первичного ключа?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Автоинкремент компактен (8 байт) и вставляется в правый край индекса, но требует одного источника и раскрывает число записей. UUID v4 генерируется где угодно, но вдвое больше и случаен: вставка идёт в случайные страницы, индекс раздувается — в демо 39 МБ против 21 МБ и 30 % пустоты. UUID v7 сочетает генерацию без координации с ростом по времени и плотным индексом.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>v7 должен быть монотонным внутри миллисекунды, иначе при высокой частоте индекс ведёт себя как при v4.</li>
+            <li>PostgreSQL 18 — встроенная uuidv7(); в JDK 21 генератора v7 нет.</li>
+            <li>Разница во времени становится кратной, когда индекс перерастает память.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Таблица платежей на 2 млрд строк. Что не так?</summary>
+          <pre><code class="language-java">@Entity
+class Payment {
+    @Id UUID id = UUID.randomUUID();      // публичный id, используем и как первичный ключ
+    ...
+}
+// GET /payments/{id} отдаёт платёж любому, кто знает id</code></pre>
+          <p>На 2 млрд строк индекс первичного ключа из случайных UUID не помещается в память, и почти каждая вставка читает случайную страницу с диска; пустота в листьях около 30 % раздувает индекс и все вторичные индексы, которые ссылаются на строку. Лучше монотонный v7 или внутренний bigint с отдельным публичным идентификатором. Последняя строка — отдельная проблема: неугадываемый id не заменяет проверку прав, и выдача платежа должна проверять владельца, как в <a href="web-security.html">Web Security</a>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="id-snowflake" data-freq="2">
+      <h3>Как устроен Snowflake и что с ним может пойти не так?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>64 бита: 41 бит миллисекунд от своей эпохи, 10 бит номера узла, 12 бит счётчика внутри миллисекунды. Генерируется локально, растёт со временем, 4 096 значений на узел за миллисекунду. Ломается, если два узла получили один номер или часы пошли назад: тогда генератор должен отказать, пока часы не догонят.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Номера узлов — из конфигурации, StatefulSet ordinal или аренды в ZooKeeper и etcd.</li>
+            <li>Исчерпание счётчика — ожидание следующей миллисекунды.</li>
+            <li>Эпоха своя, чтобы 41 бита хватило на десятилетия.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="id-distributed" data-freq="2">
+      <h3>Как генерировать уникальные идентификаторы в распределённой системе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Без координации: UUID v4 или v7 — уникальность обеспечивает случайность. С разделённым пространством: Snowflake с уникальным номером узла. С редкой координацией: блоки из последовательности (hi/lo, allocationSize в Hibernate). Централизованный генератор — простой, но единая точка отказа и лишний сетевой вызов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Выбор по пяти свойствам: координация, порядок, размер, что раскрывает, сбой часов.</li>
+            <li>Порядок по времени между узлами приблизителен: часы расходятся.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, «System Design Interview», том 1, глава 7 «Design a Unique ID Generator in Distributed Systems» — основа урока.</li>
+      <li><a href="https://www.rfc-editor.org/rfc/rfc9562">RFC 9562: Universally Unique IDentifiers</a> — UUID v7 и методы монотонности.</li>
+      <li><a href="https://www.postgresql.org/docs/current/btree.html">PostgreSQL: B-Tree Indexes</a> — деление страниц и fillfactor.</li>
+      <li><a href="https://www.postgresql.org/docs/18/functions-uuid.html">PostgreSQL 18: UUID Functions</a> — uuidv7().</li>
+      <li><a href="https://github.com/twitter-archive/snowflake">twitter-archive/snowflake</a> — исходный генератор Twitter.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
