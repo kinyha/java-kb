@@ -293,7 +293,7 @@ window.KB_TREE = [
           scope: 'CAP, PACELC, сильная и eventual consistency, read-your-writes, кворумы' },
       ] },
       { id: 'blocks', title: 'Building Blocks', source: 'System Design Interview т. 1, гл. 4–7; System Design Primer', items: [
-        { id: 'load-balancing', freq: 2, status: 'empty', title: 'Load Balancing',
+        { id: 'load-balancing', freq: 2, status: 'draft', title: 'Load Balancing',
           scope: 'L4 и L7, алгоритмы балансировки, reverse proxy, health checks, Nginx' },
         { id: 'api-gateway', freq: 2, status: 'empty', title: 'API Gateway & Service Discovery',
           scope: 'маршрутизация, аутентификация на входе, агрегация, реестр сервисов, client-side и server-side discovery' },

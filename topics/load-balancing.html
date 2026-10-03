@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Load Balancing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="load-balancing">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Load Balancing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Балансировщик решает три задачи: распределить запросы, убрать из ротации больной экземпляр и при сбое повторить запрос на другом. Round robin делит поровну и поэтому кормит медленный экземпляр так же, как быстрые: в демо он получил треть запросов, и p99 вырос до 1,2 с. Least connections смотрит на число активных соединений и сам уводит трафик от медленного — p99 0,4 с. Повтор на другом экземпляре безопасен только для идемпотентных запросов: nginx по умолчанию повторяет GET, даже если первый экземпляр его уже выполнил, и не повторяет POST, отдавая 502. L4-балансировщик распределяет соединения, L7 — запросы; для долгих соединений HTTP/2 и gRPC это разница между равномерной нагрузкой и одним перегруженным экземпляром.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Один экземпляр тормозит, и p99 всего сервиса — секунда</h2>
+      <p>Сервис платежей работает в трёх экземплярах за nginx. На одном из них началась долгая сборка мусора — или его соседом по хосту оказался тяжёлый процесс, — и он стал отвечать в десять раз медленнее. Балансировщик продолжает отправлять ему ровно треть запросов: у него очередь, а у клиентов, которым он достался, — секундные задержки. Средняя задержка выглядит прилично, но p99 всего сервиса определяется худшим экземпляром.</p>
+      <p>Тема разбирает алгоритмы, проверки здоровья, повторы и уровни балансировки. Демо <a href="../examples/load-balancing/LoadBalancingDemo.java">LoadBalancingDemo.java</a> поднимает три бэкенда на JDK HttpServer с четырьмя рабочими потоками каждый — 8091 и 8092 отвечают за 20 мс, 8093 за 200 мс — и nginx 1.31 перед ними; 24 клиента отправляют 1 200 запросов. Шлюз с маршрутизацией и аутентификацией — в <a href="api-gateway.html">API Gateway</a>, балансировка в Kubernetes — в <a href="kubernetes.html">Kubernetes</a>.</p>
+    </section>
+
+    <section class="step" id="algorithms">
+      <h2>Round robin кормит медленный экземпляр, least_conn — нет</h2>
+<pre><code class="language-nginx">upstream rr {                       # round robin — по умолчанию
+    server backend:8091;
+    server backend:8092;
+    server backend:8093;
+}
+upstream lc {
+    least_conn;                     # к серверу с меньшим числом активных соединений
+    server backend:8091;
+    server backend:8092;
+    server backend:8093;
+}</code></pre>
+      <pre class="out">== 24 clients, 1200 requests; 8093 is 10x slower
+   round robin  served {8091=400, 8092=400, 8093=400}   p50  31 ms, p99 1237 ms
+   least_conn   served {8091=560, 8092=562, 8093=78}   p50  48 ms, p99 416 ms</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Распределение 1200 запросов. Round robin: по 400 на каждый бэкенд, медленный 8093 накапливает очередь, p99 1237 мс. Least connections: 560 и 562 на быстрые, 78 на медленный, p99 416 мс.">
+            <text x="20" y="22" class="dg-cap">ЗАПРОСОВ НА БЭКЕНД ИЗ 1200</text>
+            <text x="20" y="62" class="dg-in">8091 · 20 мс</text>
+            <text x="20" y="102" class="dg-in">8092 · 20 мс</text>
+            <text x="20" y="142" class="dg-in">8093 · 200 мс</text>
+            <rect data-s="1" x="150" y="48" width="200" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="1" x="150" y="88" width="200" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="1" x="150" y="128" width="200" height="22" rx="4" class="dg-cell miss"/>
+            <text data-s="1" x="358" y="64" class="dg-n">400</text>
+            <text data-s="1" x="358" y="104" class="dg-n">400</text>
+            <text data-s="1" x="358" y="144" class="dg-bad">400 — очередь растёт</text>
+            <text data-s="1" x="20" y="182" class="dg-bad">round robin: p99 1237 мс</text>
+            <rect data-s="2" x="150" y="48" width="280" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="2" x="150" y="88" width="281" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="2" x="150" y="128" width="39" height="22" rx="4" class="dg-cell hit"/>
+            <text data-s="2" x="438" y="64" class="dg-n">560</text>
+            <text data-s="2" x="439" y="104" class="dg-n">562</text>
+            <text data-s="2" x="197" y="144" class="dg-ok">78 — соединения дольше заняты</text>
+            <text data-s="2" x="20" y="182" class="dg-ok">least_conn: p99 416 мс</text>
+            <text x="20" y="202" class="dg-s">Каждый бэкенд обрабатывает 4 запроса одновременно; 8093 тратит на запрос в 10 раз больше.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Round robin не знает о скорости бэкендов и раздаёт по кругу: 400, 400, 400. Медленный 8093 обслуживает 4 запроса за 200 мс — 20 в секунду, — и всё, что приходит сверх, ждёт в его очереди. Те, кому он достался, ждут больше секунды.</li>
+          <li>Least connections отправляет запрос туда, где меньше активных соединений. Запрос к 8093 держит соединение в 10 раз дольше, поэтому у него почти всегда больше открытых соединений, и он получает всего 78 запросов. p99 упал втрое, а медиана выросла с 31 до 48 мс: быстрые бэкенды стали загружены сильнее.</li>
+        </ol>
+      </figure>
+      <p>Least connections адаптируется к скорости без всякой настройки — число открытых соединений и есть сигнал перегрузки. Другие алгоритмы решают другие задачи: веса (<code>weight</code>) учитывают заранее известную разницу мощностей, хеш по ключу (<code>hash $arg_user consistent</code>, <code>ip_hash</code>) привязывает клиента к экземпляру, чтобы попадать в его локальный кеш, а «два случайных выбора» (power of two choices) — взять два случайных бэкенда и выбрать менее загруженный — дают почти тот же эффект, что least connections, без глобального знания о всех бэкендах. Это важно, когда балансировщиков много и каждый видит только свои соединения.</p>
+      <p>Привязка клиента к экземпляру (sticky sessions) — вынужденная мера для сервисов с состоянием в памяти, например сессией. Она ломает равномерность и превращает отказ экземпляра в потерю сессий. Лучше держать сервис без состояния, а сессию — в Redis, как в <a href="scalability.html">Scalability</a>.</p>
+    </section>
+
+    <section class="step" id="health">
+      <h2>Проверки здоровья и повторы: GET повторяется, даже если уже выполнен</h2>
+      <p>Балансировщик узнаёт о больном экземпляре двумя способами. Пассивно — по ошибкам реальных запросов: в nginx <code>max_fails=1 fail_timeout=10s</code> по умолчанию, то есть одна ошибка убирает сервер из ротации на 10 секунд. Активно — периодическими запросами к <code>/health</code>: это умеют HAProxy, Envoy, облачные балансировщики, а в Kubernetes ту же роль играет readiness probe, как в <a href="k8s-java.html">Kubernetes для Java</a>. Активная проверка находит больной экземпляр до того, как на нём споткнётся пользователь, а пассивная реагирует на то, что активная пропустила.</p>
+      <p>Самое опасное место — повтор запроса. Демо добавляет бэкенд 8094, который принимает запрос, выполняет «побочный эффект» (увеличивает счётчик) и закрывает соединение, не ответив, — как экземпляр, упавший посреди обработки. Запасной 8091 помечен <code>backup</code>, чтобы каждый запрос сначала шёл на 8094:</p>
+<pre><code class="language-nginx">upstream crash {
+    server backend:8094 max_fails=0;     # не помечать упавшим, чтобы каждый запрос шёл сюда первым
+    server backend:8091 backup;
+}
+server { listen 8083; location / { proxy_pass http://crash; proxy_next_upstream error timeout; } }
+server { listen 8084; location / { proxy_pass http://crash; proxy_next_upstream error timeout non_idempotent; } }</code></pre>
+      <pre class="out">== backend 8094 dies in the middle of a request, 8091 is the backup
+   GET  via :8083 -> 200, executed on {8091=1, 8094=1}
+   POST via :8083 -> 502, executed on {8094=1}
+   POST via :8084 -> 200, executed on {8091=1, 8094=1}</pre>
+      <p>GET вернулся с 200, но выполнился дважды: nginx увидел обрыв и повторил его на запасном. Для настоящего GET без побочных эффектов это правильно, а для GET, который что-то меняет, — двойное действие. POST по умолчанию не повторяется после отправки на бэкенд: клиент получает 502 и не знает, выполнился ли запрос. С <code>non_idempotent</code> POST тоже повторяется — клиент видит 200, а платёж выполнен дважды. Безопасный вариант — повторять только запросы с ключом идемпотентности и дедупликацией на сервере, как в <a href="idempotency.html">Idempotency</a>. В демо <code>max_fails=0</code> выставлен специально: со значением по умолчанию после первого обрыва 8094 был бы выключен на 10 секунд, и следующие запросы сразу шли бы на запасной, — что в жизни и есть желаемое поведение.</p>
+    </section>
+
+    <section class="step" id="layers">
+      <h2>L4 распределяет соединения, L7 — запросы</h2>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Клиент с одним долгим HTTP/2-соединением. L4-балансировщик выбирает бэкенд для соединения, и все запросы идут на один экземпляр. L7-балансировщик разбирает HTTP и распределяет каждый запрос по всем экземплярам.">
+            <defs><marker id="lb-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">L4: ОДНО HTTP/2-СОЕДИНЕНИЕ</text>
+            <rect x="20" y="36" width="110" height="40" rx="8" class="dg-box"/>
+            <text x="75" y="61" class="dg-in" text-anchor="middle">клиент</text>
+            <rect x="180" y="36" width="90" height="40" rx="8" class="dg-box"/>
+            <text x="225" y="61" class="dg-in" text-anchor="middle">L4</text>
+            <path d="M130 56 L 178 56" class="dg-line" marker-end="url(#lb-a)"/>
+            <rect x="330" y="30" width="100" height="22" rx="5" class="dg-cell miss"/>
+            <text x="380" y="45" class="dg-n" text-anchor="middle">все запросы</text>
+            <rect x="330" y="58" width="100" height="22" rx="5" class="dg-cell"/>
+            <rect x="330" y="86" width="100" height="22" rx="5" class="dg-cell"/>
+            <path d="M270 52 L 328 42" class="dg-line bad" marker-end="url(#lb-a)"/>
+            <text x="450" y="61" class="dg-n">балансирует один раз — при установке TCP</text>
+            <text x="20" y="128" class="dg-cap">L7: КАЖДЫЙ ЗАПРОС ОТДЕЛЬНО</text>
+            <rect x="20" y="142" width="110" height="40" rx="8" class="dg-box"/>
+            <text x="75" y="167" class="dg-in" text-anchor="middle">клиент</text>
+            <rect x="180" y="142" width="90" height="40" rx="8" class="dg-box"/>
+            <text x="225" y="167" class="dg-in" text-anchor="middle">L7</text>
+            <path d="M130 162 L 178 162" class="dg-line" marker-end="url(#lb-a)"/>
+            <rect x="330" y="128" width="100" height="18" rx="5" class="dg-cell hit"/>
+            <rect x="330" y="152" width="100" height="18" rx="5" class="dg-cell hit"/>
+            <rect x="330" y="176" width="100" height="18" rx="5" class="dg-cell hit"/>
+            <path d="M270 156 L 328 138" class="dg-line ok" marker-end="url(#lb-a)"/>
+            <path d="M270 162 L 328 161" class="dg-line ok" marker-end="url(#lb-a)"/>
+            <path d="M270 168 L 328 184" class="dg-line ok" marker-end="url(#lb-a)"/>
+            <text x="450" y="167" class="dg-n">разбирает HTTP, выбирает на каждый запрос</text>
+          </svg>
+        </div>
+      </figure>
+      <table class="mx">
+        <thead><tr><th></th><th>L4 (TCP)</th><th>L7 (HTTP)</th></tr></thead>
+        <tbody>
+          <tr><td>Что видит</td><td>IP и порты</td><td>Метод, путь, заголовки, cookies</td></tr>
+          <tr><td>Единица балансировки</td><td>Соединение</td><td>Запрос</td></tr>
+          <tr><td>TLS</td><td>Проходит насквозь</td><td>Завершается на балансировщике</td></tr>
+          <tr><td>Возможности</td><td>Быстро, любой протокол</td><td>Маршрутизация по пути, повторы, заголовки, лимиты</td></tr>
+          <tr><td>Примеры</td><td>AWS NLB, kube-proxy (Service)</td><td>nginx, HAProxy в режиме http, Envoy, AWS ALB, Ingress</td></tr>
+        </tbody>
+      </table>
+      <p>Разница становится критичной для долгих соединений. Клиент gRPC открывает одно HTTP/2-соединение и шлёт по нему тысячи запросов. L4-балансировщик — например, обычный Service в Kubernetes — выбрал бэкенд один раз, при установке TCP, и все запросы этого клиента идут в один под; новые поды после масштабирования не получают ничего, пока соединения не переоткроются. Решения — L7-балансировка, понимающая HTTP/2 (Envoy, Linkerd, Istio), клиентская балансировка, когда клиент сам знает список экземпляров и распределяет запросы, как в <a href="api-styles.html">API Styles</a>, или ограничение срока жизни соединения на сервере (<code>maxConnectionAge</code> в gRPC).</p>
+    </section>
+
+    <section class="step" id="ha">
+      <h2>Балансировщик сам не должен быть единственной точкой отказа</h2>
+      <p>Один nginx перед тремя экземплярами — сам единственная точка отказа. Его резервируют: пара с общим виртуальным IP (keepalived и VRRP — при отказе активного IP переезжает на запасной), облачный балансировщик, который провайдер держит в нескольких зонах, или DNS с несколькими адресами — грубый вариант, потому что клиенты кешируют DNS и продолжают ходить на мёртвый адрес до истечения TTL. Между регионами балансируют через DNS с геопривязкой или anycast.</p>
+      <p>При деплое экземпляр выводят из ротации до остановки: readiness переходит в «не готов», балансировщик перестаёт слать новые запросы, а начатые дорабатывают (connection draining). Иначе каждый деплой — порция обрывов, которые, как показало демо, превращаются в повторы GET и 502 на POST. В Spring Boot за это отвечает <code>server.shutdown=graceful</code> — ожидание текущих запросов при остановке; с версии 3.4 это значение по умолчанию.</p>
+      <div class="trap">
+        <p class="myth">Балансировщик сам повторит неудачный запрос на другом экземпляре, поэтому сбой экземпляра для клиента незаметен.</p>
+        <p class="fact">Повтор незаметен только для идемпотентных запросов. В демо GET выполнился на упавшем и на запасном экземплярах — дважды. POST nginx по умолчанию не повторил, и клиент получил 502 без знания, выполнен ли запрос; с <code>non_idempotent</code> POST выполнился дважды.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Round robin отдал медленному экземпляру треть запросов: p99 1 237 мс; least_conn — 78 из 1 200, p99 416 мс.</li>
+        <li>Пассивные проверки — по ошибкам запросов (max_fails, fail_timeout), активные — по /health и readiness.</li>
+        <li>nginx повторяет GET после обрыва, даже если запрос выполнен; POST по умолчанию не повторяет — 502.</li>
+        <li>L4 балансирует соединения, L7 — запросы; долгие HTTP/2 и gRPC соединения через L4 перегружают один экземпляр.</li>
+        <li>Балансировщик резервируют (VRRP, облако), экземпляры выводят из ротации до остановки.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="lb-algos" data-freq="3">
+      <h3>Какие алгоритмы балансировки вы знаете и когда какой выбрать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Round robin — по кругу, хорош для одинаковых экземпляров и коротких запросов. Взвешенный — для разной мощности. Least connections — к экземпляру с меньшим числом активных соединений, сам уводит трафик от медленных и подходит для запросов разной длительности. Хеш по ключу или IP — привязка клиента к экземпляру ради локального кеша или состояния.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В демо least_conn снизил p99 втрое при одном медленном экземпляре.</li>
+            <li>Power of two choices — почти least connections без глобального знания, для многих балансировщиков.</li>
+            <li>Sticky sessions ломают равномерность и теряют состояние при отказе.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="lb-l4l7" data-freq="2">
+      <h3>Чем L4-балансировщик отличается от L7?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>L4 работает с TCP: видит адреса и порты, выбирает бэкенд для соединения, TLS проходит насквозь. L7 разбирает HTTP: маршрутизирует по пути и заголовкам, завершает TLS, повторяет запросы, выбирает бэкенд для каждого запроса. L4 быстрее и проще, L7 гибче.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>gRPC и HTTP/2 через L4: все запросы соединения — на один экземпляр.</li>
+            <li>Решения: L7 с поддержкой HTTP/2, клиентская балансировка, ограничение возраста соединения.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>После масштабирования с 3 до 6 подов новые поды почти без нагрузки. Почему?</summary>
+          <pre><code class="language-yaml"># gRPC-сервис ledger за обычным Service (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata: { name: ledger }
+spec:
+  selector: { app: ledger }
+  ports: [{ port: 9090 }]
+# клиенты: ManagedChannel на ledger:9090, один канал на всё приложение</code></pre>
+          <p>ClusterIP балансирует на уровне соединений (kube-proxy, L4), а gRPC-клиент держит одно долгое HTTP/2-соединение. Клиенты подключились к трём старым подам и продолжают слать туда все запросы; новые поды получат трафик только от новых соединений. Нужна клиентская балансировка gRPC через headless Service (DNS со всеми подами и политика round_robin), L7-прокси с поддержкой HTTP/2 или <code>maxConnectionAge</code> на сервере, чтобы соединения периодически переоткрывались.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="lb-retry" data-freq="2">
+      <h3>Безопасно ли балансировщику повторять запрос на другом экземпляре?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Только для идемпотентных запросов. Если экземпляр упал после начала обработки, повтор выполнит запрос второй раз. nginx по умолчанию повторяет GET и не повторяет POST после отправки на бэкенд — клиент получает 502. Для повторов неидемпотентных операций нужен ключ идемпотентности и дедупликация на сервере.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>non_idempotent в proxy_next_upstream включает повтор POST — опасно без ключа.</li>
+            <li>Повторы на нескольких уровнях перемножаются: балансировщик, клиент, шлюз.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://nginx.org/en/docs/http/ngx_http_upstream_module.html">nginx: ngx_http_upstream_module</a> — least_conn, max_fails, fail_timeout, backup.</li>
+      <li><a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_next_upstream">nginx: proxy_next_upstream</a> — повторы и non_idempotent.</li>
+      <li><a href="https://grpc.io/blog/grpc-load-balancing/">gRPC Load Balancing</a> — проблема долгих соединений и клиентская балансировка.</li>
+      <li>Michael Mitzenmacher, «The Power of Two Choices in Randomized Load Balancing».</li>
+      <li>Alex Xu, «System Design Interview», том 1, глава 1 — балансировщик в масштабировании.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
