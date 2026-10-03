@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Payment System · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sd-payments">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Payment System</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёжная система — это не про скорость, а про то, чтобы ни одна копейка не потерялась и не списалась дважды. Нагрузка скромная — сотни и тысячи платежей в секунду, — а сложность в неизвестных исходах: провайдер (PSP) списал деньги, но ответ потерялся. Отсюда четыре опоры. Идемпотентность на двух границах: клиент → мы по ключу клиента, мы → PSP по нашему ключу платежа. Статус PENDING записывают до вызова, а переходы делают машиной состояний, которая не откатывает финальный статус. Деньги учитывают двойной записью в той же транзакции, что и смену статуса. Ежедневная сверка с файлом расчётов PSP находит то, что пропустили все остальные механизмы.</p>
+    </div>
+
+    <section class="step" id="requirements">
+      <h2>Сначала договориться, что именно проектируем</h2>
+      <p>Задача «спроектируйте платёжную систему» слишком широка: это может быть эквайринг для интернет-магазинов, кошелёк, межбанковские переводы. Первые минуты собеседования уходят на сужение. Здесь проектируем платёжный шлюз для маркетплейса: магазины создают платежи по заказам, мы списываем деньги с карт покупателей через внешнего провайдера (PSP — Stripe, Adyen, банк-эквайер), учитываем, сколько должны каждому магазину, и выплачиваем раз в день. Номера карт к нам не попадают: их вводят в форме PSP, а мы получаем токен, поэтому почти весь объём требований PCI DSS остаётся у PSP.</p>
+      <table class="mx">
+        <thead><tr><th>Функциональные</th><th>Нефункциональные</th></tr></thead>
+        <tbody>
+          <tr><td>Создать платёж по заказу, провести списание через PSP</td><td>Ни одного двойного списания и потерянного платежа</td></tr>
+          <tr><td>Узнать статус платежа; уведомить магазин</td><td>Статус может догонять секунды, но в итоге точен</td></tr>
+          <tr><td>Возврат полный и частичный</td><td>Аудит: каждое движение денег объяснимо годами</td></tr>
+          <tr><td>Учёт долга перед магазином, выплаты</td><td>Доступность приёма 99,95 %; лучше отказать, чем ошибиться</td></tr>
+        </tbody>
+      </table>
+      <p>Что спросить у интервьюера: один PSP или несколько, карты или ещё и переводы, валюты, нужна ли двухстадийная оплата (авторизация, затем списание), какой пик — распродажи дают десятикратный всплеск. Ответы меняют дизайн: несколько PSP требуют маршрутизации и отдельной сверки с каждым, мультивалютность — курсов и отдельных счетов на валюту.</p>
+    </section>
+
+    <section class="step" id="estimation">
+      <h2>Нагрузка маленькая, данных много и надолго</h2>
+      <p>Пусть 10 млн платежей в сутки. Среднее — 10 000 000 / 86 400 ≈ 116 платежей в секунду; на распродаже пик в десять раз выше — около 1 200 в секунду. Каждый платёж — это несколько записей: строка платежа, две-четыре проводки, событие в outbox, попытки вызова PSP; около 1,5 КБ вместе с индексами. В сутки — 10 млн × 1,5 КБ = 15 ГБ, за год — около 5,5 ТБ, а хранить финансовые записи требуют годами.</p>
+      <p>Вывод для дизайна: по записи справится одна хорошо настроенная PostgreSQL — 1 200 коротких транзакций в секунду для неё обычная нагрузка, — и шардирование не нужно с первого дня. Важнее партиционирование по времени, как в <a href="partitioning.html">Partitioning</a>: старые месяцы уходят в дешёвое хранилище, а горячая часть остаётся маленькой. Вызов PSP занимает сотни миллисекунд и иногда секунды, поэтому потоки, ждущие PSP, — главный ресурс, который нужно ограничивать, как разобрано в <a href="resilience.html">Resilience Patterns</a>.</p>
+    </section>
+
+    <section class="step" id="api">
+      <h2>API и модель данных: ключ клиента, наш ключ для PSP, проводки</h2>
+<pre><code class="language-http">POST /v1/payments
+Idempotency-Key: order-42            # ключ магазина: повтор того же запроса — тот же платёж
+{ "merchant": "shop-7", "amount": 15000, "currency": "EUR", "payment_method": "pm_tok_..." }
+
+201 Created
+{ "id": "2", "status": "PENDING" }   # итог — через вебхук магазину или GET /v1/payments/2
+
+POST /v1/payments/2/refunds          # Idempotency-Key: refund-42-1
+{ "amount": 5000 }</code></pre>
+<pre><code class="language-sql">create table payment(
+  id bigserial primary key,
+  merchant text not null,
+  idempotency_key text not null,
+  amount bigint not null check (amount &gt; 0),      -- минимальные единицы валюты, не double
+  currency char(3) not null,
+  status text not null default 'CREATED',           -- CREATED, PENDING, SUCCEEDED, FAILED
+  psp_ref text,                                     -- идентификатор списания у PSP
+  created_at timestamptz not null default now(),
+  unique (merchant, idempotency_key));              -- ключ уникален в пределах магазина
+
+create table ledger(payment_id bigint references payment, account text, amount bigint);</code></pre>
+      <p>Суммы хранят целым числом минимальных единиц (центов, копеек), потому что <code>double</code> не представляет 0,1 точно, — подробнее в <a href="bigdecimal.html">BigDecimal</a>. Ключ идемпотентности уникален в паре с магазином: разные магазины могут прислать одинаковый «order-42». Ответ на создание — сразу <code>PENDING</code>, а не ожидание итога: итог может прийти через минуты (3-D Secure, проверка банка), поэтому финальный статус доставляют вебхуком магазину, а <code>GET</code> позволяет его спросить.</p>
+      <p>Таблица <code>ledger</code> — журнал проводок по двойной записи: каждое движение денег — минимум две строки с противоположными знаками, сумма всех строк всегда ноль. Балансы магазинов не хранят как изменяемое поле, а считают из проводок или держат как материализацию, которую можно проверить пересчётом. Подробно двойная запись и балансы — в <a href="sd-wallet.html">Digital Wallet</a>.</p>
+    </section>
+
+    <section class="step" id="architecture">
+      <h2>Высокоуровневая схема: синхронно — только приём и вызов PSP</h2>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 306" role="img" aria-label="Магазин вызывает Payment API. Payment service в одной транзакции пишет payment, ledger и outbox в PostgreSQL и вызывает PSP. PSP присылает вебхуки в Payment service. Relay публикует события из outbox в Kafka, откуда их читают уведомления магазинам и выплаты. Раз в сутки сверка сравнивает базу с файлом расчётов PSP.">
+            <defs><marker id="sp-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="40" width="110" height="50" rx="9" class="dg-box"/>
+            <text x="75" y="70" class="dg-in" text-anchor="middle">магазин</text>
+            <rect x="200" y="40" width="170" height="50" rx="9" class="dg-box"/>
+            <text x="285" y="62" class="dg-in" text-anchor="middle">payment service</text>
+            <text x="285" y="80" class="dg-n" text-anchor="middle">API + воркеры</text>
+            <rect x="540" y="40" width="150" height="50" rx="9" class="dg-box"/>
+            <text x="615" y="70" class="dg-in" text-anchor="middle">PSP</text>
+            <rect x="200" y="140" width="170" height="66" rx="9" class="dg-cell"/>
+            <text x="285" y="164" class="dg-in" text-anchor="middle">PostgreSQL</text>
+            <text x="285" y="184" class="dg-n" text-anchor="middle">payment · ledger</text>
+            <text x="285" y="199" class="dg-n" text-anchor="middle">outbox</text>
+            <rect x="540" y="148" width="150" height="50" rx="9" class="dg-box"/>
+            <text x="615" y="178" class="dg-in" text-anchor="middle">Kafka</text>
+            <rect x="460" y="240" width="110" height="44" rx="9" class="dg-box"/>
+            <text x="515" y="266" class="dg-in" text-anchor="middle">уведомления</text>
+            <rect x="590" y="240" width="110" height="44" rx="9" class="dg-box"/>
+            <text x="645" y="266" class="dg-in" text-anchor="middle">выплаты</text>
+            <rect x="20" y="240" width="170" height="44" rx="9" class="dg-box"/>
+            <text x="105" y="266" class="dg-in" text-anchor="middle">сверка, раз в сутки</text>
+            <path d="M130 65 L 198 65" class="dg-line" marker-end="url(#sp-a)"/>
+            <path d="M370 56 L 538 56" class="dg-line" marker-end="url(#sp-a)"/>
+            <text x="454" y="48" class="dg-n" text-anchor="middle">charge, ключ pay-id</text>
+            <path d="M538 76 L 372 76" class="dg-line" marker-end="url(#sp-a)"/>
+            <text x="454" y="94" class="dg-n" text-anchor="middle">ответ / вебхук</text>
+            <path d="M285 90 L 285 138" class="dg-line" marker-end="url(#sp-a)"/>
+            <text x="293" y="120" class="dg-n">одна транзакция</text>
+            <path d="M370 173 L 538 173" class="dg-line" marker-end="url(#sp-a)"/>
+            <text x="454" y="166" class="dg-n" text-anchor="middle">relay outbox</text>
+            <path d="M600 198 L 530 238" class="dg-line" marker-end="url(#sp-a)"/>
+            <path d="M630 198 L 640 238" class="dg-line" marker-end="url(#sp-a)"/>
+            <path d="M190 250 L 230 208" class="dg-line" marker-end="url(#sp-a)"/>
+            <path d="M190 274 C 440 274, 470 110, 572 92" class="dg-line" marker-end="url(#sp-a)"/>
+            <text x="200" y="298" class="dg-n">забирает файл расчётов у PSP</text>
+          </svg>
+        </div>
+        <figcaption>Синхронный путь — магазин → payment service → PSP. Всё, что может подождать, идёт через outbox и Kafka; сверка работает отдельно, по файлу PSP.</figcaption>
+      </figure>
+      <p>Payment service принимает запрос, создаёт платёж, вызывает PSP и в одной транзакции меняет статус, пишет проводки и событие в outbox. Уведомления магазинов, выплаты, аналитика получают события из Kafka через <a href="outbox.html">Transactional Outbox</a>: если сервис уведомлений лежит, платежи всё равно проходят. PSP сообщает итог двумя путями — ответом на запрос и вебхуком; любой из них может потеряться или прийти дважды, поэтому оба обрабатываются одинаково, через машину состояний.</p>
+      <p>Отдельный воркер раз в минуту берёт платежи, которые слишком долго висят в <code>PENDING</code>, и спрашивает PSP их статус по нашему ключу. Раз в сутки сверка сравнивает базу с файлом расчётов PSP. Эти два фоновых механизма — страховка на случай, когда и ответ, и вебхук потерялись.</p>
+    </section>
+
+    <section class="step" id="idempotency">
+      <h2>Повторы клиента: уникальный индекс решает гонку</h2>
+      <p>Магазин не получил ответ — сеть оборвалась — и повторяет запрос с тем же <code>Idempotency-Key</code>. Хуже: повтор приходит, пока первый ещё выполняется. Проверка «есть ли платёж с таким ключом, если нет — создать» в двух потоках одновременно даст два платежа. Гонку решает уникальный индекс на <code>(merchant, idempotency_key)</code> и <code>INSERT ... ON CONFLICT DO NOTHING</code>: вставит ровно одна транзакция, остальные получат пустой результат и прочитают существующую строку. Демо <a href="../examples/sd-payments/PaymentDemo.java">PaymentDemo.java</a> отправляет три одновременных запроса с одним ключом:</p>
+<pre><code class="language-java">static long createPayment(String merchant, String key, long amount) throws SQLException {
+    try (Connection c = DriverManager.getConnection(URL)) {
+        var ins = c.prepareStatement("""
+            insert into payment(merchant, idempotency_key, amount, currency) values (?, ?, ?, 'EUR')
+            on conflict (merchant, idempotency_key) do nothing returning id""");
+        ins.setString(1, merchant); ins.setString(2, key); ins.setLong(3, amount);
+        ResultSet r = ins.executeQuery();
+        if (r.next()) return r.getLong(1);                  // вставили мы
+        var sel = c.prepareStatement("select id, amount from payment where merchant = ? and idempotency_key = ?");
+        sel.setString(1, merchant); sel.setString(2, key);
+        r = sel.executeQuery(); r.next();
+        // Тот же ключ с другой суммой — ошибка клиента, а не повтор: отвечаем 422.
+        if (r.getLong(2) != amount) throw new IllegalStateException("same key, different amount");
+        return r.getLong(1);
+    }
+}</code></pre>
+      <pre class="out">== 1. three concurrent requests with one Idempotency-Key
+   distinct payment ids in 3 responses: 1
+   rows in payment: 1</pre>
+      <p>Конкурентная вставка с тем же ключом ждёт коммита первой транзакции и затем получает конфликт, поэтому все три ответа ссылаются на один платёж. Сравнение суммы защищает от ошибки клиента, который переиспользовал ключ для другого заказа. Полная схема — с хранением ответа, блокировкой на время выполнения и сроком жизни ключей — разобрана в <a href="idempotency.html">Idempotency</a>.</p>
+    </section>
+
+    <section class="step" id="unknown">
+      <h2>Самое трудное место: PSP списал деньги, но ответ потерялся</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 260" role="img" aria-label="Временная шкала платежа 5. Сервис пишет PENDING, вызывает PSP с ключом pay-5. PSP списывает деньги, но ответ теряется, сервис получает таймаут. Повтор с тем же ключом pay-5 возвращает то же списание psp-3, второго списания нет. Платёж переходит в SUCCEEDED.">
+            <defs><marker id="sp-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="120" y="24" class="dg-cap" text-anchor="middle">PAYMENT SERVICE</text>
+            <text x="600" y="24" class="dg-cap" text-anchor="middle">PSP</text>
+            <path d="M120 34 L 120 220" class="dg-sep"/>
+            <path d="M600 34 L 600 220" class="dg-sep"/>
+            <rect x="40" y="44" width="160" height="30" rx="7" class="dg-cell"/>
+            <text data-s="1-" x="120" y="64" class="dg-n" text-anchor="middle">status = PENDING</text>
+            <path data-s="2-" d="M120 92 L 598 92" class="dg-line" marker-end="url(#sp-b)"/>
+            <text data-s="2-" x="360" y="86" class="dg-n" text-anchor="middle">charge 80.00, ключ pay-5</text>
+            <rect data-s="2-" x="530" y="100" width="140" height="30" rx="7" class="dg-cell"/>
+            <text data-s="2-" x="600" y="120" class="dg-ok" text-anchor="middle">списано psp-3</text>
+            <path data-s="3-" d="M598 140 L 300 140" class="dg-line bad"/>
+            <text data-s="3-" x="290" y="144" class="dg-bad" text-anchor="end">✕ ответ потерян</text>
+            <text data-s="3-" x="40" y="164" class="dg-bad">таймаут: исход неизвестен</text>
+            <path data-s="4-" d="M120 180 L 598 180" class="dg-line" marker-end="url(#sp-b)"/>
+            <text data-s="4-" x="360" y="174" class="dg-n" text-anchor="middle">повтор, тот же ключ pay-5</text>
+            <path data-s="4-" d="M598 200 L 122 200" class="dg-line ok" marker-end="url(#sp-b)"/>
+            <text data-s="4-" x="360" y="214" class="dg-ok" text-anchor="middle">тот же psp-3, второго списания нет</text>
+            <text data-s="4" x="40" y="236" class="dg-ok">status = SUCCEEDED + проводки в одной транзакции</text>
+            <text data-s="1" x="20" y="254" class="dg-t">Статус PENDING пишем до вызова: после сбоя видно, что исход неизвестен.</text>
+            <text data-s="2" x="20" y="254" class="dg-t">PSP получил запрос и списал деньги с карты.</text>
+            <text data-s="3" x="20" y="254" class="dg-bad">Ответ потерялся. Таймаут — не отказ: деньги, возможно, уже списаны.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Перед вызовом PSP платёж переводится в PENDING и это коммитится. Если сервис упадёт во время вызова, воркер найдёт зависший PENDING и выяснит итог.</li>
+          <li>PSP получает запрос с нашим ключом идемпотентности pay-5 и списывает деньги.</li>
+          <li>Ответ теряется: обрыв, таймаут балансировщика, перезапуск пода. Для нас исход неизвестен — нельзя ни считать платёж неуспешным, ни повторять как новый.</li>
+          <li>Повтор с тем же ключом: PSP узнаёт запрос и возвращает существующее списание. Статус SUCCEEDED и проводки пишутся одной транзакцией.</li>
+        </ol>
+      </figure>
+      <p>Таймаут — это не «платёж не прошёл», а «неизвестно». Демо проводит один и тот же сценарий дважды: в первый раз повтор идёт с новым ключом для PSP (так получается, если ключом служит, например, номер попытки или случайный UUID на каждый вызов), во второй — с ключом, привязанным к платежу.</p>
+<pre><code class="language-java">// Статус PENDING записываем ДО вызова PSP: после сбоя видно, что исход неизвестен.
+static void charge(Psp psp, long id, String pspKey) throws Exception {
+    update("update payment set status = 'PENDING' where id = ? and status in ('CREATED', 'PENDING')", id);
+    String ref = psp.charge(pspKey, id, scalar("select amount from payment where id = " + id));
+    try (Connection c = DriverManager.getConnection(URL)) {
+        c.setAutoCommit(false);
+        var u = c.prepareStatement("update payment set status = 'SUCCEEDED', psp_ref = ? where id = ? and status = 'PENDING'");
+        u.setString(1, ref); u.setLong(2, id);
+        if (u.executeUpdate() == 1) post(c, id);       // проводки — в той же транзакции, что и смена статуса
+        c.commit();
+    }
+}</code></pre>
+      <pre class="out">== 2. PSP charged the card, the response was lost
+   attempt 1: read timed out, status PENDING
+   retry with a new PSP key:  PSP charges: 2, status SUCCEEDED
+   attempt 1: read timed out, status PENDING
+   retry with same PSP key:   PSP charges: 1, status SUCCEEDED</pre>
+      <p>С новым ключом PSP видит два разных запроса и списывает дважды, а у нас записано только второе списание — первое станет видно лишь при сверке. С ключом <code>pay-{id}</code> повтор безопасен. Отсюда правило: ключ для PSP выводится из нашего платежа и не меняется между попытками, а повторять после таймаута можно только с ним или после запроса статуса у PSP. PSP в демо — модель в памяти; у настоящих провайдеров это заголовок <code>Idempotency-Key</code> у Stripe или поле <code>reference</code> у Adyen с похожей семантикой, но ключи живут ограниченное время — Stripe может удалить ключ уже через 24 часа, — поэтому поздние повторы делают только после запроса статуса.</p>
+    </section>
+
+    <section class="step" id="state-machine">
+      <h2>Вебхуки приходят дважды и не по порядку: машина состояний в UPDATE</h2>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 170" role="img" aria-label="Машина состояний платежа: CREATED переходит в PENDING, PENDING — в SUCCEEDED или FAILED. Из финальных статусов назад перейти нельзя; возврат — отдельная сущность refund.">
+            <defs><marker id="sp-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="60" width="120" height="44" rx="9" class="dg-box"/>
+            <text x="80" y="87" class="dg-in" text-anchor="middle">CREATED</text>
+            <rect x="220" y="60" width="120" height="44" rx="9" class="dg-box"/>
+            <text x="280" y="87" class="dg-in" text-anchor="middle">PENDING</text>
+            <rect x="440" y="20" width="140" height="44" rx="9" class="dg-cell"/>
+            <text x="510" y="47" class="dg-ok" text-anchor="middle">SUCCEEDED</text>
+            <rect x="440" y="100" width="140" height="44" rx="9" class="dg-cell"/>
+            <text x="510" y="127" class="dg-bad" text-anchor="middle">FAILED</text>
+            <path d="M140 82 L 218 82" class="dg-line" marker-end="url(#sp-c)"/>
+            <path d="M340 74 L 438 46" class="dg-line ok" marker-end="url(#sp-c)"/>
+            <path d="M340 90 L 438 118" class="dg-line" marker-end="url(#sp-c)"/>
+            <path d="M580 42 L 640 42 L 640 80" class="dg-line" marker-end="url(#sp-c)"/>
+            <text x="600" y="98" class="dg-n">refund —</text>
+            <text x="600" y="114" class="dg-n">отдельная</text>
+            <text x="600" y="130" class="dg-n">сущность</text>
+            <text x="20" y="162" class="dg-s">Финальные статусы не меняются; поздний processing или failed после succeeded игнорируется.</text>
+          </svg>
+        </div>
+      </figure>
+      <p>PSP доставляет вебхуки «хотя бы раз» и не гарантирует порядок: <code>payment.succeeded</code> может прийти дважды, а запоздавший <code>payment.processing</code> — после него. Обработчик, который просто пишет статус из события, вернёт успешный платёж в обработку. Защита — переход как условный <code>UPDATE</code>: новый статус записывается, только если текущий допускает этот переход. Повтор и запоздавшее событие меняют ноль строк, и обработчик просто отвечает PSP 200.</p>
+<pre><code class="language-java">String sql = switch (event) {
+    case "payment.succeeded" -&gt; "update payment set status = 'SUCCEEDED' where id = ? and status = 'PENDING'";
+    case "payment.failed"    -&gt; "update payment set status = 'FAILED' where id = ? and status = 'PENDING'";
+    default                  -&gt; "update payment set status = 'PENDING' where id = ? and status in ('CREATED')";
+};
+int n = update.executeUpdate();
+if (n == 1 &amp;&amp; event.equals("payment.succeeded")) post(c, id);   // проводки — только при реальном переходе</code></pre>
+      <pre class="out">== 3. webhooks: duplicate and out of order
+   payment.succeeded    rows changed 1, status SUCCEEDED
+   payment.succeeded    rows changed 0, status SUCCEEDED
+   payment.processing   rows changed 0, status SUCCEEDED
+   payment.failed       rows changed 0, status SUCCEEDED
+   ledger rows for payment 6: 2</pre>
+      <p>Четыре события, один переход и одна пара проводок. Число изменённых строк — это и есть ответ на вопрос «был ли переход»: побочные эффекты (проводки, событие в outbox) выполняются только при единице. Конфликт <code>failed</code> после <code>succeeded</code> не должен случаться у корректного PSP; если случился, его не применяют молча, а пишут в очередь разбора — так же, как расхождения сверки. Вебхук перед обработкой проверяют по подписи PSP, иначе кто угодно отметит платёж оплаченным.</p>
+    </section>
+
+    <section class="step" id="reconciliation">
+      <h2>Сверка находит то, что пропустили остальные механизмы</h2>
+      <p>Идемпотентность, PENDING и машина состояний закрывают известные сценарии. Но бывают баги в коде, ручные операции, сбои PSP, потерянные и ответ, и вебхуки. Поэтому раз в сутки PSP присылает файл расчётов — все списания за день с нашими идентификаторами в метаданных, — и сверка сравнивает его с базой через полное внешнее соединение. Демо добавляет платёж, на вызове которого сервис упал, и сверяет все платежи из предыдущих шагов:</p>
+<pre><code class="language-sql">select coalesce(p.id, s.payment_id) as id, s.psp_ref,
+       case when s.psp_ref is null then 'we have it, PSP does not'
+            when p.status is distinct from 'SUCCEEDED' then 'PSP settled, ours is ' || coalesce(p.status, 'missing')
+            when p.psp_ref &lt;&gt; s.psp_ref then 'extra charge, we know ' || p.psp_ref
+            else 'amount differs' end as issue
+from (select * from payment where status in ('SUCCEEDED', 'PENDING')) p
+full join settlement s on s.payment_id = p.id
+where s.psp_ref is null or p.id is null or p.status &lt;&gt; 'SUCCEEDED'
+   or p.psp_ref &lt;&gt; s.psp_ref or p.amount &lt;&gt; s.amount</code></pre>
+      <pre class="out">== 4. reconciliation against the PSP settlement file
+   settlement rows: 5
+   payment 4, psp-1 -> extra charge, we know psp-2
+   payment 7, psp-5 -> PSP settled, ours is PENDING
+   ledger balance (must be 0): 0</pre>
+      <p>Сверка нашла оба следа: двойное списание из повтора с новым ключом (платёж 4: у PSP списание psp-1, о котором мы не знаем) и платёж 7, по которому PSP деньги получил, а у нас он завис в PENDING. Первое требует возврата клиенту, второе — перевода в SUCCEEDED с проводками. Частые классы расхождений: разные суммы (частичное списание, комиссия, курс), списание у PSP без нашего платежа, наш успешный платёж без списания у PSP. Автоматически исправляют только однозначные случаи, остальное идёт людям через очередь разбора.</p>
+      <p>Последняя строка — инвариант двойной записи: сумма всех проводок равна нулю. Его проверяют постоянно, а не только при сверке: ненулевая сумма означает ошибку в коде, и это сигнал остановить выплаты.</p>
+    </section>
+
+    <section class="step" id="failures">
+      <h2>Что ломается и какой ценой чинится</h2>
+      <table class="mx">
+        <thead><tr><th>Сбой</th><th>Что видит система</th><th>Что делаем</th></tr></thead>
+        <tbody>
+          <tr><td>Магазин повторил запрос</td><td>Тот же Idempotency-Key</td><td>Возвращаем тот же платёж; другая сумма — 422</td></tr>
+          <tr><td>Таймаут PSP</td><td>Платёж в PENDING</td><td>Повтор с тем же ключом или запрос статуса воркером</td></tr>
+          <tr><td>Сервис упал во время вызова</td><td>PENDING без попыток в последние минуты</td><td>Воркер спрашивает статус у PSP по ключу</td></tr>
+          <tr><td>PSP недоступен</td><td>Ошибки и таймауты подряд</td><td>Circuit breaker, честный отказ или переключение на запасной PSP только для новых платежей</td></tr>
+          <tr><td>Вебхук дублирован или опоздал</td><td>Условный UPDATE меняет 0 строк</td><td>Отвечаем 200, ничего не делаем</td></tr>
+          <tr><td>Kafka недоступна</td><td>Outbox растёт</td><td>Платежи идут, уведомления догонят</td></tr>
+          <tr><td>Всё остальное</td><td>Расхождение в сверке</td><td>Автоисправление однозначных, очередь разбора</td></tr>
+        </tbody>
+      </table>
+      <p>Главный компромисс — согласованность против доступности, как в <a href="cap.html">CAP &amp; Consistency</a>. Для денег выбирают согласованность: при недоступности базы лучше отказать в новых платежах, чем принять их в обход учёта. Переключение на запасной PSP делают только для новых платежей: платёж с неизвестным исходом у первого PSP нельзя повторить у второго, иначе возможна двойная оплата. Второй компромисс — синхронный итог против асинхронного: клиенту хочется сразу «оплачено», но честный ответ при долгом PSP — «в обработке» с последующим вебхуком. Транзакции, охватывающие наш платёж и выплату магазину, — это сага с компенсациями, как в <a href="dist-tx.html">Distributed Transactions</a>.</p>
+      <div class="trap">
+        <p class="myth">При таймауте от PSP платёж считаем неуспешным и предлагаем клиенту оплатить ещё раз.</p>
+        <p class="fact">Таймаут означает неизвестный исход: в демо PSP списал деньги, но ответ потерялся. Платёж остаётся в PENDING, итог выясняют повтором с тем же ключом или запросом статуса. Новая попытка с новым ключом дала два списания, которые нашла только сверка.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>10 млн платежей в сутки — около 116 в секунду, пик ×10; узкое место — не запись, а ожидание PSP и долгое хранение.</li>
+        <li>Повторы магазина решает уникальный индекс (merchant, idempotency_key) и INSERT ON CONFLICT: три гонки — один платёж.</li>
+        <li>PENDING пишут до вызова PSP; ключ для PSP выводится из платежа: с новым ключом повтор дал два списания, с тем же — одно.</li>
+        <li>Переходы — условный UPDATE: дубли и запоздавшие вебхуки меняют 0 строк, проводки пишутся только при реальном переходе.</li>
+        <li>Двойная запись в одной транзакции со статусом; сумма проводок — 0.</li>
+        <li>Сверка FULL JOIN с файлом PSP нашла двойное списание и зависший PENDING.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="pay-design" data-freq="3">
+      <h3>Спроектируйте платёжную систему для маркетплейса</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Уточнить объём (сколько PSP, валюты, двухстадийная оплата, пик) и оценить нагрузку: 10 млн в сутки — около 116 платежей в секунду, пик ×10. API создания платежа с Idempotency-Key, ответ сразу PENDING, итог — вебхуком. Payment service с PostgreSQL: платежи, проводки, outbox в одной транзакции. Вызов PSP с ключом, выведенным из платежа. Вебхуки PSP и фоновый опрос зависших PENDING. События через outbox в Kafka для уведомлений и выплат. Ежедневная сверка с файлом PSP.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Карты не хранить: токенизация у PSP снимает почти весь объём PCI DSS.</li>
+            <li>Суммы в минимальных единицах, двойная запись, партиционирование по времени, хранение годами.</li>
+            <li>Для денег — согласованность: при сбое базы отказ лучше, чем приём в обход учёта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pay-timeout" data-freq="3">
+      <h3>PSP ответил таймаутом. Что делать с платежом?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Считать исход неизвестным: деньги могли быть списаны. Платёж остаётся в PENDING, который записан до вызова. Повторить можно только с тем же ключом идемпотентности, выведенным из платежа, — PSP вернёт существующее списание. Если ключ мог истечь или повтор невозможен, воркер запрашивает статус у PSP. Новая попытка с новым ключом даёт двойное списание.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ключи у PSP живут ограниченно; поздние повторы — только после запроса статуса.</li>
+            <li>Переключаться на запасной PSP можно только для новых платежей.</li>
+            <li>Клиенту честно показывают «в обработке», а не предлагают оплатить ещё раз.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так в этом обработчике?</summary>
+          <pre><code class="language-java">try {
+    var resp = psp.charge(UUID.randomUUID().toString(), payment.amount());
+    payment.setStatus(SUCCEEDED);
+} catch (SocketTimeoutException e) {
+    payment.setStatus(FAILED);                 // покажем клиенту «оплата не прошла»
+}
+repository.save(payment);</code></pre>
+          <p>Три ошибки. Случайный ключ на каждый вызов делает повтор небезопасным: новая попытка — новое списание. Таймаут превращается в FAILED, хотя PSP мог списать деньги; клиент оплатит ещё раз и заплатит дважды. Статус до вызова не записан: если сервис упадёт во время вызова, никто не узнает, что исход надо выяснять. Нужно: PENDING до вызова, ключ <code>pay-{id}</code>, при таймауте оставить PENDING для повтора или запроса статуса.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pay-double" data-freq="3">
+      <h3>Как гарантировать, что клиент не заплатит дважды?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Идемпотентность на двух границах. Магазин → мы: Idempotency-Key, уникальный индекс и INSERT ON CONFLICT, чтобы даже одновременные повторы дали один платёж. Мы → PSP: ключ, привязанный к платежу, одинаковый на всех попытках. Переходы статусов — условным UPDATE, чтобы дубли вебхуков не повторяли побочные эффекты. И сверка как последняя линия: она находит двойные списания, которые пропустили остальные механизмы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Проверка «существует ли ключ» без уникального индекса проигрывает гонку.</li>
+            <li>Тот же ключ с другой суммой — ошибка клиента, 422, а не повтор.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pay-webhooks" data-freq="2">
+      <h3>Как обрабатывать вебхуки от PSP?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Проверить подпись, затем применить переход условным UPDATE: новый статус, только если текущий допускает переход. Дубль и запоздавшее событие изменят ноль строк — ответить 200 и ничего не делать. Побочные эффекты — проводки и событие в outbox — в той же транзакции и только при реальном переходе. Ответить быстро, тяжёлую обработку вынести асинхронно, иначе PSP повторит доставку.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Порядок вебхуков не гарантирован; финальный статус не откатывается.</li>
+            <li>Невозможный переход (failed после succeeded) — в очередь разбора, а не молча.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pay-recon" data-freq="2">
+      <h3>Зачем нужна сверка, если есть идемпотентность?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Идемпотентность закрывает известные сценарии, а сверка ловит всё остальное: баги, ручные операции, сбои PSP, потерянные и ответ, и вебхуки. Файл расчётов PSP сравнивают с базой полным внешним соединением: списания без нашего платежа, наши успешные платежи без списания, зависшие PENDING, расхождения сумм. Однозначные случаи исправляют автоматически, остальное — через очередь разбора.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Инвариант двойной записи — сумма проводок ноль — проверяют постоянно.</li>
+            <li>Сверку делают на нескольких уровнях: с PSP, с банком по выплатам, внутренняя между сервисами.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, Sahn Lam, «System Design Interview», том 2, глава «Payment System» — основа урока: поток платежа, PSP, сверка.</li>
+      <li><a href="https://stripe.com/blog/idempotency">Stripe: Designing robust and predictable APIs with idempotency</a>.</li>
+      <li><a href="https://docs.stripe.com/api/idempotent_requests">Stripe API: Idempotent requests</a> — срок жизни ключей.</li>
+      <li><a href="https://docs.stripe.com/webhooks">Stripe: Webhooks</a> — повторная доставка, порядок, подписи.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 12 — сквозная идемпотентность и проверка инвариантов.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

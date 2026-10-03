@@ -333,7 +333,7 @@ window.KB_TREE = [
           scope: 'strangler fig, sidecar, BFF, anti-corruption layer, ambassador' },
       ] },
       { id: 'cases', title: 'Case Studies', source: 'System Design Interview т. 1–2: разборы задач', items: [
-        { id: 'sd-payments', freq: 3, status: 'empty', title: 'Payment System',
+        { id: 'sd-payments', freq: 3, status: 'draft', title: 'Payment System',
           scope: 'приём платежа, статусы, идемпотентность, сверка, интеграция с банком и PSP' },
         { id: 'sd-wallet', freq: 2, status: 'empty', title: 'Digital Wallet',
           scope: 'баланс и проводки, перевод между счетами, двойная запись, event sourcing, аудит' },
