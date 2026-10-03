@@ -49,7 +49,7 @@ window.KB_TREE = [
           scope: 'хеш-функция, коллизии, цепочки и открытая адресация, load factor, рехеширование' },
         { id: 'trees', freq: 2, status: 'draft', title: 'Trees',
           scope: 'BST, обходы, сбалансированные деревья, красно-чёрное дерево, B-дерево, trie' },
-        { id: 'heaps', freq: 1, status: 'empty', title: 'Heaps',
+        { id: 'heaps', freq: 1, status: 'draft', title: 'Heaps',
           scope: 'двоичная куча, очередь с приоритетом, heapify, PriorityQueue в Java' },
         { id: 'graphs', freq: 1, status: 'empty', title: 'Graphs',
           scope: 'список и матрица смежности, BFS, DFS, топологическая сортировка, Дейкстра' },
