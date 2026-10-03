@@ -57,7 +57,7 @@ window.KB_TREE = [
       { id: 'patterns', title: 'Patterns', source: 'NeetCode Roadmap: порядок категорий', items: [
         { id: 'hash-counting', freq: 3, status: 'draft', title: 'Arrays & Hashing',
           scope: 'two sum, частоты, анаграммы, группировка, поиск дублей' },
-        { id: 'two-pointers', freq: 3, status: 'empty', title: 'Two Pointers',
+        { id: 'two-pointers', freq: 3, status: 'draft', title: 'Two Pointers',
           scope: 'отсортированный массив, пара с суммой, разворот, удаление дублей на месте, слияние' },
         { id: 'sliding-window', freq: 3, status: 'draft', title: 'Sliding Window',
           scope: 'окно фиксированного размера, окно переменной длины, подсчёт в окне, подстроки без повторов' },
