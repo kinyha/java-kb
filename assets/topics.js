@@ -311,7 +311,7 @@ window.KB_TREE = [
           scope: 'ключ идемпотентности, дедупликация, повторы, exactly-once на деле' },
         { id: 'dist-tx', freq: 3, status: 'draft', title: 'Distributed Transactions',
           scope: '2PC, saga, оркестрация и хореография, компенсации' },
-        { id: 'event-driven', freq: 2, status: 'empty', title: 'Event-driven, CQRS, Event Sourcing',
+        { id: 'event-driven', freq: 2, status: 'draft', title: 'Event-driven, CQRS, Event Sourcing',
           scope: 'события и команды, CQRS, event sourcing, проекции, eventual consistency' },
         { id: 'consensus', freq: 1, status: 'empty', title: 'Consensus & Time',
           scope: 'выбор лидера, Raft, split brain, часы и порядок событий' },

@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Event-driven, CQRS, Event Sourcing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="event-driven">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Event-driven, CQRS, Event Sourcing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Три идеи, которые часто смешивают. Событийная архитектура: сервис публикует факт «заказ оплачен», а не вызывает каждого, кому это интересно, — новые потребители подключаются без изменения источника. CQRS: модель для записи и модель для чтения разделены, и чтение обслуживает отдельная проекция, которая догоняет запись с задержкой. Event sourcing: источник истины — не текущее состояние, а журнал событий, и состояние вычисляется свёрткой. Event sourcing даёт полную историю, состояние на любой момент и новые проекции из старых событий без миграции. Цена — оптимистичная проверка версии потока при записи, eventual consistency чтения, эволюция схем событий и невозможность просто удалить данные.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Сервис заказов знает обо всех, кому интересна оплата</h2>
+      <p>После оплаты заказа сервис заказов синхронно вызывает склад, уведомления, программу лояльности, аналитику и антифрод. Каждый новый потребитель — изменение и релиз сервиса заказов; недоступность программы лояльности ломает оплату; задержки складываются, как в <a href="microservices.html">Monolith &amp; Microservices</a>. Если вместо вызовов публиковать событие «заказ оплачен», сервис заказов перестаёт зависеть от потребителей: склад, уведомления и аналитика подписываются сами.</p>
+      <p>Тема разбирает события и команды, CQRS с асинхронной проекцией и event sourcing на журнале в PostgreSQL. Надёжная публикация событий вместе с изменением в базе — в <a href="outbox.html">Transactional Outbox</a>, хореография саг — в <a href="dist-tx.html">Distributed Transactions</a>, доставка через брокер — в <a href="kafka-delivery.html">Kafka Delivery</a>. Демо <a href="../examples/event-driven/EventStoreDemo.java">EventStoreDemo.java</a> хранит события заказов в одной таблице PostgreSQL 17.</p>
+    </section>
+
+    <section class="step" id="events">
+      <h2>Событие — факт в прошлом, команда — просьба</h2>
+      <table class="mx">
+        <thead><tr><th></th><th>Команда</th><th>Событие</th></tr></thead>
+        <tbody>
+          <tr><td>Имя</td><td>ShipOrder — повелительное</td><td>OrderShipped — прошедшее время</td></tr>
+          <tr><td>Адресат</td><td>Один исполнитель</td><td>Любое число подписчиков, источник их не знает</td></tr>
+          <tr><td>Можно отказать</td><td>Да: проверка правил, ошибка</td><td>Нет: это уже произошло</td></tr>
+          <tr><td>Связность</td><td>Отправитель знает, кто сделает</td><td>Источник не знает, кто отреагирует</td></tr>
+        </tbody>
+      </table>
+      <p>Событие бывает тонким — «заказ 42 оплачен», и подписчик сам запрашивает подробности, — или толстым, с данными, нужными потребителям (event-carried state transfer): тогда потребитель не ходит к источнику и может держать у себя копию нужных полей. Толстые события снижают связность во время работы, но превращают формат события в публичный контракт, который нельзя менять как угодно. Событийная архитектура меняет и способ отладки: цепочку «оплата → склад → уведомление» больше не видно в коде одного сервиса, её восстанавливают по трассировке и журналам событий.</p>
+    </section>
+
+    <section class="step" id="sourcing">
+      <h2>Event sourcing: состояние — свёртка журнала событий</h2>
+<pre><code class="language-java">// Состояние заказа восстанавливается из событий; само по себе нигде не хранится.
+record Order(String status, long paid, long refunded) {
+    Order apply(Event e) {
+        return switch (e.type()) {
+            case "OrderPlaced" -&gt; new Order("PLACED", paid, refunded);
+            case "PaymentCaptured" -&gt; new Order("PAID", paid + e.amount(), refunded);
+            case "ItemRefunded" -&gt; new Order(status, paid, refunded + e.amount());
+            case "OrderShipped" -&gt; new Order("SHIPPED", paid, refunded);
+            default -&gt; this;
+        };
+    }
+}</code></pre>
+      <pre class="out">== state is a fold of events
+   v0 OrderPlaced      -> Order[status=PLACED, paid=0, refunded=0]
+   v1 PaymentCaptured  -> Order[status=PAID, paid=12000, refunded=0]
+   v2 ItemRefunded     -> Order[status=PAID, paid=12000, refunded=3000]</pre>
+      <p>В обычной модели строка заказа хранит текущие значения, и каждое изменение затирает предыдущее. В event sourcing хранится только журнал: что произошло и в каком порядке. Текущее состояние — результат применения всех событий потока к пустому состоянию; состояние на любой момент — применение событий до этого момента. Так устроены журналы проводок в бухгалтерии, как в <a href="sd-wallet.html">Digital Wallet</a>, и журнал изменений базы данных. Если у потока тысячи событий, хранят снимок состояния на некоторой версии и применяют только более поздние события.</p>
+<pre><code class="language-sql">create table event(
+  position bigserial primary key,           -- глобальный порядок для проекций
+  stream text not null, version int not null,
+  type text not null, amount bigint not null default 0,
+  unique (stream, version));                -- оптимистичная проверка версии</code></pre>
+      <pre class="out">== two commands on order-1 at version 3 at the same time
+   appended 1, conflicts 1 (23505 on unique (stream, version))</pre>
+      <p>Две команды одновременно прочитали поток заказа — 3 события — и решили добавить своё событие с версией 3: одна — возврат, другая — отгрузку. Уникальный индекс <code>(stream, version)</code> пропустил одну, вторая получила нарушение уникальности 23505. Проигравшая команда перечитывает поток и решает заново: возможно, после возврата отгрузка уже недопустима. Это оптимистичная блокировка на уровне потока — без блокировок при чтении, с конфликтом только при настоящей гонке за один агрегат. Какая из двух команд выиграет, решает планировщик; итог «одна добавлена, одна отклонена» повторяется.</p>
+    </section>
+
+    <section class="step" id="cqrs">
+      <h2>CQRS: проекция для чтения догоняет журнал</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Команда пишет событие в журнал. Проекция читает события после своей позиции и обновляет таблицу представления. Между записью события и следующим запуском проекции чтение видит старое состояние.">
+            <defs><marker id="ev-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="60" width="120" height="44" rx="9" class="dg-box"/>
+            <text x="80" y="87" class="dg-in" text-anchor="middle">команда</text>
+            <rect x="200" y="50" width="160" height="64" rx="9" class="dg-cell"/>
+            <text x="280" y="72" class="dg-in" text-anchor="middle">event</text>
+            <text data-s="-1" x="280" y="92" class="dg-n" text-anchor="middle">v0 … v2</text>
+            <text data-s="2-" x="280" y="92" class="dg-n" text-anchor="middle">v0 … v2, v3 Shipped</text>
+            <rect x="420" y="60" width="110" height="44" rx="9" class="dg-box"/>
+            <text x="475" y="87" class="dg-in" text-anchor="middle">проектор</text>
+            <rect x="580" y="50" width="120" height="64" rx="9" class="dg-cell"/>
+            <text x="640" y="72" class="dg-in" text-anchor="middle">order_view</text>
+            <text data-s="1-2" x="640" y="92" class="dg-n" text-anchor="middle">PAID</text>
+            <text data-s="3" x="640" y="92" class="dg-ok" text-anchor="middle">SHIPPED</text>
+            <path data-s="2-" d="M140 82 L 198 82" class="dg-line" marker-end="url(#ev-a)"/>
+            <path d="M360 82 L 418 82" class="dg-line" marker-end="url(#ev-a)"/>
+            <path d="M530 82 L 578 82" class="dg-line" marker-end="url(#ev-a)"/>
+            <text data-s="1" x="20" y="150" class="dg-t">Проектор применил 5 событий: представление — PAID, позиция сохранена.</text>
+            <text data-s="2" x="20" y="150" class="dg-bad">Записан OrderShipped, но проектор ещё не запускался: чтение видит PAID.</text>
+            <text data-s="3" x="20" y="150" class="dg-ok">Следующий запуск применил событие после сохранённой позиции: SHIPPED.</text>
+            <text x="20" y="184" class="dg-s">Позиция проектора и изменения представления сохраняются в одной транзакции.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Проектор читает события после своей сохранённой позиции, обновляет таблицу представления и в той же транзакции записывает новую позицию.</li>
+          <li>Команда записала OrderShipped. Журнал уже знает об отгрузке, а представление — ещё нет: чтение отстаёт до следующего запуска проектора.</li>
+          <li>Проектор применяет новое событие, и представление догоняет журнал.</li>
+        </ol>
+      </figure>
+      <pre class="out">== read model is updated asynchronously
+   view before projector: missing
+   projector applied 5 events: PAID, paid 12000
+   after OrderShipped:    PAID, paid 12000  (stale until next run)
+   next projector run:    SHIPPED, paid 12000</pre>
+      <p>CQRS разделяет модель записи (агрегаты, проверка правил, журнал) и модели чтения (таблицы под конкретные экраны и запросы). Каждую модель чтения можно хранить там, где её удобно читать: в PostgreSQL, Elasticsearch, Redis. Цена — eventual consistency: сразу после команды чтение может вернуть старое состояние. Интерфейс должен это учитывать — показывать результат команды из её ответа, а не перечитывать представление, — тот же read-your-writes, что в <a href="cap.html">CAP &amp; Consistency</a>. CQRS не требует event sourcing: проекции можно строить и из обычной базы через outbox или CDC.</p>
+      <pre class="out">== new read model built by replaying old events
+   order-1 refunded 3000 in 1 refund(s)</pre>
+      <p>Главная выгода журнала — новые вопросы к старым данным. Понадобилась статистика возвратов — новая проекция строится проходом по всем событиям, включая события годовой давности, без миграции и без потери истории: в обычной модели, где хранится только итоговое состояние, информации о прошлых возвратах могло не остаться вовсе.</p>
+    </section>
+
+    <section class="step" id="pitfalls">
+      <h2>Чем платят за event sourcing</h2>
+      <p><b>Порядок для проекций.</b> Демо читает события по <code>position</code> из <code>bigserial</code>. Это работает в одном потоке записи, но при конкурентных транзакциях значение последовательности выдаётся до коммита: транзакция с позицией 101 может закоммититься позже транзакции с позицией 102. Если проектор успел прочитать 102 и сохранить её как позицию, событие 101 он не увидит никогда. Решения — читать только события старше минимального активного идентификатора транзакции (<code>pg_snapshot_xmin</code>), сериализовать запись в журнал или публиковать события через логическую репликацию, которая выдаёт их в порядке коммита.</p>
+      <p><b>Эволюция схем.</b> События неизменяемы и живут годами, а код меняется. Старые версии событий читают с апкастингом — преобразованием старого формата в новый при чтении, — а не переписывают журнал. Удалять поля из события опасно: старые проекции на них опираются.</p>
+      <p><b>Удаление данных.</b> Требование удалить персональные данные противоречит неизменяемому журналу. Персональные данные не кладут в события, а хранят отдельно по ссылке, или шифруют ключом пользователя и удаляют ключ (crypto-shredding).</p>
+      <p><b>Сложность.</b> Event sourcing оправдан там, где история — часть предметной области: деньги, учёт, аудит, процессы с большим числом состояний. Для справочников и CRUD он добавляет сложность без пользы. Чаще всего в системе event sourcing — только у одного-двух агрегатов, а остальное хранится обычно.</p>
+      <div class="trap">
+        <p class="myth">Event sourcing и CQRS — одно и то же, и одно без другого не бывает.</p>
+        <p class="fact">CQRS — разделение моделей записи и чтения; проекции можно строить из обычной базы через outbox или CDC. Event sourcing — хранение журнала как источника истины; читать можно и свёрткой, как в первом опыте демо. Вместе они часто встречаются, потому что журнал удобно проецировать.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Событие — факт в прошлом для любого числа подписчиков; команда — просьба к одному исполнителю.</li>
+        <li>Event sourcing: состояние — свёртка событий; снимки сокращают свёртку.</li>
+        <li>Оптимистичная проверка: unique (stream, version) — из двух одновременных команд одна добавлена, другая получила 23505.</li>
+        <li>CQRS: проекция догоняет журнал; позиция и изменения представления — в одной транзакции; чтение видит старое до следующего прогона.</li>
+        <li>Новая проекция строится из старых событий без миграции.</li>
+        <li>Цена: порядок коммитов для проекций, эволюция схем, удаление данных, сложность.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ed-sourcing" data-freq="3">
+      <h3>Что такое event sourcing и когда он оправдан?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Хранение журнала событий как источника истины вместо текущего состояния. Состояние — свёртка событий потока, состояние на любой момент — свёртка событий до него. Даёт полную историю и аудит, новые проекции из старых событий, разбор инцидентов. Оправдан, где история — часть предметной области: деньги, учёт, сложные процессы. Для CRUD — лишняя сложность.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Конкуренция — оптимистичная проверка версии потока при добавлении.</li>
+            <li>Снимки, апкастинг старых версий событий, crypto-shredding для удаления данных.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ed-cqrs" data-freq="2">
+      <h3>Что такое CQRS и какие у него последствия?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Разделение модели записи и моделей чтения. Команды проверяют правила и меняют состояние, запросы читают из проекций, построенных под конкретные экраны, возможно в другом хранилище. Проекции обновляются асинхронно, поэтому чтение может отставать; интерфейс и API должны это учитывать.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Позиция проектора и изменения представления — в одной транзакции, иначе повтор применит событие дважды.</li>
+            <li>Проекции можно перестроить с нуля, если журнал полный.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему проекция иногда пропускает события?</summary>
+          <pre><code class="language-sql">-- проектор раз в секунду
+select * from event where position &gt; :last order by position limit 1000;
+-- после обработки: :last = max(position) из выборки
+-- запись: insert into event(...) в разных транзакциях из 20 потоков; position bigserial</code></pre>
+          <p>Значения <code>bigserial</code> выдаются в момент вставки, а видны событию после коммита. Транзакция с позицией 101 может закоммититься после транзакции с позицией 102; если проектор прочитал 102 и запомнил её, событие 101 станет видно уже ниже сохранённой позиции и будет пропущено навсегда. Нужно читать только события, чьи транзакции точно завершены (граница <code>pg_snapshot_xmin</code>), сериализовать запись или брать события из логической репликации в порядке коммита.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ed-events" data-freq="2">
+      <h3>Чем событие отличается от команды и что положить в событие?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Команда — просьба к одному исполнителю, её можно отклонить. Событие — факт, который уже произошёл, для любого числа подписчиков, источник их не знает. Тонкое событие несёт идентификатор, и подписчик запрашивает детали; толстое — нужные данные, и подписчик независим от источника во время работы, но формат события становится контрактом.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Публиковать события вместе с изменением в базе — через outbox.</li>
+            <li>Версионировать события, совместимо расширять, не удалять поля.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://martinfowler.com/articles/201701-event-driven.html">Martin Fowler: What do you mean by «Event-Driven»?</a> — основа урока: виды событийных систем.</li>
+      <li><a href="https://martinfowler.com/bliki/CQRS.html">Martin Fowler: CQRS</a>, <a href="https://martinfowler.com/eaaDev/EventSourcing.html">Event Sourcing</a>.</li>
+      <li><a href="https://microservices.io/patterns/data/event-sourcing.html">microservices.io: Event sourcing</a>, <a href="https://microservices.io/patterns/data/cqrs.html">CQRS</a>.</li>
+      <li>Greg Young, «Versioning in an Event Sourced System» — апкастинг и эволюция событий.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 11 — журналы событий и производные данные.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
