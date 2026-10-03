@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Booking System · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sd-booking">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Booking System</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Бронирование — это продажа ограниченного ресурса, за который одновременно борются многие: последнее место в самолёте, номер на даты, слот к врачу. Главный дефект — двойное бронирование, и проверка «свободно ли» в приложении перед вставкой его не предотвращает: в демо 50 одновременных покупателей последнего места получили 30 подтверждений. Защиту ставят в базе: счётчик свободных мест с условным UPDATE, уникальный индекс на конкретное место, ограничение исключения на пересекающиеся интервалы дат. Между выбором и оплатой место держат временной бронью со сроком, который проверяют при каждом захвате, а не только фоновой задачей. Поиск и просмотр обслуживают из кешей и реплик, а точные проверки — только на шаге бронирования.</p>
+    </div>
+
+    <section class="step" id="requirements">
+      <h2>Требования: поиск, временная бронь, оплата, никаких двойных продаж</h2>
+      <p>Система бронирования гостиниц или билетов: пользователь ищет варианты, выбирает конкретный номер или место, получает временную бронь на 10 минут, оплачивает — бронь подтверждается; не оплатил — место освобождается. Нефункционально: ни одной двойной продажи, поиск быстрый и может показывать немного устаревшую доступность, бронирование — точное. На старте продаж популярного концерта тысячи людей одновременно хотят одни и те же места.</p>
+      <p>Типичная нагрузка асимметрична: поисков и просмотров в 100–1 000 раз больше, чем бронирований. 10 млн поисков в сутки — около 115 в секунду в среднем, а бронирований — десятки тысяч в сутки. Отсюда разделение: поиск через кеш, реплики или Elasticsearch, как в <a href="elasticsearch.html">Elasticsearch</a>; бронирование — через основную базу с проверками в транзакции. Демо <a href="../examples/sd-booking/BookingDemo.java">BookingDemo.java</a> запускает 50 одновременных попыток бронирования в PostgreSQL 17.</p>
+    </section>
+
+    <section class="step" id="last-seat">
+      <h2>Последнее место: проверка в приложении продаёт его десятки раз</h2>
+<pre><code class="language-java">// Наивно: посчитать брони, сравнить с вместимостью, вставить.
+ResultSet r = c.createStatement().executeQuery(
+    "select count(*) &lt; (select capacity from flight where id = 'SU-100') from ticket where flight = 'SU-100'");
+r.next();
+if (!r.getBoolean(1)) return false;
+exec(c, "insert into ticket values ('SU-100', " + user + ")");
+
+// Счётчик свободных мест в строке рейса: уменьшается, только если больше нуля.
+int n = c.createStatement().executeUpdate("update flight set free = free - 1 where id = 'SU-100' and free &gt; 0");
+if (n == 0) return false;
+exec(c, "insert into ticket values ('SU-100', " + user + ")");</code></pre>
+      <pre class="out">== 50 users try to book the last seat of flight SU-100
+   check, then insert           confirmed 30, tickets for 180 seats: 209
+   conditional update           confirmed  1, tickets for 180 seats: 180</pre>
+      <p>Продано 179 мест из 180. Все 50 транзакций одновременно посчитали брони, увидели 179 и вставили свою: подтверждено 30, в самолёте на 180 мест — 209 билетов. Число зависит от того, как переплелись потоки, — в других запусках было от 9 до 46, — но двойная продажа случается всегда. Причина та же, что у потерянного обновления в <a href="sd-wallet.html">Digital Wallet</a>: в READ COMMITTED чтение не блокирует ничего, и между проверкой и вставкой проходят чужие транзакции. Условный UPDATE счётчика берёт блокировку строки рейса: первая транзакция уменьшает счётчик до нуля, остальные ждут её коммита, видят ноль и получают отказ — ровно одно подтверждение.</p>
+      <p>Если продаются конкретные места, а не «любое из 180», защита ещё проще: строка на каждое место и уникальный индекс <code>(flight, seat)</code> на билетах — вторая вставка того же места получает ошибку уникальности. Строка рейса со счётчиком становится горячей точкой при старте продаж: все покупатели ждут одну блокировку. Тогда места делят на группы со своими счётчиками или выдают места из очереди, о чём ниже.</p>
+    </section>
+
+    <section class="step" id="dates">
+      <h2>Номер на даты: пересечение интервалов проверяет ограничение исключения</h2>
+<pre><code class="language-sql">create table booking(room int, stay daterange, user_id int);
+alter table booking add constraint no_overlap
+  exclude using gist (room with =, stay with &amp;&amp;);   -- нужен extension btree_gist для room with =</code></pre>
+      <pre class="out">== 50 users book room 7 for overlapping dates
+   check overlap, then insert   confirmed 40, overlapping pairs: 780
+   exclusion constraint         confirmed  1, overlapping pairs: 0</pre>
+      <p>Гостиничный номер бронируют не местом, а интервалом дат, и конфликт — не совпадение ключа, а пересечение интервалов: заезд 10–13 октября конфликтует с 12–15. Уникальный индекс такого не выразит. Проверка «есть ли пересекающиеся брони» перед вставкой проигрывает гонку так же, как с местом: в демо 50 пользователей хотели три ночи с заездом 10, 11 или 12 октября — любые две такие брони пересекаются, — и наивный вариант подтвердил 40, то есть 780 пересекающихся пар. Ограничение исключения в PostgreSQL гарантирует, что никакие две строки с равным <code>room</code> не имеют пересекающихся <code>stay</code>: подтверждена одна бронь.</p>
+      <p>Деталь, найденная демо: при одновременной вставке пересекающихся интервалов PostgreSQL иногда сообщает проигравшей транзакции не нарушение ограничения (23P01), а взаимную блокировку (40P01) при проверке ограничения. Код должен считать оба исхода отказом «занято» и откатывать транзакцию. Без этого первая версия демо падала с необработанным исключением. В базах без ограничений исключения ту же гарантию дают блокировкой строки номера (<code>SELECT ... FOR UPDATE</code>) перед проверкой пересечений или таблицей «номер × ночь» с уникальным индексом — строка на каждую ночь.</p>
+    </section>
+
+    <section class="step" id="holds">
+      <h2>Временная бронь: срок проверяется при захвате, а не только задачей очистки</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 222" role="img" aria-label="Жизненный цикл места: свободно, временная бронь на 10 минут, затем либо подтверждение после оплаты, либо истечение срока. Истёкшую бронь новый покупатель может занять сразу, не дожидаясь фоновой очистки.">
+            <defs><marker id="bk-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="70" width="120" height="44" rx="9" class="dg-box"/>
+            <text x="80" y="97" class="dg-in" text-anchor="middle">свободно</text>
+            <rect x="230" y="70" width="140" height="44" rx="9" class="dg-cell"/>
+            <text x="300" y="90" class="dg-in" text-anchor="middle">HELD</text>
+            <text x="300" y="106" class="dg-n" text-anchor="middle">expires_at = +10 мин</text>
+            <rect x="480" y="20" width="160" height="44" rx="9" class="dg-cell hit"/>
+            <text x="560" y="47" class="dg-ok" text-anchor="middle">CONFIRMED</text>
+            <rect x="480" y="120" width="160" height="44" rx="9" class="dg-cell miss"/>
+            <text x="560" y="147" class="dg-bad" text-anchor="middle">истёк срок</text>
+            <path data-s="1-" d="M140 92 L 228 92" class="dg-line" marker-end="url(#bk-a)"/>
+            <text data-s="1-" x="184" y="84" class="dg-n" text-anchor="middle">выбрал</text>
+            <path data-s="2" d="M370 84 L 478 46" class="dg-line ok" marker-end="url(#bk-a)"/>
+            <text data-s="2" x="420" y="56" class="dg-ok" text-anchor="middle">оплатил</text>
+            <path data-s="3-" d="M370 100 L 478 138" class="dg-line bad" marker-end="url(#bk-a)"/>
+            <text data-s="3-" x="410" y="136" class="dg-bad" text-anchor="middle">не оплатил</text>
+            <path data-s="4" d="M480 160 C 300 196, 120 180, 80 116" class="dg-line ok" marker-end="url(#bk-a)"/>
+            <text data-s="4" x="250" y="212" class="dg-ok" text-anchor="middle">новый покупатель занимает сразу: expires_at &lt; now()</text>
+            <text data-s="1" x="660" y="96" class="dg-t" text-anchor="end">10 минут на оплату</text>
+            <text data-s="2" x="660" y="96" class="dg-t" text-anchor="end">продано</text>
+            <text data-s="3" x="660" y="96" class="dg-t" text-anchor="end">бронь просрочена</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Пользователь выбрал место: строка получает статус HELD и срок через 10 минут. Другие видят место занятым.</li>
+          <li>Оплата прошла в срок: бронь подтверждена, срок больше не важен.</li>
+          <li>Пользователь ушёл, не оплатив. Строка всё ещё HELD, но срок прошёл.</li>
+          <li>Следующий покупатель занимает место сразу, потому что условие захвата сравнивает срок с текущим временем. Фоновая задача лишь подчищает старые строки, корректность от неё не зависит.</li>
+        </ol>
+      </figure>
+<pre><code class="language-sql">insert into hold values ('12A', 9, 'HELD', now() + interval '10 minutes')
+on conflict (seat) do update set user_id = 9, status = 'HELD', expires_at = excluded.expires_at
+where hold.status = 'HELD' and hold.expires_at &lt; now();   -- занять можно только истёкшую бронь</code></pre>
+      <pre class="out">== hold expires after 10 minutes
+   user 9 takes 12A: held
+   user 9 takes 12B: busy
+   user 9 takes 12C: busy</pre>
+      <p>Место 12A держали минуту назад истёкшей бронью — новый пользователь занял его. 12B держится ещё 9 минут, 12C оплачено — оба заняты. Одна команда <code>INSERT ... ON CONFLICT DO UPDATE ... WHERE</code> атомарно решает три случая: место свободно, бронь истекла, место занято. Если корректность зависит только от фоновой задачи, которая раз в минуту снимает истёкшие брони, то место простаивает до её запуска, а при её сбое — бесконечно.</p>
+      <p>Оплата и подтверждение — отдельная развилка: оплата прошла на 10-й минуте и 1-й секунде, а бронь уже занял другой. Защита — подтверждать условным UPDATE <code>status = 'CONFIRMED' where user_id = ? and status = 'HELD'</code> и, если ноль строк, вернуть деньги автоматически. Платёж стоит проводить через ключ идемпотентности брони, как в <a href="sd-payments.html">Payment System</a>, а срок брони делать с запасом больше времени ожидания оплаты.</p>
+    </section>
+
+    <section class="step" id="flash">
+      <h2>Старт продаж: очередь вместо толпы у одной блокировки</h2>
+      <p>На старте продаж популярного концерта сотни тысяч людей одновременно пытаются занять несколько тысяч мест. Даже правильные блокировки здесь становятся узким местом: все транзакции ждут одни и те же строки, пулы соединений забиты, база перегружена, как в <a href="overload.html">Overload</a>. Решение — виртуальная очередь перед бронированием: пользователи встают в очередь (в Redis или в отдельном сервисе), и в зал бронирования пропускают столько, сколько система обслуживает, с понятным временем ожидания. Остальное — уже знакомые механизмы: лимиты на пользователя против ботов из <a href="rate-limiting.html">Rate Limiting</a>, отказ лишнему вместо очередей в базе.</p>
+      <p>Поиск при этом показывает доступность из кеша и может ошибаться: место, видимое свободным, уже держит другой покупатель. Это нормально, если точная проверка происходит при захвате брони и пользователь получает понятный ответ «место только что заняли». Делать поиск строго согласованным — значит гонять каждый просмотр через основную базу ради редкого случая.</p>
+      <div class="trap">
+        <p class="myth">Если перед вставкой брони проверить в той же транзакции, что место свободно, двойной продажи не будет.</p>
+        <p class="fact">В READ COMMITTED проверка ничего не блокирует: все транзакции видят место свободным и вставляют. В демо так последнее место продали 30 раз, а номер на пересекающиеся даты — 40 раз. Гарантию дают условный UPDATE счётчика, уникальный индекс места или ограничение исключения на интервалы.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Проверка «свободно?» в приложении продала последнее место 30 раз; условный UPDATE счётчика — один.</li>
+        <li>Интервалы дат: ограничение исключения <code>exclude using gist (room with =, stay with &amp;&amp;)</code> — 0 пересечений против 780.</li>
+        <li>Проигравшая вставка может получить 23P01 или 40P01 — оба означают «занято».</li>
+        <li>Временная бронь со сроком: захват проверяет <code>expires_at &lt; now()</code>, фоновая очистка не нужна для корректности.</li>
+        <li>Подтверждение после оплаты — условным UPDATE с автоматическим возвратом при опоздании; старт продаж — через виртуальную очередь.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="bk-double" data-freq="3">
+      <h3>Как не допустить двойного бронирования?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Проверку и захват делать одной операцией в базе, а не «прочитать и вставить». Для «N любых мест» — счётчик с условным UPDATE <code>free = free - 1 where free &gt; 0</code>; для конкретного места — уникальный индекс; для интервалов дат — ограничение исключения или блокировка строки ресурса перед проверкой пересечений. Отказ базы означает «занято» и превращается в понятный ответ пользователю.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>READ COMMITTED не защищает проверку перед вставкой; SERIALIZABLE защитит ценой повторов.</li>
+            <li>При конкурентной проверке ограничения исключения возможен 40P01 вместо 23P01.</li>
+            <li>Горячая строка счётчика на старте продаж — делить на группы или ставить очередь.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим бронированием?</summary>
+          <pre><code class="language-java">@Transactional
+public Booking book(long roomId, LocalDate from, LocalDate to, long userId) {
+    if (bookings.existsOverlap(roomId, from, to)) throw new RoomTaken();
+    return bookings.save(new Booking(roomId, from, to, userId));
+}
+@Scheduled(fixedDelay = 60_000)
+void releaseExpired() { bookings.deleteHeldBefore(Instant.now().minus(10, MINUTES)); }</code></pre>
+          <p>Проверка пересечений и вставка разделены: одновременные запросы обе пройдут проверку, и номер забронируют дважды. Нужно ограничение исключения на интервал или блокировка строки номера перед проверкой. Истёкшие брони освобождает только задача раз в минуту: до её запуска место простаивает, а если она упала — навсегда. Захват должен сам считать бронь со сроком в прошлом свободной.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="bk-hold" data-freq="2">
+      <h3>Как реализовать временную бронь на время оплаты?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Строка брони со статусом HELD и сроком истечения. Занять место можно, если его нет или бронь в статусе HELD с прошедшим сроком — одной командой upsert с условием. Подтверждение после оплаты — условным UPDATE по пользователю и статусу; если бронь уже занята другим, деньги возвращаются автоматически. Фоновая очистка только убирает мусор.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Срок брони — с запасом к времени ожидания оплаты.</li>
+            <li>Платёж — с ключом идемпотентности брони.</li>
+            <li>Можно хранить бронь в Redis с TTL, но источником истины для продажи остаётся база.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="bk-flash" data-freq="2">
+      <h3>Как выдержать старт продаж популярного события?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Виртуальная очередь перед бронированием пропускает столько пользователей, сколько система обслуживает; остальным показывает позицию и время ожидания. Поиск и просмотр — из кеша, точная проверка — только при захвате. Лимиты на пользователя и защита от ботов. Лишнее — быстрый отказ, а не ожидание в пулах соединений.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Горячая строка счётчика — делить места на группы со своими счётчиками.</li>
+            <li>Предварительно прогретые кеши и заранее масштабированные экземпляры.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, Sahn Lam, «System Design Interview», том 2, глава «Hotel Reservation System» — основа урока.</li>
+      <li><a href="https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-EXCLUSION">PostgreSQL: Exclusion Constraints</a> и <a href="https://www.postgresql.org/docs/current/rangetypes.html">Range Types</a>.</li>
+      <li><a href="https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT">PostgreSQL: INSERT ON CONFLICT</a>.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 7 — write skew и фантомы на примере бронирования.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
