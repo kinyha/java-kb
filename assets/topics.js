@@ -281,7 +281,7 @@ window.KB_TREE = [
     source: 'System Design Interview (Alex Xu) т. 1–2, System Design Primer, roadmap.sh/system-design, Azure Cloud Design Patterns, microservices.io, DDIA',
     items: [
       { id: 'basics', title: 'Fundamentals', source: 'System Design Interview т. 1, гл. 1–3; System Design Primer', items: [
-        { id: 'sd-approach', freq: 3, status: 'empty', title: 'Interview Framework',
+        { id: 'sd-approach', freq: 3, status: 'draft', title: 'Interview Framework',
           scope: 'требования, API, модель данных, высокоуровневая схема, узкие места, компромиссы' },
         { id: 'sd-estimation', freq: 2, status: 'empty', title: 'Back-of-the-envelope',
           scope: 'RPS, объём данных, пропускная способность, latency numbers, степени двойки' },
