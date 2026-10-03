@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Consensus &amp; Time · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="consensus">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Consensus &amp; Time</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Консенсус — способ нескольким узлам согласиться об одном значении или порядке операций, даже если часть узлов упала. Raft в etcd делает это через лидера и большинство: лидер принимает записи, запись подтверждена, когда её сохранило большинство, а при пропаже лидера оставшиеся выбирают нового с увеличенным номером срока. Аварийное падение лидера в демо стоило кластеру 1,1–3,2 с недоступности записи, штатная остановка — 55 мс: лидер успел передать полномочия. Блокировка с арендой поверх консенсуса не защищает от клиента, который заснул и проснулся после истечения аренды: в демо такой клиент записал данные поверх нового владельца. Защита — fencing token: хранилище отвергает записи со старым токеном. По времени разных узлов события не упорядочивают — часы расходятся и прыгают.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Два планировщика решили, что каждый из них главный</h2>
+      <p>Выплаты магазинам запускает планировщик, который работает в трёх экземплярах; выполнять должен один — лидер. Лидерство держалось на записи в Redis с TTL 10 секунд. Один экземпляр ушёл в долгую сборку мусора на 15 секунд, его запись истекла, лидером стал второй. Первый проснулся, не проверил, что он больше не лидер, и тоже запустил выплаты. Магазины получили деньги дважды. Это split brain — два узла одновременно считают себя главными.</p>
+      <p>Тема разбирает Raft на кластере etcd 3.6, блокировки с арендой и fencing token, а также порядок событий без общих часов. Поведение кворума при сетевом разделении — в <a href="cap.html">CAP &amp; Consistency</a>, блокировки на Redis — в <a href="redis-ops.html">Redis in Production</a>. Демо <a href="../examples/consensus/consensus.sh">consensus.sh</a> поднимает три узла etcd в Docker и клиентов на alpine.</p>
+    </section>
+
+    <section class="step" id="raft">
+      <h2>Raft: лидер, большинство и номер срока</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Три узла Raft. Лидер etcd-3 в сроке 2 рассылает сердцебиения. Лидер падает. etcd-2 не получает сердцебиений дольше тайм-аута выборов, становится кандидатом в сроке 3 и просит голоса. etcd-1 голосует за него: у кандидата большинство из двух узлов, он лидер. Если два кандидата делят голоса, срок увеличивается ещё раз.">
+            <defs><marker id="rf-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="290" y="20" width="140" height="50" rx="9" class="dg-box"/>
+            <text x="360" y="42" class="dg-in" text-anchor="middle">etcd-3</text>
+            <text data-s="1" x="360" y="60" class="dg-ok" text-anchor="middle">лидер, срок 2</text>
+            <text data-s="2-" x="360" y="60" class="dg-bad" text-anchor="middle">упал</text>
+            <rect x="80" y="130" width="160" height="50" rx="9" class="dg-box"/>
+            <text x="160" y="152" class="dg-in" text-anchor="middle">etcd-1</text>
+            <text data-s="-2" x="160" y="170" class="dg-n" text-anchor="middle">последователь, 2</text>
+            <text data-s="3" x="160" y="170" class="dg-n" text-anchor="middle">голос за etcd-2</text>
+            <text data-s="4" x="160" y="170" class="dg-n" text-anchor="middle">последователь, 4</text>
+            <rect x="480" y="130" width="160" height="50" rx="9" class="dg-box"/>
+            <text x="560" y="152" class="dg-in" text-anchor="middle">etcd-2</text>
+            <text data-s="-1" x="560" y="170" class="dg-n" text-anchor="middle">последователь, 2</text>
+            <text data-s="2" x="560" y="170" class="dg-bad" text-anchor="middle">нет сердцебиений</text>
+            <text data-s="3" x="560" y="170" class="dg-n" text-anchor="middle">кандидат, срок 3</text>
+            <text data-s="4" x="560" y="170" class="dg-ok" text-anchor="middle">лидер, срок 4</text>
+            <path data-s="1" d="M300 70 L 200 128" class="dg-line ok" marker-end="url(#rf-a)"/>
+            <path data-s="1" d="M420 70 L 520 128" class="dg-line ok" marker-end="url(#rf-a)"/>
+            <text data-s="1" x="360" y="110" class="dg-n" text-anchor="middle">сердцебиения каждые 100 мс</text>
+            <path data-s="3" d="M478 150 L 242 150" class="dg-line" marker-end="url(#rf-a)"/>
+            <text data-s="3" x="360" y="143" class="dg-n" text-anchor="middle">RequestVote</text>
+            <path data-s="4" d="M242 166 L 478 166" class="dg-line ok" marker-end="url(#rf-a)"/>
+            <text data-s="4" x="360" y="200" class="dg-ok" text-anchor="middle">2 из 3 — большинство</text>
+            <text data-s="1" x="20" y="214" class="dg-t">Лидер принимает записи и подтверждает их, когда их сохранило большинство.</text>
+            <text data-s="2" x="20" y="214" class="dg-bad">Лидер упал: сердцебиений нет дольше тайм-аута выборов (1–2 с).</text>
+            <text data-s="3" x="20" y="214" class="dg-t">Первый проснувшийся становится кандидатом и увеличивает срок.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Лидер etcd-3 в сроке 2 принимает все записи, реплицирует их последователям и рассылает сердцебиения — по умолчанию каждые 100 мс. Запись подтверждена клиенту, когда её сохранило большинство: два узла из трёх.</li>
+          <li>Лидер упал. Последователи не знают, упал он или сеть медленная, и ждут тайм-аут выборов — 1 000 мс по умолчанию, у каждого узла со случайной добавкой, чтобы они не проснулись одновременно.</li>
+          <li>Тот, у кого тайм-аут истёк первым, становится кандидатом: увеличивает номер срока и просит голоса. Узел голосует за одного кандидата в сроке и только если журнал кандидата не отстаёт от его собственного.</li>
+          <li>Получив большинство, кандидат становится лидером. В демо срок вырос с 2 до 4: первый раунд не дал никому большинства, и понадобились вторые выборы.</li>
+        </ol>
+      </figure>
+      <pre class="out">== leader election (Raft, election timeout 1000 ms by default)
+   kill  etcd-3 (term 2): writes accepted again after 3238 ms, new leader etcd-2 (term 4)
+   stop  etcd-2 (term 4): writes accepted again after   54 ms, new leader etcd-1 (term 5)</pre>
+      <p>Демо роняет лидера двумя способами. <code>docker kill</code> — аварийное падение: кластер не принимал записи 3,2 с. В двух других запусках было 1,1 с при сроке, выросшем на единицу: тайм-аут выборов плюс сами выборы. В этом запуске первые выборы не дали лидера — срок вырос сразу на два, — и простой оказался втрое длиннее. <code>docker stop</code> посылает SIGTERM, и etcd при штатной остановке передаёт лидерство другому узлу до выхода: 54 мс. Отсюда практический вывод — штатные остановки при деплое почти бесплатны, а цена аварийного падения определяется тайм-аутом выборов. Уменьшить его можно, но тогда кратковременные задержки сети чаще будут вызывать лишние выборы.</p>
+      <p>Номер срока — главный инструмент против двух лидеров. Узел, узнавший о большем сроке, сразу перестаёт считать себя лидером, а сообщения со старым сроком отвергаются. Старый лидер, оказавшийся в меньшинстве, не может подтвердить ни одной записи: для этого ему нужно большинство, а оно уже признало нового лидера. Поэтому в Raft двух лидеров, подтверждающих записи, не бывает. Нечётное число узлов — 3 или 5 — выбирают потому, что 4 узла переживают отказ одного, как и 3, а голосов для большинства нужно больше.</p>
+    </section>
+
+    <section class="step" id="fencing">
+      <h2>Блокировка с арендой не останавливает уснувшего клиента</h2>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="Клиент A берёт блокировку с арендой 2 секунды и токеном 4, затем замирает. Аренда истекает, клиент B берёт блокировку с токеном 6 и пишет в хранилище. A просыпается и пишет с токеном 4. Хранилище без проверки принимает запись A поверх записи B; хранилище с проверкой токена её отвергает.">
+            <text x="20" y="40" class="dg-in">A</text>
+            <text x="20" y="90" class="dg-in">B</text>
+            <text x="20" y="140" class="dg-in">хранилище</text>
+            <path d="M110 120 L 700 120" class="dg-sep"/>
+            <rect x="110" y="26" width="120" height="22" rx="4" class="dg-cell hit"/>
+            <text x="170" y="41" class="dg-n" text-anchor="middle">lock, token 4</text>
+            <rect data-s="2-" x="230" y="26" width="200" height="22" rx="4" class="dg-cell miss"/>
+            <text data-s="2-" x="330" y="41" class="dg-bad" text-anchor="middle">пауза: аренда истекла</text>
+            <rect data-s="3-" x="440" y="76" width="140" height="22" rx="4" class="dg-cell hit"/>
+            <text data-s="3-" x="510" y="91" class="dg-n" text-anchor="middle">lock, token 6</text>
+            <text data-s="3-" x="510" y="140" class="dg-ok" text-anchor="middle">B: token 6</text>
+            <rect data-s="4" x="590" y="26" width="110" height="22" rx="4" class="dg-cell"/>
+            <text data-s="4" x="645" y="41" class="dg-n" text-anchor="middle">проснулся</text>
+            <text data-s="4" x="645" y="140" class="dg-bad" text-anchor="middle">A: token 4</text>
+            <text data-s="4" x="645" y="160" class="dg-ok" text-anchor="middle">отвергнут</text>
+            <text data-s="1" x="20" y="190" class="dg-t">A взял блокировку на 2 с; etcd выдал ревизию 4 — это и есть токен.</text>
+            <text data-s="2" x="20" y="190" class="dg-bad">A замер (docker pause ≈ пауза GC): продлевать аренду некому, она истекла.</text>
+            <text data-s="3" x="20" y="190" class="dg-t">B получил блокировку с токеном 6 и записал.</text>
+            <text data-s="4" x="20" y="190" class="dg-t">A проснулся и пишет: без проверки запись принята, с проверкой — отвергнута.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент A берёт в etcd блокировку <code>job</code> с арендой 2 с. etcd выдаёт ключ блокировки с ревизией 4 — монотонно растущим номером изменения.</li>
+          <li>A замирает: в демо — <code>docker pause</code>, в жизни — пауза сборки мусора, своп, остановленная виртуальная машина. Продлевать аренду некому, через 2 с etcd её удаляет.</li>
+          <li>B берёт блокировку и получает ревизию 6 — больше, чем у A. B пишет в хранилище.</li>
+          <li>A просыпается и продолжает, будто блокировка у него. Его запись дойдёт до хранилища — вопрос только в том, примет ли её хранилище.</li>
+        </ol>
+      </figure>
+<pre><code class="language-sh"># write.sh — хранилище за блокировкой; токен = ревизия блокировки etcd
+last=$(cat /data/last 2&gt;/dev/null || echo 0)
+if [ "$token" -lt "$last" ]; then
+  echo "$who token=$token REJECTED (seen $last)" &gt;&gt; /data/fenced.log
+else
+  echo "$token" &gt; /data/last
+  echo "$who token=$token accepted" &gt;&gt; /data/fenced.log
+fi</code></pre>
+      <pre class="out">== lock with a 2 s lease; client A freezes while holding it
+   A got the lock, token 4
+   B got the lock, token 6
+   naive storage:
+     B token=6
+     A token=4
+   fenced storage:
+     B token=6 accepted
+     A token=4 REJECTED (seen 6)</pre>
+      <p>Хранилище без проверки приняло запись A после записи B — ровно сценарий двойной выплаты. Хранилище, которое помнит наибольший виденный токен и отвергает меньшие, отклонило A. Это fencing token: блокировка выдаёт монотонно растущий номер, клиент передаёт его с каждой записью, а проверяет не клиент, а ресурс. Клиент не может сам надёжно понять, что его аренда истекла: проверка «я ещё владелец?» и запись — два действия, между которыми может случиться ещё одна пауза.</p>
+      <p>В etcd токеном служит ревизия ключа блокировки, в ZooKeeper — zxid или версия узла. В базе данных проверку делают условием записи: <code>update ... where id = ? and fence_token &lt;= ?</code>. Блокировка на Redis вроде Redlock монотонного токена не даёт, поэтому её используют для оптимизаций (не делать работу дважды без вреда), а не для корректности.</p>
+    </section>
+
+    <section class="step" id="time">
+      <h2>Порядок событий без общих часов</h2>
+      <p>Часы разных машин расходятся на миллисекунды и больше, а NTP может сдвинуть их назад, как в Snowflake из <a href="id-generation.html">Unique ID Generation</a>. Поэтому сравнивать метки времени, поставленные разными узлами, чтобы решить, что было раньше, нельзя: событие с меньшей меткой могло произойти позже. На этом ломается last write wins — «последняя» по часам запись может оказаться не последней по факту.</p>
+      <table class="mx">
+        <thead><tr><th>Механизм</th><th>Что даёт</th><th>Где</th></tr></thead>
+        <tbody>
+          <tr><td>Порядок от лидера</td><td>Полный порядок: номер в журнале консенсуса</td><td>etcd revision, Kafka offset в партиции, LSN базы</td></tr>
+          <tr><td>Часы Лэмпорта</td><td>Если A вызвало B, то L(A) &lt; L(B)</td><td>Счётчик +1 на событие, max при получении сообщения</td></tr>
+          <tr><td>Векторные часы</td><td>Отличают «раньше» от «одновременно»</td><td>Обнаружение конфликтов в Dynamo-подобных хранилищах</td></tr>
+          <tr><td>Гибридные логические часы</td><td>Близки к физическому времени и монотонны</td><td>CockroachDB, MongoDB</td></tr>
+          <tr><td>Ограниченная неопределённость</td><td>Ожидание до конца интервала погрешности</td><td>Google Spanner TrueTime</td></tr>
+        </tbody>
+      </table>
+      <p>Самый практичный ответ — не упорядочивать по часам вовсе, а брать порядок у того, кто его назначает: номер в журнале, ревизию, смещение в партиции. Монотонные часы процесса (<code>System.nanoTime</code>) годятся для измерения интервалов внутри одного процесса, но не для сравнения между машинами; настенные (<code>System.currentTimeMillis</code>, <code>Instant.now</code>) — для показа людям и грубых сроков вроде аренды, с запасом на расхождение.</p>
+      <div class="trap">
+        <p class="myth">Если блокировка выдана с TTL через консенсус-хранилище вроде etcd, два клиента не смогут работать с ресурсом одновременно.</p>
+        <p class="fact">etcd гарантирует, что блокировкой в каждый момент владеет один клиент с точки зрения etcd. Клиент, замерший дольше аренды, этого не знает и продолжает: в демо A записал после B. Защищает только проверка fencing token на стороне ресурса.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Raft: лидер, подтверждение большинством, выборы по тайм-ауту со случайной добавкой, номер срока против двух лидеров.</li>
+        <li>Аварийное падение лидера: 1,1–3,2 с без записи (второй раунд выборов при разделении голосов); штатная остановка с передачей лидерства — 54 мс.</li>
+        <li>Аренда не останавливает замерший клиент: без проверки запись с токеном 4 легла после записи с токеном 6.</li>
+        <li>Fencing token — монотонный номер от блокировки, проверяемый ресурсом; в etcd — ревизия.</li>
+        <li>Порядок — от журнала (ревизия, offset, LSN), а не по часам разных машин.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="cn-raft" data-freq="2">
+      <h3>Как Raft выбирает лидера и почему не бывает двух лидеров?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Лидер рассылает сердцебиения. Последователь, не получавший их дольше случайного тайм-аута выборов, становится кандидатом: увеличивает номер срока и просит голоса. Узел голосует за одного кандидата в сроке и только если журнал кандидата не отстаёт. Получивший большинство — лидер. Записи подтверждаются большинством, поэтому старый лидер в меньшинстве не может подтвердить ничего, а увидев больший срок, слагает полномочия.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Случайный тайм-аут уменьшает разделение голосов; в демо один раз понадобились вторые выборы.</li>
+            <li>Штатная остановка с передачей лидерства — десятки мс, аварийная — тайм-аут выборов.</li>
+            <li>3 или 5 узлов: 4 переживают столько же отказов, что и 3.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cn-fencing" data-freq="2">
+      <h3>Почему распределённой блокировки с TTL недостаточно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Клиент может замереть (пауза GC, своп) дольше TTL: блокировка истекает, её берёт другой, а первый просыпается и продолжает работу, считая себя владельцем. Проверка «я ещё владелец» перед записью не помогает — пауза может случиться между проверкой и записью. Нужен fencing token: монотонный номер от блокировки, который ресурс проверяет и отвергает устаревшие.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>etcd — ревизия ключа блокировки, ZooKeeper — zxid; в базе — условие в UPDATE.</li>
+            <li>Redlock монотонного токена не даёт — годится для оптимизаций, не для корректности.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим выбором лидера?</summary>
+          <pre><code class="language-java">@Scheduled(fixedDelay = 5_000)
+void tick() {
+    boolean leader = redis.set("payouts:leader", instanceId, SetParams.setParams().nx().px(10_000)) != null
+                  || instanceId.equals(redis.get("payouts:leader"));
+    if (leader) {
+        redis.pexpire("payouts:leader", 10_000);
+        payouts.runDue();                       // может работать дольше 10 секунд
+    }
+}</code></pre>
+          <p>Если <code>runDue</code> или пауза GC длятся дольше 10 секунд, ключ истекает, лидером становится другой экземпляр, а первый продолжает выплаты — два лидера. Проверка и продление — отдельные команды, между ними ключ может смениться. Нужен fencing token, который проверяет хранилище выплат (например, условие на номер эпохи лидера в UPDATE), и идемпотентность самих выплат по ключу периода и магазина, чтобы повтор ничего не выплатил дважды.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cn-time" data-freq="2">
+      <h3>Можно ли упорядочивать события разных сервисов по времени?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нельзя полагаться: часы машин расходятся и могут прыгнуть назад при синхронизации, и событие с меньшей меткой может быть более поздним. Порядок берут у того, кто его назначает: номер в журнале консенсуса, смещение в партиции Kafka, LSN базы. Для причинно-следственного порядка — логические часы Лэмпорта или векторные.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Last write wins по часам теряет записи при расхождении часов.</li>
+            <li>nanoTime — для интервалов в одном процессе, не для сравнения между машинами.</li>
+            <li>Spanner делает время безопасным ожиданием конца интервала неопределённости.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Diego Ongaro, John Ousterhout, «In Search of an Understandable Consensus Algorithm» — Raft; <a href="https://raft.github.io/">raft.github.io</a>.</li>
+      <li><a href="https://etcd.io/docs/v3.6/tuning/">etcd: Tuning</a> — heartbeat-interval 100 мс и election-timeout 1000 мс.</li>
+      <li><a href="https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html">Martin Kleppmann: How to do distributed locking</a> — fencing tokens.</li>
+      <li>Leslie Lamport, «Time, Clocks, and the Ordering of Events in a Distributed System», 1978.</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», главы 8 и 9.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

@@ -313,7 +313,7 @@ window.KB_TREE = [
           scope: '2PC, saga, оркестрация и хореография, компенсации' },
         { id: 'event-driven', freq: 2, status: 'draft', title: 'Event-driven, CQRS, Event Sourcing',
           scope: 'события и команды, CQRS, event sourcing, проекции, eventual consistency' },
-        { id: 'consensus', freq: 1, status: 'empty', title: 'Consensus & Time',
+        { id: 'consensus', freq: 1, status: 'draft', title: 'Consensus & Time',
           scope: 'выбор лидера, Raft, split brain, часы и порядок событий' },
       ] },
       { id: 'reliability', title: 'Reliability', source: 'Azure Cloud Design Patterns: Resiliency, Performance Antipatterns; Release It!', items: [
