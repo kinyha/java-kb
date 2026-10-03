@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Performance Antipatterns · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="perf-antipatterns">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Performance Antipatterns</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Большинство проблем производительности backend — не медленный код, а лишние круги по сети и лишние данные. Каждый запрос к базе стоит как минимум круг по сети, и при миллисекунде на круг 200 запросов в цикле — это уже 334 мс, тогда как те же данные двумя запросами приходят за 4 мс. Тысяча вставок с отдельными коммитами — 1,6 с, пакетом — 17 мс. Выборка 100 000 строк, чтобы посчитать сумму в Java, проигрывает агрегату в SQL в 18 раз. Остальные антипаттерны из каталога Azure — busy database, noisy neighbor, синхронный ввод-вывод, retry storm — сводятся к тому же: работа делается не там, не так часто или не теми ресурсами.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Страница заказов: 40 мс на ноутбуке, 400 мс в продакшене</h2>
+      <p>Разработчик проверил страницу истории заказов локально: база на той же машине, ответ за 40 мс. В продакшене база в соседней зоне доступности, круг по сети — около миллисекунды, и страница отвечает за 400 мс. Код тот же; разница — в числе обращений к базе, которое локально было незаметно. Hibernate загружал позиции каждого заказа отдельным запросом при первом обращении к ленивой коллекции — классический N+1.</p>
+      <p>Демо <a href="../examples/perf-antipatterns/AntipatternsDemo.java">AntipatternsDemo.java</a> воспроизводит продакшен-условия: отдельный PostgreSQL 17 в Docker, к сетевому интерфейсу которого добавлена задержка 1 мс через <code>tc netem</code>. Данные — 20 000 заказов по 5 позиций. Порядки задержек разобраны в <a href="sd-estimation.html">Back-of-the-envelope</a>, планы запросов — в <a href="query-tuning.html">Query Tuning</a>.</p>
+    </section>
+
+    <section class="step" id="chatty">
+      <h2>Chatty I/O: N+1 запросов вместо одного-двух</h2>
+<pre><code class="language-java">// N+1: позиции каждого заказа — отдельным запросом.
+ResultSet o = c.createStatement().executeQuery("select id from orders order by id limit 200");
+var ps = c.prepareStatement("select sku, price from item where order_id = ?");
+while (o.next()) {
+    ps.setInt(1, o.getInt(1));
+    try (ResultSet r = ps.executeQuery()) { while (r.next()) items++; }
+}
+
+// Два запроса: заказы, затем все их позиции одним = ANY(массив).
+var ps = c.prepareStatement("select order_id, sku, price from item where order_id = any(?)");
+ps.setArray(1, c.createArrayOf("int4", ids.toArray()));</code></pre>
+      <pre class="out">== load 200 orders with their items (1 ms network round trip)
+   N+1: one query per order           334 ms   201 queries, 1000 items
+   one JOIN                             8 ms   1 query, 1000 items
+   two queries, = ANY(array)            4 ms   2 queries, 1000 items</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 190" role="img" aria-label="Временная шкала. N+1: 201 запрос по кругу 1,7 мс — 334 мс. Два запроса с ANY — 4 мс. Почти всё время N+1 — ожидание сети, а не работа базы.">
+            <defs><marker id="pa-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">ВРЕМЯ ОТВЕТА, 1 ПИКСЕЛЬ ≈ 0,6 МС</text>
+            <text x="20" y="58" class="dg-in">N+1</text>
+            <text x="20" y="118" class="dg-in">= ANY</text>
+            <rect data-s="1" x="110" y="44" width="3" height="22" rx="1" class="dg-cell miss"/>
+            <text data-s="1" x="122" y="60" class="dg-n">1-й заказ, 1-й круг ~1,7 мс, далее ещё 200…</text>
+            <rect data-s="2" x="110" y="44" width="560" height="22" rx="3" class="dg-cell miss"/>
+            <text data-s="2" x="390" y="60" class="dg-bad" text-anchor="middle">201 круг по сети — 334 мс</text>
+            <rect data-s="2" x="110" y="104" width="7" height="22" rx="2" class="dg-cell hit"/>
+            <text data-s="2" x="125" y="120" class="dg-ok">2 круга — 4 мс</text>
+            <path data-s="2" d="M110 150 L 670 150" class="dg-line" marker-end="url(#pa-a)"/>
+            <text data-s="2" x="110" y="168" class="dg-n">0</text>
+            <text data-s="2" x="670" y="168" class="dg-n" text-anchor="end">334 мс</text>
+            <text x="20" y="186" class="dg-s">База отвечает на каждый запрос за доли миллисекунды; остальное — сеть.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Каждый запрос N+1 сам по себе быстрый: поиск по индексу пяти строк. Но каждый ждёт круг по сети — около 1,7 мс с задержкой netem и накладными расходами драйвера.</li>
+          <li>201 запрос складывается в 334 мс; два запроса с <code>= ANY</code> — в 4 мс. Разница в 80 раз — почти целиком ожидание сети.</li>
+        </ol>
+      </figure>
+      <p>N+1 опасен тем, что не виден локально: на машине разработчика круг по сети — десятки микросекунд, и 201 запрос занимает пару десятков миллисекунд. В JPA он появляется при обращении к ленивым коллекциям в цикле; лечат <code>join fetch</code>, <code>@EntityGraph</code> или <code>@BatchSize</code> — последний превращает N запросов в N/размер пачки, как разобрано в <a href="jpa-relations.html">Relations &amp; Fetching</a>. Обнаруживают по числу запросов на запрос пользователя: счётчик запросов Hibernate в тестах или трассировка, где под одним HTTP-запросом сотни одинаковых SQL.</p>
+      <p>Один JOIN оказался вдвое медленнее двух запросов — 8 мс против 4. <code>EXPLAIN ANALYZE</code> показал, что для JOIN планировщик выбрал hash join с полным проходом по всем 100 000 позициям, а <code>= ANY</code> идёт по индексу. «Меньше запросов» — не самоцель; цель — меньше кругов и разумный план для каждого. JOIN к тому же размножает строки родителя на каждую дочернюю, что при больших строках заказа даёт лишний трафик.</p>
+    </section>
+
+    <section class="step" id="extraneous">
+      <h2>Extraneous fetching: тянуть всё, чтобы посчитать одно</h2>
+      <pre class="out">== revenue of customer 7
+   fetch all items, sum in Java        18 ms   rows transferred 100000, revenue 47800
+   sum in SQL                           1 ms   rows transferred 1, revenue 47800</pre>
+      <p>Чтобы посчитать выручку одного клиента, код выбрал все 100 000 позиций с номером клиента и отфильтровал в Java: 18 мс и 100 000 строк по сети ради 25 нужных. Агрегат в SQL с условием по индексу вернул одну строку за миллисекунду — фактически за один круг. На полной таблице в миллионы строк разница растёт линейно, а память приложения забивается строками, которые сразу выбрасываются. Та же ошибка в мелком масштабе — <code>select *</code> там, где нужны два столбца, или загрузка сущности с коллекциями ради одного поля: лишние данные читаются с диска, передаются и разбираются.</p>
+      <p>Обратная ошибка — busy database: перенос в базу тяжёлой логики, которая там не нужна, например формирования отчётов на основной базе в часы пик или бизнес-правил в хранимых процедурах, которые конкурируют за процессор с транзакциями. Фильтры и агрегаты — в базу; вычисления, не требующие данных, и тяжёлая аналитика — в приложение или на реплику, как в <a href="replication.html">Replication</a>.</p>
+    </section>
+
+    <section class="step" id="writes">
+      <h2>Запись по одной строке: тысяча кругов и тысяча коммитов</h2>
+      <pre class="out">== insert 1000 rows
+   one insert per row, autocommit    1559 ms   1000 round trips, 1000 commits
+   JDBC batch, one transaction         17 ms   batched round trips, 1 commit</pre>
+      <p>Тысяча вставок в режиме autocommit — тысяча кругов по сети и тысяча коммитов, каждый со сбросом журнала: 1,56 с. Пакет JDBC в одной транзакции — 17 мс, в 90 раз быстрее: драйвер отправляет команды пачками, а коммит один. С параметром <code>reWriteBatchedInserts=true</code> pgjdbc ещё и склеивает вставки в многострочный <code>INSERT</code>. В Hibernate пакетная запись включается <code>hibernate.jdbc.batch_size</code>, но не работает с <code>GenerationType.IDENTITY</code>: чтобы узнать id, Hibernate вынужден вставлять строки по одной.</p>
+      <table class="mx">
+        <thead><tr><th>Антипаттерн</th><th>Признак</th><th>Лечение</th></tr></thead>
+        <tbody>
+          <tr><td>Chatty I/O</td><td>Сотни одинаковых запросов под одним запросом пользователя</td><td>JOIN, = ANY, пакетные вызовы, @BatchSize</td></tr>
+          <tr><td>Extraneous fetching</td><td>Много строк из базы, мало в ответе</td><td>Фильтры и агрегаты в SQL, проекции, пагинация</td></tr>
+          <tr><td>Busy database</td><td>CPU базы занят не запросами транзакций</td><td>Логику — в приложение, отчёты — на реплику</td></tr>
+          <tr><td>Synchronous I/O</td><td>Потоки ждут сеть, пул исчерпан при низком CPU</td><td>Пулы с лимитами, асинхронность, виртуальные потоки</td></tr>
+          <tr><td>No caching</td><td>Одни и те же неизменные данные читаются на каждый запрос</td><td>Кеш с инвалидацией, как в <a href="caching.html">Caching</a></td></tr>
+          <tr><td>Noisy neighbor</td><td>Один клиент или задача съедает общий ресурс</td><td>Лимиты на клиента, изоляция пулов (bulkhead)</td></tr>
+          <tr><td>Retry storm</td><td>Нагрузка растёт при сбое</td><td>Backoff, бюджет повторов, как в <a href="overload.html">Overload</a></td></tr>
+        </tbody>
+      </table>
+      <p>Диагностика у всех одна: измерять число запросов и данных на одну операцию пользователя, а не только время. Трассировка показывает лишние круги, <code>pg_stat_statements</code> — запросы с огромным числом вызовов или строк, как в <a href="slow-queries.html">Slow Queries</a>. Тесты производительности с задержкой сети, как в этом демо, ловят N+1 до продакшена.</p>
+      <div class="trap">
+        <p class="myth">Запрос выполняется за 0,1 мс — значит, делать его в цикле не страшно.</p>
+        <p class="fact">Время выполнения в базе не включает круг по сети. В демо каждый запрос N+1 сам по себе мгновенный, но 201 круг с задержкой 1 мс дал 334 мс против 4 мс у двух запросов. Локально разница незаметна, в продакшене — в 80 раз.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>С кругом по сети 1 мс: N+1 на 200 заказов — 334 мс, два запроса с = ANY — 4 мс, JOIN — 8 мс из-за выбранного плана.</li>
+        <li>Сумма в Java по 100 000 строкам — 18 мс, агрегат в SQL — 1 мс и одна строка.</li>
+        <li>1 000 вставок с autocommit — 1,56 с, пакет в одной транзакции — 17 мс.</li>
+        <li>Считать число запросов и строк на операцию пользователя; тестировать с задержкой сети.</li>
+        <li>Остальные антипаттерны: busy database, синхронный ввод-вывод, нет кеша, noisy neighbor, retry storm.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="pa-n1" data-freq="3">
+      <h3>Что такое проблема N+1 и как её найти и исправить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Один запрос за списком и по одному запросу на каждый элемент за связанными данными. Каждый запрос быстрый, но круги по сети складываются: в демо 201 запрос — 334 мс против 4 мс у двух. Исправляют загрузкой связанных данных одним запросом — JOIN или <code>where id = any(...)</code>; в JPA — join fetch, EntityGraph или BatchSize. Находят по числу SQL на один HTTP-запрос: трассировка, счётчики Hibernate в тестах.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Локально незаметен: круг по сети там — десятки микросекунд.</li>
+            <li>Один JOIN не всегда быстрее двух запросов: смотреть план; JOIN размножает строки родителя.</li>
+            <li>Тест с netem-задержкой ловит N+1 до продакшена.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Сколько запросов сделает этот код на странице из 50 заказов?</summary>
+          <pre><code class="language-java">@Transactional(readOnly = true)
+public List&lt;OrderDto&gt; page(long customerId) {
+    return orders.findTop50ByCustomerIdOrderByIdDesc(customerId).stream()
+        .map(o -&gt; new OrderDto(o.getId(),
+                               o.getItems().size(),                 // LAZY
+                               o.getDelivery().getCity()))          // LAZY @ManyToOne
+        .toList();
+}</code></pre>
+          <p>1 запрос за заказами, затем 50 за позициями и до 50 за доставкой — до 101 запроса; при 1 мс на круг — около 100 мс только на сеть. Нужны <code>@EntityGraph(attributePaths = {"items", "delivery"})</code> или join fetch, а для количества позиций лучше проекция с <code>count</code> в запросе, чтобы не загружать сами позиции.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pa-writes" data-freq="2">
+      <h3>Как ускорить массовую запись в базу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Писать пакетами в одной транзакции, а не по строке с autocommit: каждый коммит — круг по сети и сброс журнала. В демо 1 000 строк — 1,56 с по одной и 17 мс пакетом. В pgjdbc — reWriteBatchedInserts, в Hibernate — jdbc.batch_size; для очень больших объёмов — COPY.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Hibernate не пакетирует вставки при IDENTITY — нужен SEQUENCE с allocationSize.</li>
+            <li>Слишком большие транзакции держат блокировки и мешают VACUUM — пачки по тысячам строк.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pa-catalog" data-freq="2">
+      <h3>Какие антипаттерны производительности вы знаете?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Chatty I/O — много мелких запросов вместо немногих; extraneous fetching — выборка лишних строк и столбцов; busy database — тяжёлая логика в базе; synchronous I/O — потоки, ждущие сеть; отсутствие кеша для неизменных данных; noisy neighbor — один клиент съедает общий ресурс; retry storm — повторы, усиливающие сбой.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Метрика — запросы и строки на операцию пользователя, а не только время.</li>
+            <li>pg_stat_statements: calls и rows выдают chatty и extraneous.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://learn.microsoft.com/en-us/azure/architecture/antipatterns/">Azure Architecture Center: Performance antipatterns</a> — основа каталога.</li>
+      <li><a href="https://jdbc.postgresql.org/documentation/use/">pgjdbc: reWriteBatchedInserts</a>.</li>
+      <li><a href="https://docs.jboss.org/hibernate/orm/current/userguide/html_single/Hibernate_User_Guide.html#batch">Hibernate: Batching</a> — batch_size и ограничение IDENTITY.</li>
+      <li><a href="https://man7.org/linux/man-pages/man8/tc-netem.8.html">tc-netem</a> — эмуляция сетевой задержки.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

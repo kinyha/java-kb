@@ -321,7 +321,7 @@ window.KB_TREE = [
           scope: 'таймауты, retry с backoff и jitter, circuit breaker, bulkhead, fallback' },
         { id: 'overload', freq: 1, status: 'draft', title: 'Overload',
           scope: 'backpressure, throttling, load shedding, graceful degradation, retry storm' },
-        { id: 'perf-antipatterns', freq: 1, status: 'empty', title: 'Performance Antipatterns',
+        { id: 'perf-antipatterns', freq: 1, status: 'draft', title: 'Performance Antipatterns',
           scope: 'chatty I/O, busy database, extraneous fetching, noisy neighbor, synchronous I/O' },
       ] },
       { id: 'architecture', title: 'Architecture', source: 'microservices.io; Azure Cloud Design Patterns', items: [
