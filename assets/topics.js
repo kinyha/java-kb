@@ -615,7 +615,7 @@ window.KB_TREE = [
           scope: 'Prometheus и pull-модель, counter, gauge и histogram, RED и USE, Grafana' },
         { id: 'tracing', freq: 2, status: 'draft', title: 'Tracing',
           scope: 'OpenTelemetry, span и trace, передача контекста между сервисами, sampling' },
-        { id: 'incidents', freq: 1, status: 'empty', title: 'Alerting & Incidents',
+        { id: 'incidents', freq: 1, status: 'draft', title: 'Alerting & Incidents',
           scope: 'алерты по SLO, дежурства, разбор инцидента, postmortem' },
         { id: 'performance', freq: 2, status: 'draft', title: 'Load Testing',
           scope: 'нагрузочное тестирование, JMeter, Gatling и k6, профили нагрузки, поиск узкого места' },
