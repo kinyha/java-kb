@@ -1,0 +1,871 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Arrays &amp; Hashing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="hash-counting">
+<main class="page">
+  <header class="topic-head"><h1>Arrays &amp; Hashing</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сверка платежей снова ищет сумму среди уже прочитанных операций. Если сохранить нужные сведения в таблице, следующий элемент проверяется одним запросом вместо нового прохода по прошлому. Значение таблицы зависит от вопроса: встречался ли id, сколько раз, на какой позиции или в какую группу он попал. Самая важная часть решения — выбрать ключ и объяснить, что таблица содержит перед очередным шагом.</p>
+    </div>
+
+    <section class="step" id="repeated-search">
+      <h2>Повторный поиск можно заменить памятью о прочитанном</h2>
+      <p>В выгрузке суммы [40, 20, 90, 30]. Нужно найти две <b>разные позиции</b> с суммой 50. Прямой способ берёт каждую сумму и сравнивает её со всеми следующими. Для одного небольшого файла это просто, но при росте входа одна и та же часть списка просматривается снова и снова.</p>
+      <p>Для n элементов существует n(n − 1)/2 пар. Если подходящей пары нет или она в конце, перебор проверит их все: O(n²) времени и O(1) дополнительной памяти. Отрицательные суммы и повторы не мешают перебору. Даже здесь надо считать в подходящем типе: две суммы int могут дать результат, который не помещается в int.</p>
+      <p>Фрагменты <a href="../examples/hash-counting/PairDemo.java">PairDemo.java</a>, JDK 21. Счётчик считает только проверки суммы; вход не меняется:</p>
+      <pre><code class="language-java">record Brute(int[] pair, int comparisons) {}
+
+static Brute brute(int[] nums, int target) {
+    int comparisons = 0;
+    for (int i = 0; i &lt; nums.length; i++) {
+        for (int j = i + 1; j &lt; nums.length; j++) { // Разные позиции, каждую пару один раз.
+            comparisons++;
+            if ((long) nums[i] + nums[j] == target) return new Brute(new int[]{i, j}, comparisons);
+        }
+    }
+    return new Brute(new int[0], comparisons);
+}
+</code></pre>
+      <pre><code class="language-java">int[] amounts = {40, 20, 90, 30};
+System.out.println(&quot;== repeated search ==&quot;);
+Brute result = brute(amounts, 50);
+System.out.println(&quot;brute pair=&quot; + Arrays.toString(result.pair()) + &quot; comparisons=&quot; + result.comparisons());
+</code></pre>
+      <pre class="out">== repeated search ==
+brute pair=[1, 3] comparisons=5</pre>
+      <p>На позиции j известно текущее x. Его партнёр должен иметь значение <code>target − x</code>. Вместо перебора прошлых позиций сохраним <b>значение → индекс</b> и спросим, есть ли дополнение. Если есть, ответ восстановим сразу. Если нет, текущее значение пригодится следующему элементу, поэтому добавим его в таблицу.</p>
+      <p>Это обмен памяти на время. Для хеш-таблицы с подходящим распределением ключей поиск и вставка ожидаемо стоят O(1), весь проход — ожидаемое O(n), память O(n). Гарантию для любого входа за O(1) хеширование не даёт. Устройство коллизий и расширения уже разобрано в <a href="hash-tables.html">Hash Tables</a>; здесь важнее доказать, какие сведения таблица обязана хранить.</p>
+    </section>
+
+    <section class="step" id="prior-prefix">
+      <h2>Перед запросом таблица содержит только предыдущие позиции</h2>
+      <p>Сформулируем инвариант: <b>перед обработкой j таблица хранит ранний индекс каждого значения из [0, j)</b>. Значит, найденный индекс i всегда меньше j. Текущий элемент ещё не участвует в поиске, и пара не использует одну операцию дважды. После неудачного запроса добавление позиции j делает инвариант верным для следующего шага.</p>
+      <p>Почему ответ не пропущен? У любой подходящей пары есть более поздний индекс j. Когда дойдём до него, раннее значение уже лежит в таблице. Даже если его запись представляет ещё более раннюю копию той же суммы, она тоже образует допустимую пару. Мы возвращаем первую найденную пару по правому индексу; сохранение раннего индекса делает выбор среди копий воспроизводимым.</p>
+      <figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 326" role="img" aria-label="В массиве 40,20,90,30 ищем сумму 50. Перед каждым запросом таблица содержит только более ранние значения. На последнем шаге число 30 находит дополнение 20 с индексом 1.">
+      <defs>
+      <marker id="hc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hc-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hc-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">TARGET = 50: СПРАШИВАЕМ ТОЛЬКО О ПРОШЛОМ</text>
+      <g data-s="1">
+      <path d="M70 122 C70 170, 580 170, 580 124" class="dg-line" marker-end="url(#hc-n)"/>
+      <rect x="28" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="70" y="88" class="dg-in" text-anchor="middle">40</text>
+      <text x="70" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="128" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="170" y="88" class="dg-in" text-anchor="middle">20</text>
+      <text x="170" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="228" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="270" y="88" class="dg-in" text-anchor="middle">90</text>
+      <text x="270" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="328" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="370" y="88" class="dg-in" text-anchor="middle">30</text>
+      <text x="370" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <path d="M70 38 L70 60" class="dg-line" marker-end="url(#hc-n)"/>
+      <text x="80" y="48" class="dg-n" text-anchor="start">j=0</text>
+      <rect x="478" y="64" width="204" height="56" rx="6" class="dg-cell"/>
+      <text x="492" y="86" class="dg-in" text-anchor="start">need = 10</text>
+      <text x="492" y="108" class="dg-s" text-anchor="start">found = null</text>
+      <text x="28" y="203" class="dg-t" text-anchor="start">seen ПЕРЕД ЗАПРОСОМ: значение → ранний индекс</text>
+      <rect x="28" y="219" width="120" height="42" rx="6" class="dg-cell"/>
+      <text x="88" y="245" class="dg-n" text-anchor="middle">пусто</text>
+      <text x="28" y="300" class="dg-s" text-anchor="start">нет 10: после запроса запишем 40 → 0</text>
+      </g>
+      <g data-s="2">
+      <path d="M170 122 C170 170, 580 170, 580 124" class="dg-line" marker-end="url(#hc-n)"/>
+      <rect x="28" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="70" y="88" class="dg-in" text-anchor="middle">40</text>
+      <text x="70" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="128" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="170" y="88" class="dg-in" text-anchor="middle">20</text>
+      <text x="170" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="228" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="270" y="88" class="dg-in" text-anchor="middle">90</text>
+      <text x="270" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="328" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="370" y="88" class="dg-in" text-anchor="middle">30</text>
+      <text x="370" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <path d="M170 38 L170 60" class="dg-line" marker-end="url(#hc-n)"/>
+      <text x="180" y="48" class="dg-n" text-anchor="start">j=1</text>
+      <rect x="478" y="64" width="204" height="56" rx="6" class="dg-cell"/>
+      <text x="492" y="86" class="dg-in" text-anchor="start">need = 30</text>
+      <text x="492" y="108" class="dg-s" text-anchor="start">found = null</text>
+      <text x="28" y="203" class="dg-t" text-anchor="start">seen ПЕРЕД ЗАПРОСОМ: значение → ранний индекс</text>
+      <rect x="28" y="219" width="134" height="42" rx="6" class="dg-cell"/>
+      <text x="95" y="245" class="dg-in" text-anchor="middle">40 → 0</text>
+      <text x="28" y="300" class="dg-s" text-anchor="start">нет 30: после запроса запишем 20 → 1</text>
+      </g>
+      <g data-s="3">
+      <path d="M270 122 C270 170, 580 170, 580 124" class="dg-line" marker-end="url(#hc-n)"/>
+      <rect x="28" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="70" y="88" class="dg-in" text-anchor="middle">40</text>
+      <text x="70" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="128" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="170" y="88" class="dg-in" text-anchor="middle">20</text>
+      <text x="170" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="228" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="270" y="88" class="dg-in" text-anchor="middle">90</text>
+      <text x="270" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="328" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="370" y="88" class="dg-in" text-anchor="middle">30</text>
+      <text x="370" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <path d="M270 38 L270 60" class="dg-line" marker-end="url(#hc-n)"/>
+      <text x="280" y="48" class="dg-n" text-anchor="start">j=2</text>
+      <rect x="478" y="64" width="204" height="56" rx="6" class="dg-cell"/>
+      <text x="492" y="86" class="dg-in" text-anchor="start">need = -40</text>
+      <text x="492" y="108" class="dg-s" text-anchor="start">found = null</text>
+      <text x="28" y="203" class="dg-t" text-anchor="start">seen ПЕРЕД ЗАПРОСОМ: значение → ранний индекс</text>
+      <rect x="28" y="219" width="134" height="42" rx="6" class="dg-cell"/>
+      <text x="95" y="245" class="dg-in" text-anchor="middle">40 → 0</text>
+      <rect x="178" y="219" width="134" height="42" rx="6" class="dg-cell"/>
+      <text x="245" y="245" class="dg-in" text-anchor="middle">20 → 1</text>
+      <text x="28" y="300" class="dg-s" text-anchor="start">нет −40: после запроса запишем 90 → 2</text>
+      </g>
+      <g data-s="4">
+      <path d="M370 122 C370 170, 580 170, 580 124" class="dg-line ok" marker-end="url(#hc-ok)"/>
+      <rect x="28" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="70" y="88" class="dg-in" text-anchor="middle">40</text>
+      <text x="70" y="107" class="dg-n" text-anchor="middle">i=0</text>
+      <rect x="128" y="64" width="84" height="54" rx="6" class="dg-cell hit"/>
+      <text x="170" y="88" class="dg-in" text-anchor="middle">20</text>
+      <text x="170" y="107" class="dg-n" text-anchor="middle">i=1</text>
+      <rect x="228" y="64" width="84" height="54" rx="6" class="dg-cell"/>
+      <text x="270" y="88" class="dg-in" text-anchor="middle">90</text>
+      <text x="270" y="107" class="dg-n" text-anchor="middle">i=2</text>
+      <rect x="328" y="64" width="84" height="54" rx="6" class="dg-cell hit"/>
+      <text x="370" y="88" class="dg-in" text-anchor="middle">30</text>
+      <text x="370" y="107" class="dg-n" text-anchor="middle">i=3</text>
+      <path d="M370 38 L370 60" class="dg-line" marker-end="url(#hc-n)"/>
+      <text x="380" y="48" class="dg-n" text-anchor="start">j=3</text>
+      <rect x="478" y="64" width="204" height="56" rx="6" class="dg-cell hit"/>
+      <text x="492" y="86" class="dg-in" text-anchor="start">need = 20</text>
+      <text x="492" y="108" class="dg-ok" text-anchor="start">found = 1</text>
+      <text x="28" y="203" class="dg-t" text-anchor="start">seen ПЕРЕД ЗАПРОСОМ: значение → ранний индекс</text>
+      <rect x="28" y="219" width="134" height="42" rx="6" class="dg-cell"/>
+      <text x="95" y="245" class="dg-in" text-anchor="middle">40 → 0</text>
+      <rect x="178" y="219" width="134" height="42" rx="6" class="dg-cell hit"/>
+      <text x="245" y="245" class="dg-in" text-anchor="middle">20 → 1</text>
+      <rect x="328" y="219" width="134" height="42" rx="6" class="dg-cell"/>
+      <text x="395" y="245" class="dg-in" text-anchor="middle">90 → 2</text>
+      <text x="28" y="300" class="dg-s" text-anchor="start">есть 20 → 1: возвращаем [1, 3], 30 не добавляем</text>
+      </g>
+    </svg>
+  </div>
+  <ol class="play-steps">
+    <li>j = 0, текущее 40, нужно 10. Таблица ещё пустая. Совпадения нет; только после этого запроса можно сохранить 40 → 0.</li>
+    <li>j = 1, текущее 20, нужно 30. В таблице есть только 40 → 0. Совпадения нет; добавим 20 → 1 для следующих шагов.</li>
+    <li>j = 2, текущее 90, нужно −40. В таблице прежние 40 и 20; 90 ещё не записано. Совпадения нет, следующий шаг увидит 90 → 2.</li>
+    <li>j = 3, текущее 30, нужно 20. Таблица возвращает индекс 1. Он строго меньше 3, поэтому это две разные позиции; ответ [1, 3].</li>
+  </ol>
+</figure>
+      <p>Продолжение PairDemo.java. LinkedHashMap используется для понятного порядка в trace; при поиске без печати достаточно HashMap. Значения таблицы — Integer с индексом, null туда не записываем. Поэтому null из get однозначно означает отсутствие значения. Индекс 0 — полноценный найденный ответ:</p>
+      <pre><code class="language-java">static int[] find(int[] nums, int target, boolean trace) {
+    var seen = new LinkedHashMap&lt;Long, Integer&gt;(); // Порядок нужен только для читаемой печати.
+    for (int j = 0; j &lt; nums.length; j++) {
+        long need = (long) target - nums[j]; // Сначала расширяем тип, потом вычитаем.
+        Integer i = seen.get(need); // Таблица содержит только позиции &lt; j.
+        if (trace) System.out.println(&quot;j=&quot; + j + &quot; x=&quot; + nums[j] + &quot; need=&quot; + need + &quot; before=&quot; + seen + &quot; found=&quot; + i);
+        if (i != null) return new int[]{i, j};
+        seen.putIfAbsent((long) nums[j], j); // Сохраняем самый ранний индекс для равного значения.
+    }
+    return new int[0];
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== prior prefix ==&quot;);
+System.out.println(&quot;hash pair=&quot; + Arrays.toString(find(amounts, 50, true)));
+</code></pre>
+      <pre class="out">== prior prefix ==
+j=0 x=40 need=10 before={} found=null
+j=1 x=20 need=30 before={40=0} found=null
+j=2 x=90 need=-40 before={40=0, 20=1} found=null
+j=3 x=30 need=20 before={40=0, 20=1, 90=2} found=1
+hash pair=[1, 3]</pre>
+      <p>Позиция 3 нашла дополнение 20 на позиции 1. Пять проверок пар сменились четырьмя запросами к таблице. Числа этого опыта объясняют ход алгоритма; асимптотику даёт общий инвариант, а не разница 5 и 4. Для небольшого массива стоимость выделения таблицы может превысить пользу от меньшего числа сравнений.</p>
+      <h3>Порядок запроса и записи — часть алгоритма</h3>
+      <p>Если сначала записать текущую 5, а затем искать дополнение к сумме 10, таблица вернёт ту же позицию. При двух отдельных пятёрках ответ [0, 1] допустим, при одной [0, 0] — нет. Проверка «i != j» могла бы исправить отдельный вариант, но инвариант прошлых позиций делает лишнюю проверку и связанные с ней ошибки ненужными.</p>
+      <pre><code class="language-java">static int[] wrongInsertFirst(int[] nums, int target) {
+    var seen = new HashMap&lt;Long, Integer&gt;();
+    for (int j = 0; j &lt; nums.length; j++) {
+        seen.put((long) nums[j], j); // Ошибка: j уже доступен как «предыдущий» индекс.
+        Integer i = seen.get((long) target - nums[j]);
+        if (i != null) return new int[]{i, j};
+    }
+    return new int[0];
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== order and range ==&quot;);
+System.out.println(&quot;insert first [5]=&quot; + Arrays.toString(wrongInsertFirst(new int[]{5}, 10)));
+System.out.println(&quot;query first [5]=&quot; + Arrays.toString(find(new int[]{5}, 10, false)));
+System.out.println(&quot;query first [5,5]=&quot; + Arrays.toString(find(new int[]{5, 5}, 10, false)));
+int max = Integer.MAX_VALUE;
+System.out.println(&quot;int sum=&quot; + (max + max) + &quot; long sum=&quot; + ((long) max + max));
+System.out.println(&quot;pair MAX,MAX target=-2=&quot; + Arrays.toString(find(new int[]{max, max}, -2, false)));
+System.out.println(&quot;earliest index=&quot; + Arrays.toString(find(new int[]{4, 4, 6}, 10, false)));
+</code></pre>
+      <pre class="out">== order and range ==
+insert first [5]=[0, 0]
+query first [5]=[]
+query first [5,5]=[0, 1]
+int sum=-2 long sum=4294967294
+pair MAX,MAX target=-2=[]
+earliest index=[0, 2]</pre>
+      <p>Сумма двух Integer.MAX_VALUE в int стала −2. Это арифметическое переполнение, а не найденная пара к target = −2. Выражение <code>(long) target − nums[j]</code> расширяет тип <b>до</b> вычитания; приведение уже вычисленного int-результата было бы поздним. Диапазон разности двух int помещается в long, и Long-ключи сохраняют его без обрезания.</p>
+      <div class="trap"><p class="myth">Достаточно HashSet: он же проверяет наличие дополнения.</p><p class="fact">Если нужен только ответ «есть пара», множества хватит при запросе до добавления. Чтобы вернуть исходные индексы, нужен индекс в значении таблицы. Сортировка меняет позиции, поэтому вариант с двумя указателями хранит связь с исходным массивом отдельно.</p></div>
+    </section>
+
+    <section class="step" id="counts-and-units">
+      <h2>Количество копий нельзя восстановить из множества</h2>
+      <p>В журнале ids = [A, B, A, C, B, A]. Для вопроса «встречался ли этот id» достаточно множества. Для «сколько раз» нужна таблица частот. Для «какой id был вторым дублем» нужен порядок события обнаружения. Это разные сведения: один HashMap не угадает за тебя, какой смысл должно иметь его значение.</p>
+      <p>Счётчик после обработки первых j элементов равен числу появлений ключа в этом префиксе. Новый элемент увеличивает ровно свой счётчик на 1. Если нужен первый уникальный id всего входа, раннего ответа во время первого появления нет: следующий элемент ещё может повторить его. Сначала считаем весь вход, затем проходим исходный порядок и берём первый со счётчиком 1.</p>
+      <p>Фрагменты <a href="../examples/hash-counting/FrequencyDemo.java">FrequencyDemo.java</a>. LinkedHashMap сохраняет порядок первого появления ключей при печати, LinkedHashSet — порядок добавления уникальных найденных дублей:</p>
+      <pre><code class="language-java">static Map&lt;String, Long&gt; counts(String[] ids) {
+    var count = new LinkedHashMap&lt;String, Long&gt;();
+    for (String id : ids) count.merge(id, 1L, Long::sum); // Новому ключу 1, прежнему +1.
+    return count;
+}
+
+static List&lt;String&gt; duplicates(String[] ids) {
+    var seen = new HashSet&lt;String&gt;();
+    var repeated = new LinkedHashSet&lt;String&gt;();
+    for (String id : ids) if (!seen.add(id)) repeated.add(id);
+    return new ArrayList&lt;&gt;(repeated); // Порядок второго появления, каждый id один раз.
+}
+
+static String firstUnique(String[] ids) {
+    Map&lt;String, Long&gt; count = counts(ids);
+    for (String id : ids) if (count.get(id) == 1) return id; // Повторный проход сохраняет порядок входа.
+    return null;
+}
+</code></pre>
+      <pre><code class="language-java">String[] ids = {&quot;A&quot;, &quot;B&quot;, &quot;A&quot;, &quot;C&quot;, &quot;B&quot;, &quot;A&quot;};
+System.out.println(&quot;== set and counts ==&quot;);
+System.out.println(&quot;counts=&quot; + counts(ids));
+System.out.println(&quot;duplicates=&quot; + duplicates(ids));
+System.out.println(&quot;first unique=&quot; + firstUnique(ids));
+</code></pre>
+      <pre class="out">== set and counts ==
+counts={A=3, B=2, C=1}
+duplicates=[A, B]
+first unique=C</pre>
+      <p>Дубль A попал в результат при втором появлении и остался там один раз, хотя пришёл и в третий раз. Для простой проверки одного дубля можно вернуть true, как только seen.add даст false. Для поиска всех дублирующихся id второе множество не позволяет печатать один id несколько раз. Дедупликация списка и подсчёт кратности решают разные задачи.</p>
+      <figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 348" role="img" aria-label="Слова aab и abb имеют одно множество букв a,b, но разные количества. Из каждого слова независимо строятся множество и таблица частот; счётчик различает 2a+1b и 1a+2b.">
+      <defs>
+      <marker id="hm-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hm-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hm-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">МНОЖЕСТВО ТЕРЯЕТ ЧИСЛО КОПИЙ</text>
+      <rect x="28" y="62" width="44" height="38" rx="6" class="dg-cell"/>
+      <text x="50" y="87" class="dg-in" text-anchor="middle">a</text>
+      <rect x="84" y="62" width="44" height="38" rx="6" class="dg-cell"/>
+      <text x="106" y="87" class="dg-in" text-anchor="middle">a</text>
+      <rect x="140" y="62" width="44" height="38" rx="6" class="dg-cell"/>
+      <text x="162" y="87" class="dg-in" text-anchor="middle">b</text>
+      <path d="M190 81 L244 81" class="dg-line" marker-end="url(#hm-n)"/>
+      <rect x="248" y="62" width="168" height="38" rx="6" class="dg-cell"/>
+      <text x="332" y="87" class="dg-in" text-anchor="middle">set = {a, b}</text>
+      <path d="M190 94 C220 144, 450 144, 466 88" class="dg-line" marker-end="url(#hm-n)"/>
+      <rect x="470" y="62" width="206" height="38" rx="6" class="dg-cell hit"/>
+      <text x="573" y="87" class="dg-in" text-anchor="middle">a:2 b:1</text>
+      <rect x="28" y="202" width="44" height="38" rx="6" class="dg-cell"/>
+      <text x="50" y="227" class="dg-in" text-anchor="middle">a</text>
+      <rect x="84" y="202" width="44" height="38" rx="6" class="dg-cell"/>
+      <text x="106" y="227" class="dg-in" text-anchor="middle">b</text>
+      <rect x="140" y="202" width="44" height="38" rx="6" class="dg-cell"/>
+      <text x="162" y="227" class="dg-in" text-anchor="middle">b</text>
+      <path d="M190 221 L244 221" class="dg-line" marker-end="url(#hm-n)"/>
+      <rect x="248" y="202" width="168" height="38" rx="6" class="dg-cell"/>
+      <text x="332" y="227" class="dg-in" text-anchor="middle">set = {a, b}</text>
+      <path d="M190 234 C220 284, 450 284, 466 228" class="dg-line" marker-end="url(#hm-n)"/>
+      <rect x="470" y="202" width="206" height="38" rx="6" class="dg-cell"/>
+      <text x="573" y="227" class="dg-in" text-anchor="middle">a:1 b:2</text>
+      <text x="28" y="321" class="dg-s" text-anchor="start">Из исходного слова отдельно строим set и таблицу частот</text>
+    </svg>
+  </div>
+  <figcaption>Равенство множеств проверяет наличие букв. Для анаграммы нужно равенство мультимножеств: наличие вместе с количеством.</figcaption>
+</figure>
+      <p>У aab и abb одинаковое множество букв, но разные частоты. Анаграммы — строки, у которых совпадает <b>мультимножество</b> символов: каждая буква встречается столько же раз. Для фиксированного алфавита a…z таблица не нужна: буква напрямую задаёт ячейку int[26]. Каждый элемент хранит число появлений соответствующей буквы:</p>
+      <pre><code class="language-java">static int[] latinCounts(String s) {
+    int[] count = new int[26]; // Вход: только a…z. Индекс буквы — прямой адрес.
+    for (int i = 0; i &lt; s.length(); i++) count[s.charAt(i) - &#x27;a&#x27;]++;
+    return count;
+}
+
+static Set&lt;Character&gt; letters(String s) {
+    var letters = new HashSet&lt;Character&gt;();
+    for (int i = 0; i &lt; s.length(); i++) letters.add(s.charAt(i));
+    return letters;
+}
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== multiset ==&quot;);
+System.out.println(&quot;same letters=&quot; + letters(&quot;aab&quot;).equals(letters(&quot;abb&quot;)));
+System.out.println(&quot;same counts=&quot; + Arrays.equals(latinCounts(&quot;aab&quot;), latinCounts(&quot;abb&quot;)));
+System.out.println(&quot;tea/eat=&quot; + Arrays.equals(latinCounts(&quot;tea&quot;), latinCounts(&quot;eat&quot;)));
+</code></pre>
+      <pre class="out">== multiset ==
+same letters=true
+same counts=false
+tea/eat=true</pre>
+      <p>Сравнение двух массивов из 26 частот стоит O(26), то есть константу относительно длины слов. Полная проверка двух слов занимает O(|s| + |t| + 26) времени и O(26) памяти. В задаче ниже вместо построения двух массивов можно постепенно израсходовать частоты первого слова символами второго. Ранний отрицательный счётчик означает, что нужных копий не хватает.</p>
+      <details class="deep"><summary>Что считается одним символом: char, кодовая точка или видимый знак?</summary>
+        <p>Ограничение a…z должно быть частью условия. Для произвольного Unicode charAt читает кодовые единицы UTF-16; одна дополнительная кодовая точка занимает пару char. Разные пары могут дать одинаковый набор отдельных char. Если анаграмма определена по кодовым точкам, считаем codePoints(), а не charAt. Видимый знак тоже может состоять из нескольких кодовых точек: это ещё один уровень задачи.</p>
+        <pre><code class="language-java">static Map&lt;Integer, Integer&gt; charBag(String s) {
+    var count = new TreeMap&lt;Integer, Integer&gt;(); // TreeMap упорядочивает только печать ключей.
+    for (int i = 0; i &lt; s.length(); i++) count.merge((int) s.charAt(i), 1, Integer::sum);
+    return count;
+}
+
+static Map&lt;Integer, Integer&gt; codePointBag(String s) {
+    var count = new TreeMap&lt;Integer, Integer&gt;();
+    s.codePoints().forEach(cp -&gt; count.merge(cp, 1, Integer::sum));
+    return count;
+}
+</code></pre>
+        <pre><code class="language-java">System.out.println(&quot;== Unicode units ==&quot;);
+String left = &quot;\uD83D\uDE00\uD83E\uDD23&quot;;
+String right = &quot;\uD83D\uDD23\uD83E\uDE00&quot;; // Те же char, но пары составлены иначе.
+System.out.println(&quot;length=&quot; + left.length() + &quot; code points=&quot; + left.codePointCount(0, left.length()));
+System.out.println(&quot;same char bag=&quot; + charBag(left).equals(charBag(right)));
+System.out.println(&quot;same code point bag=&quot; + codePointBag(left).equals(codePointBag(right)));
+String composed = &quot;\u00E9&quot;, decomposed = &quot;e\u0301&quot;;
+System.out.println(&quot;raw accent=&quot; + codePointBag(composed).equals(codePointBag(decomposed)));
+String a = Normalizer.normalize(composed, Normalizer.Form.NFC);
+String b = Normalizer.normalize(decomposed, Normalizer.Form.NFC);
+System.out.println(&quot;NFC accent=&quot; + codePointBag(a).equals(codePointBag(b)));
+</code></pre>
+        <pre class="out">== Unicode units ==
+length=4 code points=2
+same char bag=true
+same code point bag=false
+raw accent=false
+NFC accent=true</pre>
+        <p>В первых двух строках обе суррогатные пары корректны, но составлены по-разному. Мультимножество char совпало, мультимножество кодовых точек — нет. Для é и e + комбинируемого акцента сырые кодовые точки тоже различны. NFC уравнивает эту канонически эквивалентную запись; применять такую нормализацию надо по условиям продукта. Регистр, пробелы и видимые составные символы требуют своих правил, которые нельзя молча добавить в алгоритм.</p>
+      </details>
+    </section>
+
+    <section class="step" id="canonical-groups">
+      <h2>Группа определяется полной неизменяемой подписью</h2>
+      <p>Теперь нужно собрать все метки-анаграммы в группы. Сравнивать новое слово со всеми прежними группами — снова многократный поиск. Вычислим <b>каноническую подпись</b>: для анаграмм она одинакова, для разных мультимножеств различна. Таблица будет хранить подпись → список слов этой группы.</p>
+      <p>Первый вариант — отсортировать буквы: pay и yap дают apy, bat и tab дают abt. Второй — вектор частот всех 26 букв. Порядок слов исчезает в обоих вариантах, но количество каждой буквы сохраняется. Сортировка слова длины m требует O(m log m), подсчёт — O(m + 26); подпись потом всё равно надо сформировать, хешировать и сравнивать.</p>
+      <figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 357" role="img" aria-label="Слова pay и yap после сортировки букв имеют подпись apy и попадают в один список. bat и tab имеют подпись abt и попадают в другой.">
+      <defs>
+      <marker id="hg-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hg-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hg-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">ОДНА ПОДПИСЬ ВЕДЁТ В ОДНУ ГРУППУ</text>
+      <rect x="28" y="62" width="106" height="38" rx="6" class="dg-cell"/>
+      <text x="81" y="87" class="dg-in" text-anchor="middle">pay</text>
+      <path d="M134 81 L270 81" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="28" y="116" width="106" height="38" rx="6" class="dg-cell"/>
+      <text x="81" y="141" class="dg-in" text-anchor="middle">yap</text>
+      <path d="M134 135 L270 81" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="28" y="206" width="106" height="38" rx="6" class="dg-cell"/>
+      <text x="81" y="231" class="dg-in" text-anchor="middle">bat</text>
+      <path d="M134 225 L270 225" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="28" y="260" width="106" height="38" rx="6" class="dg-cell"/>
+      <text x="81" y="285" class="dg-in" text-anchor="middle">tab</text>
+      <path d="M134 279 L270 225" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="274" y="62" width="132" height="38" rx="6" class="dg-cell"/>
+      <text x="340" y="87" class="dg-in" text-anchor="middle">apy</text>
+      <path d="M406 81 L484 81" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="488" y="62" width="196" height="38" rx="6" class="dg-cell hit"/>
+      <text x="586" y="87" class="dg-in" text-anchor="middle">[pay, yap]</text>
+      <rect x="274" y="206" width="132" height="38" rx="6" class="dg-cell"/>
+      <text x="340" y="231" class="dg-in" text-anchor="middle">abt</text>
+      <path d="M406 225 L484 225" class="dg-line" marker-end="url(#hg-n)"/>
+      <rect x="488" y="206" width="196" height="38" rx="6" class="dg-cell hit"/>
+      <text x="586" y="231" class="dg-in" text-anchor="middle">[bat, tab]</text>
+      <text x="28" y="333" class="dg-n" text-anchor="start">слова по входу</text>
+      <text x="274" y="333" class="dg-n" text-anchor="start">ключ: sortedKey</text>
+      <text x="488" y="333" class="dg-n" text-anchor="start">значение: List</text>
+    </svg>
+  </div>
+  <figcaption>Таблица ищет список по подписи. При совпадении добавляется слово в существующий список, а не заменяется сам список.</figcaption>
+</figure>
+      <p>Фрагменты <a href="../examples/hash-counting/GroupingDemo.java">GroupingDemo.java</a>. Вариант countKey возвращает String с разделителями. Подпись неизменяема, а список группы остаётся изменяемым: в него последовательно добавляются слова:</p>
+      <pre><code class="language-java">static String sortedKey(String word) {
+    char[] chars = word.toCharArray();
+    Arrays.sort(chars);
+    return new String(chars); // Строка неизменяема, равенство по содержимому.
+}
+
+static String countKey(String word) {
+    int[] count = new int[26];
+    for (int i = 0; i &lt; word.length(); i++) count[word.charAt(i) - &#x27;a&#x27;]++;
+    return Arrays.toString(count); // Разделители сохраняют границы чисел.
+}
+
+static List&lt;List&lt;String&gt;&gt; group(String[] words, boolean sorting) {
+    var groups = new LinkedHashMap&lt;String, List&lt;String&gt;&gt;();
+    for (String word : words) {
+        String key = sorting ? sortedKey(word) : countKey(word);
+        groups.computeIfAbsent(key, ignored -&gt; new ArrayList&lt;&gt;()).add(word);
+    }
+    return new ArrayList&lt;&gt;(groups.values()); // Группы по первому появлению, слова по входу.
+}
+</code></pre>
+      <pre><code class="language-java">String[] words = {&quot;pay&quot;, &quot;bat&quot;, &quot;yap&quot;, &quot;aab&quot;, &quot;tab&quot;, &quot;aba&quot;, &quot;abb&quot;};
+System.out.println(&quot;== canonical groups ==&quot;);
+System.out.println(&quot;sorted=&quot; + group(words, true));
+System.out.println(&quot;counts=&quot; + group(words, false));
+</code></pre>
+      <pre class="out">== canonical groups ==
+sorted=[[pay, yap], [bat, tab], [aab, aba], [abb]]
+counts=[[pay, yap], [bat, tab], [aab, aba], [abb]]</pre>
+      <p>Оба способа дали одинаковые группы. LinkedHashMap в обычном режиме вставки сохраняет порядок первого появления подписи, ArrayList — порядок добавления слов. Повторное слово остаётся второй записью: группировка сама по себе не удаляет дубли. HashMap также собрал бы правильные группы, но порядок обхода групп не обещал бы. В условиях задачи надо отдельно сказать, важен ли этот порядок.</p>
+      <h3>Подпись и её хеш — разные вещи</h3>
+      <p>Числа частот надо разделять. Если склеить десятичные записи без границ, [1, 11] и [11, 1] дадут одну строку 111. Другой опасный способ — использовать только Arrays.hashCode(count): разные массивы могут иметь одинаковый хеш, а таблице тогда уже нечего сравнивать. Хеш выбирает место поиска; полный ключ подтверждает, что группа действительно та же.</p>
+      <p>Сам массив тоже не готовый ключ по содержимому. Его обычные equals и hashCode работают с идентичностью объекта. Record с компонентом int[] сохраняет это правило компонента: final-ссылка не добавляет сравнение элементов и не делает элементы массива неизменяемыми. Два независимо построенных массива одной частоты окажутся разными ключами.</p>
+      <pre><code class="language-java">record BadKey(int[] count) {} // equals компонента — обычный equals массива.
+</code></pre>
+      <pre><code class="language-java">System.out.println(&quot;== key boundaries ==&quot;);
+System.out.println(&quot;joined=&quot; + (&quot;&quot; + 1 + 11) + &quot; / &quot; + (&quot;&quot; + 11 + 1));
+System.out.println(&quot;delimited=&quot; + Arrays.toString(new int[]{1, 11}) + &quot; / &quot; + Arrays.toString(new int[]{11, 1}));
+int[] a = {2, 1}, b = {2, 1};
+System.out.println(&quot;array content=&quot; + Arrays.equals(a, b) + &quot; record equals=&quot; + new BadKey(a).equals(new BadKey(b)));
+var broken = new HashMap&lt;BadKey, String&gt;();
+broken.put(new BadKey(a), &quot;aab&quot;);
+broken.put(new BadKey(b), &quot;aba&quot;);
+var correct = new HashMap&lt;String, String&gt;();
+correct.put(Arrays.toString(a), &quot;aab&quot;);
+correct.put(Arrays.toString(b), &quot;aba&quot;);
+System.out.println(&quot;array-key size=&quot; + broken.size() + &quot; string-key size=&quot; + correct.size());
+int[] x = {0, 31}, y = {1, 0};
+System.out.println(&quot;hashes=&quot; + Arrays.hashCode(x) + &quot;/&quot; + Arrays.hashCode(y) + &quot; content equal=&quot; + Arrays.equals(x, y));
+</code></pre>
+      <pre class="out">== key boundaries ==
+joined=111 / 111
+delimited=[1, 11] / [11, 1]
+array content=true record equals=false
+array-key size=2 string-key size=1
+hashes=992/992 content equal=false</pre>
+      <p>У двух массивов [0, 31] и [1, 0] один Arrays.hashCode — 992, хотя содержимое разное. Два BadKey с содержимым [2, 1] создали две записи; строковая подпись создала одну. Для рабочей подписи можно написать отдельный value object, который копирует массив и реализует Arrays.equals/Arrays.hashCode. Копирование и отсутствие изменяемого доступа нужны, чтобы хеш ключа не менялся после вставки.</p>
+      <p>Если всего N слов и T символов, сортированные подписи требуют суммарного времени O(Σ mᵢ log mᵢ) плюс чтение, хеширование и группировка. Частотный вариант ожидаемо O(T + 26N) при фиксированном алфавите. Для строки Arrays.toString ещё есть цена десятичной записи счётчиков; при длинных словах учитывай длину ключа. Результат хранит N ссылок на исходные слова, ключи — по одной подписи на группу. При возвращении готовых групп память результата тоже O(N), даже если считать только один проход по входу.</p>
+    </section>
+
+    <section class="step" id="recognize-and-explain">
+      <h2>На собеседовании сначала назови сведения, которые нужно сохранить</h2>
+      <p>Узнать этот паттерн помогают повторяющиеся запросы к уже прочитанной части: «есть ли дополнение», «сколько было копий», «найти повтор», «объединить по одинаковому признаку». Сначала назови перебор, затем выведи нужный ключ и значение. Фраза «использую HashMap» ещё не объясняет ни алгоритм, ни то, почему он сохраняет ответ.</p>
+      <table class="mx">
+        <thead><tr><th>Нужный ответ</th><th>Что сохранить</th><th>Что теряется в более простой структуре</th></tr></thead>
+        <tbody>
+          <tr><td>Элемент встречался?</td><td>Set&lt;K&gt;</td><td>Позиция и количество копий</td></tr>
+          <tr><td>Где встречался?</td><td>Map&lt;K, Integer&gt;</td><td>Уточни: первый или последний индекс</td></tr>
+          <tr><td>Сколько раз?</td><td>Map&lt;K, счётчик&gt; или массив частот</td><td>Порядок появления отдельных копий</td></tr>
+          <tr><td>Вернуть все элементы группы</td><td>Map&lt;подпись, List&lt;элемент&gt;&gt;</td><td>Одно значение вместо списка затрёт прежний элемент</td></tr>
+          <tr><td>Как часто встречалась сумма префикса?</td><td>Map&lt;сумма, число префиксов&gt;</td><td>Set недосчитает несколько одинаковых префиксов</td></tr>
+        </tbody>
+      </table>
+      <p>Произнеси инвариант до цикла: «здесь только индексы меньше j», «здесь число копий в обработанном префиксе» или «этот ключ представляет всё мультимножество». Потом покажи сохранение после каждого действия. Проверь пустой вход, одну копию, несколько одинаковых элементов, отсутствие ответа и переполнение. Для строк уточни алфавит; для групп — равенство ключей и порядок результата.</p>
+      <p>Память зависит от числа различных ключей d, а не только от n. Однако ключ длины m не хешируется и не сравнивается магически за один символ: учитывай его создание и чтение. ContainsValue ищет по значениям и просматривает таблицу; если часто нужен обратный поиск, выбирают обратный индекс или меняют смысл ключа. При известном маленьком диапазоне частоты массива обходятся без упаковки ключей и записи хешей.</p>
+      <p>Порядок массива важен не во всех задачах. Если нужны цепочки последовательных <b>значений</b>, HashSet позволяет начинать расширение только там, где нет предшественника. Это не подмассив из соседних позиций. В последней задаче ниже внешний цикл идёт по уникальным значениям: множество сохраняет наличие, а длину цепочки получаем из соседних запросов. Дубликаты начала иначе заставили бы снова проходить уже известную цепочку.</p>
+      <p>Если память O(n) не помещается, рассмотрим сортировку и соседние сравнения или два указателя. Это часто O(n log n) времени; при сохранении исходных индексов нужна дополнительная обвязка. Для выгрузки больше памяти процесса возможны внешняя сортировка или GROUP BY в базе. Подсчёт частот в ограниченном локальном окне разобран в <a href="sliding-window.html">Sliding Window</a>, суммы подмассивов — в <a href="prefix-sums.html">Prefix Sums</a>; выбор самых частых — в <a href="top-k.html">Heap &amp; Top-K</a>.</p>
+      <p>В платёжном сервисе одинаковая сумма не означает одинаковый платёж. Ключ дедупликации должен включать нужную бизнес-идентичность: например, merchantId вместе с idempotencyKey. Подсчёт выгрузки в HashSet не обеспечивает идемпотентность между перезапусками и не согласует несколько экземпляров сервиса. На собеседовании отдели решение задачи по массиву от хранения факта операции: <a href="idempotency.html">Idempotency</a> разбирает эту границу отдельно.</p>
+      <p>Уточнения senior-уровня меняют условия задачи, а не просто длину кода: все пары вместо одной, окно вместо всего префикса, Unicode вместо a…z, несколько потоков вместо одного прохода. Сначала выясни, какие новые сведения нужны. Например, все пары требуют нескольких индексов на значение, а при уходе элемента из окна счётчик надо уменьшить. Один метод merge не заменяет согласование общего изменяемого состояния.</p>
+    </section>
+    <div class="summary"><ul>
+      <li>Таблица убирает повторный поиск ценой памяти. Выбирай отдельно ключ и смысл значения.</li>
+      <li>Для Two Sum сначала запрос, затем вставка: партнёр лежит в прошлой части и отличается по индексу.</li>
+      <li>Множество хранит наличие, частоты — количество. Анаграммы требуют полного мультимножества.</li>
+      <li>Подпись должна быть полной и неизменяемой. Один хеш и массив с обычным equals для этого не подходят.</li>
+      <li>В оценке времени учитывай создание и длину ключа; порядок результата и бизнес-идентичность уточняются отдельно.</li>
+    </ul></div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>Задачи</h2>
+    <article class="q" id="two-sum" data-freq="3" data-type="task">
+  <h3>Две разные позиции с заданной суммой</h3>
+  <div class="task">
+    <p>Дан массив int и target типа int. Верни индексы i &lt; j, для которых математическая сумма равна target. Вход менять нельзя. Если пар нет — пустой массив. Из нескольких пар выбери минимальный j, затем минимальный i. Элементы могут занимать весь диапазон int.</p>
+    <pre class="io">[40,20,90,30], target=50 → [1,3]
+[5], target=10 → []
+[5,5], target=10 → [0,1]</pre>
+    <p class="src">LeetCode 1 · easy · вариант с отсутствующим ответом и определённым выбором пары · ожидаемое O(n)</p>
+    <details><summary>Заготовка: TwoSum.java — java TwoSum.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class TwoSum {
+    static int[] twoSum(int[] nums, int target) {
+        // твоё решение
+        return new int[0];
+    }
+
+    public static void main(String[] args) {
+        check(twoSum(new int[]{2, 7, 11, 15}, 9), new int[]{0, 1});
+        check(twoSum(new int[]{3, 2, 4}, 6), new int[]{1, 2});
+        check(twoSum(new int[]{5, 5}, 10), new int[]{0, 1});
+        check(twoSum(new int[]{5}, 10), new int[0]);
+        check(twoSum(new int[0], 0), new int[0]);
+        check(twoSum(new int[]{4, 4, 6}, 10), new int[]{0, 2});
+        check(twoSum(new int[]{-3, 7, 2}, -1), new int[]{0, 2});
+        check(twoSum(new int[]{Integer.MAX_VALUE, Integer.MAX_VALUE}, -2), new int[0]);
+    }
+
+    static void check(int[] got, int[] want) {
+        if (!Arrays.equals(got, want)) throw new AssertionError(&quot;got &quot; + Arrays.toString(got) + &quot;, want &quot; + Arrays.toString(want));
+        System.out.println(&quot;OK &quot; + Arrays.toString(got));
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Переформулируй запрос к прошлой части: для текущего x нужен target − x.</p></details>
+    <details><summary>Подсказка 2</summary><p>Храни значение → ранний индекс. Сначала ищи дополнение, потом добавляй текущую позицию; разность вычисляй в long.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <p>Перед j таблица содержит только позиции меньше j. Дополнение из неё образует пару с текущей позицией. PutIfAbsent сохраняет минимальный i, а порядок прохода даёт минимальный j. В отличие от исходного LeetCode здесь отсутствие ответа допустимо и выбор при нескольких ответах определён.</p>
+
+    <pre><code class="language-java">static int[] twoSum(int[] nums, int target) {
+    var seen = new HashMap&lt;Long, Integer&gt;();
+    for (int j = 0; j &lt; nums.length; j++) {
+        Integer i = seen.get((long) target - nums[j]); // Только предыдущие позиции.
+        if (i != null) return new int[]{i, j};
+        seen.putIfAbsent((long) nums[j], j); // При равных числах сохраняем ранний индекс.
+    }
+    return new int[0];
+}
+</code></pre>
+    <p>Ожидаемое O(n) времени и O(d) памяти, d — число разных прочитанных значений. Вход не сортируется. Long нужен для дополнения за пределами int.</p>
+    <p>Этот метод подставлен в заготовку и запущен на JDK 21; вывод всех проверок:</p>
+    <pre class="out">OK [0, 1]
+OK [1, 2]
+OK [0, 1]
+OK []
+OK []
+OK [0, 2]
+OK [0, 2]
+OK []</pre>
+  </details>
+  <div class="check"><details data-kind="уточнение"><summary>Теперь нужны все пары индексов. Достаточно сохранить один индекс?</summary><p>Нет: при копиях одинакового значения один индекс потеряет пары. Храни список прежних индексов для каждого значения и выдавай все из списка дополнения до вставки текущего. Даже с быстрым поиском время не меньше числа выдаваемых пар; при одинаковых элементах результат может содержать O(n²) пар.</p></details></div>
+</article>
+<article class="q" id="valid-anagram" data-freq="3" data-type="task">
+  <h3>Одинаковые буквы с одинаковой кратностью</h3>
+  <div class="task">
+    <p>Строки s и t содержат только строчные латинские буквы a…z, null нет. Проверь, можно ли переставить буквы s и получить t. Пустые строки считаются анаграммами.</p>
+    <pre class="io">&quot;listen&quot;, &quot;silent&quot; → true
+&quot;aab&quot;, &quot;abb&quot; → false
+&quot;&quot;, &quot;&quot; → true</pre>
+    <p class="src">LeetCode 242 · easy · фиксированный алфавит · O(|s| + |t|)</p>
+    <details><summary>Заготовка: ValidAnagram.java — java ValidAnagram.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class ValidAnagram {
+    static boolean isAnagram(String s, String t) {
+        // твоё решение
+        return false;
+    }
+
+    public static void main(String[] args) {
+        check(isAnagram(&quot;listen&quot;, &quot;silent&quot;), true);
+        check(isAnagram(&quot;aab&quot;, &quot;abb&quot;), false);
+        check(isAnagram(&quot;&quot;, &quot;&quot;), true);
+        check(isAnagram(&quot;ab&quot;, &quot;a&quot;), false);
+        check(isAnagram(&quot;aabb&quot;, &quot;baba&quot;), true);
+        check(isAnagram(&quot;zx&quot;, &quot;yx&quot;), false);
+        check(isAnagram(&quot;aaa&quot;, &quot;aaaf&quot;), false);
+    }
+
+    static void check(boolean got, boolean want) {
+        if (got != want) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Нужно сравнить число копий каждой буквы, а не только множество букв.</p></details>
+    <details><summary>Подсказка 2</summary><p>Длины должны совпасть. Увеличивай частоты по первой строке и уменьшай по второй; отрицательное значение докажет нехватку.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <p>Массив — запас букв первой строки. Каждая буква второй забирает одну копию. Если счётчик стал отрицательным, копий не хватает. При равных длинах и отсутствии отрицательных остатков сумма всех счётчиков равна 0, значит каждое значение равно 0: весь запас израсходован.</p>
+
+    <pre><code class="language-java">static boolean isAnagram(String s, String t) {
+    if (s.length() != t.length()) return false;
+    int[] count = new int[26];
+    for (int i = 0; i &lt; s.length(); i++) count[s.charAt(i) - &#x27;a&#x27;]++;
+    for (int i = 0; i &lt; t.length(); i++) {
+        if (--count[t.charAt(i) - &#x27;a&#x27;] &lt; 0) return false; // t запросила лишнюю копию буквы.
+    }
+    return true; // Длины равны: израсходован весь запас s, остатка нет.
+}
+</code></pre>
+    <p>O(|s| + |t| + 26) времени и O(26) памяти. Это массив для заданного алфавита, а не общий способ обработки Unicode. Для кодовых точек меняются обход и структура частот.</p>
+    <p>Этот метод подставлен в заготовку и запущен на JDK 21; вывод всех проверок:</p>
+    <pre class="out">OK true
+OK false
+OK true
+OK false
+OK true
+OK false
+OK false</pre>
+  </details>
+
+</article>
+<article class="q" id="group-anagrams" data-freq="3" data-type="task">
+  <h3>Группы анаграмм с устойчивым порядком</h3>
+  <div class="task">
+    <p>Дан массив слов из a…z; пустые слова допустимы, null нет. Собери анаграммы в группы. Группы идут по первому появлению представителя во входе, слова внутри — по исходному порядку. Одинаковые слова сохраняются с повторами. Пустой вход даёт пустой список.</p>
+    <pre class="io">[&quot;pay&quot;,&quot;bat&quot;,&quot;yap&quot;,&quot;tab&quot;] → [[&quot;pay&quot;,&quot;yap&quot;],[&quot;bat&quot;,&quot;tab&quot;]]
+[&quot;aab&quot;,&quot;abb&quot;,&quot;aba&quot;] → [[&quot;aab&quot;,&quot;aba&quot;],[&quot;abb&quot;]]</pre>
+    <p class="src">LeetCode 49 · medium · вариант с определённым порядком · ожидаемое O(T + 26N) с учётом длины подписи</p>
+    <details><summary>Заготовка: GroupAnagrams.java — java GroupAnagrams.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class GroupAnagrams {
+    static List&lt;List&lt;String&gt;&gt; groupAnagrams(String[] words) {
+        // твоё решение
+        return List.of();
+    }
+
+    public static void main(String[] args) {
+        check(groupAnagrams(new String[]{&quot;pay&quot;, &quot;bat&quot;, &quot;yap&quot;, &quot;aab&quot;, &quot;tab&quot;, &quot;aba&quot;, &quot;abb&quot;}),
+                List.of(List.of(&quot;pay&quot;, &quot;yap&quot;), List.of(&quot;bat&quot;, &quot;tab&quot;), List.of(&quot;aab&quot;, &quot;aba&quot;), List.of(&quot;abb&quot;)));
+        check(groupAnagrams(new String[0]), List.of());
+        check(groupAnagrams(new String[]{&quot;&quot;, &quot;&quot;}), List.of(List.of(&quot;&quot;, &quot;&quot;)));
+        check(groupAnagrams(new String[]{&quot;pay&quot;, &quot;pay&quot;}), List.of(List.of(&quot;pay&quot;, &quot;pay&quot;)));
+        String a = &quot;a&quot; + &quot;b&quot;.repeat(11), b = &quot;a&quot;.repeat(11) + &quot;b&quot;;
+        check(groupAnagrams(new String[]{a, b}), List.of(List.of(a), List.of(b)));
+        check(groupAnagrams(new String[]{&quot;aab&quot;, &quot;abb&quot;, &quot;aba&quot;}), List.of(List.of(&quot;aab&quot;, &quot;aba&quot;), List.of(&quot;abb&quot;)));
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Группа ищется по признаку, одинаковому для всех анаграмм. Вектор частот всех 26 букв подходит.</p></details>
+    <details><summary>Подсказка 2</summary><p>Ключ должен сравниваться по содержимому и сохранять границы счётчиков. LinkedHashMap задаст порядок групп, список — порядок слов.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <p>Для каждого слова строим частоты и сериализуем их в неизменяемую строку с разделителями. ComputeIfAbsent создаёт список только для новой подписи; слово добавляется в существующий список. LinkedHashMap сохраняет порядок первой вставки ключа. Подписи пустых слов одинаковы, поэтому они попадают в одну группу.</p>
+
+    <pre><code class="language-java">static List&lt;List&lt;String&gt;&gt; groupAnagrams(String[] words) {
+    var groups = new LinkedHashMap&lt;String, List&lt;String&gt;&gt;();
+    for (String word : words) {
+        int[] count = new int[26];
+        for (int i = 0; i &lt; word.length(); i++) count[word.charAt(i) - &#x27;a&#x27;]++;
+        String key = Arrays.toString(count); // Не массив и не один его hashCode.
+        groups.computeIfAbsent(key, ignored -&gt; new ArrayList&lt;&gt;()).add(word);
+    }
+    return new ArrayList&lt;&gt;(groups.values());
+}
+</code></pre>
+    <p>При N словах и T символах подсчёт и обработка 26 частот дают ожидаемое O(T + 26N), плюс длина текстовых подписей. Дополнительно — ключи для групп и O(N) ссылок результата. Подпись одного слова нельзя сократить до одного hashCode.</p>
+    <p>Этот метод подставлен в заготовку и запущен на JDK 21; вывод всех проверок:</p>
+    <pre class="out">OK [[pay, yap], [bat, tab], [aab, aba], [abb]]
+OK []
+OK [[, ]]
+OK [[pay, pay]]
+OK [[abbbbbbbbbbb], [aaaaaaaaaaab]]
+OK [[aab, aba], [abb]]</pre>
+  </details>
+
+</article>
+<article class="q" id="duplicate-ids" data-freq="2" data-type="task">
+  <h3>Каждый дублирующийся id — один раз</h3>
+  <div class="task">
+    <p>В журнале массив строковых id без null. Верни id, встречавшиеся минимум два раза. Каждый выводится один раз, порядок — по моменту второго появления. Строковое равенство точное, без нормализации.</p>
+    <pre class="io">[A,B,A,C,B,A] → [A,B]
+[A,B,B,A] → [B,A]
+[A,A,A] → [A]</pre>
+    <p class="src">Авторская задача на дедупликацию · точное равенство String · один проход</p>
+    <details><summary>Заготовка: DuplicateIds.java — java DuplicateIds.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class DuplicateIds {
+    static List&lt;String&gt; duplicates(String[] ids) {
+        // твоё решение
+        return List.of();
+    }
+
+    public static void main(String[] args) {
+        check(duplicates(new String[]{&quot;A&quot;, &quot;B&quot;, &quot;A&quot;, &quot;C&quot;, &quot;B&quot;, &quot;A&quot;}), List.of(&quot;A&quot;, &quot;B&quot;));
+        check(duplicates(new String[]{&quot;B&quot;, &quot;A&quot;, &quot;B&quot;, &quot;A&quot;}), List.of(&quot;B&quot;, &quot;A&quot;));
+        check(duplicates(new String[]{&quot;A&quot;, &quot;A&quot;, &quot;A&quot;}), List.of(&quot;A&quot;));
+        check(duplicates(new String[0]), List.of());
+        check(duplicates(new String[]{&quot;A&quot;}), List.of());
+        check(duplicates(new String[]{&quot;A&quot;, &quot;B&quot;, &quot;C&quot;}), List.of());
+        check(duplicates(new String[]{&quot;A&quot;, &quot;B&quot;, &quot;B&quot;, &quot;A&quot;}), List.of(&quot;B&quot;, &quot;A&quot;));
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Add множества возвращает, был ли элемент новым. Не нужно отдельно спрашивать contains перед add.</p></details>
+    <details><summary>Подсказка 2</summary><p>Первое множество помнит все id, второе хранит уже обнаруженные дубли и их порядок.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <p>Если seen.add вернул false, id уже встречался. Добавляем его в LinkedHashSet repeated: второе появление определяет позицию в результате, третье не добавляет новую копию. Фильтрация таблицы частот в порядке первого появления дала бы A,B для входа A,B,B,A — другой порядок.</p>
+
+    <pre><code class="language-java">static List&lt;String&gt; duplicates(String[] ids) {
+    var seen = new HashSet&lt;String&gt;();
+    var repeated = new LinkedHashSet&lt;String&gt;();
+    for (String id : ids) if (!seen.add(id)) repeated.add(id);
+    return new ArrayList&lt;&gt;(repeated); // Второе появление определяет порядок выдачи.
+}
+</code></pre>
+    <p>Ожидаемое O(n) операций таблиц и O(d) памяти. Для строк учитывай хеширование и сравнение их содержимого; при ограниченной длине это ожидаемое O(n) времени. Результат занимает до O(d) ссылок.</p>
+    <p>Этот метод подставлен в заготовку и запущен на JDK 21; вывод всех проверок:</p>
+    <pre class="out">OK [A, B]
+OK [B, A]
+OK [A]
+OK []
+OK []
+OK []
+OK [B, A]</pre>
+  </details>
+
+</article>
+<article class="q" id="longest-consecutive" data-freq="2" data-type="task">
+  <h3>Самая длинная цепочка последовательных значений</h3>
+  <div class="task">
+    <p>Дан неотсортированный массив int. Найди длину самой длинной цепочки x, x+1, x+2… среди его значений. Позиции могут идти в любом порядке, дубли длину не увеличивают. Вход не меняй. Поддерживается весь диапазон int, за границу диапазона цепочка не переходит.</p>
+    <pre class="io">[100,4,200,1,3,2] → 4  (1,2,3,4)
+[1,1,1,2,3] → 3
+[Integer.MIN_VALUE,Integer.MAX_VALUE] → 1</pre>
+    <p class="src">LeetCode 128 · medium · расширенный диапазон int · ожидаемое O(n)</p>
+    <details><summary>Заготовка: LongestConsecutive.java — java LongestConsecutive.java</summary>
+      <pre><code class="language-java">import java.util.*;
+
+public class LongestConsecutive {
+    static int longestConsecutive(int[] nums) {
+        // твоё решение
+        return 0;
+    }
+
+    public static void main(String[] args) {
+        check(longestConsecutive(new int[]{100, 4, 200, 1, 3, 2}), 4);
+        check(longestConsecutive(new int[]{0, 3, 7, 2, 5, 8, 4, 6, 0, 1}), 9);
+        check(longestConsecutive(new int[0]), 0);
+        check(longestConsecutive(new int[]{-5}), 1);
+        check(longestConsecutive(new int[]{-3, -1, -2, 5}), 3);
+        check(longestConsecutive(new int[]{Integer.MIN_VALUE, Integer.MAX_VALUE}), 1);
+        check(longestConsecutive(new int[]{Integer.MIN_VALUE, Integer.MIN_VALUE + 1, 0}), 2);
+        check(longestConsecutive(new int[]{Integer.MAX_VALUE - 1, Integer.MAX_VALUE}), 2);
+        check(longestConsecutive(new int[]{1, 1, 1, 2, 3}), 3);
+    }
+
+    static void check(int got, int want) {
+        if (got != want) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}
+</code></pre>
+    </details>
+  </div>
+  <div class="hints">
+    <details><summary>Подсказка 1</summary><p>Проверка соседнего значения — запрос к множеству. Но запускать расширение из каждого числа слишком дорого.</p></details>
+    <details><summary>Подсказка 2</summary><p>Начинай только из числа без предшественника. Перебирай уникальные числа, чтобы повторный старт не расширял одну цепочку ещё раз. Границы int проверяй до +1 и −1.</p></details>
+  </div>
+  <details class="solution"><summary>Решение</summary>
+    <p>Множество удаляет повторы. Если есть start − 1, текущая вершина не начинает цепочку и пропускается. Иначе расширяемся вправо до первого отсутствующего значения. Каждая уникальная цепочка обходится один раз. MIN_VALUE не имеет допустимого предшественника, MAX_VALUE не имеет допустимого следующего числа; проверки стоят до арифметики.</p>
+    <figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Множество разбито на цепочки -2,-1,0; 4,5; 9. Зелёные начала не имеют предшественника. Обход расширяет каждую цепочку один раз.">
+      <defs>
+      <marker id="hl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow "/></marker>
+      <marker id="hl-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+      <marker id="hl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+      </defs>
+      <text x="28" y="24" class="dg-cap" text-anchor="start">РАСШИРЯЕМ ТОЛЬКО НАЧАЛО ЦЕПОЧКИ</text>
+      <rect x="28" y="86" width="66" height="44" rx="6" class="dg-cell hit"/>
+      <text x="61" y="114" class="dg-in" text-anchor="middle">-2</text>
+      <path d="M94 108 L102 108" class="dg-line" marker-end="url(#hl-n)"/>
+      <rect x="106" y="86" width="66" height="44" rx="6" class="dg-cell"/>
+      <text x="139" y="114" class="dg-in" text-anchor="middle">-1</text>
+      <path d="M172 108 L180 108" class="dg-line" marker-end="url(#hl-n)"/>
+      <rect x="184" y="86" width="66" height="44" rx="6" class="dg-cell"/>
+      <text x="217" y="114" class="dg-in" text-anchor="middle">0</text>
+      <text x="28" y="164" class="dg-n" text-anchor="start">нет -3</text>
+      <text x="28" y="195" class="dg-s" text-anchor="start">длина 3</text>
+      <rect x="326" y="86" width="66" height="44" rx="6" class="dg-cell hit"/>
+      <text x="359" y="114" class="dg-in" text-anchor="middle">4</text>
+      <path d="M392 108 L400 108" class="dg-line" marker-end="url(#hl-n)"/>
+      <rect x="404" y="86" width="66" height="44" rx="6" class="dg-cell"/>
+      <text x="437" y="114" class="dg-in" text-anchor="middle">5</text>
+      <text x="326" y="164" class="dg-n" text-anchor="start">нет 3</text>
+      <text x="326" y="195" class="dg-s" text-anchor="start">длина 2</text>
+      <rect x="570" y="86" width="66" height="44" rx="6" class="dg-cell hit"/>
+      <text x="603" y="114" class="dg-in" text-anchor="middle">9</text>
+      <text x="570" y="164" class="dg-n" text-anchor="start">нет 8</text>
+      <text x="570" y="195" class="dg-s" text-anchor="start">длина 1</text>
+      <text x="28" y="242" class="dg-s" text-anchor="start">−1, 0 и 5 не начинают повторный обход: предшественник есть</text>
+    </svg>
+  </div>
+  <figcaption>Внешний цикл идёт по уникальным значениям. Повторы начала во входе больше не заставляют пересчитывать целую цепочку.</figcaption>
+</figure>
+    <pre><code class="language-java">static int longestConsecutive(int[] nums) {
+    var values = new HashSet&lt;Integer&gt;();
+    for (int x : nums) values.add(x);
+    int best = 0;
+    for (int start : values) { // По уникальным числам: дубли старта не повторяют всю цепочку.
+        if (start != Integer.MIN_VALUE &amp;&amp; values.contains(start - 1)) continue;
+        int end = start, length = 1; // Предшественника нет: это начало одной цепочки.
+        while (end != Integer.MAX_VALUE &amp;&amp; values.contains(end + 1)) {
+            end++;
+            length++;
+        }
+        best = Math.max(best, length);
+    }
+    return best;
+}
+</code></pre>
+    <p>Построение множества и проверки предшественников требуют ожидаемого O(n). Суммарно while проходит O(d) уникальных значений: одно значение принадлежит одной цепочке. Память O(d). Вложенный while не даёт O(n²), потому что повторные старты исключены.</p>
+    <p>Этот метод подставлен в заготовку и запущен на JDK 21; вывод всех проверок:</p>
+    <pre class="out">OK 4
+OK 9
+OK 0
+OK 1
+OK 3
+OK 1
+OK 2
+OK 2
+OK 3</pre>
+  </details>
+  <div class="check"><details data-kind="ревью"><summary>Внешний цикл заменили на for (int start : nums). Ответ тот же. Что испортилось?</summary><p>При входе [1,1,…,1,2,3,…,m] каждая копия 1 снова расширит цепочку до m. Дублей старта может быть O(n), длина цепочки тоже O(n), и время станет квадратичным. Внешний цикл по множеству или отдельная пометка обработанного начала сохраняют линейный суммарный обход.</p></details></div>
+</article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://www.techinterviewhandbook.org/algorithms/hash-table/">Tech Interview Handbook, Hash table cheatsheet</a> — основа урока: обмен памяти на поиск, Two Sum и Group Anagrams как опорные задачи. Инварианты, платёжные примеры, код и схемы авторские.</li>
+    <li>Первичные условия задач: <a href="https://leetcode.com/problems/two-sum/">1</a>, <a href="https://leetcode.com/problems/valid-anagram/">242</a>, <a href="https://leetcode.com/problems/group-anagrams/">49</a>, <a href="https://leetcode.com/problems/longest-consecutive-sequence/">128</a>. Отличия учебных вариантов указаны в карточках.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/HashMap.html">HashMap, Java SE 21</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/String.html">String</a> — стоимость базовых операций, get/merge/computeIfAbsent и единицы UTF-16.</li>
+    <li><a href="../examples/hash-counting/README.md">Демо, решения и команды запуска</a>; устройство таблицы — в <a href="hash-tables.html">Hash Tables</a>, строковые правила — в <a href="strings.html">Strings</a>.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

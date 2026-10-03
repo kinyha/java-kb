@@ -55,7 +55,7 @@ window.KB_TREE = [
           scope: 'список и матрица смежности, BFS, DFS, топологическая сортировка, Дейкстра' },
       ] },
       { id: 'patterns', title: 'Patterns', source: 'NeetCode Roadmap: порядок категорий', items: [
-        { id: 'hash-counting', freq: 3, status: 'empty', title: 'Arrays & Hashing',
+        { id: 'hash-counting', freq: 3, status: 'draft', title: 'Arrays & Hashing',
           scope: 'two sum, частоты, анаграммы, группировка, поиск дублей' },
         { id: 'two-pointers', freq: 3, status: 'empty', title: 'Two Pointers',
           scope: 'отсортированный массив, пара с суммой, разворот, удаление дублей на месте, слияние' },
