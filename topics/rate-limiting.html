@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rate Limiting · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="rate-limiting">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Rate Limiting</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Ограничение частоты защищает общий ресурс от одного клиента: каждый ключ (API-ключ, пользователь, IP) получает не больше N запросов за период, лишние — 429 с <code>Retry-After</code>. Алгоритмы различаются поведением на всплесках и ценой. Фиксированное окно дешёвое, но на границе окон пропускает вдвое больше лимита. Скользящий журнал точен, но хранит каждый запрос. Скользящий счётчик приближает журнал двумя числами. Token bucket разрешает управляемый всплеск при ограниченной средней скорости. В распределённом сервисе состояние держат в Redis, а проверку и изменение делают одним Lua-скриптом: GET и SET отдельными командами пропускают все запросы гонки.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Один партнёр забрал всю ёмкость API</h2>
+      <p>Платёжный API обслуживает сотни магазинов. Один из них запустил сверку и опрашивает статусы платежей в цикле без паузы — 3 000 запросов в секунду. База отвечает медленнее, пулы соединений заняты, и остальные магазины получают таймауты при создании платежей. Ни один сервис не упал, но один клиент сделал API недоступным для всех. Нужен лимит на клиента: магазин получает, скажем, 100 запросов в секунду, а сверх лимита — быстрый отказ, который ничего не стоит серверу.</p>
+      <p>Тема разбирает алгоритмы и их поведение на одном и том же трафике, распределённую реализацию на Redis, место лимитера в архитектуре и ответ клиенту. Демо <a href="../examples/rate-limiting/RateLimitDemo.java">RateLimitDemo.java</a> запускает четыре алгоритма Lua-скриптами в Redis 8. Защита сервиса от общей перегрузки, а не от отдельного клиента, — в <a href="overload.html">Overload</a>, повторы на стороне клиента — в <a href="resilience.html">Resilience Patterns</a>.</p>
+    </section>
+
+    <section class="step" id="boundary">
+      <h2>Фиксированное окно пропускает двойной лимит на границе</h2>
+      <p>Самый простой лимитер — счётчик на номер окна: ключ <code>fw:anna:0</code> для первой секунды, <code>fw:anna:1</code> для второй, <code>INCR</code> и срок жизни в одно окно. Демо подаёт одинаковый трафик всем алгоритмам: 10 запросов в момент 900 мс и ещё 10 — в 1100 мс, при лимите 10 в секунду. Время передаётся в скрипты явно, чтобы сценарий на границе был воспроизводимым; в сервисе это текущее время.</p>
+      <pre class="out">== 10 requests at t=900 ms, 10 more at t=1100 ms; limit 10 per second
+   fixed window     allowed 10 + 10 = 20 within 200 ms
+   sliding log      allowed 10 +  0 = 10 within 200 ms
+   sliding counter  allowed 10 +  1 = 11 within 200 ms
+   token bucket     allowed 10 +  2 = 12 within 200 ms</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+            <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Шкала времени от 0 до 2 секунд, граница окон на 1000 мс. Десять запросов в 900 мс и десять в 1100 мс. Фиксированное окно пропускает все 20, скользящий журнал — 10, скользящий счётчик — 11, token bucket — 12.">
+            <path d="M60.0 170 L 660.0 170" class="dg-line"/>
+            <path d="M60.0 166 L 60.0 174" class="dg-line"/>
+            <text x="60.0" y="190" class="dg-n" text-anchor="middle">0</text>
+            <path d="M360.0 166 L 360.0 174" class="dg-line"/>
+            <text x="360.0" y="190" class="dg-n" text-anchor="middle">1000 мс</text>
+            <path d="M660.0 166 L 660.0 174" class="dg-line"/>
+            <text x="660.0" y="190" class="dg-n" text-anchor="middle">2000 мс</text>
+            <path d="M360.0 36 L 360.0 166" class="dg-sep"/>
+            <text x="330.0" y="205" class="dg-n" text-anchor="end">900</text>
+            <text x="390.0" y="205" class="dg-n">1100</text>
+            <rect x="325.0" y="152" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="141" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="130" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="119" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="108" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="97" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="86" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="75" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="64" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect x="325.0" y="53" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="152" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="141" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="130" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="119" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="108" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="97" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="86" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="75" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="64" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="1" x="385.0" y="53" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="2" x="385.0" y="152" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="141" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="130" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="119" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="108" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="97" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="86" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="75" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="64" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="2" x="385.0" y="53" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="152" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="3" x="385.0" y="141" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="130" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="119" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="108" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="97" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="86" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="75" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="64" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="3" x="385.0" y="53" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="152" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="4" x="385.0" y="141" width="10" height="9" rx="2" class="dg-cell hit"/>
+            <rect data-s="4" x="385.0" y="130" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="119" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="108" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="97" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="86" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="75" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="64" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="4" x="385.0" y="53" width="10" height="9" rx="2" class="dg-cell miss"/>
+            <rect data-s="1" x="60.0" y="30" width="298.0" height="14" rx="4" class="dg-cell"/>
+            <rect data-s="1" x="362.0" y="30" width="298.0" height="14" rx="4" class="dg-cell"/>
+            <text data-s="1" x="210.0" y="41" class="dg-n" text-anchor="middle">окно 0: 10</text>
+            <text data-s="1" x="510.0" y="41" class="dg-n" text-anchor="middle">окно 1: 10</text>
+            <rect data-s="2" x="90.0" y="30" width="300.0" height="14" rx="4" class="dg-cell"/>
+            <text data-s="2" x="240.0" y="41" class="dg-n" text-anchor="middle">последняя секунда до 1100: уже 10</text>
+            <rect data-s="3" x="90.0" y="30" width="268.0" height="14" rx="4" class="dg-cell"/>
+            <text data-s="3" x="225.0" y="41" class="dg-n" text-anchor="middle">10 × 0,9 = 9</text>
+            <rect data-s="3" x="362.0" y="30" width="28.0" height="14" rx="4" class="dg-cell"/>
+            <text data-s="3" x="396.0" y="41" class="dg-n">+ текущее окно</text>
+            <text data-s="4" x="360.0" y="41" class="dg-n" text-anchor="middle">за 200 мс пополнилось 10/с × 0,2 с = 2 жетона</text>
+            <text data-s="1" x="20" y="226" class="dg-bad">фиксированное окно: 10 + 10 = 20 за 200 мс</text>
+            <text data-s="2" x="20" y="226" class="dg-t">скользящий журнал: 10 + 0 = 10</text>
+            <text data-s="3" x="20" y="226" class="dg-t">скользящий счётчик: 10 + 1 = 11</text>
+            <text data-s="4" x="20" y="226" class="dg-t">token bucket: 10 + 2 = 12</text>
+            <text x="20" y="244" class="dg-s">Зелёные — пропущены, красные — отказ 429. Лимит: 10 запросов в секунду.</text>
+            </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Фиксированное окно: запросы в 900 мс попали в окно 0, в 1100 мс — в окно 1, у каждого свой счётчик до 10. За 200 мс прошло 20 запросов — вдвое больше лимита.</li>
+          <li>Скользящий журнал смотрит на последнюю секунду от текущего момента: в промежутке (100, 1100] уже 10 запросов, поэтому все поздние получают отказ.</li>
+          <li>Скользящий счётчик оценивает журнал: в 1100 мс скользящее окно на 90 % перекрывает предыдущее, 10 × 0,9 = 9, и остаётся место для одного запроса.</li>
+          <li>Token bucket: в 900 мс ведро было полным и отдало 10 жетонов; за 200 мс пополнилось 2 — пропущено два запроса.</li>
+        </ol>
+      </figure>
+      <p>Двойной лимит на границе — не теоретическая проблема: клиенты с расписанием (cron, ретраи по таймеру) часто стреляют ровно в начале секунды или минуты. Если лимит защищает базу, выдерживающую 10 запросов в секунду, фиксированное окно в худший момент пропускает 20. Для лимитов «на час» или «на сутки» это обычно приемлемо, для коротких окон, защищающих ресурс, — нет.</p>
+    </section>
+
+    <section class="step" id="algorithms">
+      <h2>Четыре алгоритма: точность, всплески и память</h2>
+<pre><code class="language-lua">-- Token bucket: остаток жетонов и время последнего пополнения в одном хеше.
+local now, capacity, perMs = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+local b = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
+local tokens, ts = tonumber(b[1]) or capacity, tonumber(b[2]) or now
+tokens = math.min(capacity, tokens + (now - ts) * perMs)   -- пополнение за прошедшее время
+local ok = 0
+if tokens &gt;= 1 then tokens = tokens - 1; ok = 1 end
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', now)
+redis.call('PEXPIRE', KEYS[1], math.ceil(capacity / perMs))  -- полное ведро можно забыть
+return ok</code></pre>
+      <p>Token bucket не пополняет ведро таймером: при каждом запросе он досчитывает жетоны за прошедшее время. Состояние — два числа, а у двух параметров ясный смысл: <code>capacity</code> — допустимый всплеск, скорость пополнения — средний предел. Скользящий журнал хранит в ZSET время каждого запроса, удаляет устаревшие и считает оставшиеся. Скользящий счётчик хранит только счётчики текущего и предыдущего окна и взвешивает предыдущее по доле перекрытия — это приближение, которое считает запросы прошлого окна равномерно распределёнными. Цена журнала видна на лимите 10 000 запросов в минуту:</p>
+      <pre class="out">== memory for one client, limit 10000 per minute, full window
+   sliding log:     815826 bytes
+   sliding counter: 35 bytes
+   token bucket:    75 bytes</pre>
+      <table class="mx">
+        <thead><tr><th>Алгоритм</th><th>Состояние на ключ</th><th>Граница окон</th><th>Где уместен</th></tr></thead>
+        <tbody>
+          <tr><td>Фиксированное окно</td><td>1 счётчик</td><td>До 2 × лимит</td><td>Квоты на час и сутки, биллинг</td></tr>
+          <tr><td>Скользящий журнал</td><td>Запись на запрос: ~800 КБ на 10 000</td><td>Точно</td><td>Малые лимиты, где важна точность</td></tr>
+          <tr><td>Скользящий счётчик</td><td>2 счётчика</td><td>Приближённо</td><td>Лимиты API по умолчанию</td></tr>
+          <tr><td>Token bucket</td><td>2 числа</td><td>Всплеск до capacity</td><td>API с допустимыми всплесками; AWS, Stripe</td></tr>
+          <tr><td>Leaky bucket</td><td>Очередь или счётчик</td><td>Ровный выход</td><td>Сглаживание до постоянной скорости; nginx limit_req</td></tr>
+        </tbody>
+      </table>
+      <p>Leaky bucket — зеркало token bucket: запросы встают в очередь и уходят с постоянной скоростью. Так работает <code>limit_req</code> в nginx: без <code>burst</code> лишние запросы сразу получают отказ, с <code>burst</code> встают в очередь и задерживаются, а с <code>nodelay</code> пропускаются сразу, но занимают место в очереди. Leaky bucket сглаживает поток к защищаемому ресурсу ценой задержки; token bucket не задерживает, а отказывает.</p>
+    </section>
+
+    <section class="step" id="distributed">
+      <h2>Распределённый лимит: проверка и изменение — одна операция</h2>
+      <p>Сервис работает в десяти экземплярах за балансировщиком. Лимит в памяти каждого экземпляра — 100 в секунду на клиента — превращается в 1 000 при равномерной балансировке и в непредсказуемую величину при неравномерной. Поэтому общий лимит держат в Redis. Частая ошибка — прочитать счётчик, сравнить с лимитом в коде и записать новое значение отдельной командой. Демо отправляет 200 одновременных запросов при лимите 100:</p>
+<pre><code class="language-java">// Неверно: между GET и SET другие потоки читают то же старое значение.
+long n = Long.parseLong(redis.get("race:naive") == null ? "0" : redis.get("race:naive"));
+if (n &gt;= 100) return false;
+redis.set("race:naive", String.valueOf(n + 1));
+return true;
+
+// Верно: INCR и сравнение внутри одного Lua-скрипта, Redis выполняет его атомарно.
+return eval(FIXED, "race:lua", 60_000, 100);</code></pre>
+      <pre class="out">== 200 concurrent requests, limit 100
+   GET then SET:   allowed 200
+   Lua INCR:       allowed 100, counter 200</pre>
+      <p>Наивный вариант пропустил все 200: каждый поток прочитал маленькое значение, а итоговый счётчик между запусками оказывался от 11 до 37 — записи затирали друг друга. Lua-скрипт выполняется в Redis целиком, без вклинивания других команд, поэтому пропущено ровно 100. Счётчик 200 показывает, что скрипт считает и отклонённые попытки; если это нежелательно, сначала сравнивают, а потом увеличивают, — внутри скрипта это так же атомарно.</p>
+      <p>Остальные вопросы распределённого лимита — это компромиссы. Каждый запрос получает поход в Redis, около миллисекунды; для очень горячих путей держат локальный лимит и синхронизируют его с общим пачками, жертвуя точностью. Если Redis недоступен, выбирают: пропускать всех (fail open — API работает без защиты) или отказывать всем (fail closed — API недоступен из-за лимитера); для защиты от злоупотреблений обычно выбирают первое с локальным запасным лимитом. Время берут из одного источника — команды <code>TIME</code> в Redis или часов сервиса с синхронизацией, — иначе расхождение часов экземпляров сдвигает окна. В Redis Cluster все ключи одного клиента должны попасть в один слот: <code>{anna}:prev</code> и <code>{anna}:cur</code> с hash tag.</p>
+    </section>
+
+    <section class="step" id="where">
+      <h2>Где ставить лимитер и что отвечать клиенту</h2>
+      <p>Лимиты стоят на нескольких уровнях. На входе — шлюз или nginx: грубые лимиты по IP против ботов и всплесков, до того как запрос дошёл до приложения, — в <a href="api-gateway.html">API Gateway</a>. В приложении — лимиты по смыслу: по API-ключу магазина, по пользователю, по дорогой операции («не больше 5 попыток входа в минуту», как в <a href="auth.html">Authentication</a>). Ключ выбирают по тому, кто потребляет ресурс: лимит по IP наказывает всех клиентов за NAT одного офиса, а лимит по API-ключу — только виновного.</p>
+<pre><code class="language-http">HTTP/1.1 429 Too Many Requests
+Retry-After: 1
+RateLimit-Policy: "default";q=100;w=1
+RateLimit: "default";r=0;t=1</code></pre>
+      <p>Ответ на превышение — <code>429 Too Many Requests</code> (RFC 6585) с <code>Retry-After</code>: через сколько секунд повторить. Заголовки <code>RateLimit</code> и <code>RateLimit-Policy</code> из черновика IETF сообщают остаток и сброс заранее, чтобы клиент замедлялся до отказа. Клиент, получив 429, повторяет с экспоненциальной задержкой и jitter, а не сразу, иначе отказ превращается в шторм повторов. Отказ дешёв для сервера только если лимитер стоит до тяжёлой работы: проверять лимит после запроса в базу бессмысленно.</p>
+      <p>В Java-сервисе лимитер можно не писать самому: <a href="https://bucket4j.com/">Bucket4j</a> реализует token bucket с хранением в Redis, Hazelcast или JDBC. <code>RateLimiter</code> из Resilience4j — локальный, на один экземпляр: он делит время на циклы <code>limitRefreshPeriod</code> и выдаёт <code>limitForPeriod</code> разрешений в цикле, то есть это фиксированное окно в памяти процесса. Он подходит для ограничения собственных вызовов внешнего API, а не для общего лимита клиентов кластера.</p>
+      <div class="trap">
+        <p class="myth">Лимит 10 запросов в секунду на фиксированном окне гарантирует, что ресурс не получит больше 10 запросов за любую секунду.</p>
+        <p class="fact">Окно считает запросы по номеру секунды, а не за любую секунду. Десять запросов в 900 мс и десять в 1100 мс попали в разные окна: фиксированное окно пропустило 20 за 200 мс. Точную гарантию «за любую секунду» даёт скользящий журнал, приближённую — скользящий счётчик.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Лимит на клиента защищает общий ресурс от одного потребителя; сверх лимита — дешёвый отказ 429 с Retry-After.</li>
+        <li>На границе окон фиксированное окно пропустило 20 при лимите 10; журнал — 10, скользящий счётчик — 11, token bucket — 12.</li>
+        <li>Журнал точен, но занимает около 800 КБ на 10 000 запросов; счётчик и token bucket — десятки байт.</li>
+        <li>Token bucket: capacity — допустимый всплеск, скорость пополнения — средний предел.</li>
+        <li>Распределённый лимит — в Redis одним Lua-скриптом: GET и SET отдельно пропустили 200 из 200 при лимите 100.</li>
+        <li>Решить заранее: fail open или closed при недоступном Redis, единые часы, hash tag в Redis Cluster.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="rl-algos" data-freq="3">
+      <h3>Какие алгоритмы rate limiting вы знаете и чем они отличаются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Фиксированное окно — счётчик на интервал: просто, но на границе окон пропускает до двойного лимита. Скользящий журнал хранит время каждого запроса — точен, но дорог по памяти. Скользящий счётчик взвешивает предыдущее окно по доле перекрытия — два счётчика и приближённая точность. Token bucket пополняет жетоны с постоянной скоростью и разрешает всплеск до ёмкости. Leaky bucket выпускает запросы с постоянной скоростью из очереди.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Token bucket досчитывает жетоны при запросе, без таймеров: состояние — остаток и время.</li>
+            <li>Leaky bucket сглаживает ценой задержки, token bucket отказывает без задержки.</li>
+            <li>Скользящий счётчик предполагает равномерность запросов в прошлом окне.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Лимит защищает базу, выдерживающую 50 запросов в секунду. Что не так?</summary>
+          <pre><code class="language-java">long window = System.currentTimeMillis() / 1000;
+long n = redis.incr("rl:" + client + ":" + window);
+redis.expire("rl:" + client + ":" + window, 1);
+if (n &gt; 50) throw new TooManyRequests();</code></pre>
+          <p>Фиксированное окно на границе секунд пропустит до 100 запросов за доли секунды — вдвое больше, чем выдерживает база; нужен скользящий счётчик или token bucket с ёмкостью, которую база переживёт. Лимит на клиента вообще не защищает базу от суммы всех клиентов — для этого нужен общий лимит или ограничение конкурентности перед базой. И <code>INCR</code> с <code>EXPIRE</code> отдельными командами: при сбое между ними ключ останется без срока жизни; их объединяют в скрипт или транзакцию.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rl-distributed" data-freq="3">
+      <h3>Как сделать rate limiter для сервиса из нескольких экземпляров?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Держать состояние в общем хранилище, обычно Redis, и выполнять проверку с изменением атомарно — Lua-скриптом. Локальные лимиты в каждом экземпляре умножаются на число экземпляров и зависят от балансировки. Ответ сверх лимита — 429 с Retry-After.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Отдельные GET и SET пропускают все запросы гонки.</li>
+            <li>Fail open или fail closed при недоступном Redis — осознанный выбор.</li>
+            <li>Для горячих путей — локальный лимит с периодической синхронизацией, ценой точности.</li>
+            <li>Redis Cluster: ключи клиента в одном слоте через hash tag.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rl-key" data-freq="2">
+      <h3>По какому ключу ограничивать и где ставить лимитер?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>По тому, кто потребляет ресурс: API-ключ или пользователь для аутентифицированных запросов, IP — только для анонимных и грубой защиты. Грубые лимиты — на шлюзе или nginx, до приложения; смысловые — в приложении, до тяжёлой работы. Для дорогих операций — отдельные лимиты.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Лимит по IP наказывает всех за NAT.</li>
+            <li>Заголовки RateLimit позволяют клиенту замедлиться до отказа.</li>
+            <li>Клиент повторяет после 429 с backoff и jitter.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, «System Design Interview», том 1, глава 4 «Design a Rate Limiter» — основа урока.</li>
+      <li><a href="https://blog.cloudflare.com/counting-things-a-lot-of-different-things/">Cloudflare: How we built rate limiting capable of scaling to millions of domains</a> — скользящий счётчик.</li>
+      <li><a href="https://nginx.org/en/docs/http/ngx_http_limit_req_module.html">nginx: ngx_http_limit_req_module</a> — leaky bucket, burst, nodelay.</li>
+      <li><a href="https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/">IETF draft: RateLimit header fields for HTTP</a>; RFC 6585 — код 429.</li>
+      <li><a href="https://resilience4j.readme.io/docs/ratelimiter">Resilience4j: RateLimiter</a>, <a href="https://bucket4j.com/">Bucket4j</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

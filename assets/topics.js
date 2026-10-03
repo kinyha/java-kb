@@ -297,7 +297,7 @@ window.KB_TREE = [
           scope: 'L4 и L7, алгоритмы балансировки, reverse proxy, health checks, Nginx' },
         { id: 'api-gateway', freq: 2, status: 'empty', title: 'API Gateway & Service Discovery',
           scope: 'маршрутизация, аутентификация на входе, агрегация, реестр сервисов, client-side и server-side discovery' },
-        { id: 'rate-limiting', freq: 2, status: 'empty', title: 'Rate Limiting',
+        { id: 'rate-limiting', freq: 2, status: 'draft', title: 'Rate Limiting',
           scope: 'token bucket, leaky bucket, fixed и sliding window, распределённый лимит на Redis' },
         { id: 'consistent-hashing', freq: 2, status: 'empty', title: 'Consistent Hashing',
           scope: 'кольцо хешей, виртуальные узлы, перераспределение ключей при добавлении узла' },
