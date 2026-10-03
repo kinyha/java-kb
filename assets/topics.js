@@ -595,7 +595,7 @@ window.KB_TREE = [
           scope: 'Scrum и Kanban, оценка задач, документация' },
       ] },
       { id: 'containers', title: 'Containers', source: 'Docker Docs; Kubernetes Documentation: Concepts', items: [
-        { id: 'docker', freq: 2, status: 'empty', title: 'Docker',
+        { id: 'docker', freq: 2, status: 'draft', title: 'Docker',
           scope: 'образ и контейнер, слои, Dockerfile для Java, multi-stage build, контейнер и виртуалка, namespaces и cgroups' },
         { id: 'kubernetes', freq: 2, status: 'empty', title: 'Kubernetes Basics',
           scope: 'pod, deployment, service, ingress, ConfigMap и Secret, namespace' },

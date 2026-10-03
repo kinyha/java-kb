@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Docker · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="docker">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Docker</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Образ — неизменяемый набор слоёв файловой системы и настройка запуска; контейнер — процесс, запущенный из образа в изолированных namespaces и с ограничениями cgroups. Это не виртуальная машина: ядро общее, а изоляция — механизм ядра. Для Java-сервиса из этого следуют практические правила. Сборка в несколько стадий и среда выполнения без компилятора уменьшают образ: в демо 554 МБ на JDK, 285 МБ на JRE и 74 МБ со средой из jlink. Редко меняющиеся зависимости кладут отдельным слоем раньше кода: после правки кода изменился один слой из восьми. JVM 21 видит лимиты контейнера, но по умолчанию берёт под heap только четверть памяти: 123 МБ из 512. И java должна быть PID 1 или получать сигналы: скрипт запуска без <code>exec</code> превратил корректную остановку в убийство через 10 секунд.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Образ на 600 МБ, сборка по 5 минут и сервис, который убивают при каждом деплое</h2>
+      <p>Платёжный сервис собирают в образе на полном JDK вместе с Maven-кешем, и образ весит 600 МБ. Каждое изменение одной строки кода заново скачивает и пушит зависимости. В Kubernetes контейнеру дали 1 ГБ, а JVM взяла heap 256 МБ и упирается в сборку мусора. При каждом деплое поды завершаются по SIGKILL, обрывая платежи посреди обработки, хотя в коде есть хук корректной остановки.</p>
+      <p>Тема разбирает образы и слои, изоляцию контейнера и то, как в нём ведёт себя JVM. Демо <a href="../examples/docker/docker.sh">docker.sh</a> собирает мини-сервис <a href="../examples/docker/app/App.java">App.java</a> на JDK HttpServer в нескольких вариантах на eclipse-temurin:21 alpine и запускает их в Docker 29.8. Запуск в Kubernetes — в <a href="kubernetes.html">Kubernetes Basics</a> и <a href="k8s-java.html">Java in Kubernetes</a>, память JVM — в <a href="jvm-memory.html">JVM Memory</a>.</p>
+    </section>
+
+    <section class="step" id="images">
+      <h2>Образ — стопка слоёв; в продакшен едет только нужное</h2>
+<pre><code class="language-dockerfile"># Сборка на JDK, запуск на JRE: в итоговом образе только классы и среда выполнения.
+FROM eclipse-temurin:21-jdk-alpine AS build
+WORKDIR /src
+COPY app/App.java .
+RUN javac -d out App.java
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY --from=build /src/out .
+CMD ["java", "App"]</code></pre>
+      <pre class="out">== image size
+   single stage on JDK:   554 MB
+   multi-stage, JRE:      285 MB
+   multi-stage, jlink:    74 MB</pre>
+      <p>Образ на JDK несёт компилятор, отладчики и исходники стандартной библиотеки — в продакшене они не нужны, а каждый лишний бинарник — ещё одна потенциальная уязвимость в отчёте сканера. Многостадийная сборка компилирует в первой стадии, а в итоговую копирует только результат: 285 МБ на JRE. jlink собирает среду выполнения из нужных модулей — здесь <code>java.base</code> и <code>jdk.httpserver</code> — и кладёт её на голый alpine: 74 МБ. Для Spring Boot модулей нужно больше, их список подсказывает <code>jdeps --print-module-deps</code>. Ещё меньше и безопаснее — distroless-образы без shell и пакетного менеджера; цена — отладка без <code>sh</code> внутри контейнера.</p>
+    </section>
+
+    <section class="step" id="layers">
+      <h2>Порядок инструкций определяет, что пересобирается</h2>
+<pre><code class="language-dockerfile"># Зависимости меняются редко — отдельным слоем до кода приложения.
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+COPY libs/ libs/
+COPY --from=kb-docker-multistage /app .
+CMD ["java", "-cp", "libs/*:.", "App"]</code></pre>
+      <pre class="out">== layer cache: 40 MB of dependencies, then a change in the app
+   layers total: 8, changed after rebuild: 1
+   12.3kB	COPY /app .
+   40MB	COPY libs/ libs/
+   12.3kB	COPY --chmod=755 entrypoint.sh /__cacert_ent…</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Слои образа снизу вверх: базовый образ JRE, слой зависимостей 40 мегабайт, слой классов приложения 12 килобайт. При первой сборке в реестр загружаются все слои. После изменения кода пересобирается и загружается только верхний слой.">
+            <defs><marker id="dk-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">СЛОИ ОБРАЗА, СНИЗУ ВВЕРХ</text>
+            <rect x="20" y="146" width="360" height="40" rx="6" class="dg-cell"/>
+            <text x="200" y="171" class="dg-in" text-anchor="middle">eclipse-temurin:21-jre-alpine — 6 слоёв</text>
+            <rect x="20" y="100" width="360" height="40" rx="6" class="dg-cell"/>
+            <text x="200" y="125" class="dg-in" text-anchor="middle">COPY libs/ — 40 МБ зависимостей</text>
+            <rect data-s="1" x="20" y="54" width="360" height="40" rx="6" class="dg-cell"/>
+            <rect data-s="2" x="20" y="54" width="360" height="40" rx="6" class="dg-cell miss"/>
+            <text x="200" y="79" class="dg-in" text-anchor="middle">COPY /app — 12 КБ классов</text>
+            <rect x="560" y="96" width="140" height="50" rx="9" class="dg-box"/>
+            <text x="630" y="118" class="dg-in" text-anchor="middle">реестр</text>
+            <text x="630" y="136" class="dg-n" text-anchor="middle">и узлы кластера</text>
+            <path data-s="1" d="M380 74 L 558 108" class="dg-line" marker-end="url(#dk-a)"/>
+            <path data-s="1" d="M380 120 L 558 120" class="dg-line" marker-end="url(#dk-a)"/>
+            <path data-s="1" d="M380 166 L 558 134" class="dg-line" marker-end="url(#dk-a)"/>
+            <text data-s="1" x="470" y="72" class="dg-n" text-anchor="middle">push всё</text>
+            <path data-s="2" d="M380 74 L 558 108" class="dg-line bad" marker-end="url(#dk-a)"/>
+            <text data-s="2" x="470" y="70" class="dg-bad" text-anchor="middle">push 12 КБ</text>
+            <text data-s="2" x="470" y="125" class="dg-ok" text-anchor="middle">уже есть</text>
+            <text data-s="2" x="470" y="171" class="dg-ok" text-anchor="middle">уже есть</text>
+            <text data-s="1" x="20" y="204" class="dg-t">Первая сборка: все слои создаются и загружаются в реестр.</text>
+            <text data-s="2" x="20" y="204" class="dg-t">Изменён код: пересобран и загружается 1 слой из 8, 40 МБ зависимостей — из кеша.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Каждая инструкция <code>COPY</code> и <code>RUN</code> даёт слой. Слой идентифицируется содержимым: одинаковое содержимое — тот же слой, который уже есть в кеше сборки, в реестре и на узлах.</li>
+          <li>После изменения кода изменился только слой классов. Если бы зависимости копировались одной инструкцией вместе с кодом, каждая правка пересобирала и пушила бы все 40 МБ, а каждый узел кластера скачивал бы их заново.</li>
+        </ol>
+      </figure>
+      <p>Слой определяется содержимым, а не фактом изменения файлов. При первом прогоне демо я менял только комментарий в исходнике — и изменённых слоёв оказалось ноль: <code>javac</code> выдал те же байты классов, и слой остался прежним. Для Maven-проектов то же правило: сначала копируют <code>pom.xml</code> и скачивают зависимости (<code>mvn dependency:go-offline</code>), потом копируют исходники и собирают. Spring Boot умеет раскладывать jar по слоям сам (<code>java -Djarmode=tools -jar app.jar extract --layers</code>): зависимости, snapshot-зависимости, ресурсы и код приложения ложатся отдельными слоями.</p>
+    </section>
+
+    <section class="step" id="jvm">
+      <h2>Что JVM видит в контейнере</h2>
+      <pre class="out">== what the JVM sees in a container
+   no limits:                         cpus=18 maxHeap=1984MB
+   --memory=512m --cpus=2:            cpus=2 maxHeap=123MB
+   same + -XX:MaxRAMPercentage=75:    cpus=2 maxHeap=371MB
+   cgroup memory.max inside:          536870912</pre>
+      <p>Контейнер — обычный процесс хоста в отдельных namespaces: свой список процессов (PID), своя сеть, своя файловая система (mount), свои имя хоста и пользователи. Ограничения ресурсов задают cgroups: лимит памяти виден внутри контейнера как <code>/sys/fs/cgroup/memory.max</code> — ровно 512 МБ. Ядро общее с хостом, поэтому контейнер стартует за доли секунды, но и изоляция слабее, чем у виртуальной машины.</p>
+      <p>JVM 21 читает cgroups: при <code>--cpus=2</code> <code>availableProcessors</code> вернул 2 вместо 18 ядер машины, и от этого числа зависят размеры пулов, число потоков GC и параллельных стримов. Под heap по умолчанию берётся четверть доступной памяти: без лимита — 1 984 МБ от памяти виртуальной машины Docker Desktop, с лимитом 512 МБ — 123 МБ (четверть, за вычетом одного survivor-пространства, которое <code>maxMemory()</code> не учитывает). Сервис получает 512 МБ, а пользуется 123. Поэтому в контейнерах задают <code>-XX:MaxRAMPercentage</code>, обычно 60–75: 371 МБ heap при 75 %. Оставшееся нужно не-heap-памяти — метаспейсу, стекам потоков, коду JIT, прямым буферам. Если поставить 100 %, процесс превысит лимит cgroup, и ядро убьёт его (OOMKilled) без всякого <code>OutOfMemoryError</code>.</p>
+    </section>
+
+    <section class="step" id="pid1">
+      <h2>PID 1 и сигналы: кто получает SIGTERM</h2>
+<pre><code class="language-sh">#!/bin/sh
+# Скрипт запуска без exec: java — дочерний процесс, PID 1 остаётся sh.
+echo "starting"
+java App          # правильно: exec java App</code></pre>
+      <pre class="out">== docker stop -t 10: who is PID 1
+   kb-docker-multistage   PID 1 = java  stop took  0.1 s, exit code 143, shutdown hook ran: yes
+   kb-docker-shell        PID 1 = java  stop took  0.1 s, exit code 143, shutdown hook ran: yes
+   kb-docker-noexec       PID 1 = start.sh stop took 10.1 s, exit code 137, shutdown hook ran: no
+   kb-docker-exec         PID 1 = java  stop took  0.1 s, exit code 143, shutdown hook ran: yes</pre>
+      <p><code>docker stop</code> и Kubernetes при удалении пода посылают SIGTERM процессу с PID 1, ждут и затем посылают SIGKILL. Если PID 1 — java, срабатывает хук завершения: сервис перестаёт принимать запросы, дорабатывает текущие и выходит с кодом 143 (128 + 15, SIGTERM) за 0,1 с. Если PID 1 — скрипт запуска без <code>exec</code>, сигнал получает <code>sh</code>, а он как PID 1 по умолчанию игнорирует SIGTERM и не пересылает его дочерним процессам. Контейнер ждёт весь тайм-аут — 10 секунд — и умирает от SIGKILL с кодом 137, хук не выполнился: текущие запросы оборваны.</p>
+      <p>Шелл-форма <code>CMD java App</code> в этом образе оказалась безопасной: busybox <code>sh -c</code> заменяет себя последней командой, и PID 1 — java. На это нельзя полагаться — другой shell или команда из двух частей (<code>java App &amp;&amp; echo done</code>) поведёт себя иначе. Правила: exec-форма <code>CMD ["java", ...]</code>; в скриптах — <code>exec java ...</code>; если нужен настоящий init для сбора зомби-процессов — <code>docker run --init</code> или tini. Без флага <code>-t</code> Docker 29.8 на этой машине ждал 3 секунды вместо документированных 10; в Kubernetes ожидание задаёт <code>terminationGracePeriodSeconds</code>, по умолчанию 30.</p>
+      <div class="trap">
+        <p class="myth">JVM в контейнере сама использует выделенную контейнеру память.</p>
+        <p class="fact">JVM видит лимит, но берёт под heap по умолчанию 25 %: в демо 123 МБ из 512. Нужен <code>-XX:MaxRAMPercentage</code> около 75 % с запасом под не-heap-память; 100 % приводит к OOMKilled от ядра без <code>OutOfMemoryError</code>.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Образ — слои по содержимому; контейнер — процесс в namespaces с ограничениями cgroups, ядро общее с хостом.</li>
+        <li>Многостадийная сборка: 554 МБ на JDK → 285 МБ на JRE → 74 МБ с jlink.</li>
+        <li>Зависимости — слоем раньше кода: после правки изменился 1 слой из 8; комментарий не меняет классы и слой.</li>
+        <li>JVM видит 2 CPU и 512 МБ лимита, но heap — 123 МБ; MaxRAMPercentage=75 — 371 МБ.</li>
+        <li>java должна быть PID 1: скрипт без exec — 10 с ожидания, SIGKILL, код 137, хук не выполнен.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="dk-vm" data-freq="3">
+      <h3>Чем контейнер отличается от виртуальной машины?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Виртуальная машина эмулирует оборудование и запускает своё ядро. Контейнер — обычный процесс хоста, изолированный механизмами ядра: namespaces дают свои процессы, сеть, файловую систему и имя хоста, cgroups ограничивают CPU и память. Поэтому контейнер стартует за доли секунды и занимает мало, но изоляция слабее — ядро общее.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Образ — слои файловой системы по содержимому плюс настройка запуска.</li>
+            <li>Docker Desktop на macOS запускает контейнеры в Linux-виртуалке.</li>
+            <li>Повышенная изоляция — gVisor, Kata Containers.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="dk-dockerfile" data-freq="3">
+      <h3>Как написать хороший Dockerfile для Java-сервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Многостадийная сборка: компиляция на JDK, запуск на JRE или среде из jlink. Зависимости — отдельным слоем раньше кода, чтобы правки кода не пересобирали их. Exec-форма CMD или ENTRYPOINT, чтобы java получала сигналы. Непривилегированный пользователь, фиксированные версии базового образа, <code>MaxRAMPercentage</code> для heap.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Spring Boot layered jar — слои зависимостей и кода.</li>
+            <li>Distroless — меньше уязвимостей, но нет shell для отладки.</li>
+            <li>.dockerignore, чтобы target и .git не попадали в контекст.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим Dockerfile?</summary>
+          <pre><code class="language-dockerfile">FROM maven:3-eclipse-temurin-21
+COPY . /src
+WORKDIR /src
+RUN mvn package -DskipTests
+ENTRYPOINT ./run.sh                  # run.sh: java -Xmx256m -jar target/app.jar</code></pre>
+          <p>Образ на Maven и JDK несёт инструменты сборки и кеш зависимостей в продакшен. <code>COPY . /src</code> до сборки — любая правка кода заново скачивает все зависимости. Шелл-форма ENTRYPOINT и скрипт без <code>exec</code>: PID 1 — shell, SIGTERM не доходит до java, и при каждом деплое контейнер убивают по тайм-ауту. Жёсткий <code>-Xmx256m</code> не связан с лимитом контейнера. Нужно: две стадии, сначала <code>pom.xml</code> и <code>dependency:go-offline</code>, потом исходники; запуск на JRE, <code>exec java -XX:MaxRAMPercentage=75 -jar</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="dk-jvm" data-freq="2">
+      <h3>Как JVM ведёт себя в контейнере с лимитом памяти?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Современные JVM читают лимиты cgroups: availableProcessors учитывает лимит CPU, а heap по умолчанию — 25 % лимита памяти. Это мало, поэтому задают MaxRAMPercentage около 75 %, оставляя память метаспейсу, стекам, JIT и прямым буферам. Если процесс превысит лимит, ядро убьёт его — OOMKilled без OutOfMemoryError.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Число CPU влияет на пулы, потоки GC, ForkJoinPool.</li>
+            <li>Native Memory Tracking показывает, куда уходит не-heap-память.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.docker.com/build/building/best-practices/">Docker: Building best practices</a> — многостадийная сборка, кеш слоёв.</li>
+      <li><a href="https://docs.docker.com/reference/dockerfile/#cmd">Dockerfile reference: CMD, shell и exec form</a>.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/packaging/container-images/efficient-images.html">Spring Boot: Efficient container images</a> — layered jar.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html">java: MaxRAMPercentage, UseContainerSupport</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
