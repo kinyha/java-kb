@@ -43,7 +43,7 @@ window.KB_TREE = [
         },
       ] },
       { id: 'ds', title: 'Data Structures', items: [
-        { id: 'arrays-lists', freq: 2, status: 'empty', title: 'Arrays & Lists',
+        { id: 'arrays-lists', freq: 2, status: 'draft', title: 'Arrays & Lists',
           scope: 'массив, динамический массив, связный список, стек, очередь, дек' },
         { id: 'hash-tables', freq: 3, status: 'empty', title: 'Hash Tables',
           scope: 'хеш-функция, коллизии, цепочки и открытая адресация, load factor, рехеширование' },
