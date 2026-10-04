@@ -643,7 +643,7 @@ window.KB_TREE = [
           scope: 'вилка, несколько офферов, как называть цифру, что кроме зарплаты' },
       ] },
       { id: 'domain', title: 'Banking Domain', items: [
-        { id: 'banking', freq: 2, status: 'empty', title: 'Banking Basics',
+        { id: 'banking', freq: 2, status: 'draft', title: 'Banking Basics',
           scope: 'счета и проводки, двойная запись, деньги в коде, сверка, аудит' },
         { id: 'payments-domain', freq: 2, status: 'empty', title: 'Payments',
           scope: 'карточный платёж, эквайринг и эмиссия, авторизация и клиринг, СБП и SWIFT, статусы платежа' },
