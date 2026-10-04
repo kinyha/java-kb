@@ -75,7 +75,7 @@ window.KB_TREE = [
           scope: 'DFS рекурсивно и через стек, BFS по уровням, глубина, проверка BST, LCA' },
         { id: 'top-k', freq: 1, status: 'draft', title: 'Heap & Top-K',
           scope: 'top-K элементов, K-way merge, медиана потока, две кучи' },
-        { id: 'graph-search', freq: 1, status: 'empty', title: 'Graph Search',
+        { id: 'graph-search', freq: 1, status: 'draft', title: 'Graph Search',
           scope: 'острова в матрице, BFS по кратчайшему пути, topological sort, обнаружение цикла' },
         { id: 'backtracking', freq: 1, status: 'empty', title: 'Backtracking',
           scope: 'подмножества, перестановки, комбинации, отсечение ветвей' },
