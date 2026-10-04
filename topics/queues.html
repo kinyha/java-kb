@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Queue &amp; Deque · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="queues">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Queue &amp; Deque</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p><code>Queue</code> — вставка с одного конца, извлечение с другого. <code>Deque</code> — оба конца, поэтому он же и стек. Главная реализация — <code>ArrayDeque</code>: кольцевой массив с индексами <code>head</code> и <code>tail</code>, которые при переходе через край массива продолжают с другой стороны. Операции на обоих концах — O(1), без узлов и без сдвигов. В замере push/pop он в 8 раз быстрее <code>LinkedList</code> и в 4 раза быстрее <code>Stack</code>. <code>Stack</code> — наследник синхронизированного <code>Vector</code>: лишние блокировки, вставка в середину, а обход идёт со дна, а не с вершины.
+      <code>PriorityQueue</code> — двоичная куча в массиве: <code>poll</code> и <code>offer</code> за O(log n), минимум в корне. Обход и <code>toString</code> идут в порядке массива, а не по возрастанию. Изменённый приоритет элемента внутри очереди куча не замечает. Каждая операция <code>Queue</code> есть в двух вариантах: бросающая исключение (<code>add</code>, <code>remove</code>, <code>element</code>) и возвращающая специальное значение (<code>offer</code>, <code>poll</code>, <code>peek</code>). <code>null</code> в эти очереди класть нельзя.</p>
+    </div>
+
+    <section class="step" id="api">
+      <h2>Queue и Deque: два набора методов</h2>
+      <p>В платёжном сервисе очереди повсюду: входящие платежи ждут обработки по порядку прихода, повторные попытки ждут своего времени, обход графа зависимостей идёт по слоям, а парсер выражений комиссии держит стек операций. В Java для всего этого два интерфейса. У каждой операции <code>Queue</code> есть две формы:</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Бросает исключение</th><th>Возвращает значение</th><th>Deque: голова</th><th>Deque: хвост</th></tr></thead>
+        <tbody>
+          <tr><td>Вставить</td><td><code>add(e)</code></td><td><code>offer(e)</code> → false</td><td><code>addFirst</code> / <code>offerFirst</code>, <code>push</code></td><td><code>addLast</code> / <code>offerLast</code></td></tr>
+          <tr><td>Извлечь</td><td><code>remove()</code></td><td><code>poll()</code> → null</td><td><code>removeFirst</code> / <code>pollFirst</code>, <code>pop</code></td><td><code>removeLast</code> / <code>pollLast</code></td></tr>
+          <tr><td>Посмотреть</td><td><code>element()</code></td><td><code>peek()</code> → null</td><td><code>getFirst</code> / <code>peekFirst</code></td><td><code>getLast</code> / <code>peekLast</code></td></tr>
+        </tbody>
+      </table>
+      <pre class="out">== Queue API: exceptions or special values
+poll() = null, peek() = null
+remove(): NoSuchElementException
+offer(null): NullPointerException</pre>
+      <p>Демо <a href="../examples/queues/DequeDemo.java">DequeDemo.java</a>. <code>poll</code> на пустой очереди возвращает <code>null</code>, <code>remove</code> бросает <code>NoSuchElementException</code>. <code>offer</code> возвращает <code>false</code>, если в очереди нет места; для неограниченных очередей это не случается, зато важно для ограниченных <code>BlockingQueue</code> из <a href="concurrent-collections.html">Concurrent Collections</a>, где <code>offer</code> — способ не заблокироваться. Именно потому, что <code>null</code> означает «пусто», <code>ArrayDeque</code> и <code>PriorityQueue</code> запрещают <code>null</code>-элементы: иначе <code>poll() == null</code> было бы неоднозначно. <code>LinkedList</code> <code>null</code> пропускает — ещё одна причина его не использовать.</p>
+      <p>Как стек <code>Deque</code> используют через <code>push</code>, <code>pop</code> и <code>peek</code> — это синонимы <code>addFirst</code>, <code>removeFirst</code> и <code>peekFirst</code>: вершина стека — голова. Как очередь FIFO — <code>offer</code> в хвост и <code>poll</code> из головы. Путаница между ними — частая ошибка в BFS: <code>push</code> вместо <code>offer</code> превращает обход в ширину в обход в глубину, как в <a href="graph-search.html">Graph Search</a>.</p>
+    </section>
+
+    <section class="step" id="arraydeque">
+      <h2>ArrayDeque: кольцевой массив</h2>
+      <pre class="out">== ArrayDeque is a circular array
+new ArrayDeque&lt;&gt;(6):  [. . . . . . .] head=0 tail=0
+addLast a, b, c:      [a b c . . . .] head=0 tail=3
+addFirst z:           [a b c . . . z] head=6 tail=3  -&gt; [z, a, b, c]
+pollFirst x2:         [. b c . . . .] head=1 tail=3  -&gt; [b, c]
+addLast d, e, f:      [. b c d e f .] head=1 tail=6  -&gt; [b, c, d, e, f]
+addLast g, h (grow):  [h . . . . . . . . . b c d e f g] head=10 tail=1  -&gt; [b, c, d, e, f, g, h]</pre>
+      <p>Демо печатает внутренний массив <code>elements</code> и индексы. <code>head</code> — индекс первого элемента, <code>tail</code> — следующая свободная ячейка после последнего. <code>addLast</code> пишет в <code>tail</code> и сдвигает его вперёд. <code>addFirst</code> сдвигает <code>head</code> назад — с 0 он переходит на последнюю ячейку 6, и <code>z</code> оказался в конце массива, оставаясь первым элементом очереди. <code>pollFirst</code> обнуляет ячейку и сдвигает <code>head</code> вперёд. Ни одна операция не двигает другие элементы — в отличие от <code>ArrayList.remove(0)</code> из <a href="lists.html">List</a>.</p>
+      <p>Две детали видны в выводе. Ёмкость 6 дала массив из 7 ячеек: одна ячейка всегда пустая, иначе при <code>head == tail</code> нельзя отличить полную очередь от пустой. И рост: когда <code>tail</code> догнал <code>head</code>, массив вырос с 7 до 16 (для маленьких массивов почти вдвое, начиная с 64 — на 50%). Элементы при этом не переупорядочились в начало: часть от <code>head</code> до края переехала в конец нового массива, и <code>head</code> стал 10. Порядок очереди сохранился — <code>[b, c, d, e, f, g, h]</code>. В Java 8 длина массива была степенью двойки, и переход через край вычислялся маской, как в <a href="hashmap.html">HashMap</a>; в JDK 21 — сравнением с длиной, поэтому массив может быть любой длины.</p>
+    </section>
+
+    <section class="step" id="stack">
+      <h2>Почему не Stack и не LinkedList</h2>
+      <pre class="out">== stack: ArrayDeque vs Stack
+ArrayDeque push x3: pop = p-3, iterates [p-3, p-2, p-1]
+Stack      push x3: pop = p-3, iterates [p-1, p-2, p-3]
+Stack is synchronized Vector: true</pre>
+      <p>Оба стека вернут <code>p-3</code>, но обходятся в разном порядке: <code>ArrayDeque</code> — с вершины, как и ожидаешь от стека, <code>Stack</code> — со дна, потому что это <code>Vector</code>, и итератор идёт по индексам массива. Код, печатающий «стек вызовов» или путь в графе через обход, даст обратный порядок при замене одного на другой. <code>Stack</code> унаследовал от <code>Vector</code> и <code>add(i, e)</code>, <code>remove(i)</code>, <code>get(i)</code> — операции, которых у стека быть не должно, — это пример плохого наследования из <a href="inheritance.html">Inheritance &amp; Composition</a>. И все методы <code>Vector</code> синхронизированы: блокировка на каждом <code>push</code> и <code>pop</code>, даже в однопоточном коде.</p>
+      <pre class="out">== push/pop 10 000 000 times
+ArrayDeque 22 ms, LinkedList 179 ms, Stack 97 ms (15000000)</pre>
+      <p>Демо <a href="../examples/queues/PriorityDemo.java">PriorityDemo.java</a>: 10 миллионов <code>push</code> с периодическими <code>pop</code>. <code>ArrayDeque</code> — 22 мс; <code>Stack</code> — в 4 раза медленнее из-за синхронизации и проверок <code>Vector</code>; <code>LinkedList</code> — в 8 раз, потому что каждый <code>push</code> создаёт узел, а миллионы узлов — работа для сборщика. Javadoc самого <code>Stack</code> рекомендует <code>Deque</code>: <q>Deque&lt;Integer&gt; stack = new ArrayDeque&lt;Integer&gt;();</q>. Для многопоточной очереди ни <code>ArrayDeque</code>, ни синхронизированный <code>Stack</code> не годятся — нужны <code>ConcurrentLinkedDeque</code> или блокирующие очереди.</p>
+    </section>
+
+    <section class="step" id="priority">
+      <h2>PriorityQueue: куча в массиве</h2>
+      <pre class="out">== PriorityQueue: heap order is not sorted order
+toString / iteration: [10, 20, 30, 70, 40, 50, 60]
+poll one by one:      10 20 30 40 50 60 70</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 265" role="img" aria-label="Массив PriorityQueue — двоичная куча: дети элемента i лежат в позициях 2i плюс 1 и 2i плюс 2, минимум в корне. poll возвращает корень 10, ставит на его место последний элемент 60 и просеивает его вниз, меняя с меньшим ребёнком: сначала с 20, потом с 40.">
+            <g data-s="1">
+            <path d="M360 54 L 200 86" class="dg-line"/>
+            <path d="M360 54 L 520 86" class="dg-line"/>
+            <path d="M200 114 L 120 146" class="dg-line"/>
+            <path d="M200 114 L 280 146" class="dg-line"/>
+            <path d="M520 114 L 440 146" class="dg-line"/>
+            <path d="M520 114 L 600 146" class="dg-line"/>
+            <rect x="336" y="26" width="48" height="28" rx="6" class="dg-cell hit"/>
+            <text x="360" y="45" class="dg-n" text-anchor="middle">10</text>
+            <rect x="176" y="86" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="200" y="105" class="dg-n" text-anchor="middle">20</text>
+            <rect x="496" y="86" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="520" y="105" class="dg-n" text-anchor="middle">30</text>
+            <rect x="96" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="120" y="165" class="dg-n" text-anchor="middle">70</text>
+            <rect x="256" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="280" y="165" class="dg-n" text-anchor="middle">40</text>
+            <rect x="416" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="440" y="165" class="dg-n" text-anchor="middle">50</text>
+            <rect x="576" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="600" y="165" class="dg-n" text-anchor="middle">60</text>
+            <rect x="40" y="200" width="44" height="26" rx="4" class="dg-cell hit"/>
+            <text x="62" y="218" class="dg-n" text-anchor="middle">10</text>
+            <rect x="90" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="112" y="218" class="dg-n" text-anchor="middle">20</text>
+            <rect x="140" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="162" y="218" class="dg-n" text-anchor="middle">30</text>
+            <rect x="190" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="212" y="218" class="dg-n" text-anchor="middle">70</text>
+            <rect x="240" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="262" y="218" class="dg-n" text-anchor="middle">40</text>
+            <rect x="290" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="312" y="218" class="dg-n" text-anchor="middle">50</text>
+            <rect x="340" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="362" y="218" class="dg-n" text-anchor="middle">60</text>
+            <text x="20" y="252" class="dg-t">Массив — дерево по уровням: дети i в 2i+1 и 2i+2, минимум в корне.</text>
+            </g>
+            <g data-s="2">
+            <path d="M360 54 L 200 86" class="dg-line"/>
+            <path d="M360 54 L 520 86" class="dg-line"/>
+            <path d="M200 114 L 120 146" class="dg-line"/>
+            <path d="M200 114 L 280 146" class="dg-line"/>
+            <path d="M520 114 L 440 146" class="dg-line"/>
+            <rect x="336" y="26" width="48" height="28" rx="6" class="dg-cell miss"/>
+            <text x="360" y="45" class="dg-n" text-anchor="middle">60</text>
+            <rect x="176" y="86" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="200" y="105" class="dg-n" text-anchor="middle">20</text>
+            <rect x="496" y="86" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="520" y="105" class="dg-n" text-anchor="middle">30</text>
+            <rect x="96" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="120" y="165" class="dg-n" text-anchor="middle">70</text>
+            <rect x="256" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="280" y="165" class="dg-n" text-anchor="middle">40</text>
+            <rect x="416" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="440" y="165" class="dg-n" text-anchor="middle">50</text>
+            <rect x="40" y="200" width="44" height="26" rx="4" class="dg-cell miss"/>
+            <text x="62" y="218" class="dg-n" text-anchor="middle">60</text>
+            <rect x="90" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="112" y="218" class="dg-n" text-anchor="middle">20</text>
+            <rect x="140" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="162" y="218" class="dg-n" text-anchor="middle">30</text>
+            <rect x="190" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="212" y="218" class="dg-n" text-anchor="middle">70</text>
+            <rect x="240" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="262" y="218" class="dg-n" text-anchor="middle">40</text>
+            <rect x="290" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="312" y="218" class="dg-n" text-anchor="middle">50</text>
+            <rect x="340" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="362" y="218" class="dg-n" text-anchor="middle"></text>
+            <text x="20" y="252" class="dg-bad">poll: вернуть 10, на его место — последний элемент 60.</text>
+            </g>
+            <g data-s="3">
+            <path d="M360 54 L 200 86" class="dg-line"/>
+            <path d="M360 54 L 520 86" class="dg-line"/>
+            <path d="M200 114 L 120 146" class="dg-line"/>
+            <path d="M200 114 L 280 146" class="dg-line"/>
+            <path d="M520 114 L 440 146" class="dg-line"/>
+            <rect x="336" y="26" width="48" height="28" rx="6" class="dg-cell hit"/>
+            <text x="360" y="45" class="dg-n" text-anchor="middle">20</text>
+            <rect x="176" y="86" width="48" height="28" rx="6" class="dg-cell miss"/>
+            <text x="200" y="105" class="dg-n" text-anchor="middle">60</text>
+            <rect x="496" y="86" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="520" y="105" class="dg-n" text-anchor="middle">30</text>
+            <rect x="96" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="120" y="165" class="dg-n" text-anchor="middle">70</text>
+            <rect x="256" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="280" y="165" class="dg-n" text-anchor="middle">40</text>
+            <rect x="416" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="440" y="165" class="dg-n" text-anchor="middle">50</text>
+            <rect x="40" y="200" width="44" height="26" rx="4" class="dg-cell hit"/>
+            <text x="62" y="218" class="dg-n" text-anchor="middle">20</text>
+            <rect x="90" y="200" width="44" height="26" rx="4" class="dg-cell miss"/>
+            <text x="112" y="218" class="dg-n" text-anchor="middle">60</text>
+            <rect x="140" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="162" y="218" class="dg-n" text-anchor="middle">30</text>
+            <rect x="190" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="212" y="218" class="dg-n" text-anchor="middle">70</text>
+            <rect x="240" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="262" y="218" class="dg-n" text-anchor="middle">40</text>
+            <rect x="290" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="312" y="218" class="dg-n" text-anchor="middle">50</text>
+            <rect x="340" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="362" y="218" class="dg-n" text-anchor="middle"></text>
+            <text x="20" y="252" class="dg-t">siftDown: 60 больше меньшего ребёнка 20 — обмен.</text>
+            </g>
+            <g data-s="4">
+            <path d="M360 54 L 200 86" class="dg-line"/>
+            <path d="M360 54 L 520 86" class="dg-line"/>
+            <path d="M200 114 L 120 146" class="dg-line"/>
+            <path d="M200 114 L 280 146" class="dg-line"/>
+            <path d="M520 114 L 440 146" class="dg-line"/>
+            <rect x="336" y="26" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="360" y="45" class="dg-n" text-anchor="middle">20</text>
+            <rect x="176" y="86" width="48" height="28" rx="6" class="dg-cell hit"/>
+            <text x="200" y="105" class="dg-n" text-anchor="middle">40</text>
+            <rect x="496" y="86" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="520" y="105" class="dg-n" text-anchor="middle">30</text>
+            <rect x="96" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="120" y="165" class="dg-n" text-anchor="middle">70</text>
+            <rect x="256" y="146" width="48" height="28" rx="6" class="dg-cell hit"/>
+            <text x="280" y="165" class="dg-n" text-anchor="middle">60</text>
+            <rect x="416" y="146" width="48" height="28" rx="6" class="dg-cell"/>
+            <text x="440" y="165" class="dg-n" text-anchor="middle">50</text>
+            <rect x="40" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="62" y="218" class="dg-n" text-anchor="middle">20</text>
+            <rect x="90" y="200" width="44" height="26" rx="4" class="dg-cell hit"/>
+            <text x="112" y="218" class="dg-n" text-anchor="middle">40</text>
+            <rect x="140" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="162" y="218" class="dg-n" text-anchor="middle">30</text>
+            <rect x="190" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="212" y="218" class="dg-n" text-anchor="middle">70</text>
+            <rect x="240" y="200" width="44" height="26" rx="4" class="dg-cell hit"/>
+            <text x="262" y="218" class="dg-n" text-anchor="middle">60</text>
+            <rect x="290" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="312" y="218" class="dg-n" text-anchor="middle">50</text>
+            <rect x="340" y="200" width="44" height="26" rx="4" class="dg-cell"/>
+            <text x="362" y="218" class="dg-n" text-anchor="middle"></text>
+            <text x="20" y="252" class="dg-ok">60 больше ребёнка 40 — обмен; дальше детей нет. O(log n).</text>
+            </g>
+            <text x="62" y="194" class="dg-n" text-anchor="middle">0</text>
+            <text x="112" y="194" class="dg-n" text-anchor="middle">1</text>
+            <text x="162" y="194" class="dg-n" text-anchor="middle">2</text>
+            <text x="212" y="194" class="dg-n" text-anchor="middle">3</text>
+            <text x="262" y="194" class="dg-n" text-anchor="middle">4</text>
+            <text x="312" y="194" class="dg-n" text-anchor="middle">5</text>
+            <text x="362" y="194" class="dg-n" text-anchor="middle">6</text>
+            <text x="400" y="218" class="dg-n">queue[] — сам массив</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Массив <code>[10, 20, 30, 70, 40, 50, 60]</code> — двоичное дерево, записанное по уровням: дети элемента <code>i</code> лежат в <code>2i + 1</code> и <code>2i + 2</code>, родитель — в <code>(i − 1) / 2</code>. Свойство кучи: родитель не больше детей. Поэтому минимум — в корне, а в остальном массив не отсортирован: 70 стоит раньше 40. <code>toString</code> и итератор идут по массиву, и печатают именно это.</li>
+          <li><code>poll</code> возвращает корень и ставит на его место последний элемент — 60. Массив укоротился, но свойство кучи в корне нарушено.</li>
+          <li><code>siftDown</code>: 60 сравнивается с меньшим из детей — 20 — и меняется с ним местами.</li>
+          <li>На уровне ниже 60 больше ребёнка 40 — ещё обмен. Детей больше нет, куча восстановлена: <code>[20, 40, 30, 70, 60, 50]</code>. Каждый шаг спускает элемент на уровень, высота дерева — log n, отсюда O(log n). <code>offer</code> симметричен: элемент встаёт в конец и всплывает (<code>siftUp</code>).</li>
+        </ol>
+      </figure>
+      <p>Куча даёт минимум за O(1), вставку и извлечение за O(log n), построение из коллекции за O(n) (<code>heapify</code> в конструкторе), но не поиск: <code>contains</code> и <code>remove(Object)</code> — линейный проход. Порядок задаёт <code>Comparable</code> или компаратор; для максимума — <code>Comparator.reverseOrder()</code>. Равные элементы извлекаются в произвольном порядке — куча не стабильна; если нужен FIFO среди равных приоритетов, в ключ добавляют порядковый номер. Применения — top-K, слияние отсортированных потоков, планировщик задач, алгоритм Дейкстры — разобраны в <a href="top-k.html">Heap &amp; Top-K</a>.</p>
+      <pre class="out">== retries by time, earliest first
+peek = p-2@10:01
+after p-1 moved to 10:00, peek = p-2@10:01 (heap did not notice)
+after remove + add,      peek = p-1@10:00</pre>
+      <p>Очередь повторных попыток упорядочена по времени. Когда время попытки <code>p-1</code> изменили прямо в объекте, лежащем в очереди, куча этого не заметила: элемент остался на своём месте в массиве, и <code>peek</code> вернул <code>p-2</code>, хотя <code>p-1</code> теперь раньше. Порядок проверяется только при <code>siftUp</code> и <code>siftDown</code> — при вставке и извлечении. Это та же ловушка, что изменяемый ключ в <code>HashMap</code>. Правильно — удалить элемент и вставить заново (<code>remove(Object)</code> — O(n)) или делать элементы очереди неизменяемыми и вставлять новую запись, а устаревшую пропускать при извлечении (ленивое удаление). <code>PriorityQueue</code> не потокобезопасна; для планировщика есть <code>PriorityBlockingQueue</code>, <code>DelayQueue</code> и <code>ScheduledThreadPoolExecutor</code>, который внутри держит именно кучу задач по времени.</p>
+      <div class="trap">
+        <p class="myth">Если распечатать PriorityQueue или обойти её for-each, элементы будут по порядку приоритета.</p>
+        <p class="fact">Обход идёт по массиву кучи, а он упорядочен только частично: в демо <code>[10, 20, 30, 70, 40, 50, 60]</code>. Отсортированный порядок даёт только последовательность <code>poll</code> или явная сортировка копии.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Queue: add/remove/element бросают исключения, offer/poll/peek возвращают false/null; null-элементы запрещены.</li>
+        <li>Deque как стек: push/pop/peek работают с головой; как очередь: offer в хвост, poll из головы.</li>
+        <li>ArrayDeque — кольцевой массив: head и tail переходят через край, одна ячейка всегда пустая, O(1) на концах.</li>
+        <li>Stack — синхронизированный Vector, обходится со дна; LinkedList — узел на каждый элемент. Оба медленнее ArrayDeque в разы.</li>
+        <li>PriorityQueue — двоичная куча: минимум в корне, offer/poll O(log n), contains O(n).</li>
+        <li>Обход PriorityQueue — порядок массива, не сортировка; изменённый приоритет куча не видит.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="q-stack" data-freq="2">
+      <h3>Почему вместо Stack рекомендуют ArrayDeque?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Stack наследует Vector: все методы синхронизированы, что лишнее в однопоточном коде, и у стека есть операции по индексу, ломающие LIFO. ArrayDeque — кольцевой массив без блокировок с O(1) на обоих концах; он реализует Deque, и push/pop/peek работают с головой. По замерам он в разы быстрее и Stack, и LinkedList.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Итерация: ArrayDeque — с вершины, Stack — со дна.</li>
+            <li>ArrayDeque не принимает null — null из poll однозначно значит «пусто».</li>
+            <li>Для потоков — ConcurrentLinkedDeque или BlockingDeque.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="q-pq" data-freq="2">
+      <h3>Как устроена PriorityQueue?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Двоичная куча в массиве: дети элемента i — в 2i + 1 и 2i + 2, родитель не больше детей, минимум в корне. offer добавляет в конец и поднимает элемент, poll ставит последний в корень и опускает — обе операции O(log n); peek — O(1); contains и remove(Object) — O(n). Порядок задаёт Comparable или компаратор.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Итератор и toString не отсортированы.</li>
+            <li>Изменение приоритета элемента внутри очереди ломает порядок — удалить и вставить заново.</li>
+            <li>Куча не стабильна; построение из коллекции — O(n).</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что напечатает этот отчёт о срочных платежах?</summary>
+          <pre><code class="language-java">PriorityQueue&lt;Payment&gt; urgent = new PriorityQueue&lt;&gt;(comparing(Payment::deadline));
+urgent.addAll(loadUrgent());
+for (Payment p : urgent) report.add(p.id() + " " + p.deadline());   // «по возрастанию дедлайна»</code></pre>
+          <p>Первая строка будет с самым ранним дедлайном, а остальные — в порядке массива кучи, не отсортированном. Отчёт выглядит почти правильным и ошибается в середине. Нужно извлекать <code>poll</code> из копии очереди или просто отсортировать список: <code>loadUrgent().stream().sorted(comparing(Payment::deadline))</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="q-api" data-freq="2">
+      <h3>Чем offer отличается от add, а poll от remove?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>add и remove бросают исключение — IllegalStateException при нехватке места и NoSuchElementException на пустой очереди. offer и poll возвращают специальное значение — false и null. Для неограниченных очередей разница в основном на пустой очереди; для ограниченных BlockingQueue offer позволяет не бросать и не блокироваться.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Из-за null-сигнала ArrayDeque и PriorityQueue запрещают null-элементы.</li>
+            <li>BlockingQueue добавляет put/take (блокировка) и offer/poll с таймаутом.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Queue.html">Queue</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Deque.html">Deque</a> — таблицы методов.</li>
+      <li><a href="https://github.com/openjdk/jdk21u/blob/master/src/java.base/share/classes/java/util/ArrayDeque.java">OpenJDK 21: ArrayDeque.java</a>, <a href="https://github.com/openjdk/jdk21u/blob/master/src/java.base/share/classes/java/util/PriorityQueue.java">PriorityQueue.java</a>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/Stack.html">Stack</a> — рекомендация использовать Deque.</li>
+      <li>Cormen et al., «Introduction to Algorithms», гл. 6 «Heapsort» — двоичные кучи.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

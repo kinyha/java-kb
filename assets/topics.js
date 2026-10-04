@@ -389,7 +389,7 @@ window.KB_TREE = [
           scope: 'hash, бакеты, коллизии, treeify, resize, load factor' },
         { id: 'maps-sets', freq: 2, status: 'draft', title: 'Other Maps & Sets',
           scope: 'LinkedHashMap и LRU-кеш, TreeMap, HashSet через HashMap, EnumMap, WeakHashMap, IdentityHashMap' },
-        { id: 'queues', freq: 2, status: 'empty', title: 'Queue & Deque',
+        { id: 'queues', freq: 2, status: 'draft', title: 'Queue & Deque',
           scope: 'ArrayDeque, PriorityQueue, почему не Stack, Queue и Deque API' },
       ] },
       { id: 'lambdas-streams', title: 'Lambdas & Streams', source: 'Modern Java in Action, ч. 1–3; Effective Java, гл. 7', items: [
