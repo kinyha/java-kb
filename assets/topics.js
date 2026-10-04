@@ -387,7 +387,7 @@ window.KB_TREE = [
           scope: 'ArrayList и LinkedList, рост массива, сложность операций, удаление при обходе' },
         { id: 'hashmap', freq: 3, status: 'draft', title: 'HashMap',
           scope: 'hash, бакеты, коллизии, treeify, resize, load factor' },
-        { id: 'maps-sets', freq: 2, status: 'empty', title: 'Other Maps & Sets',
+        { id: 'maps-sets', freq: 2, status: 'draft', title: 'Other Maps & Sets',
           scope: 'LinkedHashMap и LRU-кеш, TreeMap, HashSet через HashMap, EnumMap, WeakHashMap, IdentityHashMap' },
         { id: 'queues', freq: 2, status: 'empty', title: 'Queue & Deque',
           scope: 'ArrayDeque, PriorityQueue, почему не Stack, Queue и Deque API' },
