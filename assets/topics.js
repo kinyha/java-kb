@@ -397,7 +397,7 @@ window.KB_TREE = [
           scope: 'синтаксис, effectively final, функциональные интерфейсы java.util.function, method references' },
         { id: 'optional', freq: 2, status: 'draft', title: 'Optional',
           scope: 'зачем нужен, map и flatMap, orElse и orElseGet, антипаттерны' },
-        { id: 'streams', freq: 3, status: 'empty', title: 'Stream API',
+        { id: 'streams', freq: 3, status: 'draft', title: 'Stream API',
           scope: 'ленивый конвейер, intermediate и terminal, map, filter, flatMap, reduce, одноразовость стрима' },
         { id: 'collectors', freq: 3, status: 'empty', title: 'Collectors',
           scope: 'toList и toMap с дубликатами, groupingBy, partitioningBy, downstream collectors, joining' },

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stream API · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="streams">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Stream API</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Стрим — не коллекция, а описание вычисления над источником: цепочка промежуточных операций (<code>filter</code>, <code>map</code>, <code>flatMap</code>, <code>sorted</code>) и одна терминальная (<code>toList</code>, <code>sum</code>, <code>findFirst</code>, <code>collect</code>). Промежуточные операции ленивы, без терминальной ничего не выполняется. Терминальная собирает из стадий цепочку приёмников и проталкивает через неё элементы по одному: в демо <code>findFirst</code> прошёл два платежа из пяти, а <code>map</code> вызвался один раз. Операции с состоянием, как <code>sorted</code>, — барьер: они сначала забирают все элементы.
+      Стрим одноразовый. С Java 9 <code>count()</code> может вообще не выполнять конвейер, если размер известен заранее, и тогда <code>peek</code> молчит. У <code>reduce</code> identity обязана быть нейтральной, иначе параллельный результат разойдётся с последовательным. Стримы дают читаемость, а не скорость. На 10 млн элементов цикл по <code>long[]</code> в 5 раз быстрее <code>LongStream</code> и в 13 раз — стрима обёрток. На коротких списках накладные расходы на создание стрима доминируют.</p>
+    </div>
+
+    <section class="step" id="pipeline">
+      <h2>Конвейер вместо цикла</h2>
+      <p>Отчёт о крупных платежах: отфильтровать по сумме, взять идентификаторы, отсортировать, ограничить. Цикл смешивает «что» и «как»: переменные-аккумуляторы, условия, временные списки. Стрим описывает только «что» — и каждая стадия читается отдельно. Демо <a href="../examples/streams/LazyDemo.java">LazyDemo.java</a> добавляет в стадии печать, чтобы увидеть, когда и в каком порядке они работают:</p>
+<pre><code class="language-java">Optional&lt;String&gt; firstBig = BATCH.stream()
+        .filter(p -&gt; { System.out.println("   filter " + p.id()); return p.amount() &gt; 50_000; })
+        .map(p -&gt; { System.out.println("   map    " + p.id()); return p.id(); })
+        .findFirst();</code></pre>
+      <pre class="out">== nothing runs without a terminal operation
+pipeline built, no output above this line
+== element by element, and only as many as needed
+   filter p-1
+   filter p-2
+   map    p-2
+findFirst = p-2</pre>
+      <p>Конвейер без терминальной операции ничего не напечатал: <code>filter</code> только запомнил функцию. С <code>findFirst</code> видно главное свойство: обработка идёт не «стадия за стадией по всей коллекции», а «элемент за элементом через все стадии». <code>p-1</code> отсеян фильтром, <code>p-2</code> прошёл фильтр и <code>map</code>, <code>findFirst</code> получил результат — и остальные три платежа не тронуты вообще. Никаких промежуточных списков между стадиями нет.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 180" role="img" aria-label="Стадии стрима связаны в цепочку приёмников: источник, filter, map, findFirst. Терминальная операция проталкивает элементы по одному. p-1 отсеивается фильтром, p-2 проходит до findFirst, который запрашивает остановку, и p-3, p-4, p-5 не читаются.">
+            <defs><marker id="st-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="30" width="140" height="44" rx="8" class="dg-box"/><text x="90" y="57" class="dg-in" text-anchor="middle">источник</text>
+            <rect x="200" y="30" width="140" height="44" rx="8" class="dg-box"/><text x="270" y="57" class="dg-in" text-anchor="middle">filter</text>
+            <rect x="380" y="30" width="140" height="44" rx="8" class="dg-box"/><text x="450" y="57" class="dg-in" text-anchor="middle">map</text>
+            <rect data-s="2-" x="560" y="30" width="140" height="44" rx="8" class="dg-cell"/><text data-s="2-" x="630" y="57" class="dg-in" text-anchor="middle">findFirst</text>
+            <path d="M160 52 L 198 52" class="dg-line" stroke-dasharray="4 4" marker-end="url(#st-a)"/>
+            <path d="M340 52 L 378 52" class="dg-line" stroke-dasharray="4 4" marker-end="url(#st-a)"/>
+            <path data-s="2-" d="M520 52 L 558 52" class="dg-line" marker-end="url(#st-a)"/>
+            <text data-s="1" x="20" y="176" class="dg-t">Промежуточные операции только создают стадии и запоминают лямбды.</text>
+            <g data-s="3"><rect x="40" y="110" width="100" height="34" rx="6" class="dg-cell miss"/><text x="90" y="132" class="dg-bad" text-anchor="middle">p-1</text>
+              <path d="M140 127 L 230 127" class="dg-line bad" marker-end="url(#st-a)"/><text x="270" y="132" class="dg-bad" text-anchor="middle">amount ≤ 50 000</text>
+              <text x="20" y="176" class="dg-bad">p-1 проталкивается в filter и отсеивается: map о нём не узнает.</text></g>
+            <g data-s="4"><rect x="40" y="110" width="100" height="34" rx="6" class="dg-cell hit"/><text x="90" y="132" class="dg-ok" text-anchor="middle">p-2</text>
+              <path d="M140 127 L 560 127" class="dg-line ok" marker-end="url(#st-a)"/><text x="570" y="132" class="dg-ok">"p-2", стоп</text>
+              <text x="20" y="176" class="dg-ok">p-2 проходит filter и map; findFirst запросил остановку.</text></g>
+            <g data-s="5"><rect x="40" y="110" width="200" height="34" rx="6" class="dg-cell"/><text x="140" y="132" class="dg-n" text-anchor="middle">p-3, p-4, p-5</text>
+              <text x="270" y="132" class="dg-n">не прочитаны</text>
+              <text x="20" y="176" class="dg-t">Источник больше не продвигается: короткое замыкание.</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>stream()</code>, <code>filter</code> и <code>map</code> создают по объекту-стадии и связывают их в список. Данные не читаются: стадии хранят только функции и флаги (известен ли размер, упорядочен ли поток, нет ли дубликатов).</li>
+          <li>Терминальная операция строит цепочку приёмников (<code>Sink</code>) от конца к началу: каждая стадия оборачивает следующую. Затем источник через <code>Spliterator</code> начинает проталкивать элементы в первый приёмник.</li>
+          <li><code>p-1</code> попадает в приёмник фильтра; условие ложно, и элемент дальше не передаётся.</li>
+          <li><code>p-2</code> проходит фильтр, <code>map</code> превращает его в строку, <code>findFirst</code> запоминает результат и сообщает, что больше ничего не нужно (<code>cancellationRequested</code>).</li>
+          <li>Источник проверяет этот флаг перед каждым элементом и останавливается. Поэтому стримы работают с бесконечными источниками — если в конвейере есть короткое замыкание: <code>findFirst</code>, <code>anyMatch</code>, <code>limit</code>, <code>takeWhile</code>.</li>
+        </ol>
+      </figure>
+    </section>
+
+    <section class="step" id="stateful">
+      <h2>Стадии с состоянием и сюрпризы ленивости</h2>
+      <pre class="out">== sorted is a barrier: it needs every element first
+   before sorted p-1
+   before sorted p-2
+   before sorted p-3
+   before sorted p-4
+   before sorted p-5
+   after sorted  p-3
+   after sorted  p-2</pre>
+      <p>Чтобы выдать первый элемент по убыванию суммы, <code>sorted</code> должен увидеть все. Поэтому он собирает весь поток в буфер, сортирует и только потом отдаёт дальше — <code>limit(2)</code> не избавил от чтения всех пяти. Такие операции называют stateful: <code>sorted</code>, <code>distinct</code> (помнит увиденные элементы в <code>HashSet</code>), <code>limit</code> и <code>skip</code> в параллельном режиме. Они требуют памяти пропорционально потоку и не работают с бесконечными источниками. Топ-N из миллиона через <code>sorted().limit(10)</code> — сортировка миллиона; куча на 10 элементов из <a href="top-k.html">Heap &amp; Top-K</a> дешевле.</p>
+      <pre class="out">== count() may skip the pipeline entirely
+count = 5 (size known, peek never ran)
+   peek p-1
+   peek p-2
+   peek p-3
+   peek p-4
+   peek p-5
+count after filter = 5</pre>
+      <p>Неочевидное следствие ленивости. Источник — <code>List</code> с известным размером, и между ним и <code>count()</code> только <code>peek</code>, который размер не меняет. С Java 9 <code>count()</code> возвращает размер, не проходя по элементам, и <code>peek</code> не выполнился ни разу. Стоило добавить <code>filter</code> — размер стал неизвестен, и конвейер выполнился. Документация прямо предупреждает: реализация может не выполнять поведенческие параметры, если результат вычисляется без них. Вывод: <code>peek</code> — только для отладки, а побочные эффекты в стадиях — ошибка проектирования, на которую нельзя полагаться.</p>
+      <pre class="out">== a stream is single-use
+second terminal op: stream has already been operated upon or closed</pre>
+      <p>Стрим одноразовый: после терминальной операции объект отработал, и повторный вызов бросает <code>IllegalStateException</code>. Хранить <code>Stream</code> в поле или возвращать его «на потом» — значит рассчитывать, что потребитель вызовет его ровно один раз. Нужно многократно — храните коллекцию или <code>Supplier&lt;Stream&lt;T&gt;&gt;</code>. Стримы над файлами (<code>Files.lines</code>) держат открытый ресурс и закрываются в <code>try-with-resources</code>, как в <a href="io.html">I/O &amp; NIO</a>.</p>
+    </section>
+
+    <section class="step" id="ops">
+      <h2>flatMap, reduce и бесконечные источники</h2>
+      <pre class="out">== map vs flatMap
+map:     [2, 0, 1]
+flatMap: [card, 3ds, sbp]</pre>
+      <p><code>map</code> — один элемент в один. <code>flatMap</code> — один элемент в поток из нуля или многих, которые вливаются в общий поток: теги всех платежей одним списком, строки всех файлов, позиции всех заказов. Пустой список тегов у второго платежа просто ничего не добавил. С Java 16 есть <code>mapMulti</code> — то же через приёмник, без создания промежуточного стрима на каждый элемент. Практические задачи на <code>flatMap</code> и группировку — в <a href="stream-practice.html">Stream Practice</a>.</p>
+      <pre class="out">== reduce: identity must be neutral
+sum, identity 0:          280800
+identity 100 sequential:  280900
+identity 100 parallel:    281300</pre>
+      <p><code>reduce(identity, op)</code> сворачивает поток в одно значение. Identity — нейтральный элемент операции: 0 для суммы, 1 для произведения, пустая строка для конкатенации. «Начальное значение 100» — ошибка: последовательно оно добавилось один раз, а в параллельном стриме каждая часть начинает свёртку со своего identity, и 100 добавилось пять раз. Операция должна быть ассоциативной: <code>(a op b) op c == a op (b op c)</code>, иначе результат зависит от разбиения. Для сумм есть <code>sum()</code> у примитивных стримов, для сборки в коллекции — <code>collect</code> из <a href="collectors.html">Collectors</a>; <code>reduce</code> с созданием новой коллекции на каждом шаге — квадратичная работа.</p>
+      <pre class="out">== infinite sources need a short-circuit
+retry delays: [100, 200, 400, 800, 1600, 3200]
+takeWhile &lt; 1000: [100, 200, 400, 800]</pre>
+      <p><code>Stream.iterate</code> и <code>generate</code> — бесконечные источники; работают только с <code>limit</code>, <code>takeWhile</code> (Java 9) или коротким замыканием в терминальной операции. С Java 9 есть и <code>iterate(seed, hasNext, next)</code> — аналог цикла <code>for</code>. Без ограничения <code>toList()</code> на бесконечном потоке закончится <code>OutOfMemoryError</code>.</p>
+      <pre class="out">== toList() vs collect(Collectors.toList())
+Stream.toList(): unmodifiable
+Collectors.toList(): ArrayList, add worked</pre>
+      <p><code>Stream.toList()</code> (Java 16) возвращает неизменяемый список и разрешает <code>null</code>-элементы; <code>Collectors.toList()</code> на практике возвращает <code>ArrayList</code>, хотя спецификация этого не обещает. Замена одного на другой при рефакторинге ломает код, который потом добавляет элементы в результат. Если нужен изменяемый — <code>Collectors.toCollection(ArrayList::new)</code>.</p>
+    </section>
+
+    <section class="step" id="cost">
+      <h2>Сколько стоит стрим</h2>
+      <pre class="out">== sum of amounts &gt; 50 000, 10M elements
+for loop over long[]                           4.4 ms
+LongStream over long[]                        20.3 ms
+for loop over List&lt;Long&gt;                       5.1 ms
+stream().filter().mapToLong().sum()           59.1 ms
+stream().filter().reduce(0L, Long::sum)       69.7 ms
+== a stream over 5 elements, called 1M times
+for loop                                       2.1 ms
+stream                                        38.0 ms</pre>
+      <p>Замер <a href="../examples/streams/CostDemo.java">CostDemo.java</a> — однопоточный, лучший из восьми прогонов; для точных выводов нужен JMH, но порядок разницы показателен. На 10 миллионах элементов цикл по массиву JIT превращает в плотный, векторизуемый код; <code>LongStream</code> над тем же массивом в 5 раз медленнее — вызовы лямбд через интерфейсы и цепочку приёмников JIT встраивает не всегда. Стрим обёрток <code>Long</code> — ещё в 3 раза медленнее: разыменование и распаковка на каждом шаге, а <code>reduce(0L, Long::sum)</code> к тому же упаковывает промежуточные суммы — <code>mapToLong().sum()</code> лучше. Короткий стрим на 5 элементов, вызванный миллион раз, в 18 раз медленнее цикла: создание стадий, приёмников и <code>Spliterator</code> на каждый вызов дороже самой работы.</p>
+      <p>Вывод не «стримы медленные», а «стримы — для читаемости». В типичном бизнес-коде с вызовами базы и сети разница в микросекундах не видна, а конвейер из трёх операций понятнее цикла с флагами. В горячих циклах на миллионах элементов — массивы примитивов и циклы, и всегда — примитивные стримы (<code>mapToLong</code>, <code>IntStream</code>) вместо стримов обёрток. Параллельные стримы — отдельная тема со своими ловушками, в <a href="parallel-streams.html">Parallel Streams</a>. Отладка — ещё одна цена: в стеке исключения из лямбды десяток кадров <code>ReferencePipeline</code>, а точку останова в лямбде IDE ставит отдельно от строки.</p>
+      <div class="trap">
+        <p class="myth"><code>peek</code> — удобное место для логирования или побочного действия над каждым элементом.</p>
+        <p class="fact">Стрим может не выполнить стадии, если результат получается без них: в демо <code>count()</code> вернул размер списка, и <code>peek</code> не вызвался ни разу. Документация разрешает это явно. <code>peek</code> — только для отладки, действия над элементами — в <code>forEach</code> или обычном цикле.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Промежуточные операции ленивы; терминальная строит цепочку приёмников и проталкивает элементы по одному.</li>
+        <li>Короткое замыкание (findFirst, anyMatch, limit, takeWhile) останавливает источник — поэтому работают бесконечные стримы.</li>
+        <li>sorted и distinct — барьеры с состоянием: читают весь поток.</li>
+        <li>count() с Java 9 может не выполнять конвейер при известном размере — peek только для отладки.</li>
+        <li>Стрим одноразовый; файловые стримы закрывать.</li>
+        <li>reduce: нейтральная identity и ассоциативная операция, иначе параллельный результат другой.</li>
+        <li>toList() неизменяемый, Collectors.toList() — нет.</li>
+        <li>Стримы медленнее циклов, особенно на обёртках и коротких списках; примитивные стримы обязательны для чисел.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="st-lazy" data-freq="3">
+      <h3>Чем промежуточные операции отличаются от терминальных? Что значит ленивость?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Промежуточные операции (filter, map, flatMap, sorted, distinct, limit) возвращают новый стрим и ничего не выполняют — только описывают шаг. Терминальная (collect, toList, forEach, reduce, count, findFirst, anyMatch) запускает вычисление. Элементы проходят через все стадии по одному, без промежуточных коллекций, и короткозамыкающие операции останавливают обработку, как только результат известен.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Терминальная операция строит цепочку Sink; источник — Spliterator.</li>
+            <li>sorted и distinct — stateful-барьеры.</li>
+            <li>count() с Java 9 может пропустить конвейер при SIZED-источнике.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему аудит иногда не записывает платежи?</summary>
+          <pre><code class="language-java">long processed = payments.stream()
+        .peek(audit::record)          // записать каждый платёж в журнал
+        .count();</code></pre>
+          <p>Если <code>payments</code> — список, <code>count()</code> вернёт его размер, не выполняя конвейер, и <code>audit::record</code> не вызовется ни разу (Java 9+). С фильтром перед <code>count</code> поведение снова изменится. Побочное действие не должно жить в <code>peek</code>: нужен явный цикл или <code>forEach(audit::record)</code> и отдельно <code>payments.size()</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="st-reuse" data-freq="2">
+      <h3>Можно ли использовать стрим повторно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нет: после терминальной операции стрим считается использованным, повторный вызов бросает IllegalStateException. Для повторного обхода хранят источник — коллекцию — или Supplier&lt;Stream&gt;, создающий новый стрим.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Стримы над ресурсами (Files.lines) нужно закрывать — они AutoCloseable.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="st-flatmap" data-freq="3">
+      <h3>Чем map отличается от flatMap, и как работает reduce?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>map преобразует каждый элемент в один элемент. flatMap преобразует элемент в стрим и вливает его элементы в общий поток — так «расплющивают» вложенные списки. reduce сворачивает поток в одно значение: identity — нейтральный элемент, операция — ассоциативная функция.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ненейтральная identity добавляется на каждую часть параллельного стрима.</li>
+            <li>mapMulti (Java 16) — flatMap без промежуточных стримов.</li>
+            <li>Для коллекций — collect, а не reduce.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="st-perf" data-freq="2">
+      <h3>Стримы быстрее циклов?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обычно нет: у стрима накладные расходы на стадии, лямбды и итератор-разделитель, а стримы обёрток добавляют упаковку. На больших массивах примитивов цикл заметно быстрее, на коротких списках создание стрима дороже самой работы. Стримы выбирают ради читаемости; в горячем коде — циклы и примитивные стримы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Для замеров — JMH, а не System.nanoTime.</li>
+            <li>reduce(0L, Long::sum) упаковывает промежуточные суммы, mapToLong().sum() — нет.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/package-summary.html">java.util.stream</a> — laziness, stateful operations, side-effects, non-interference.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/Stream.html#count()">Stream.count</a> — API Note о пропуске конвейера.</li>
+      <li>Brian Goetz, «Java Streams» (серия статей IBM developerWorks) — устройство конвейера.</li>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, items 45–48 — streams judiciously.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
