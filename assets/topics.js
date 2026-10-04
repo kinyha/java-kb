@@ -591,7 +591,7 @@ window.KB_TREE = [
           scope: 'ветки, merge и rebase, конфликты, cherry-pick, git flow и trunk-based' },
         { id: 'code-review', freq: 2, status: 'draft', title: 'Code Review',
           scope: 'что смотреть, как писать комментарии, размер PR' },
-        { id: 'process', freq: 1, status: 'empty', title: 'Team Process',
+        { id: 'process', freq: 1, status: 'draft', title: 'Team Process',
           scope: 'Scrum и Kanban, оценка задач, документация' },
       ] },
       { id: 'containers', title: 'Containers', source: 'Docker Docs; Kubernetes Documentation: Concepts', items: [
