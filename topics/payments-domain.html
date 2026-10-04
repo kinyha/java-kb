@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Payments · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="payments-domain">
+<main class="page">
+  <header class="topic-head"><h1>Payments</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Платёж проходит через несколько участников, и каждый видит свою часть исполнения. Банк может одобрить покупку, пока продавец ещё не получил деньги. Запрос на завершение оплаты может быть принят, а его результат прийти позже. Поэтому статус должен отвечать на конкретный вопрос: что разрешено, что исполнено, между кем завершён расчёт и что мы об этом знаем. Карта, СБП и перевод через сообщения SWIFT решают эту задачу разными путями.</p>
+    </div>
+    <section class="step" id="approved-not-paid">
+      <h2>Одобренная покупка ещё не означает выплату продавцу</h2>
+      <p>Alice покупает товар за 120 ₽. Она подтверждает оплату, приложение банка показывает удержанную сумму, сайт пишет «успешно». Но магазин пока не получил выплату. Деньги не потерялись: слово «успешно» смешало несколько разных событий. Банк одобрил операцию, а завершение покупки и расчёты с магазином имеют собственные стадии.</p>
+      <p>В карточном сценарии с раздельной авторизацией и завершением <b>авторизация</b> разрешает операцию и связывается с резервированием суммы у эмитента. <b>Capture</b> — команда завершить оплату по этой авторизации. Дальше информация участвует в клиринге и расчётах. Выплата продавцу со стороны его провайдера может идти по отдельному графику. Эти границы нужны, даже если API объединяет первые действия одним запросом.</p>
+      <p>В <a href="../examples/payments-domain/StageDemo.java">StageDemo.java</a> локально моделируются подтверждённые стадии покупки. Все целые суммы — копейки RUB. Это учебный порядок, без сетевого клиента и без имитации точных моментов проводок каждого банка. Запуск на JDK 21: <code>java -ea examples/payments-domain/StageDemo.java</code>.</p>
+      <pre><code class="language-java">static final class Payment {
+    final long requested = 12_000;
+    long authorised, captureRequested, captured, settledGross, paidOut;
+    String captureState = &quot;NONE&quot;;
+    void authorise() { authorised = requested; }
+    void requestCapture() {
+        captureRequested = authorised; captureState = &quot;REQUESTED&quot;;
+    }
+    void confirmCapture() {
+        captured = captureRequested; captureState = &quot;CONFIRMED&quot;;
+    }
+    void failCapture() { captureState = &quot;FAILED&quot;; }
+    void settle() {
+        if (captured == 0) throw new IllegalStateException(&quot;not captured&quot;);
+        settledGross = captured;
+    }
+    void payout(long fee) {
+        if (settledGross == 0 || fee &lt; 0 || fee &gt; settledGross)
+            throw new IllegalArgumentException(&quot;invalid payout&quot;);
+        paidOut = settledGross - fee;
+    }
+    void show(String tag) {
+        System.out.printf(&quot;%s auth=%d capture=%s captured=%d settled=%d paid=%d%n&quot;,
+            tag, authorised, captureState, captured, settledGross, paidOut);
+    }
+}</code></pre>
+      <pre><code class="language-java">static void authorisation() {
+    Payment p = new Payment(); p.authorise(); p.show(&quot;approved&quot;);
+    if (p.paidOut != 0) throw new AssertionError();
+}
+
+authorisation();</code></pre>
+<pre class="out">approved auth=12000 capture=NONE captured=0 settled=0 paid=0</pre>
+      <p>На стадии approved известно только об авторизации 12 000 копеек. Нули остальных полей здесь относятся к специально заданному учебному сценарию: следующие действия ещё не выполнялись. При наблюдении реального провайдера отсутствие события нельзя автоматически превращать в доказанный нулевой результат. Эту разницу покажем отдельно.</p>
+      <h3>Аутентификация покупателя и авторизация платежа решают разные вопросы</h3>
+      <p>3-D Secure помогает проверить участие держателя карты: например, через подтверждение в приложении банка. Это <b>аутентификация</b>. Платёжная авторизация отвечает на другой вопрос: одобряется ли конкретная операция с учётом суммы, состояния карты, средств и проверок риска. Успешная проверка покупателя сама по себе не гарантирует одобрения, capture или расчёта. Разделение видно и в <a href="https://stripe.com/payments/authentication">документации Stripe об аутентификации</a>, где результат проверки можно использовать для последующей авторизации.</p>
+      <p>Какой момент позволяет отдать товар, определяет договорённость продукта с провайдером и риск бизнеса. Для мгновенной цифровой услуги и отгрузки товара через несколько дней нужны разные решения. Условие должно ссылаться на подтверждённое событие, а не на слово success в любом ответе.</p>
+    </section>
+
+    <section class="step" id="participants">
+      <h2>Эмитент отвечает за карту, эквайер — за приём оплаты продавцом</h2>
+      <p><b>Эмитент</b> выпускает карту и обслуживает связанный с ней платёжный продукт держателя. В выбранном онлайн-сценарии он проверяет запрос авторизации и одобряет либо отклоняет его. <b>Эквайер</b> обеспечивает продавцу приём карточных операций и участвует в расчётной стороне. Эти роли задаются конкретной операцией: один банк может выпускать карту Alice и одновременно принимать оплаты у другого магазина.</p>
+      <p><b>Карточная платёжная система</b> задаёт правила взаимодействия и связывает участников обработки и расчётов. <b>PSP</b>, payment service provider, предоставляет продавцу платёжный интерфейс и дополнительные услуги. PSP может объединять шлюз и эквайринговые функции либо работать с другими эквайерами. HTTP-адрес, куда обращается сервис магазина, ещё не объясняет, кто фактически принял решение и кто должен деньги продавцу.</p>
+      <table class="mx">
+        <thead><tr><th>Участник</th><th>Что делает в примере</th><th>Что важно сервису магазина</th></tr></thead>
+        <tbody>
+          <tr><td>Покупатель</td><td>Выбирает оплату и подтверждает её.</td><td>Его переход на страницу результата не является банковским подтверждением.</td></tr>
+          <tr><td>Продавец</td><td>Связывает покупку с платёжной попыткой и решает, когда исполнить заказ.</td><td>Один заказ может иметь несколько попыток оплаты.</td></tr>
+          <tr><td>PSP / шлюз</td><td>Принимает запрос магазина, передаёт его дальше и сообщает результаты.</td><td>Нужно знать смысл ответа, идентификаторы и источник последующих событий.</td></tr>
+          <tr><td>Эквайер</td><td>Обслуживает приём оплаты на стороне продавца.</td><td>Участвует в расчётах и правилах возврата; может быть частью PSP.</td></tr>
+          <tr><td>Карточная система</td><td>Передаёт сообщения и задаёт правила обработки.</td><td>Правила определяют сроки, допустимые действия и обработку споров.</td></tr>
+          <tr><td>Эмитент</td><td>Обслуживает карту покупателя и принимает решение авторизации в этом сценарии.</td><td>Отклонение операции и транспортная ошибка — разные результаты.</td></tr>
+        </tbody>
+      </table>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 246" role="img" aria-label="Запрос авторизации покупки 120 рублей проходит от магазина через PSP и эквайера в карточную систему и банк-эмитент. Эмитент одобряет запрос, ответ возвращается обратно. Это обмен сведениями об авторизации, не выплата магазину.">
+            <defs><marker id="pd-auth" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="70" width="140" height="94" rx="8" class="dg-box"/>
+            <rect x="196" y="70" width="150" height="94" rx="8" class="dg-box"/>
+            <rect x="382" y="70" width="140" height="94" rx="8" class="dg-box"/>
+            <rect x="558" y="70" width="142" height="94" rx="8" class="dg-box"/>
+            <path data-s="1" d="M160 109 L192 109" class="dg-line" marker-end="url(#pd-auth)"/>
+            <path data-s="2" d="M346 109 L378 109" class="dg-line" marker-end="url(#pd-auth)"/>
+            <path data-s="3" d="M522 109 L554 109" class="dg-line" marker-end="url(#pd-auth)"/>
+            <g data-s="4"><path d="M558 139 L526 139" class="dg-line" marker-end="url(#pd-auth)"/><path d="M382 139 L350 139" class="dg-line" marker-end="url(#pd-auth)"/><path d="M196 139 L164 139" class="dg-line" marker-end="url(#pd-auth)"/></g>
+            <text x="20" y="26" class="dg-cap">ОНЛАЙН-АВТОРИЗАЦИЯ · RUB 120</text>
+            <text x="90" y="94" class="dg-t" text-anchor="middle">Магазин</text>
+            <text x="271" y="94" class="dg-t" text-anchor="middle">PSP / эквайер</text>
+            <text x="452" y="94" class="dg-t" text-anchor="middle">Карт. система</text>
+            <text x="629" y="94" class="dg-t" text-anchor="middle">Эмитент</text>
+            <text data-s="1-3" x="90" y="143" class="dg-in" text-anchor="middle">ждёт ответ</text>
+            <text data-s="4" x="90" y="143" class="dg-ok" text-anchor="middle">одобрено</text>
+            <text data-s="1-3" x="271" y="143" class="dg-in" text-anchor="middle">запрос 120</text>
+            <text data-s="4" x="271" y="143" class="dg-ok" text-anchor="middle">одобрено</text>
+            <text data-s="2-3" x="452" y="143" class="dg-in" text-anchor="middle">запрос 120</text>
+            <text data-s="4" x="452" y="143" class="dg-ok" text-anchor="middle">одобрено</text>
+            <text data-s="3-4" x="629" y="143" class="dg-in" text-anchor="middle">резерв 120</text>
+            <text data-s="1" x="20" y="204" class="dg-s">Магазин отправил запрос; PSP передаёт его дальше</text>
+            <text data-s="2" x="20" y="204" class="dg-s">Карточная система определяет маршрут к эмитенту</text>
+            <text data-s="3" x="20" y="204" class="dg-s">В этом сценарии эмитент одобряет покупку и удерживает 120</text>
+            <text data-s="4" x="20" y="204" class="dg-ok">Ответ вернулся магазину; выплата продавцу ещё впереди</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Магазин создаёт попытку оплаты 120 ₽. PSP и эквайринговая сторона получают запрос авторизации.</li>
+          <li>Запрос передан в карточную систему. Она маршрутизирует его по правилам выбранного карточного продукта.</li>
+          <li>Эмитент одобряет запрос и резервирует 120 ₽. В этой модели одобрение ещё не известно магазину.</li>
+          <li>Одобрение возвращается через систему и эквайринговую сторону. Магазин знает об авторизации, но это не сообщение о полученной выплате.</li>
+        </ol>
+        <figcaption>На стрелках движется платёжное сообщение. Выделение денег между участниками расчёта относится к следующим стадиям.</figcaption>
+      </figure>
+      <p>Это распространённый онлайн-маршрут, а не единственная форма карточной обработки. При on-us эмитент и эквайер могут совпасть. При автономной обработке или решении сети от имени недоступного эмитента порядок отличается. Для backend важнее знать, кто дал конкретное подтверждение и что оно означает, чем считать обязательным ровно четыре сетевых узла.</p>
+    </section>
+
+    <section class="step" id="capture-clearing-settlement">
+      <h2>Capture, клиринг, расчёт и выплата завершают разные части работы</h2>
+      <p>После авторизации магазин просит завершить оплату: например, когда товар готов к отправке. Capture может быть автоматическим, ручным или отложенным. В двухстадийном сценарии отдельно сохраняй сумму авторизации и проведённую сумму. Окончательная сумма может быть меньше первоначального резерва; допустимость частичных действий и увеличение суммы определяются правилами продукта.</p>
+      <p><b>Клиринг</b> готовит денежные обязательства к расчёту: сведения передаются, сопоставляются, проверяются, формируются позиции участников. В некоторых моделях встречные требования сворачиваются в нетто-позицию. <b>Settlement</b>, расчёт, исполняет эти обязательства через расчётные счета и выбранный расчётный механизм. Это разделение определено в <a href="https://www.bis.org/committees/cpmi/glossary">глоссарии BIS / CPMI</a>; клиринг не сводится только к вычитанию двух сумм.</p>
+      <h3>Неттинг уменьшает расчётную позицию, но не число покупок</h3>
+      <p>В учебной пачке карты банка A использованы в магазинах эквайера B на 120 и 80 ₽. Встречная покупка картой B у эквайера A — 50 ₽. Без учёта комиссий встречные обязательства дают A → B 200 ₽ и B → A 50 ₽. При выбранном двустороннем неттинге A должен перечислить B 150 ₽. Три исходные покупки сохраняются для обслуживания клиентов и сверки.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="В учебном клиринге банки A и B имеют встречные обязательства 200 и 50 рублей. После двустороннего неттинга расчётная позиция A в пользу B равна 150 рублям. Исходные покупки 120, 80 и 50 рублей остаются отдельными операциями.">
+            <defs><marker id="pd-net" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="46" width="220" height="80" rx="8" class="dg-box"/>
+            <rect x="480" y="46" width="220" height="80" rx="8" class="dg-box"/>
+            <rect x="20" y="180" width="220" height="58" rx="8" class="dg-cell"/>
+            <rect x="480" y="180" width="220" height="58" rx="8" class="dg-cell hit"/>
+            <path d="M240 70 L476 70" class="dg-line" marker-end="url(#pd-net)"/>
+            <path d="M480 98 L244 98" class="dg-line" marker-end="url(#pd-net)"/>
+            <path d="M240 209 L476 209" class="dg-line" marker-end="url(#pd-net)"/>
+            <text x="20" y="24" class="dg-cap">ОБЯЗАТЕЛЬСТВА · RUB</text>
+            <text x="130" y="79" class="dg-t" text-anchor="middle">Банк A</text>
+            <text x="130" y="104" class="dg-s" text-anchor="middle">эмитент и эквайер</text>
+            <text x="590" y="79" class="dg-t" text-anchor="middle">Банк B</text>
+            <text x="590" y="104" class="dg-s" text-anchor="middle">эмитент и эквайер</text>
+            <text x="360" y="54" class="dg-in" text-anchor="middle">120 + 80 = 200</text>
+            <text x="360" y="122" class="dg-in" text-anchor="middle">50</text>
+            <text x="20" y="164" class="dg-cap">ДВУСТОРОННИЙ НЕТТИНГ</text>
+            <text x="130" y="215" class="dg-t" text-anchor="middle">A: заплатить 150</text>
+            <text x="590" y="215" class="dg-t" text-anchor="middle">B: получить 150</text>
+            <text x="360" y="192" class="dg-in" text-anchor="middle">200 − 50 = 150</text>
+            <text x="20" y="267" class="dg-s">Покупки 120, 80 и 50 сохраняются по отдельности</text>
+          </svg>
+        </div>
+        <figcaption>Выбранная модель исключает комиссии и FX. Она показывает смысл позиции, а не алгоритм клиринга любой карточной системы.</figcaption>
+      </figure>
+      <pre><code class="language-java">record Purchase(String issuer, String acquirer, long minor) {}
+public static void main(String[] args) {
+    List&lt;Purchase&gt; batch = List.of(
+        new Purchase(&quot;A&quot;, &quot;B&quot;, 12_000), new Purchase(&quot;A&quot;, &quot;B&quot;, 8_000),
+        new Purchase(&quot;B&quot;, &quot;A&quot;, 5_000)); // Оба банка играют разные роли в разных покупках.
+    Map&lt;String, Long&gt; netDebit = new TreeMap&lt;&gt;();
+    long gross = 0;
+    for (Purchase p : batch) {
+        gross = Math.addExact(gross, p.minor());
+        netDebit.merge(p.issuer(), p.minor(), Math::addExact);
+        netDebit.merge(p.acquirer(), -p.minor(), Math::addExact);
+    }
+    System.out.println(&quot;gross=&quot; + gross);
+    System.out.println(&quot;net-debit=&quot; + netDebit);
+    System.out.println(&quot;settlement A-&gt;B=&quot; + netDebit.get(&quot;A&quot;));
+    if (netDebit.get(&quot;A&quot;) != 15_000 || netDebit.get(&quot;B&quot;) != -15_000)
+        throw new AssertionError();
+}</code></pre>
+<pre class="out">gross=25000
+net-debit={A=15000, B=-15000}
+settlement A-&gt;B=15000</pre>
+      <p>Полный источник — <a href="../examples/payments-domain/ClearingDemo.java">ClearingDemo.java</a>. Положительный net-debit здесь значит «участник должен заплатить», отрицательный — «получить». Сумма покупок 25 000 копеек отличается от расчётного движения 15 000. Подменить отдельный платёж этой нетто-суммой нельзя: у него другой получатель и другое основание.</p>
+      <h3>Получение средств провайдером и выплата магазину могут быть разными событиями</h3>
+      <p>В StageDemo сначала принимается команда capture, потом приходит подтверждённый результат, затем сведения о получении 120 ₽ провайдером и выплате магазину 117 ₽ после учебной комиссии 3 ₽. Суммы и порядок заданы для примера. Слово Settled всегда читай вместе с тем, между кем завершён расчёт.</p>
+      <pre><code class="language-java">static void captureAndPayout() {
+    Payment p = new Payment(); p.authorise();
+    p.requestCapture(); p.show(&quot;accepted-command&quot;);
+    p.confirmCapture(); p.show(&quot;confirmed-capture&quot;);
+    p.settle(); p.show(&quot;settlement-report&quot;);
+    p.payout(300); p.show(&quot;merchant-payout&quot;); // Учебная комиссия 3 RUB, не тариф провайдера.
+    if (p.paidOut != 11_700) throw new AssertionError();
+}
+
+captureAndPayout();</code></pre>
+<pre class="out">accepted-command auth=12000 capture=REQUESTED captured=0 settled=0 paid=0
+confirmed-capture auth=12000 capture=CONFIRMED captured=12000 settled=0 paid=0
+settlement-report auth=12000 capture=CONFIRMED captured=12000 settled=12000 paid=0
+merchant-payout auth=12000 capture=CONFIRMED captured=12000 settled=12000 paid=11700</pre>
+      <p>В <a href="https://docs.adyen.com/account/payments-lifecycle/">Adyen Payments Lifecycle</a> Settled означает, что средства получены Adyen; выплату продавцу определяет модель payout. В <a href="https://docs.adyen.com/online-payments/capture">Adyen Capture</a> успешное уведомление о принятии capture может позже сопровождаться CAPTURE_FAILED. Поэтому собственный статус «деньги получены» нельзя выводить только из HTTP-ответа о принятой команде.</p>
+      <pre><code class="language-java">static void acceptedThenFailed() {
+    Payment p = new Payment(); p.authorise(); p.requestCapture();
+    p.failCapture(); p.show(&quot;later-failure&quot;);
+    if (p.captured != 0 || p.settledGross != 0) throw new AssertionError();
+}
+
+acceptedThenFailed();</code></pre>
+<pre class="out">later-failure auth=12000 capture=FAILED captured=0 settled=0 paid=0</pre>
+      <p>В демо FAILED относится именно к capture, авторизация остаётся отдельным фактом. Это не полная машина состояний провайдера: освобождение резерва и возможный повтор требуют его правил. Срок действия авторизации, обработка после него и расписание расчёта отличаются по сети, способу оплаты и договорённости. Универсального «всегда списывается через сутки» здесь нет.</p>
+    </section>
+
+    <section class="step" id="status-evidence">
+      <h2>Статус должен хранить подтверждённые факты и неизвестный результат</h2>
+      <p>Если запрос ушёл, а ответ не вернулся, сервис знает о таймауте своей связи. Он ещё не знает, отказал ли банк, удержал ли сумму или завершил ли действие. UNKNOWN описывает эту неопределённость наблюдения. DECLINED описывает подтверждённое отклонение конкретной попытки. Перевести один в другой по истечению собственного таймера — значит выдать отсутствие сведений за банковское решение.</p>
+      <p>Сохраняй разные идентификаторы. Номер заказа связывает бизнес-покупку, идентификатор попытки — один выбранный путь оплаты. Провайдер присваивает свой идентификатор операции; у capture и возврата могут быть отдельные ссылки. Идентификатор события помогает узнавать повтор сообщения. Ключ идемпотентности связывает повтор команды с исходным действием. Совпадение слов «reference» в двух API ещё не делает их одной сущностью.</p>
+      <p>Неупорядоченная доставка также не равна неупорядоченному исполнению. Сообщение об авторизации может прийти позже отчёта о расчёте. Если присваивать <code>status = event.status</code>, поздний AUTHORISED откатит видимое состояние рассчитанного платежа. Лучше хранить сведения о стадиях отдельно и выводить представление из имеющихся фактов.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="После локального таймаута факт исполнения неизвестен. Затем приходит подтверждение расчёта 12000 копеек, после него поздние события авторизации и capture. Они дополняют сведения, а финансовая стадия остаётся Settled.">
+            <defs><marker id="pd-facts" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="66" width="250" height="90" rx="8" class="dg-box"/>
+            <rect x="330" y="46" width="370" height="148" rx="8" class="dg-box"/>
+            <path data-s="2-4" d="M270 110 L326 110" class="dg-line" marker-end="url(#pd-facts)"/>
+            <text x="20" y="24" class="dg-cap">ЧТО ПРИШЛО И ЧТО МЫ ЗНАЕМ</text>
+            <text data-s="1" x="32" y="96" class="dg-t">Локальный таймаут</text>
+            <text data-s="1" x="32" y="130" class="dg-in">результата нет</text>
+            <text data-s="2" x="32" y="96" class="dg-t">e3: SETTLED</text>
+            <text data-s="2" x="32" y="130" class="dg-in">12 000 копеек</text>
+            <text data-s="3" x="32" y="96" class="dg-t">e1: AUTHORISED</text>
+            <text data-s="3" x="32" y="130" class="dg-in">12 000 копеек</text>
+            <text data-s="4" x="32" y="96" class="dg-t">e2: CAPTURED</text>
+            <text data-s="4" x="32" y="130" class="dg-in">12 000 копеек</text>
+            <text x="342" y="72" class="dg-t">Наши сведения о psp-1</text>
+            <text data-s="1" x="342" y="103" class="dg-in">financial = UNKNOWN</text>
+            <text data-s="2-4" x="342" y="103" class="dg-in">financial = SETTLED</text>
+            <text data-s="1-2" x="342" y="130" class="dg-s">auth = unknown</text>
+            <text data-s="3-4" x="342" y="130" class="dg-s">auth = 12 000</text>
+            <text data-s="1-3" x="342" y="154" class="dg-s">captured = unknown</text>
+            <text data-s="4" x="342" y="154" class="dg-s">captured = 12 000</text>
+            <text data-s="1" x="342" y="178" class="dg-s">settled = unknown</text>
+            <text data-s="2-4" x="342" y="178" class="dg-s">settled = 12 000</text>
+            <text data-s="1" x="20" y="230" class="dg-s">unknown не означает отказ и не означает нулевую сумму</text>
+            <text data-s="2-4" x="20" y="230" class="dg-ok">Поздние события дополняют сведения, не отменяя расчёт</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Локальный таймаут оставляет результат неизвестным. Ни отказа, ни подтверждённых сумм ещё нет.</li>
+          <li>Пришло e3: расчёт подтверждён на 12 000 копеек. Отдельные сообщения о предыдущих стадиях пока не получены.</li>
+          <li>Позднее e1 добавляет сумму авторизации. Наличие более поздней финансовой стадии сохраняется.</li>
+          <li>e2 заполняет сведения о capture. Полная известная цепочка не требует менять SETTLED обратно на CAPTURED.</li>
+        </ol>
+        <figcaption>Показан порядок доставки в наш сервис. Из него нельзя выводить порядок исполнения у банка.</figcaption>
+      </figure>
+      <p><a href="../examples/payments-domain/StatusFactsDemo.java">StatusFactsDemo.java</a> хранит по одному подтверждённому итогу авторизации, capture и расчёта. Неизвестная сумма — null, а не ноль. Это модель с одной авторизацией и одним полным capture; подтверждённые возвраты поступают отдельными событиями. Для нескольких частичных capture нужны отдельные операции и их суммы.</p>
+      <pre><code class="language-java">enum Type { AUTHORISED, CAPTURED, SETTLED, REFUNDED, DISPUTE_OPENED }
+record Event(String id, String payment, Type type, long minor) {}
+
+static final class Facts {
+    final String payment = &quot;psp-1&quot;;
+    final Map&lt;String, Event&gt; seen = new HashMap&lt;&gt;();
+    Long authorised, captured, settled;
+    long refunded;
+    boolean dispute;
+    String observation = &quot;WAITING&quot;;
+    void timeout() { observation = &quot;UNKNOWN&quot;; } // Локальное знание, а не отказ банка.
+    boolean apply(Event e) {
+        if (!payment.equals(e.payment())) throw new IllegalArgumentException(&quot;wrong payment&quot;);
+        Event old = seen.get(e.id());
+        if (old != null) {
+            if (!old.equals(e)) throw new IllegalArgumentException(&quot;event conflict&quot;);
+            return false;
+        }
+        if (e.minor() &lt;= 0) throw new IllegalArgumentException(&quot;invalid amount&quot;);
+        switch (e.type()) {
+            case AUTHORISED -&gt; authorised = e.minor();
+            case CAPTURED -&gt; captured = e.minor();
+            case SETTLED -&gt; settled = e.minor();
+            case REFUNDED -&gt; refunded = Math.addExact(refunded, e.minor());
+            case DISPUTE_OPENED -&gt; dispute = true;
+        }
+        seen.put(e.id(), e); observation = &quot;OBSERVED&quot;;
+        return true;
+    }
+    static String value(Long n) { return n == null ? &quot;unknown&quot; : n.toString(); }
+    void show(String tag) {
+        String financial = settled != null ? &quot;SETTLED&quot; : captured != null ? &quot;CAPTURED&quot;
+            : authorised != null ? &quot;AUTHORISED&quot; : &quot;UNKNOWN&quot;;
+        System.out.printf(&quot;%s observation=%s financial=%s auth=%s captured=%s settled=%s refunded=%d dispute=%s%n&quot;,
+            tag, observation, financial, value(authorised), value(captured), value(settled),
+            refunded, dispute ? &quot;OPEN&quot; : &quot;NONE&quot;);
+    }
+}</code></pre>
+      <pre><code class="language-java">static void uncertainAndOutOfOrder() {
+    Facts f = new Facts(); f.timeout(); f.show(&quot;timeout&quot;);
+    // Присланы подтверждённые сведения, но порядок доставки отличается от порядка исполнения.
+    f.apply(new Event(&quot;e3&quot;, &quot;psp-1&quot;, Type.SETTLED, 12_000)); f.show(&quot;settled-first&quot;);
+    f.apply(new Event(&quot;e1&quot;, &quot;psp-1&quot;, Type.AUTHORISED, 12_000)); f.show(&quot;late-authorisation&quot;);
+    f.apply(new Event(&quot;e2&quot;, &quot;psp-1&quot;, Type.CAPTURED, 12_000)); f.show(&quot;late-capture&quot;);
+    if (f.settled != 12_000) throw new AssertionError();
+}
+
+uncertainAndOutOfOrder();</code></pre>
+<pre class="out">timeout observation=UNKNOWN financial=UNKNOWN auth=unknown captured=unknown settled=unknown refunded=0 dispute=NONE
+settled-first observation=OBSERVED financial=SETTLED auth=unknown captured=unknown settled=12000 refunded=0 dispute=NONE
+late-authorisation observation=OBSERVED financial=SETTLED auth=12000 captured=unknown settled=12000 refunded=0 dispute=NONE
+late-capture observation=OBSERVED financial=SETTLED auth=12000 captured=12000 settled=12000 refunded=0 dispute=NONE</pre>
+      <p>Состояние SETTLED остаётся прежним, хотя подробности заполняются позже. Оно не значит, что дальнейших событий не будет: возможны возврат и спор. Поэтому у платежа отдельно сохраняются исходное исполнение, возвращённая сумма и состояние спора.</p>
+      <pre><code class="language-java">static void refundsAndDispute() {
+    Facts f = new Facts();
+    f.apply(new Event(&quot;e1&quot;, &quot;psp-1&quot;, Type.AUTHORISED, 12_000));
+    f.apply(new Event(&quot;e2&quot;, &quot;psp-1&quot;, Type.CAPTURED, 12_000));
+    f.apply(new Event(&quot;e3&quot;, &quot;psp-1&quot;, Type.SETTLED, 12_000));
+    Event refund = new Event(&quot;r1&quot;, &quot;psp-1&quot;, Type.REFUNDED, 4_000);
+    System.out.println(&quot;refund-first=&quot; + f.apply(refund));
+    System.out.println(&quot;refund-repeat=&quot; + f.apply(refund));
+    f.apply(new Event(&quot;d1&quot;, &quot;psp-1&quot;, Type.DISPUTE_OPENED, 12_000));
+    f.show(&quot;after-refund-and-dispute&quot;);
+    try { f.apply(new Event(&quot;r1&quot;, &quot;psp-1&quot;, Type.REFUNDED, 4_100)); }
+    catch (IllegalArgumentException e) { System.out.println(&quot;conflict=&quot; + e.getMessage()); }
+    if (f.refunded != 4_000) throw new AssertionError();
+}
+
+refundsAndDispute();</code></pre>
+<pre class="out">refund-first=true
+refund-repeat=false
+after-refund-and-dispute observation=OBSERVED financial=SETTLED auth=12000 captured=12000 settled=12000 refunded=4000 dispute=OPEN
+conflict=event conflict</pre>
+      <p>Здесь refunded — сумма наблюдённых подтверждений возврата, а OPEN означает открытый спор. Сам спор ещё не доказывает окончательного списания спорной суммы. При его открытии провайдер может уже удержать спорную сумму или создать резерв; это отдельное денежное изменение, а окончательное решение ещё впереди. Демо узнаёт повтор одного event.id; в рабочем контракте также нужен идентификатор самой операции возврата, если о ней поступают несколько разных событий. Противоречащие сведения требуют сохранения исходного сообщения и разбирательства, а не выбора «самого старшего» enum по порядковому номеру.</p>
+      <p>Для восстановления неизвестного результата опрашивают провайдера по сохранённой операции, принимают подтверждения и сверяют отчётные сведения. Повтор команды сохраняет её ключ и параметры. Подробная архитектура устойчивой обработки разобрана в <a href="sd-payments.html">Payment System</a> и <a href="idempotency.html">Idempotency</a>. Здесь важно правильно определить смысл результата до проектирования повторов.</p>
+    </section>
+
+    <section class="step" id="payment-rails">
+      <h2>СБП переводит между счетами, а SWIFT передаёт инструкции участникам расчёта</h2>
+      <p>У СБП плательщик переводит деньги между банковскими счетами; наличие карты не определяет этот способ оплаты. Для покупки клиент получает реквизиты платежа, например из QR-кода, проверяет получателя и подтверждает действие в банковском интерфейсе. <a href="https://www.cbr.ru/PSystem/sfp">Банк России описывает СБП</a> как круглосуточный сервис переводов в реальном времени, а не как карточную авторизацию с отдельным capture.</p>
+      <p>Банк России выступает оператором и расчётным центром СБП, НСПК выполняет операционные и платёжные клиринговые функции. Это роли инфраструктуры, а клиентские счета обслуживают банки-участники. Поля и уведомления, которые увидит сервис продавца, определяет его банковская интеграция. Быстрота расчёта не гарантирует мгновенного получения сообщения нашим HTTP-клиентом.</p>
+      <p>QR-код содержит или связывает сведения о платеже. Его создание и сканирование ещё не доказывают, что деньги зачислены. Подтверждение в приложении клиента и редирект на сайт тоже не заменяют проверку результата на банковской стороне. Подписка или разрешение на будущие списания относятся к согласию на операции; их состояние следует хранить отдельно от исполнения каждой покупки.</p>
+      <h3>У SWIFT сообщения и денежный расчёт находятся на разных слоях</h3>
+      <p>SWIFT предоставляет защищённый обмен финансовыми сообщениями. В <a href="https://www.swift.com/about-us/who-we-are">официальном FAQ</a> прямо разделены передача платёжной инструкции и фактический перевод средств участниками. Поэтому подтверждение доставки сообщения в сеть ещё не является подтверждением зачисления конечному получателю.</p>
+      <p>Разберём упрощённый перевод 100 EUR без FX и комиссий. У банков A и B есть счета в банке-корреспонденте C. По согласованной инструкции C уменьшает свой долг перед A на 100 EUR и увеличивает долг перед B на 100 EUR. Банк B отражает зачисление клиенту по своему процессу. Инструкция может передаваться через SWIFT; денежное изменение происходит в книгах банков.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 286" role="img" aria-label="Верхний слой показывает обмен сообщениями через SWIFT между банками A и B. Нижний слой показывает расчёт в банке-корреспонденте C: его обязательство перед A уменьшается с 1000 до 900 EUR, перед B растёт с 0 до 100 EUR. Это два разных слоя одного упрощённого сценария.">
+            <defs><marker id="pd-swift" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="42" width="180" height="58" rx="8" class="dg-box"/>
+            <rect x="270" y="42" width="180" height="58" rx="8" class="dg-box"/>
+            <rect x="520" y="42" width="180" height="58" rx="8" class="dg-box"/>
+            <rect x="20" y="130" width="680" height="142" rx="10" class="dg-sep" fill="none"/>
+            <rect x="36" y="176" width="290" height="72" rx="8" class="dg-cell"/>
+            <rect x="394" y="176" width="290" height="72" rx="8" class="dg-cell hit"/>
+            <path d="M200 71 L266 71" class="dg-line" marker-end="url(#pd-swift)"/>
+            <path d="M450 71 L516 71" class="dg-line" marker-end="url(#pd-swift)"/>
+            <path d="M326 215 L390 215" class="dg-line" marker-end="url(#pd-swift)"/>
+            <text x="20" y="24" class="dg-cap">СООБЩЕНИЯ И РАСЧЁТ · EUR</text>
+            <text x="110" y="76" class="dg-t" text-anchor="middle">Банк A</text>
+            <text x="360" y="76" class="dg-t" text-anchor="middle">SWIFT</text>
+            <text x="610" y="76" class="dg-t" text-anchor="middle">Банк B</text>
+            <text x="235" y="55" class="dg-n" text-anchor="middle">msg</text>
+            <text x="485" y="55" class="dg-n" text-anchor="middle">msg</text>
+            <text x="32" y="154" class="dg-t">Банк C: собственные книги</text>
+            <text x="48" y="200" class="dg-t">Обязательство перед A</text>
+            <text x="48" y="230" class="dg-in">1 000 → 900 EUR</text>
+            <text x="406" y="200" class="dg-t">Обязательство перед B</text>
+            <text x="406" y="230" class="dg-in">0 → 100 EUR</text>
+            <text x="360" y="198" class="dg-in" text-anchor="middle">100</text>
+          </svg>
+        </div>
+        <figcaption>Показаны смысловые слои, а не полный маршрут всех сообщений. Реальный расчёт может иметь другую цепочку корреспондентов.</figcaption>
+      </figure>
+      <p>Для A его счёт у C — nostro: «наш счёт у вас», актив A. Для C тот же счёт — vostro: «ваш счёт у нас», обязательство C. Это две перспективы одного отношения, а не два независимых мешка денег. Для перевода могут потребоваться несколько корреспондентов, конвертация и проверки; время и сумма зачисления зависят от всего маршрута.</p>
+      <p><a href="https://www.swift.com/payments/what-unique-end-end-transaction-reference-uetr">UETR</a> — сквозная ссылка для отслеживания платёжной инструкции. Она связывает сведения участников цепочки; сама ссылка не доказывает успешного зачисления. При расследовании нужны конкретный результат и сторона, которая его сообщила: инструкция принята, задержана, отклонена или средства зачислены получателю.</p>
+      <table class="mx">
+        <thead><tr><th>Способ</th><th>Основная модель</th><th>Что подтверждать отдельно</th></tr></thead>
+        <tbody>
+          <tr><td>Карта</td><td>Оплата через эмитента, эквайринговую сторону и карточные правила.</td><td>Авторизацию, завершение, расчёт, выплату и последующие изменения.</td></tr>
+          <tr><td>СБП</td><td>Перевод между счетами через соответствующий банковский сервис.</td><td>Исполнение конкретного перевода; QR и согласие — отдельные сведения.</td></tr>
+          <tr><td>Перевод с сообщениями SWIFT</td><td>Инструкции участникам, расчёт через банковские отношения и счета.</td><td>Доставку инструкции и банковский результат до конечного зачисления.</td></tr>
+        </tbody>
+      </table>
+      <p>Общий интерфейс сервиса должен сохранять смысл стадий каждого способа. Заставлять СБП проходить фиктивные AUTHORISED и CAPTURED ради одного enum неудобно: система начнёт показывать события, которых интеграция не предоставляет. Обобщай подтверждённые факты и доступные действия, оставляя детали конкретному способу.</p>
+    </section>
+
+    <section class="step" id="cancellation-refund-dispute">
+      <h2>Отмена, возврат и спор требуют разных денежных действий</h2>
+      <p>Если сумма только зарезервирована, отмена авторизации прекращает дальнейшее использование этого разрешения и связана с освобождением резерва. В карточном языке reversal может относиться к обратному сообщению об авторизации; точный смысл зависит от стадии. Если оплата уже исполнена, возврат представляет новое связанное денежное движение. Освободить старый hold вместо возврата проведённой суммы нельзя.</p>
+      <p>У возврата свой идентификатор и свой результат. Принятие заявки ещё не означает, что клиент получил деньги. Возврат может быть частичным, а несколько возвратов относятся к одной исходной оплате. Сумму, доступную для новой заявки, надо уменьшать и на уже подтверждённые возвраты, и на ожидающие исполнения. Иначе две заявки успеют запросить больше исходной оплаты.</p>
+      <p><a href="../examples/payments-domain/RefundDemo.java">RefundDemo.java</a> моделирует оплату 120 ₽ и заявки в одном потоке. Первая заявка 80 ₽ ещё ожидает подтверждения, поэтому для второй доступны только 40 ₽. Это ограничение принятия команды, а не банковский учёт уже исполненного возврата.</p>
+      <pre><code class="language-java">enum State { PENDING, CONFIRMED, FAILED }
+record Refund(long minor, State state) {}
+static final class Payment {
+    final long captured = 12_000;
+    final Map&lt;String, Refund&gt; refunds = new LinkedHashMap&lt;&gt;();
+    long remaining() {
+        long committed = 0;
+        for (Refund r : refunds.values())
+            if (r.state() != State.FAILED) committed = Math.addExact(committed, r.minor());
+        return Math.subtractExact(captured, committed); // И подтверждённые, и ещё ожидаемые.
+    }
+    boolean request(String id, long amount) {
+        Refund old = refunds.get(id);
+        if (old != null) {
+            if (old.minor() != amount) throw new IllegalArgumentException(&quot;id conflict&quot;);
+            return false;
+        }
+        if (amount &lt;= 0 || amount &gt; remaining()) throw new IllegalArgumentException(&quot;refund exceeds available&quot;);
+        refunds.put(id, new Refund(amount, State.PENDING));
+        return true;
+    }
+    void resolve(String id, State state) {
+        Refund old = refunds.get(id);
+        if (old == null || old.state() != State.PENDING || state == State.PENDING)
+            throw new IllegalArgumentException(&quot;invalid resolution&quot;);
+        refunds.put(id, new Refund(old.minor(), state));
+    }
+}
+public static void main(String[] args) {
+    Payment p = new Payment();
+    p.request(&quot;r1&quot;, 8_000); System.out.println(&quot;pending remaining=&quot; + p.remaining());
+    try { p.request(&quot;r2&quot;, 5_000); }
+    catch (IllegalArgumentException e) { System.out.println(&quot;second=&quot; + e.getMessage()); }
+    p.resolve(&quot;r1&quot;, State.CONFIRMED);
+    System.out.println(&quot;confirmed remaining=&quot; + p.remaining());
+    System.out.println(&quot;retry=&quot; + p.request(&quot;r1&quot;, 8_000));
+    p.request(&quot;r3&quot;, 4_000); p.resolve(&quot;r3&quot;, State.FAILED);
+    System.out.println(&quot;failed remaining=&quot; + p.remaining());
+    if (p.remaining() != 4_000) throw new AssertionError();
+}</code></pre>
+<pre class="out">pending remaining=4000
+second=refund exceeds available
+confirmed remaining=4000
+retry=false
+failed remaining=4000</pre>
+      <p>Пока r1 ожидает и после её подтверждения доступно одинаково 4 000 копеек. Отказ по r3 освобождает сумму для новой заявки. UNKNOWN после таймаута не следует приравнивать к такому отказу: ожидающее действие ещё могло состояться. В рабочей системе проверка доступной суммы и регистрация заявки имеют общую транзакционную границу.</p>
+      <h3>Спор не стирает исходный расчёт</h3>
+      <p>Dispute означает процедуру оспаривания операции, а chargeback — соответствующее обратное денежное действие по правилам карточного процесса. Исходная оплата при этом сохраняется в истории. Могут появиться спорная сумма, комиссия, сроки представления сведений и последующие решения. Ответ «платёж окончательный» должен уточнять: завершён текущий расчёт или больше невозможны никакие связанные события.</p>
+      <p>Возврат и спор способны пересечься. Поэтому состояние спора ведут отдельно от возвращённой суммы и сопоставляют реальные движения: автоматическое «вернуть ещё раз» при открытии спора может создать лишнее возмещение. Для СБП и других способов процедура возврата и разрешения спорной ситуации имеет собственные правила; карточный chargeback нельзя переносить на них как универсальное API.</p>
+      <p>Границы главы — доменные значения, а не полный регламент сети. Онлайн-авторизация с отдельным capture не покрывает автономную обработку, изменение авторизованной суммы и позднее предъявление операции. Право выполнить действие, срок и доверенное подтверждение проверяются по выбранному продукту и провайдеру. Суммы, проводки и резервы разобраны в <a href="banking.html">Banking Basics</a>; архитектура доставки событий и повторов — в Payment System. Прежде чем писать обработчик статуса, сформулируй, какое денежное событие он подтверждает.</p>
+    </section>
+    <div class="summary"><ul>
+      <li>Авторизация разрешает операцию; capture завершает оплату в выбранном карточном процессе. Ни одно слово success не описывает весь путь.</li>
+      <li>Эмитент и эквайер — роли сторон покупки. PSP предоставляет интеграцию и может объединять несколько функций.</li>
+      <li>Клиринг готовит обязательства к расчёту. Расчёт между участниками и выплата продавцу могут быть разными событиями.</li>
+      <li>Таймаут означает неизвестность наблюдения. Сохраняй попытки, операции и подтверждённые сведения раздельно.</li>
+      <li>Карта, СБП и обмен сообщениями SWIFT имеют разные модели; интерфейс должен сохранять их смысл.</li>
+      <li>Отмена резерва, возврат проведённого и оспаривание исходной оплаты не заменяют друг друга.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="issuer-acquirer" data-freq="2">
+      <h3>Чем эмитент отличается от эквайера и где здесь PSP?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Я разделяю стороны операции. Эмитент выпускает карту и обслуживает держателя; в обычной онлайн-авторизации он решает, одобрить ли запрос. Эквайер обслуживает приём карточной оплаты продавцом и участвует в расчётах. Карточная система связывает участников и задаёт правила.</p><p>PSP даёт продавцу платёжную интеграцию. Он может сам выполнять эквайринговые функции или работать с отдельными эквайерами. Поэтому по адресу платёжного API я ещё не определю, кто принял решение и между кем завершён расчёт.</p></div>
+        <div data-level="senior"><ul><li>Один банк может быть эмитентом в одной покупке и эквайером в другой. On-us сокращает маршрут, но не меняет смысл ролей.</li><li>У результата есть источник: собственная проверка PSP, решение эмитента, ответ сети. Причина отказа зависит от этой границы.</li><li>Авторизацию платежа отделяю от аутентификации держателя через 3DS. Проверка участия клиента не гарантирует денежного исполнения.</li></ul></div>
+      </div>
+    </article>
+    <article class="q" id="payment-stages" data-freq="2">
+      <h3>Что происходит после авторизации: capture, клиринг и settlement?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Авторизация одобряет операцию и связана с резервом. В раздельном процессе capture запрашивает завершение оплаты. Клиринг готовит обязательства участников к расчёту, иногда с неттингом. Settlement исполняет эти обязательства через расчётную инфраструктуру.</p><p>Я отдельно уточню выплату продавцу. Провайдер может уже получить расчётные средства, а магазин — получить их позже в своей выплате. Поэтому собственное «оплачено» связываю с определённым подтверждением и правилами продукта.</p></div>
+        <div data-level="senior"><ul><li>Сумма авторизации и итоговая сумма могут отличаться. Для нескольких capture нужна история отдельных завершений, а не одно перезаписываемое число.</li><li>Расчётная нетто-позиция не заменяет исходные покупки. Их отдельные основания нужны для клиентских операций и сверки.</li><li>Завершённый расчёт сохраняется в истории даже при последующем возврате или chargeback.</li></ul></div>
+      </div>
+      <div class="check"><details data-kind="уточнение"><summary>Можно ли считать средства полученными после ответа «capture принят»?</summary><p>Нужно прочитать контракт именно этого результата. Подтверждение команды может означать её отправку на обработку, а позднее прийти отказ. В демо после принятия captured, settled и paid всё ещё нули. Ожидай событие или отчёт, который подтверждает нужную стадию, и сохраняй отдельное состояние обработки команды.</p></details></div>
+    </article>
+    <article class="q" id="timeout-status" data-freq="2">
+      <h3>Какой статус поставить после таймаута и как обработать позднее подтверждение?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>После отправленного запроса таймаут означает, что мне неизвестен результат. Я сохраню попытку и её идентификаторы, затем восстановлю сведения через провайдера и его подтверждения. Отказом обозначаю подтверждённое отклонение, а не отсутствие ответа.</p><p>Позднее сообщение сопоставлю с той же операцией и уже известными фактами. Если об исполнении известно больше, событие прежней стадии дополнит историю. Авторизация, пришедшая после расчёта, не должна откатить рассчитанный платёж назад.</p></div>
+        <div data-level="senior"><ul><li>Идентификатор сообщения и идентификатор денежной операции — разные уровни. Несколько уведомлений могут описывать один возврат.</li><li>При противоречии сохраняю исходные сведения и инициирую проверку. Порядковый номер enum не определяет истинность сообщения.</li><li>Отдельно храню исполнение, возвращённую сумму и спор. Одно поле SETTLED не описывает открытую процедуру оспаривания.</li></ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью"><summary>После таймаута capture сняли hold и решили, что возврат не нужен. Где ошибка?</summary><p>Локальный таймаут не доказывает, что capture не исполнился. Снятие резерва и возврат уже проведённых средств — разные денежные действия. Сначала восстанови результат исходной операции, затем выбери допустимое действие по её подтверждённой стадии. Скрыть неизвестность общим состоянием «отменён» опасно.</p></details></div>
+    </article>
+    <article class="q" id="rails-comparison" data-freq="2">
+      <h3>Чем СБП и перевод через SWIFT отличаются от карточной оплаты?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Карточная оплата связывает держателя, эмитента, эквайринговую сторону и правила карточного продукта. СБП — банковский перевод между счетами; QR-код помогает задать платёж, а результат относится к самому переводу. Карточные авторизация и capture не становятся обязательными стадиями СБП.</p><p>SWIFT передаёт финансовые инструкции. Деньги учитываются и перемещаются участниками через их счета и расчётные отношения. Поэтому доставленное сообщение отличается от зачисления получателю. Сквозная ссылка помогает проследить цепочку, но успешный результат всё равно надо подтвердить.</p></div>
+        <div data-level="senior"><ul><li>Одинаковое слово «успешно» в интеграциях может означать принятие команды, исполнение или зачисление. Обобщаю семантику, сохраняя источник подтверждения.</li><li>Корреспондентский перевод может включать FX и несколько участников. Сообщение без данных о комиссии и валюте не объясняет итоговую сумму.</li><li>Правила отмены, возврата и спора выбираю по способу и стадии. Карточный chargeback не является общим механизмом всех переводов.</li></ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью"><summary>Покупатель показал экран «СБП успешно» и вернулся на сайт. Можно ли исполнить заказ по этому экрану?</summary><p>Экран относится к клиентскому интерфейсу и не заменяет проверку в нашей банковской интеграции. Сопоставь подтверждение перевода с нужной попыткой, получателем, суммой и валютой. Если сообщение задержалось, результат пока неизвестен сервису; это не повод автоматически создавать новую оплату.</p></details></div>
+    </article>
+  </section>
+  <div class="refs"><ul>
+    <li><a href="https://docs.adyen.com/account/payments-lifecycle/">Adyen: Payments Lifecycle</a> и <a href="https://docs.adyen.com/online-payments/capture">Capture</a> — основа урока: смысл стадий и различие принятого capture, расчёта и выплаты. Имена статусов провайдера не объявлены универсальными для всех способов.</li>
+    <li><a href="https://www.bis.org/committees/cpmi/glossary">BIS / CPMI Glossary</a> — определения clearing, settlement и netting; учебный двусторонний расчёт отдельно от правил реальной сети.</li>
+    <li><a href="https://www.cbr.ru/PSystem/sfp">Банк России: Система быстрых платежей</a> и <a href="https://www.cbr.ru/press/event/?id=1793">устройство инфраструктуры СБП</a> — переводы между счетами, роли Банка России и НСПК. Тарифы и лимиты в урок не включены.</li>
+    <li><a href="https://www.swift.com/about-us/who-we-are">SWIFT: Who We Are, FAQ</a> и <a href="https://www.swift.com/payments/what-unique-end-end-transaction-reference-uetr">UETR</a> — сообщения, фактический перевод участниками и сквозное отслеживание.</li>
+    <li><a href="https://stripe.com/payments/authentication">Stripe: Authentication</a> — аутентификация держателя и использование её результата для авторизации платежа.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

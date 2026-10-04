@@ -645,7 +645,7 @@ window.KB_TREE = [
       { id: 'domain', title: 'Banking Domain', items: [
         { id: 'banking', freq: 2, status: 'draft', title: 'Banking Basics',
           scope: 'счета и проводки, двойная запись, деньги в коде, сверка, аудит' },
-        { id: 'payments-domain', freq: 2, status: 'empty', title: 'Payments',
+        { id: 'payments-domain', freq: 2, status: 'draft', title: 'Payments',
           scope: 'карточный платёж, эквайринг и эмиссия, авторизация и клиринг, СБП и SWIFT, статусы платежа' },
       ] },
     ],
