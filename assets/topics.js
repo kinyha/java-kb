@@ -363,7 +363,7 @@ window.KB_TREE = [
           scope: 'type erasure, wildcards, PECS, bounded types, raw types' },
         { id: 'enums', freq: 2, status: 'draft', title: 'Enums',
           scope: 'enum с полями и методами, EnumMap и EnumSet, singleton через enum, switch' },
-        { id: 'reflection', freq: 2, status: 'empty', title: 'Annotations & Reflection',
+        { id: 'reflection', freq: 2, status: 'draft', title: 'Annotations & Reflection',
           scope: 'retention, meta-аннотации, обработка аннотаций, Reflection API, dynamic proxy' },
       ] },
       { id: 'oop', title: 'OOP', source: 'roadmap.sh/java: Basics of OOP; Effective Java, гл. 4', items: [

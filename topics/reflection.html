@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Annotations &amp; Reflection · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="reflection">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Annotations &amp; Reflection</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Аннотация — метаданные, которые сами ничего не делают: смысл им придаёт код, который их читает. Читают в двух местах. При выполнении — рефлексией: Spring, Hibernate, Jackson и Bean Validation находят <code>@Transactional</code>, <code>@Entity</code> и <code>@NotBlank</code> и меняют поведение; для этого нужна <code>@Retention(RUNTIME)</code>, иначе аннотация в демо невидима. При компиляции — обработчиками аннотаций, как Lombok и MapStruct: они видят исходник, генерируют код и могут остановить сборку. Поведение «вокруг» метода фреймворки добавляют прокси: объект-посредник с тем же интерфейсом. Отсюда главный подвох: вызов метода изнутри того же объекта идёт мимо прокси, и в демо два внутренних вызова не попали в аудит — так же теряется <code>@Transactional</code>. Рефлексия к тому же медленнее прямого вызова, обходит инкапсуляцию и ограничена модулями.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Валидация и аудит, переписанные в каждом методе</h2>
+      <p>В сервисе возвратов каждый метод начинается с одних и тех же строк: проверить, что <code>paymentId</code> не пустой, что сумма не больше лимита, записать в журнал аудита, кто и что сделал. Эти строки повторяются в десятке сервисов и расходятся при правках. Аннотации позволяют объявить правило один раз, рядом с полем или методом, — <code>@NotBlank</code>, <code>@Max(100_000)</code>, <code>@Audited("refund")</code>, — а общий код, читающий эти метаданные, выполняет его везде.</p>
+      <p>Тема разбирает, как аннотации читаются при выполнении и при компиляции и как фреймворки встраивают поведение через прокси. Демо <a href="../examples/reflection/ReflectionDemo.java">ReflectionDemo.java</a> строит валидатор и аудит на рефлексии и прокси JDK, скрипт <a href="../examples/reflection/processor.sh">processor.sh</a> собирает обработчик аннотаций. Как Spring использует это в контейнере — в <a href="spring-aop.html">AOP</a>, транзакции — в <a href="spring-tx.html">Transactions</a>.</p>
+    </section>
+
+    <section class="step" id="retention">
+      <h2>Retention: где аннотация существует</h2>
+<pre><code class="language-java">@Retention(RetentionPolicy.RUNTIME) @Target(ElementType.METHOD) @interface Audited { String value(); }
+@Retention(RetentionPolicy.CLASS)   @Target(ElementType.METHOD) @interface Internal {}
+
+@Audited("refund") @Internal
+public void refund(String paymentId, long amount) { ... }</code></pre>
+      <pre class="out">== retention: which annotations reflection can see
+@Audited (RUNTIME) present: true, value = refund
+@Internal (CLASS) present:  false</pre>
+      <table class="mx">
+        <thead><tr><th>Retention</th><th>Где хранится</th><th>Кто читает</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td>SOURCE</td><td>Только в исходнике</td><td>Компилятор и обработчики аннотаций</td><td><code>@Override</code>, <code>@SuppressWarnings</code>, Lombok</td></tr>
+          <tr><td>CLASS (по умолчанию)</td><td>В класс-файле, но не загружается</td><td>Инструменты байткода</td><td>Аннотации для анализаторов</td></tr>
+          <tr><td>RUNTIME</td><td>В класс-файле и в памяти</td><td>Рефлексия при выполнении</td><td><code>@Transactional</code>, <code>@Entity</code>, <code>@NotBlank</code></td></tr>
+        </tbody>
+      </table>
+      <p>Обе аннотации стоят на одном методе, но рефлексия видит только <code>@Audited</code>. У <code>@Internal</code> retention CLASS — значение по умолчанию, если его не указать, — и при загрузке класса JVM её не сохраняет. Это частая ошибка при написании своей аннотации для фреймворка: забыли <code>@Retention(RUNTIME)</code>, и аспект «не видит» аннотацию. <code>@Target</code> ограничивает, где аннотацию можно поставить; мета-аннотации <code>@Inherited</code>, <code>@Repeatable</code> и <code>@Documented</code> управляют наследованием, повторением и документацией. На мета-аннотациях построены составные аннотации Spring: <code>@RestController</code> помечен <code>@Controller</code> и <code>@ResponseBody</code>.</p>
+    </section>
+
+    <section class="step" id="reflection">
+      <h2>Reflection API: обойти поля и прочитать аннотации</h2>
+<pre><code class="language-java">record RefundRequest(@NotBlank String paymentId, @Max(100_000) long amount, String reason) {}
+
+static List&lt;String&gt; validate(Record r) throws Exception {
+    List&lt;String&gt; errors = new ArrayList&lt;&gt;();
+    for (RecordComponent c : r.getClass().getRecordComponents()) {
+        Object v = c.getAccessor().invoke(r);                       // вызов метода по объекту Method
+        if (c.isAnnotationPresent(NotBlank.class) &amp;&amp; (v == null || v.toString().isBlank()))
+            errors.add(c.getName() + " must not be blank");
+        Max max = c.getAnnotation(Max.class);
+        if (max != null &amp;&amp; ((Number) v).longValue() &gt; max.value())
+            errors.add(c.getName() + " must be &lt;= " + max.value());
+    }
+    return errors.isEmpty() ? List.of("valid") : errors;
+}</code></pre>
+      <pre class="out">== annotation-driven validation of a record
+[valid]
+[paymentId must not be blank, amount must be &lt;= 100000]
+== private access and modules
+own private field via setAccessible: 42
+String.value: InaccessibleObjectException (java.base does not open java.lang)</pre>
+      <p>Двадцать строк дают то, что делает Hibernate Validator: валидатор ничего не знает о <code>RefundRequest</code>, он обходит его компоненты, читает аннотации и значения и применяет правила. Так же Jackson находит поля для сериализации, а Spring — конструктор и <code>@Autowired</code>. Reflection API — это <code>Class</code>, <code>Field</code>, <code>Method</code>, <code>Constructor</code>, <code>RecordComponent</code> и <code>Parameter</code>: получить члены класса, их модификаторы, типы с параметрами из атрибута <code>Signature</code>, как в <a href="generics.html">Generics</a>, и аннотации, а также прочитать поле или вызвать метод.</p>
+      <p><code>setAccessible(true)</code> открывает приватные члены — своего кода спокойно: демо прочитало приватное поле record. Но с Java 9 модули закрывают внутренности чужих модулей: <code>String.value</code> из <code>java.base</code> недоступен — <code>InaccessibleObjectException</code>, пока модуль не открыт флагом <code>--add-opens</code>, как в <a href="enums.html">Enums</a>. Цена рефлексии — скорость и безопасность: вызов через <code>Method.invoke</code> проходит проверки доступа и упаковку аргументов (с JDK 18 он реализован через <code>MethodHandle</code>, и разрыв с прямым вызовом сократился), ошибки в именах всплывают при выполнении, а не при компиляции, и код, лезущий в приватные поля, ломает инкапсуляцию из <a href="encapsulation.html">Encapsulation</a>.</p>
+    </section>
+
+    <section class="step" id="proxy">
+      <h2>Динамический прокси: поведение вокруг метода и вызов через this</h2>
+<pre><code class="language-java">RefundService proxy = (RefundService) Proxy.newProxyInstance(RefundService.class.getClassLoader(),
+        new Class&lt;?&gt;[] { RefundService.class }, (p, method, a) -&gt; {
+            Method impl = target.getClass().getMethod(method.getName(), method.getParameterTypes());
+            Audited audited = impl.getAnnotation(Audited.class);
+            if (audited != null) System.out.println("   audit: " + audited.value() + " " + Arrays.toString(a));
+            return method.invoke(target, a);                      // дальше — настоящий объект
+        });
+
+@Audited("refund-all")
+public void refundAll(List&lt;String&gt; ids) { for (String id : ids) refund(id, 100); }   // вызов через this, мимо прокси</code></pre>
+      <pre class="out">== dynamic proxy: audit around calls (how Spring AOP works for interfaces)
+JDK proxy class: true, is DefaultRefundService: false
+   audit: refund [p-1, 500]
+   refund p-1 500
+-- refundAll calls refund() twice internally:
+   audit: refund-all [[p-2, p-3]]
+   refund p-2 100
+   refund p-3 100</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Вызов refundAll идёт через прокси, тот записывает аудит и вызывает настоящий объект. Внутри объект вызывает refund через this — это прямой вызов, мимо прокси, поэтому аудит refund не выполняется.">
+            <defs><marker id="rf-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="70" width="120" height="50" rx="9" class="dg-box"/>
+            <text x="80" y="100" class="dg-in" text-anchor="middle">вызывающий</text>
+            <rect x="220" y="60" width="170" height="70" rx="9" class="dg-cell hit"/>
+            <text x="305" y="86" class="dg-in" text-anchor="middle">прокси $Proxy</text>
+            <text x="305" y="106" class="dg-n" text-anchor="middle">аудит, транзакция</text>
+            <rect x="470" y="40" width="230" height="110" rx="9" class="dg-box"/>
+            <text x="585" y="64" class="dg-in" text-anchor="middle">DefaultRefundService</text>
+            <text x="585" y="94" class="dg-n" text-anchor="middle">refundAll()</text>
+            <text x="585" y="128" class="dg-n" text-anchor="middle">refund()</text>
+            <path data-s="1-" d="M140 95 L 218 95" class="dg-line" marker-end="url(#rf-a)"/>
+            <text data-s="1-" x="179" y="88" class="dg-n" text-anchor="middle">refundAll</text>
+            <path data-s="2-" d="M390 95 L 520 92" class="dg-line ok" marker-end="url(#rf-a)"/>
+            <text data-s="2-" x="455" y="84" class="dg-ok" text-anchor="middle">audit ✓</text>
+            <path data-s="3" d="M640 98 C 680 104, 680 118, 640 124" class="dg-line bad" marker-end="url(#rf-a)"/>
+            <text data-s="3" x="700" y="172" class="dg-bad" text-anchor="end">this.refund(): мимо прокси</text>
+            <text data-s="1" x="20" y="200" class="dg-t">Снаружи объект виден только через прокси.</text>
+            <text data-s="2" x="20" y="200" class="dg-t">Прокси выполняет своё и передаёт вызов настоящему объекту.</text>
+            <text data-s="3" x="20" y="200" class="dg-bad">Внутренний вызов идёт по ссылке this — прокси о нём не знает.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>Proxy.newProxyInstance</code> создаёт класс, который реализует <code>RefundService</code> и передаёт каждый вызов обработчику. Вызывающий код держит ссылку на прокси — объект не является <code>DefaultRefundService</code>.</li>
+          <li>Обработчик читает <code>@Audited</code> с метода реализации, пишет аудит и вызывает настоящий объект. Так же Spring открывает транзакцию для <code>@Transactional</code> или проверяет права для <code>@PreAuthorize</code>.</li>
+          <li>Внутри <code>refundAll</code> вызов <code>refund</code> идёт через <code>this</code> — ссылку на сам объект, а не на прокси. Аудита для двух внутренних вызовов нет: в выводе только <code>refund-all</code>.</li>
+        </ol>
+      </figure>
+      <p>Это ровно та ловушка, на которой теряются <code>@Transactional</code>, <code>@Async</code> и <code>@Cacheable</code>: метод с аннотацией, вызванный из соседнего метода того же бина, выполняется без транзакции, синхронно и без кеша. Исправляют, вынося метод в отдельный бин, или явно вызывают через прокси (самовнедрение, <code>AopContext.currentProxy()</code>). Прокси JDK умеет только интерфейсы; для классов Spring генерирует подкласс через CGLIB или ByteBuddy, и тогда не перехватываются <code>final</code>- и <code>private</code>-методы — их нельзя переопределить. Поэтому методы с <code>@Transactional</code> должны быть public и не final.</p>
+    </section>
+
+    <section class="step" id="processing">
+      <h2>Обработка аннотаций при компиляции</h2>
+<pre><code class="language-java">@SupportedAnnotationTypes("audit.Audited")
+public class AuditProcessor extends AbstractProcessor {
+    public boolean process(Set&lt;? extends TypeElement&gt; annotations, RoundEnvironment env) {
+        for (Element e : env.getElementsAnnotatedWith(Audited.class))
+            if (!e.getModifiers().contains(Modifier.PUBLIC))
+                processingEnv.getMessager().printMessage(Diagnostic.Kind.ERROR,
+                        "@Audited method must be public (proxies cannot intercept it): " + ..., e);
+        return true;
+    }
+}</code></pre>
+      <pre class="out">Note: audited: Refunds.refund -&gt; refund
+Refunds.java:5: error: @Audited method must be public (proxies cannot intercept it): Refunds.cleanup
+1 error
+class file produced: no</pre>
+      <p>Обработчик аннотаций работает внутри javac: он видит элементы исходника — классы, методы, их модификаторы и аннотации с retention SOURCE — и может выдать ошибку, остановив сборку, или сгенерировать новые исходники. Демо остановило компиляцию на не-public методе с <code>@Audited</code>: ошибку, которая при выполнении превратилась бы в тихо пропущенный аудит, поймал компилятор. На генерации кода построены Lombok (геттеры, билдеры), MapStruct (мапперы), Dagger и Micronaut (внедрение зависимостей без рефлексии при выполнении).</p>
+      <p>Выбор между рефлексией при выполнении и генерацией при компиляции — компромисс. Рефлексия гибче и не требует шага сборки, но медленнее на старте, ошибки всплывают поздно, а в нативных образах GraalVM её нужно описывать конфигурацией. Генерация даёт обычный быстрый код и ошибки при компиляции, но усложняет сборку и отладку сгенерированного кода. Spring Boot 3 сочетает оба: AOT-обработка заранее генерирует часть конфигурации для нативных образов.</p>
+      <div class="trap">
+        <p class="myth">Если поставить <code>@Transactional</code> на метод, он всегда выполнится в транзакции.</p>
+        <p class="fact">Аннотацию исполняет прокси, а вызов изнутри того же объекта идёт через <code>this</code>, мимо него. В демо аудит записал внешний вызов <code>refundAll</code>, но не два внутренних <code>refund</code>. Кроме того, прокси на основе подкласса не перехватывает private- и final-методы.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Аннотация — метаданные; поведение даёт код, который её читает: рефлексия при выполнении или обработчик при компиляции.</li>
+        <li>Retention: SOURCE — компилятор, CLASS (по умолчанию) — в класс-файле, но не видна рефлексии, RUNTIME — для фреймворков.</li>
+        <li>Reflection API обходит поля и методы; setAccessible открывает private своего кода, а модули закрывают чужие внутренности.</li>
+        <li>Динамический прокси добавляет поведение вокруг вызова; вызов через this идёт мимо — так теряются @Transactional и @Async.</li>
+        <li>Прокси-подкласс не перехватывает private и final; методы с аспектами — public и не final.</li>
+        <li>Обработчик аннотаций видит исходник, генерирует код и может остановить сборку.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="rf-retention" data-freq="2">
+      <h3>Что такое retention аннотации и зачем он нужен?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Retention определяет, где аннотация существует. SOURCE — только в исходнике, её видят компилятор и обработчики аннотаций. CLASS, значение по умолчанию, — в класс-файле, но JVM не загружает её, и рефлексия её не видит. RUNTIME — доступна рефлексии при выполнении; такие нужны Spring, JPA, валидации. Своя аннотация для фреймворка без <code>@Retention(RUNTIME)</code> просто не будет найдена.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>@Target ограничивает места, @Inherited — наследование с класса, @Repeatable — повторение.</li>
+            <li>Составные аннотации Spring построены на мета-аннотациях.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rf-proxy" data-freq="3">
+      <h3>Как работают прокси в Spring и почему @Transactional иногда не срабатывает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spring оборачивает бин прокси: для интерфейсов — динамическим прокси JDK, для классов — подклассом через CGLIB. Прокси выполняет дополнительную логику — открывает транзакцию, проверяет права — и вызывает настоящий метод. Вызов метода из соседнего метода того же бина идёт через <code>this</code>, мимо прокси, поэтому аннотация не срабатывает. Также не перехватываются private- и final-методы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Исправление: вынести метод в другой бин или вызвать через прокси.</li>
+            <li>AspectJ с вплетением при компиляции или загрузке обходит ограничение прокси.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему возвраты иногда сохраняются частично?</summary>
+          <pre><code class="language-java">@Service
+public class RefundService {
+    public void refundAll(List&lt;Refund&gt; refunds) {
+        for (Refund r : refunds) refundOne(r);
+    }
+    @Transactional
+    public void refundOne(Refund r) {
+        ledger.post(r);            // первая запись
+        payments.markRefunded(r);  // может бросить исключение
+    }
+}</code></pre>
+          <p><code>refundOne</code> вызывается из <code>refundAll</code> через <code>this</code>, мимо транзакционного прокси, поэтому <code>@Transactional</code> не работает: проводка сохраняется, а при исключении в <code>markRefunded</code> не откатывается. Нужно вынести <code>refundOne</code> в отдельный бин или сделать транзакционным вызов снаружи — и решить, нужна ли транзакция на каждый возврат или на всю пачку.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rf-cost" data-freq="2">
+      <h3>Каковы недостатки рефлексии?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ошибки в именах и типах всплывают при выполнении, а не при компиляции. Вызов через Method.invoke медленнее прямого: проверки доступа, упаковка аргументов. setAccessible ломает инкапсуляцию, а с Java 9 модули запрещают доступ к закрытым пакетам чужих модулей без --add-opens. В нативных образах GraalVM рефлексию нужно описывать конфигурацией.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С JDK 18 рефлексия реализована через MethodHandle — разрыв с прямым вызовом сократился.</li>
+            <li>Альтернатива — генерация кода при компиляции: MapStruct, Dagger, Micronaut.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="rf-processor" data-freq="2">
+      <h3>Что такое обработка аннотаций при компиляции?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обработчик аннотаций — класс, который javac вызывает во время компиляции. Он видит элементы исходника и их аннотации, может выдать ошибку или предупреждение и сгенерировать новые исходники. Так работают Lombok, MapStruct, Dagger. Ошибки находятся при сборке, а сгенерированный код работает без рефлексии.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Обработка идёт раундами: сгенерированные файлы снова обрабатываются.</li>
+            <li>Lombok изменяет AST через внутренние API javac, а не только генерирует новые файлы.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-9.html#jls-9.6">JLS §9.6 Annotation Interfaces</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/annotation/RetentionPolicy.html">RetentionPolicy</a>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/reflect/Proxy.html">java.lang.reflect.Proxy</a>.</li>
+      <li><a href="https://docs.spring.io/spring-framework/reference/core/aop/proxying.html">Spring: Proxying Mechanisms</a> — self-invocation, JDK и CGLIB.</li>
+      <li><a href="https://openjdk.org/jeps/416">JEP 416: Reimplement Core Reflection with Method Handles</a>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.compiler/javax/annotation/processing/Processor.html">javax.annotation.processing.Processor</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
