@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nested Classes · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="nested-classes">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Nested Classes</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Класс внутри класса бывает четырёх видов. Статический вложенный — обычный класс в пространстве имён внешнего, без связи с его экземпляром. Внутренний (inner, без <code>static</code>) — каждый его объект хранит скрытую ссылку <code>this$0</code> на внешний объект. Локальный объявлен в методе, анонимный — там же и без имени. Оба захватывают копии фактически final локальных переменных в поля <code>val$x</code>. Скрытая ссылка — главная ловушка. Слушатель на глобальной шине держит внешний объект вместе с его данными, и в демо 40-мегабайтный отчёт не собран сборщиком.
+      Тот же слушатель статическим вложенным классом отчёт не держит. С JDK 18 javac не создаёт <code>this$0</code>, если внутренний класс внешний объект не использует. Лямбда — не анонимный класс: отдельного класс-файла нет, <code>this</code> в ней — внешний объект, а захват <code>this</code> происходит только при обращении к полям. Правило по умолчанию: вложенный класс делают <code>static</code>, пока ему действительно не нужен внешний экземпляр.</p>
+    </div>
+
+    <section class="step" id="kinds">
+      <h2>Четыре вида и что компилятор из них делает</h2>
+<pre><code class="language-java">public class Outer {
+    private long total;
+    class Inner { void add(long a) { total += a; } }                 // внутренний: держит ссылку на Outer
+    class Idle { long twice(long a) { return a * 2; } }               // внутренний, но Outer не использует
+    static class Nested { long twice(long a) { return a * 2; } }      // статический вложенный: ссылки нет
+    Runnable anonymous() { return new Runnable() { public void run() { total++; } }; }
+    Runnable lambda() { return () -&gt; total++; }
+}</code></pre>
+      <pre class="out">== class files
+Outer.class
+Outer$1.class
+Outer$Idle.class
+Outer$Inner.class
+Outer$Nested.class
+== Outer$Inner
+  final Outer this$0;
+  Outer$Inner(Outer);
+         5: getfield      #13                 // Field Outer.total:J
+        10: putfield      #13                 // Field Outer.total:J
+NestHost: class Outer
+== Outer$Idle
+  Outer$Idle(Outer);
+== Outer$Nested
+class Outer$Nested {
+  Outer$Nested();</code></pre>
+      <p>Для JVM вложенных классов не существует: скрипт <a href="../examples/nested-classes/javap.sh">javap.sh</a> показывает обычные класс-файлы <code>Outer$Inner</code>, <code>Outer$Nested</code> и <code>Outer$1</code> для анонимного. Внутренний класс компилятор превратил в класс с полем <code>final Outer this$0</code> и конструктором, который принимает внешний объект: <code>outer.new Inner()</code> передаёт его неявно. Обращение к <code>total</code> — это <code>getfield</code>/<code>putfield</code> поля <code>Outer.total</code> через <code>this$0</code>. У <code>Nested</code> конструктор без параметров: связи с экземпляром нет, создаётся как <code>new Outer.Nested()</code>.</p>
+      <p><code>Idle</code> — внутренний класс, но <code>Outer</code> не трогает. Конструктор по-прежнему принимает <code>Outer</code>, а поля <code>this$0</code> нет: с JDK 18 javac его не создаёт, если внешний экземпляр не используется (кроме сериализуемых классов). Конструктор параметр просто не сохраняет: в его байткоде только вызов <code>Object.&lt;init&gt;</code>. До JDK 18 ссылка хранилась всегда.</p>
+      <table class="mx">
+        <thead><tr><th>Вид</th><th>Ссылка на внешний объект</th><th>Где объявлен</th><th>Типичное применение</th></tr></thead>
+        <tbody>
+          <tr><td>static nested</td><td>Нет</td><td>В теле класса, <code>static</code></td><td>Builder, узел <code>HashMap.Node</code>, DTO запроса, приватный помощник</td></tr>
+          <tr><td>inner</td><td>Да, <code>this$0</code>, если используется</td><td>В теле класса</td><td>Итератор коллекции (<code>ArrayList.Itr</code>), представление над данными внешнего</td></tr>
+          <tr><td>локальный</td><td>Да, в нестатическом методе, если используется</td><td>В методе</td><td>Редко: помощник с именем внутри одного метода, локальные records</td></tr>
+          <tr><td>анонимный</td><td>Да, в нестатическом методе, если используется</td><td>В выражении</td><td>Реализация с состоянием или нескольких методов; раньше — вместо лямбд</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="leak">
+      <h2>Утечка: слушатель держит внешний объект</h2>
+      <p>Задание на построение отчёта держит 40 МБ строк и подписывается на глобальную шину событий, которая живёт всё время работы приложения. Отчёт построен, ссылку на задание отпустили. Соберёт ли его сборщик? Демо <a href="../examples/nested-classes/LeakDemo.java">LeakDemo.java</a> проверяет через <code>WeakReference</code>, по-разному реализуя слушателя:</p>
+<pre><code class="language-java">static class ReportJob {
+    final long[] rows = new long[5_000_000];                                 // ~40 МБ данных отчёта
+    void subscribeInner()     { BUS.add(new Listener()); }                 // внутренний, читает поле отчёта
+    void subscribeIdleInner() { BUS.add(new IdleListener()); }             // внутренний, внешний объект не трогает
+    void subscribeNested()    { BUS.add(new StaticListener()); }           // статический вложенный
+    void subscribeLambdaThis(){ BUS.add(e -&gt; rows[0]++); }                 // лямбда, читающая поле
+    class Listener implements Consumer&lt;String&gt; { public void accept(String e) { rows[0]++; } }
+    ...
+}</code></pre>
+      <pre class="out">== listener on a global bus: is the 40 MB job collected?
+inner class using the job:     false
+anonymous class using the job: false
+lambda using a field:          false
+inner class not using it:      true (javac 18+ drops unused this$0)
+static nested class:           true
+lambda without this:           true</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Статическое поле BUS — корень сборки мусора. Оно ссылается на Listener, а тот через this$0 на ReportJob с массивом в 40 мегабайт. Когда локальная переменная job обнуляется, путь от корня через Listener остаётся, и отчёт не собирается. У статического вложенного слушателя этой ссылки нет.">
+            <defs><marker id="nc-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="30" width="150" height="44" rx="8" class="dg-box"/>
+            <text x="95" y="57" class="dg-in" text-anchor="middle">static BUS (корень)</text>
+            <rect x="230" y="30" width="150" height="44" rx="8" class="dg-cell"/>
+            <text data-s="1-2" x="305" y="57" class="dg-in" text-anchor="middle">Listener</text>
+            <text data-s="3" x="305" y="57" class="dg-ok" text-anchor="middle">StaticListener</text>
+            <path d="M170 52 L 228 52" class="dg-line" marker-end="url(#nc-a)"/>
+            <rect x="470" y="30" width="230" height="44" rx="8" class="dg-cell"/>
+            <text x="585" y="57" class="dg-in" text-anchor="middle">ReportJob + rows 40 МБ</text>
+            <rect x="20" y="120" width="150" height="44" rx="8" class="dg-box"/>
+            <text x="95" y="147" class="dg-in" text-anchor="middle">локальная job</text>
+            <path data-s="1" d="M170 142 L 520 76" class="dg-line" marker-end="url(#nc-a)"/>
+            <path data-s="1-2" d="M380 52 L 468 52" class="dg-line bad" marker-end="url(#nc-a)"/>
+            <text data-s="1-2" x="424" y="44" class="dg-bad" text-anchor="middle">this$0</text>
+            <rect data-s="2" x="466" y="26" width="238" height="52" rx="10" class="dg-line bad" stroke-width="2"/>
+            <rect data-s="3" x="470" y="30" width="230" height="44" rx="8" class="dg-cell hit"/>
+            <text data-s="3" x="585" y="57" class="dg-ok" text-anchor="middle">собран</text>
+            <text data-s="3" x="424" y="44" class="dg-ok" text-anchor="middle">нет this$0</text>
+            <text data-s="1" x="20" y="205" class="dg-t">Отчёт достижим двумя путями: из локальной переменной и через слушателя.</text>
+            <text data-s="2" x="20" y="205" class="dg-bad">job = null, но путь BUS → Listener → this$0 остался: 40 МБ живут вечно.</text>
+            <text data-s="3" x="20" y="205" class="dg-ok">У статического вложенного слушателя нет this$0 — отчёт недостижим и собран.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Задание подписало внутренний класс <code>Listener</code> на шину. Объект слушателя хранит <code>this$0</code> — ссылку на задание, а значит, и на массив строк.</li>
+          <li>Локальную переменную обнулили, но сборщик ищет пути от корней, а статическое поле <code>BUS</code> — корень. Путь <code>BUS → Listener → this$0 → ReportJob</code> существует, отчёт живёт, пока живёт шина. Сборщик и корни — в <a href="gc-basics.html">GC Basics</a>.</li>
+          <li><code>StaticListener</code> поля <code>this$0</code> не имеет, и единственный путь к отчёту исчез вместе с локальной переменной — отчёт собран.</li>
+        </ol>
+      </figure>
+      <p>Утекает не слушатель, а всё, что он держит: внутренний объект невелик, но через <code>this$0</code> тянет внешний целиком. Так же внутренний класс, отданный в кеш, пул потоков, планировщик или статическую коллекцию, держит свой внешний объект — классический источник утечек в Android (Activity, удерживаемая <code>Handler</code>-ом или <code>AsyncTask</code>) и в серверном коде (слушатели, не снятые с регистрации). Анонимный класс и лямбда, обращающиеся к полю, ведут себя так же: в демо оба удержали отчёт. Найти такую утечку помогает дамп кучи с путём до корня из <a href="jvm-diagnostics.html">JVM Diagnostics</a>.</p>
+      <p>Исправления: сделать класс <code>static</code> и передать ему только нужные данные, а не весь внешний объект; снимать подписку, когда объект больше не нужен, — <code>try/finally</code> или <code>AutoCloseable</code>-подписка; если слушателю допустимо исчезнуть вместе с владельцем — слабые ссылки из <a href="gc-references.html">References</a>. Ещё одна причина держать класс статическим — сериализация: сериализация внутреннего класса тянет внешний объект, а имена синтетических полей не стабильны между компиляторами, поэтому Java прямо не рекомендует сериализовать внутренние классы.</p>
+    </section>
+
+    <section class="step" id="anon-lambda">
+      <h2>Анонимный класс, лямбда и захват переменных</h2>
+<pre><code class="language-java">long rate = 15;
+Fee fee = new Fee() { public long of(long amount) { return amount * rate / 1000; } };
+
+Runnable anon = new Runnable() { public void run() { System.out.println("anonymous: this = " + this.getClass().getName()); } };
+Runnable lambda = () -&gt; System.out.println("lambda:    this = " + this);</code></pre>
+      <pre class="out">== what 'this' means
+anonymous: this = LeakDemo$2
+lambda:    this = LeakDemo instance
+== captured local variable is a copied field
+anonymous class field: long val$rate
+fee.of(10_000) = 150</pre>
+      <p>Захват локальной переменной — копия значения в поле: у анонимного класса появилось поле <code>long val$rate</code>, заполненное в конструкторе. Поэтому переменная должна быть фактически final: если бы метод потом изменил <code>rate</code>, копия в объекте и переменная в стеке разошлись бы, а объект может жить дольше вызова метода. Обходной путь с массивом из одного элемента <code>long[] counter = {0}</code> компилируется, но делает изменяемое состояние общим — в многопоточном коде это гонка; для счётчика есть <code>AtomicLong</code>.</p>
+      <p><code>this</code> в анонимном классе — сам анонимный объект (<code>LeakDemo$2</code>), а в лямбде — внешний объект: лямбда не вводит новой области видимости, это просто тело функции в контексте метода. Отличия глубже синтаксиса.</p>
+      <pre class="out">== Outer
+         1: invokedynamic #12,  0             // InvokeDynamic #0:run:(LOuter;)Ljava/lang/Runnable;
+  private void lambda$lambda$0();
+NestMembers:
+  Outer$Nested
+  Outer$Idle
+  Outer$Inner
+  Outer$1</pre>
+      <p>Тело лямбды компилятор кладёт в приватный метод <code>lambda$lambda$0</code> самого <code>Outer</code>, а на месте выражения — <code>invokedynamic</code>: класс, реализующий <code>Runnable</code>, создаёт <code>LambdaMetafactory</code> при первом выполнении, в памяти, без класс-файла <code>Outer$2</code>. Сигнатура <code>(LOuter;)Runnable</code> показывает, что эта лямбда захватывает <code>this</code> — она обращается к <code>total</code>. Лямбда без захвата создаётся один раз и переиспользуется. Подробнее — в <a href="lambdas.html">Lambdas</a>. Анонимный класс по-прежнему нужен, когда у реализации несколько методов, собственное состояние или нужен абстрактный класс, а не функциональный интерфейс.</p>
+    </section>
+
+    <section class="step" id="nestmates">
+      <h2>Доступ к private и nestmates</h2>
+      <p>Вложенный класс видит приватные члены внешнего, а внешний — приватные члены вложенного: <code>Inner</code> пишет в <code>private long total</code>. Для JVM до Java 11 это были разные классы без доступа к приватному, и компилятор генерировал синтетические методы-мосты <code>access$000</code> с пакетным доступом — лишний вызов в стеке и дыра, через которую любой класс пакета мог добраться до приватного поля. С Java 11 (JEP 181, nestmates) в класс-файлах есть атрибуты <code>NestHost</code> и <code>NestMembers</code> — в выводе <code>javap</code> у <code>Outer$Inner</code> стоит <code>NestHost: class Outer</code>, а у <code>Outer</code> перечислены все вложенные классы. JVM пускает к приватным членам внутри гнезда напрямую: <code>getfield Outer.total</code> без мостов. Рефлексия тоже учитывает гнездо — <code>Class.getNestHost()</code> и <code>isNestmateOf()</code>.</p>
+      <p>Самый частый в коде вид — статический вложенный класс. Builder живёт внутри своего класса (<code>Payment.builder()</code> возвращает <code>Payment.Builder</code>) и имеет доступ к его приватному конструктору, о билдерах — в <a href="patterns-creational.html">Creational Patterns</a>. Узлы структур данных — <code>HashMap.Node</code>, <code>LinkedList.Node</code> — статические: узлов миллионы, и лишняя ссылка на внешний объект в каждом стоила бы памяти. Внутренние классы JDK использует там, где связь нужна: итератор <code>ArrayList.Itr</code> читает массив и <code>modCount</code> своего списка, как в <a href="lists.html">List</a>. Records, enums и интерфейсы, объявленные внутри класса, неявно статические.</p>
+      <div class="trap">
+        <p class="myth">Внутренний класс всегда держит ссылку на внешний объект.</p>
+        <p class="fact">С JDK 18 javac не создаёт поле <code>this$0</code>, если внутренний класс внешний экземпляр не использует, — в демо такой слушатель не удержал отчёт. Но стоит обратиться к любому полю или методу внешнего — ссылка появится. Надёжно — <code>static</code>.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Static nested — без связи с экземпляром; inner — скрытое поле this$0 и конструктор с внешним объектом.</li>
+        <li>Локальные и анонимные классы копируют фактически final переменные в поля val$x.</li>
+        <li>Слушатель-внутренний класс на долгоживущей шине держит внешний объект: 40 МБ отчёта не собраны.</li>
+        <li>С JDK 18 неиспользуемый this$0 не создаётся; лямбда захватывает this только при обращении к членам.</li>
+        <li>Лямбда — приватный метод + invokedynamic, без класс-файла; this в ней — внешний объект.</li>
+        <li>Nestmates (Java 11): доступ к private внутри гнезда без синтетических access$-методов.</li>
+        <li>По умолчанию вложенный класс static.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="nc-static" data-freq="2">
+      <h3>Чем статический вложенный класс отличается от внутреннего?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Внутренний класс связан с экземпляром внешнего: каждый его объект хранит скрытую ссылку на внешний объект, создаётся через <code>outer.new Inner()</code> и может обращаться к его полям и методам. Статический вложенный — обычный класс в пространстве имён внешнего, без ссылки на экземпляр; создаётся через <code>new Outer.Nested()</code>. Оба видят приватные члены внешнего класса.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В байткоде — поле this$0 и конструктор с параметром Outer; с JDK 18 поле не создаётся, если не используется.</li>
+            <li>Скрытая ссылка — источник утечек и проблем сериализации.</li>
+            <li>Nestmates (Java 11) убрали синтетические access$-методы.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему память сервиса растёт после каждого отчёта?</summary>
+          <pre><code class="language-java">public class ReportService {
+    private final byte[] buffer = new byte[50 * 1024 * 1024];
+    public void build(Scheduler scheduler) {
+        scheduler.every(Duration.ofMinutes(1), new Runnable() {
+            public void run() { log.info("still building, buffer {}", buffer.length); }
+        });
+        // ... строим отчёт, задача в планировщике остаётся
+    }
+}</code></pre>
+          <p>Анонимный <code>Runnable</code> обращается к <code>buffer</code> и поэтому держит ссылку на <code>ReportService</code>. Задача остаётся в планировщике навсегда, и каждый экземпляр сервиса с 50-мегабайтным буфером живёт вместе с ней. Нужно отменять задачу по окончании отчёта (сохранить <code>ScheduledFuture</code> и вызвать <code>cancel</code>) и не захватывать внешний объект — передать в задачу только нужное значение.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="nc-lambda" data-freq="2">
+      <h3>Чем лямбда отличается от анонимного класса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p><code>this</code> в лямбде — внешний объект, в анонимном классе — сам анонимный объект. Лямбда реализует только функциональный интерфейс, анонимный класс — любой интерфейс или абстрактный класс, может иметь поля и несколько методов. Обе захватывают только фактически final локальные переменные.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Лямбда компилируется в приватный метод и invokedynamic; класс создаёт LambdaMetafactory в памяти.</li>
+            <li>Лямбда без захвата — один переиспользуемый объект.</li>
+            <li>Лямбда захватывает this, только если обращается к членам внешнего объекта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="nc-final" data-freq="2">
+      <h3>Почему локальные переменные в анонимном классе и лямбде должны быть final?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Захват — это копия значения в поле объекта, а объект может жить дольше вызова метода. Если бы переменная менялась после захвата, копия и оригинал разошлись бы. Поэтому Java требует фактически final переменные: значение одно и то же.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>У анонимного класса копия видна как поле val$x.</li>
+            <li>Обход через массив из одного элемента компилируется, но в многопоточности даёт гонку.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html#jls-8.1.3">JLS §8.1.3 Inner Classes and Enclosing Instances</a>, <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.27.2">§15.27.2 Lambda Body</a>.</li>
+      <li><a href="https://openjdk.org/jeps/181">JEP 181: Nest-Based Access Control</a>.</li>
+      <li><a href="https://bugs.openjdk.org/browse/JDK-8271623">JDK-8271623: Omit enclosing instance fields from inner classes that don't use it</a>.</li>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, item 24 — favor static member classes over nonstatic.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

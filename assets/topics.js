@@ -377,7 +377,7 @@ window.KB_TREE = [
           scope: 'позднее связывание, перегрузка и переопределение, правила override, поля и static, вызов из конструктора, sealed и switch' },
         { id: 'abstraction', freq: 3, status: 'draft', title: 'Abstraction',
           scope: 'abstract class или interface, default, static и private методы интерфейса, когда что выбрать' },
-        { id: 'nested-classes', freq: 1, status: 'empty', title: 'Nested Classes',
+        { id: 'nested-classes', freq: 1, status: 'draft', title: 'Nested Classes',
           scope: 'static nested, inner, локальные, анонимные, утечка ссылки на внешний объект' },
       ] },
       { id: 'collections', title: 'Collections', source: 'Core Java т. I, гл. Collections; Baeldung: Collections Interview Questions', items: [
