@@ -371,7 +371,7 @@ window.KB_TREE = [
           scope: 'конструкторы, this, static, final, блоки инициализации, порядок инициализации, модификаторы доступа' },
         { id: 'encapsulation', freq: 3, status: 'draft', title: 'Encapsulation',
           scope: 'инварианты, модификаторы доступа, геттеры и сеттеры, неизменяемость, защитные копии, reflection и модули' },
-        { id: 'inheritance', freq: 3, status: 'empty', title: 'Inheritance & Composition',
+        { id: 'inheritance', freq: 3, status: 'draft', title: 'Inheritance & Composition',
           scope: 'extends и super, хрупкий базовый класс, композиция вместо наследования, LSP' },
         { id: 'polymorphism', freq: 3, status: 'draft', title: 'Polymorphism',
           scope: 'позднее связывание, перегрузка и переопределение, правила override, поля и static, вызов из конструктора, sealed и switch' },
