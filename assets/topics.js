@@ -385,7 +385,7 @@ window.KB_TREE = [
           scope: 'иерархия Collection и Map, выбор реализации, Iterator, fail-fast, Comparator, List.of, Sequenced Collections' },
         { id: 'lists', freq: 3, status: 'draft', title: 'List',
           scope: 'ArrayList и LinkedList, рост массива, сложность операций, удаление при обходе' },
-        { id: 'hashmap', freq: 3, status: 'empty', title: 'HashMap',
+        { id: 'hashmap', freq: 3, status: 'draft', title: 'HashMap',
           scope: 'hash, бакеты, коллизии, treeify, resize, load factor' },
         { id: 'maps-sets', freq: 2, status: 'empty', title: 'Other Maps & Sets',
           scope: 'LinkedHashMap и LRU-кеш, TreeMap, HashSet через HashMap, EnumMap, WeakHashMap, IdentityHashMap' },
