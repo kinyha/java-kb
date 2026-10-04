@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lambdas · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="lambdas">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Lambdas</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Лямбда — короткая запись реализации функционального интерфейса, то есть интерфейса с одним абстрактным методом. Тип лямбды задаёт контекст: одно и то же <code>x -&gt; x + 1</code> может быть <code>Function&lt;Integer, Integer&gt;</code> или <code>IntUnaryOperator</code>. Компилятор кладёт тело в приватный метод <code>lambda$...</code>, а на месте выражения ставит <code>invokedynamic</code>. При первом выполнении <code>LambdaMetafactory</code> создаёт в памяти скрытый класс, реализующий интерфейс. Лямбда без захвата — один объект на всё время работы, захватывающая — новый объект на каждое вычисление.
+      Захватывать можно только фактически final локальные переменные. Ссылка на метод — сокращённая лямбда, но с отличием: получатель <code>expr::method</code> вычисляется один раз, при создании. Стандартные интерфейсы <code>java.util.function</code> не бросают checked-исключений. Их обобщённые версии упаковывают примитивы — в демо <code>List&lt;Integer&gt;</code> с <code>Function</code> оказался в 10 раз медленнее <code>int[]</code> с <code>IntUnaryOperator</code>.</p>
+    </div>
+
+    <section class="step" id="syntax">
+      <h2>От анонимного класса к ссылке на метод</h2>
+      <p>Платежи нужно сортировать по сумме, фильтровать по валюте, считать комиссию — и каждый раз передавать в метод кусок поведения. До Java 8 это был анонимный класс в пять строк. Демо <a href="../examples/lambdas/LambdaDemo.java">LambdaDemo.java</a> пишет один компаратор тремя способами:</p>
+<pre><code class="language-java">Comparator&lt;Payment&gt; c1 = new Comparator&lt;&gt;() { public int compare(Payment a, Payment b) { return Long.compare(a.amount(), b.amount()); } };
+Comparator&lt;Payment&gt; c2 = (a, b) -&gt; Long.compare(a.amount(), b.amount());
+Comparator&lt;Payment&gt; c3 = Comparator.comparingLong(Payment::amount);</code></pre>
+      <pre class="out">== from anonymous class to method reference
+[p-2, p-1, p-3] [p-2, p-1, p-3] [p-3, p-1, p-2]</pre>
+      <p>Синтаксис: параметры, стрелка, тело. Типы параметров компилятор выводит из целевого типа — <code>Comparator&lt;Payment&gt;</code> требует <code>compare(Payment, Payment)</code>. Тело — выражение или блок в фигурных скобках с <code>return</code>. Лямбда сама по себе типа не имеет: <code>var f = x -&gt; x</code> не компилируется, потому что неоткуда узнать интерфейс. Функциональный интерфейс — любой интерфейс с ровно одним абстрактным методом; <code>default</code>-методы и методы <code>Object</code> не считаются, поэтому <code>Comparator</code> с его <code>equals</code> и десятком default-методов — функциональный. Аннотация <code>@FunctionalInterface</code> необязательна, но заставляет компилятор проверить это правило. Третий вариант — комбинатор <code>comparingLong</code> со ссылкой на метод: читается как описание и собирается дальше (<code>reversed()</code>, <code>thenComparing</code>).</p>
+      <table class="mx">
+        <thead><tr><th>Интерфейс</th><th>Метод</th><th>Пример</th></tr></thead>
+        <tbody>
+          <tr><td><code>Function&lt;T, R&gt;</code></td><td><code>R apply(T)</code></td><td><code>Payment::currency</code></td></tr>
+          <tr><td><code>BiFunction&lt;T, U, R&gt;</code></td><td><code>R apply(T, U)</code></td><td><code>(id, amt) -&gt; new Payment(...)</code></td></tr>
+          <tr><td><code>Predicate&lt;T&gt;</code></td><td><code>boolean test(T)</code></td><td><code>p -&gt; p.amount() &gt; 50_000</code></td></tr>
+          <tr><td><code>Consumer&lt;T&gt;</code></td><td><code>void accept(T)</code></td><td><code>audit::record</code></td></tr>
+          <tr><td><code>Supplier&lt;T&gt;</code></td><td><code>T get()</code></td><td><code>ArrayList::new</code></td></tr>
+          <tr><td><code>UnaryOperator&lt;T&gt;</code>, <code>BinaryOperator&lt;T&gt;</code></td><td><code>T apply(T)</code>, <code>T apply(T, T)</code></td><td><code>String::trim</code>, <code>Long::sum</code></td></tr>
+          <tr><td><code>IntPredicate</code>, <code>ToLongFunction&lt;T&gt;</code>, <code>IntUnaryOperator</code>…</td><td>примитивные версии</td><td>без упаковки</td></tr>
+        </tbody>
+      </table>
+      <p>Интерфейсы <code>java.util.function</code> сочетаются: <code>Predicate.and/or/negate</code>, <code>Function.andThen/compose</code>, <code>Comparator.thenComparing</code>. Свой интерфейс вместо стандартного заводят, когда у операции есть смысл, который полезно назвать (<code>FeePolicy</code> вместо <code>ToLongFunction&lt;Payment&gt;</code>), когда нужен checked-исключение или больше трёх параметров.</p>
+    </section>
+
+    <section class="step" id="bytecode">
+      <h2>Что лямбда в байткоде и при выполнении</h2>
+<pre><code class="language-java">static LongUnaryOperator flat() { return a -&gt; a / 100; }                  // ничего не захватывает
+static LongUnaryOperator rate(long r) { return a -&gt; a * r / 1000; }       // захватывает r
+static Function&lt;String, Long&gt; parse() { return Long::parseLong; }         // ссылка на метод</code></pre>
+      <pre class="out">Fees.class
+         0: invokedynamic #14,  0             // InvokeDynamic #2:apply:()Ljava/util/function/Function;
+         0: invokedynamic #7,  0              // InvokeDynamic #0:applyAsLong:()Ljava/util/function/LongUnaryOperator;
+         1: invokedynamic #11,  0             // InvokeDynamic #1:applyAsLong:(J)Ljava/util/function/LongUnaryOperator;
+      #47 REF_invokeStatic java/lang/Long.parseLong:(Ljava/lang/String;)J
+  0: #56 REF_invokeStatic java/lang/invoke/LambdaMetafactory.metafactory:(Lookup, String, MethodType, ...)CallSite
+  1: #56 REF_invokeStatic java/lang/invoke/LambdaMetafactory.metafactory:(Lookup, String, MethodType, ...)CallSite
+  2: #56 REF_invokeStatic java/lang/invoke/LambdaMetafactory.metafactory:(Lookup, String, MethodType, ...)CallSite
+  private static long lambda$flat$0(long);
+  private static long lambda$rate$1(long, long);</code></pre>
+      <p>Скрипт <a href="../examples/lambdas/javap.sh">javap.sh</a> компилирует <a href="../examples/lambdas/Fees.java">Fees.java</a>: класс-файл один — <code>Fees.class</code>, никаких <code>Fees$1</code>, как у анонимных классов из <a href="nested-classes.html">Nested Classes</a>. Тела лямбд стали приватными статическими методами <code>lambda$flat$0(long)</code> и <code>lambda$rate$1(long, long)</code>; захваченное <code>r</code> — просто первый параметр. Для ссылки на метод отдельного метода нет: bootstrap получает прямую ссылку на <code>Long.parseLong</code>. На месте каждого выражения — <code>invokedynamic</code>, и его сигнатура показывает захват: <code>()LongUnaryOperator</code> у <code>flat</code> и <code>(J)LongUnaryOperator</code> у <code>rate</code>, который принимает захваченный <code>long</code>.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="При первом выполнении invokedynamic вызывает bootstrap-метод LambdaMetafactory.metafactory. Он создаёт скрытый класс, реализующий интерфейс и вызывающий lambda-метод, и связывает точку вызова. Для лямбды без захвата точка вызова всегда возвращает один и тот же объект, для захватывающей — создаёт новый объект с захваченными значениями в полях.">
+            <defs><marker id="la-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="30" width="170" height="50" rx="8" class="dg-box"/>
+            <text x="105" y="52" class="dg-in" text-anchor="middle">invokedynamic</text>
+            <text x="105" y="70" class="dg-n" text-anchor="middle">точка вызова</text>
+            <rect data-s="1-" x="260" y="30" width="200" height="50" rx="8" class="dg-cell"/>
+            <text data-s="1-" x="360" y="52" class="dg-in" text-anchor="middle">LambdaMetafactory</text>
+            <text data-s="1-" x="360" y="70" class="dg-n" text-anchor="middle">bootstrap, один раз</text>
+            <path data-s="1-" d="M190 55 L 258 55" class="dg-line" marker-end="url(#la-a)"/>
+            <rect data-s="2-" x="520" y="30" width="180" height="50" rx="8" class="dg-cell hit"/>
+            <text data-s="2-" x="610" y="52" class="dg-in" text-anchor="middle">Fees$$Lambda/0x…</text>
+            <text data-s="2-" x="610" y="70" class="dg-n" text-anchor="middle">скрытый класс</text>
+            <path data-s="2-" d="M460 55 L 518 55" class="dg-line" marker-end="url(#la-a)"/>
+            <rect data-s="3-" x="20" y="130" width="300" height="50" rx="8" class="dg-cell hit"/>
+            <text data-s="3-" x="170" y="152" class="dg-in" text-anchor="middle">без захвата: константа</text>
+            <text data-s="3-" x="170" y="170" class="dg-n" text-anchor="middle">каждый раз тот же объект</text>
+            <rect data-s="4" x="400" y="130" width="300" height="50" rx="8" class="dg-cell miss"/>
+            <text data-s="4" x="550" y="152" class="dg-in" text-anchor="middle">с захватом: new $$Lambda(r)</text>
+            <text data-s="4" x="550" y="170" class="dg-n" text-anchor="middle">новый объект на каждое вычисление</text>
+            <path data-s="3-" d="M540 80 L 290 128" class="dg-line ok" marker-end="url(#la-a)"/>
+            <path data-s="4" d="M610 80 L 560 128" class="dg-line bad" marker-end="url(#la-a)"/>
+            <text data-s="1" x="20" y="218" class="dg-t">Первое выполнение: точка вызова не связана, JVM вызывает bootstrap-метод.</text>
+            <text data-s="2" x="20" y="218" class="dg-t">Метафабрика порождает скрытый класс: метод интерфейса вызывает lambda$flat$0.</text>
+            <text data-s="3" x="20" y="218" class="dg-ok">Без захвата точка вызова связана с готовым объектом — дальше это константа.</text>
+            <text data-s="4" x="20" y="218" class="dg-bad">С захватом связана с фабрикой: каждое вычисление — new с захваченными полями.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Когда выполнение впервые доходит до <code>invokedynamic</code>, точка вызова ещё не связана. JVM вызывает её bootstrap-метод из атрибута <code>BootstrapMethods</code> — <code>LambdaMetafactory.metafactory</code> — и передаёт имя интерфейсного метода, его сигнатуру и ссылку на <code>lambda$flat$0</code>.</li>
+          <li>Метафабрика генерирует в памяти скрытый класс (hidden class, Java 15+), реализующий <code>LongUnaryOperator</code>: его <code>applyAsLong</code> вызывает приватный метод. Класс не виден по имени, его не найти через <code>Class.forName</code>; в стеке вызовов он скрыт.</li>
+          <li>Для лямбды без захвата метафабрика сразу создаёт единственный экземпляр, и точка вызова навсегда возвращает его. Повторные вычисления выражения ничего не аллоцируют.</li>
+          <li>Для захватывающей лямбды точка вызова связана с фабрикой: каждое вычисление выражения — новый объект, захваченные значения лежат в его полях. Связывание происходит один раз на точку вызова, поэтому первая лямбда в программе заметно дороже последующих — это часть времени старта.</li>
+        </ol>
+      </figure>
+      <pre class="out">== one object or a new one per evaluation?
+non-capturing: same instance true, capturing: same instance false
+lambda class: LambdaDemo$$Lambda/0x…, synthetic/hidden: true</pre>
+      <p>Демо подтверждает: две итерации цикла дали один и тот же объект для лямбды без захвата и два разных для лямбды, захватившей <code>n</code>. Ни то ни другое спецификация не гарантирует — она лишь разрешает не создавать новый объект, — поэтому сравнивать лямбды через <code>==</code> или полагаться на их идентичность (как ключ карты, как слушателя для последующего снятия) нельзя: удалить слушателя, переданного как <code>this::onEvent</code>, повторным <code>this::onEvent</code> не получится — это другой объект. Аллокацию захватывающей лямбды в горячем цикле JIT часто убирает анализом убегания из <a href="jit.html">JIT</a>.</p>
+    </section>
+
+    <section class="step" id="capture">
+      <h2>Захват и ссылки на методы</h2>
+      <p>Лямбда видит локальные переменные метода, только если они фактически final — им ничего не присваивают после инициализации. Причина та же, что у анонимных классов: захват — копия значения, а лямбда может выполниться позже и в другом потоке, когда переменной уже нет в стеке. Поля объекта и статические поля захватываются через <code>this</code> или класс, и их менять можно — но тогда лямбда разделяет изменяемое состояние, что в параллельных стримах из <a href="parallel-streams.html">Parallel Streams</a> превращается в гонку. <code>this</code> в лямбде — объект внешнего метода, лямбда не вводит новую область имён: объявить в ней переменную с именем уже существующей локальной нельзя.</p>
+<pre><code class="language-java">Function&lt;String, Integer&gt; parse = Integer::parseInt;          // статический метод
+ToLongFunction&lt;Payment&gt; bound = service::fee;                 // метод конкретного объекта
+Function&lt;Payment, String&gt; unbound = Payment::currency;        // метод аргумента: p -&gt; p.currency()
+Function&lt;String, StringBuilder&gt; newSb = StringBuilder::new;   // конструктор</code></pre>
+      <pre class="out">== method reference kinds
+42 150 USD p-9 xy</pre>
+      <p>Четыре вида ссылок на методы. Статический — <code>Integer::parseInt</code>. Связанный — <code>service::fee</code>, метод конкретного объекта. Несвязанный — <code>Payment::currency</code>, где первый параметр функции становится получателем: <code>p -&gt; p.currency()</code>. Конструктор — <code>StringBuilder::new</code>, перегрузку выбирает целевой тип: здесь <code>StringBuilder(String)</code>. Ссылка на метод обычно читается лучше лямбды, которая просто передаёт аргументы дальше; если нужны преобразования или несколько вызовов — лямбда.</p>
+      <pre class="out">== bound reference evaluates the receiver once
+currentRate()::toString  calls at creation 1, during 3 get() 0
+() -&gt; currentRate()...   calls at creation 0, during 3 get() 3
+null::length -&gt; NPE when the reference is created
+() -&gt; null.length() created fine, fails only on get()</pre>
+      <p>Тонкое отличие связанной ссылки от «эквивалентной» лямбды: выражение слева от <code>::</code> вычисляется один раз, при создании ссылки. <code>currentRate()::toString</code> вызвал <code>currentRate()</code> сразу и запомнил результат — три вызова <code>get()</code> вернули один и тот же курс. Лямбда <code>() -&gt; currentRate().toString()</code> вызывает его на каждый <code>get()</code> — и увидит новый курс. Так же с <code>null</code>: <code>nothing::length</code> бросает <code>NullPointerException</code> в момент создания, а лямбда — только при вызове. Если поставщик значения должен быть ленивым — нужна лямбда.</p>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Упаковка, исключения и отладка</h2>
+      <pre class="out">== primitive specializations avoid boxing
+10M fees: List&lt;Integer&gt; + Function 79 ms, int[] + IntUnaryOperator 8 ms (8493 8493)</pre>
+      <p>Обобщения не работают с примитивами (<a href="generics.html">Generics</a>), поэтому <code>Function&lt;Integer, Integer&gt;</code> принимает и возвращает объекты: каждое значение больше 127 — новый <code>Integer</code>. На 10 миллионах комиссий вариант со списком обёрток и <code>Function</code> в 10 раз медленнее массива с <code>IntUnaryOperator</code>: аллокации, разыменование, нагрузка на сборщик. Для этого в <code>java.util.function</code> 43 интерфейса вместо десятка: <code>IntPredicate</code>, <code>ToLongFunction</code>, <code>LongBinaryOperator</code> и другие, а у стримов — <code>IntStream</code>, <code>mapToLong</code> из <a href="streams.html">Stream API</a>. В горячем коде с числами выбирают примитивные версии.</p>
+      <pre class="out">== checked exceptions do not fit java.util.function
+wrapped: no such file: missing.csv</pre>
+      <p>Методы стандартных интерфейсов не объявляют checked-исключений, и <code>files.forEach(LambdaDemo::read)</code>, где <code>read</code> бросает <code>IOException</code>, не компилируется. Варианты: обернуть внутри лямбды в unchecked-исключение (<code>UncheckedIOException</code> существует ровно для этого), как делает адаптер <code>unchecked</code> в демо; объявить свой функциональный интерфейс с <code>throws</code>; для стримов с ошибками — собирать результаты или ошибки явно. Чего делать не стоит — «хитрые» обёртки, которые обманывают компилятор и выбрасывают checked-исключение без объявления (sneaky throw): вызывающий не узнает, что его нужно ловить.</p>
+      <pre class="out">== stack trace of a lambda
+   at LambdaDemo.lambda$main$10
+   at java.lang.Iterable.forEach
+   at LambdaDemo.main</pre>
+      <p>В стеке исключения лямбда видна как <code>lambda$main$10</code> — синтетический метод с номером по порядку в классе, а скрытый класс <code>$$Lambda</code> между <code>forEach</code> и ним JVM не показывает. При отладке длинных цепочек из лямбд номера мало что говорят; хорошая практика — выносить нетривиальную логику в именованный метод и передавать ссылку на него: в стеке будет нормальное имя, а метод можно протестировать отдельно.</p>
+      <div class="trap">
+        <p class="myth">Ссылка на метод <code>obj::m</code> — то же самое, что лямбда <code>() -&gt; obj.m()</code>.</p>
+        <p class="fact">Выражение <code>obj</code> вычисляется один раз, при создании ссылки, — в демо <code>currentRate()::toString</code> вызвал <code>currentRate()</code> один раз на три <code>get()</code>, а лямбда — три раза. И <code>null::length</code> падает при создании, а не при вызове.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Лямбда реализует функциональный интерфейс; тип задаёт контекст, var не работает.</li>
+        <li>Тело — приватный метод lambda$...; на месте выражения invokedynamic, bootstrap LambdaMetafactory создаёт скрытый класс.</li>
+        <li>Без захвата — один объект; с захватом — новый на каждое вычисление; на идентичность лямбд полагаться нельзя.</li>
+        <li>Захват — копия фактически final переменной; this — внешний объект.</li>
+        <li>Ссылки на методы: статические, связанные, несвязанные, конструкторы; получатель связанной вычисляется один раз.</li>
+        <li>Обобщённые интерфейсы упаковывают примитивы — для чисел IntUnaryOperator, ToLongFunction.</li>
+        <li>Checked-исключения не проходят через java.util.function: оборачивать или свой интерфейс.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="la-what" data-freq="3">
+      <h3>Что такое функциональный интерфейс и как лямбда к нему относится?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Интерфейс с ровно одним абстрактным методом; default-методы и методы Object не считаются. Лямбда — реализация этого метода, а её тип определяется контекстом: переменной, параметром, возвращаемым значением. @FunctionalInterface заставляет компилятор проверить правило. Стандартные интерфейсы — Function, Predicate, Consumer, Supplier, операторы и их примитивные версии.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Компилятор кладёт тело в приватный метод и ставит invokedynamic; LambdaMetafactory создаёт скрытый класс при первом выполнении.</li>
+            <li>Лямбда без захвата — один объект, с захватом — новый на вычисление.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="la-final" data-freq="3">
+      <h3>Почему лямбда может использовать только effectively final переменные?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Лямбда получает копию значения локальной переменной, а выполниться может позже и в другом потоке, когда метода уже нет в стеке. Если бы переменную можно было менять, копия и оригинал разошлись бы. Поэтому разрешены только переменные, которым после инициализации ничего не присваивают. Поля объекта менять можно — они доступны через this.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Захваченное значение — параметр синтетического метода и поле объекта лямбды.</li>
+            <li>Обход через массив или AtomicLong меняет разделяемое состояние — в параллельном коде гонка.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему слушатель не отписывается?</summary>
+          <pre><code class="language-java">public void start() { bus.subscribe(this::onPayment); }
+public void stop()  { bus.unsubscribe(this::onPayment); }   // слушатель продолжает получать события</code></pre>
+          <p>Каждое вычисление <code>this::onPayment</code> — новый объект: ссылка захватывает <code>this</code>. <code>unsubscribe</code> ищет другой экземпляр, не равный подписанному, и ничего не удаляет. Нужно сохранить слушателя в поле (<code>private final Consumer&lt;Payment&gt; listener = this::onPayment;</code>) и использовать его в обоих методах — или получать из <code>subscribe</code> объект подписки и закрывать его.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="la-refs" data-freq="2">
+      <h3>Какие бывают ссылки на методы?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Четыре вида: на статический метод (Integer::parseInt), на метод конкретного объекта (service::fee), на метод произвольного объекта типа, где первый параметр становится получателем (Payment::currency), и на конструктор (ArrayList::new). Ссылка — сокращение лямбды, которая только передаёт аргументы в метод.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Получатель связанной ссылки вычисляется один раз, при создании; null::m падает сразу.</li>
+            <li>Перегрузку и конструктор выбирает целевой тип.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="la-checked" data-freq="2">
+      <h3>Как быть с checked-исключениями внутри лямбд?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Методы стандартных функциональных интерфейсов не объявляют checked-исключений, поэтому вызов метода с throws IOException в лямбде не компилируется. Обычно оборачивают в unchecked (UncheckedIOException) внутри лямбды или адаптером, либо объявляют свой функциональный интерфейс с throws.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Sneaky throw обманывает компилятор — вызывающий не узнает об исключении.</li>
+            <li>В стримах ошибки часто собирают как значения, а не бросают.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.27">JLS §15.27 Lambda Expressions</a>, <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-15.html#jls-15.13">§15.13 Method Reference Expressions</a>.</li>
+      <li><a href="https://cr.openjdk.org/~briangoetz/lambda/lambda-translation.html">Brian Goetz, Translation of Lambda Expressions</a>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/invoke/LambdaMetafactory.html">LambdaMetafactory</a>, <a href="https://openjdk.org/jeps/371">JEP 371: Hidden Classes</a>.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/function/package-summary.html">java.util.function</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

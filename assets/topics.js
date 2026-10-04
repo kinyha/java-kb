@@ -393,7 +393,7 @@ window.KB_TREE = [
           scope: 'ArrayDeque, PriorityQueue, почему не Stack, Queue и Deque API' },
       ] },
       { id: 'lambdas-streams', title: 'Lambdas & Streams', source: 'Modern Java in Action, ч. 1–3; Effective Java, гл. 7', items: [
-        { id: 'lambdas', freq: 3, status: 'empty', title: 'Lambdas',
+        { id: 'lambdas', freq: 3, status: 'draft', title: 'Lambdas',
           scope: 'синтаксис, effectively final, функциональные интерфейсы java.util.function, method references' },
         { id: 'optional', freq: 2, status: 'empty', title: 'Optional',
           scope: 'зачем нужен, map и flatMap, orElse и orElseGet, антипаттерны' },
