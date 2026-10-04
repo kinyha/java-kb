@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Abstraction · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="abstraction">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Abstraction</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Абстракция — контракт, за которым можно менять реализацию: сервис платежей знает про <code>Gateway.pay</code>, а не про СБП или эквайера. В Java два инструмента. Интерфейс — контракт без состояния: абстрактные методы, а с Java 8 ещё <code>default</code>- и <code>static</code>-методы, с Java 9 — <code>private</code>; класс может реализовать сколько угодно интерфейсов. Абстрактный класс — частичная реализация с полями, конструктором и шаблонными методами, но родитель у класса один. 
+      Default-методы появились ради эволюции: в демо старый класс-реализация, не пересобранный, работает с новым default-методом. С новым абстрактным методом он падает <code>AbstractMethodError</code>. Конфликты default-методов решаются тремя правилами: метод класса важнее интерфейса, более конкретный интерфейс важнее общего, а неразрешимый конфликт компилятор требует переопределить. Выбор по умолчанию — интерфейс; абстрактный класс — когда реализациям нужно общее состояние или фиксированный алгоритм с точками расширения.</p>
+    </div>
+
+    <section class="step" id="contract">
+      <h2>Контракт вместо конкретного шлюза</h2>
+      <p>Платёжный сервис работает с несколькими шлюзами: СБП, карточный эквайер, кошелёк. Если сервис вызывает <code>SbpClient.sendTransfer</code> и <code>AcquirerClient.authorize</code> напрямую, каждый новый шлюз — правка сервиса, а тест без настоящих шлюзов невозможен. Абстракция выделяет то, что важно сервису, — «провести оплату на сумму и получить результат» — в контракт <code>Gateway</code>. Реализации прячут детали за ним, сервис зависит от контракта, а не от реализаций; выбор реализации во время выполнения — полиморфизм из <a href="polymorphism.html">Polymorphism</a>.</p>
+      <p>Хорошая абстракция названа и сформулирована в терминах задачи, а не реализации: <code>pay(Payment)</code>, а не <code>sendHttpPost(Map)</code>. Она не протекает: вызывающему не нужно знать, что под ней HTTP, чтобы правильно обработать ошибки, — поэтому шлюз переводит <code>SocketTimeoutException</code> в свой <code>GatewayUnavailable</code>. И она минимальна: интерфейс из двадцати методов, половину которых каждая реализация не поддерживает, нарушает принцип разделения интерфейсов (ISP) и ведёт к <code>UnsupportedOperationException</code>, как в <a href="inheritance.html">Inheritance &amp; Composition</a>.</p>
+    </section>
+
+    <section class="step" id="tools">
+      <h2>Интерфейс и абстрактный класс</h2>
+<pre><code class="language-java">interface Gateway {
+    String pay(long amount);
+    default String name() { return "gateway"; }
+    default String payLogged(long amount) { return log(name() + " pays " + amount) + " -&gt; " + pay(amount); }  // default через абстрактный
+    private String log(String s) { return "[" + s + "]"; }                                                  // private-метод интерфейса
+}
+static abstract class RetryingGateway implements Gateway {
+    private final int attempts;
+    private int calls;
+    protected RetryingGateway(int attempts) { this.attempts = attempts; }
+    public final String pay(long amount) { /* повторяет doPay до attempts раз */ }
+    protected abstract String doPay(long amount);        // точка расширения
+}</code></pre>
+      <pre class="out">== default built on an abstract method
+[card pays 500] -&gt; visa ok
+== abstract class with state and a template method
+acquirer ok after 3, calls = 3
+lambda as Gateway: [gateway pays 1] -&gt; lambda ok</pre>
+      <p>Демо <a href="../examples/abstraction/DispatchDemo.java">DispatchDemo.java</a>. Default-метод <code>payLogged</code> построен на абстрактном <code>pay</code> и вспомогательном <code>private</code>-методе: интерфейс даёт поведение, не зная реализаций. Но состояния у интерфейса нет: поля интерфейса — неявно <code>public static final</code> константы. Абстрактный <code>RetryingGateway</code> хранит число попыток и счётчик вызовов, получает настройку через конструктор и фиксирует алгоритм в <code>final</code>-методе <code>pay</code> — это шаблонный метод: наследник реализует только шаг <code>doPay</code> и не может сломать логику повторов. Интерфейс с одним абстрактным методом — функциональный, его реализует лямбда, как в <a href="lambdas.html">Lambdas</a>.</p>
+      <pre class="out">== interface fields are constants
+   line 2: cannot assign a value to static final variable MAX
+   compiled: false
+== static interface methods are not inherited
+   line 2: cannot find symbol symbol:   method cents(int) location: class Rub
+   compiled: false
+== abstract class: state and constructor
+   compiled: true</pre>
+      <p>Демо <a href="../examples/abstraction/RulesDemo.java">RulesDemo.java</a> компилирует фрагменты в памяти и показывает, что говорит javac. Константу интерфейса присвоить нельзя. Static-метод интерфейса не наследуется реализациями: <code>Rub.cents(5)</code> не компилируется, вызывать нужно <code>Money.cents(5)</code> — иначе добавление static-метода в интерфейс ломало бы классы с методом того же имени. Так устроены фабрики <code>List.of</code>, <code>Comparator.comparing</code>, <code>Map.entry</code>.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Интерфейс</th><th>Абстрактный класс</th></tr></thead>
+        <tbody>
+          <tr><td>Сколько можно унаследовать</td><td>Сколько угодно</td><td>Один</td></tr>
+          <tr><td>Состояние</td><td>Нет, только константы</td><td>Любые поля</td></tr>
+          <tr><td>Конструктор</td><td>Нет</td><td>Есть, вызывается через super</td></tr>
+          <tr><td>Методы</td><td>abstract, default, static, private; всё public, кроме private</td><td>Любые, с любым доступом; final для фиксированного алгоритма</td></tr>
+          <tr><td>Лямбда</td><td>Да, если один абстрактный метод</td><td>Нет</td></tr>
+          <tr><td>Для чего</td><td>Контракт, роль, возможность</td><td>Общая реализация с состоянием, шаблонный метод</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="resolution">
+      <h2>Какой default выполнится: три правила</h2>
+<pre><code class="language-java">interface CardGateway extends Gateway { default String name() { return "card"; } }
+static class BaseGateway { public String name() { return "base-class"; } }
+static class Sbp extends BaseGateway implements Gateway { ... }        // класс + default интерфейса
+static class Visa implements Gateway, CardGateway { ... }              // общий + конкретный интерфейс</code></pre>
+      <pre class="out">== which name() runs
+Sbp  (class + interface default): base-class
+Visa (Gateway + CardGateway):     card</pre>
+      <pre class="out">== two defaults with the same signature
+   line 3: types Audited and Traced are incompatible; class Refunds inherits unrelated defaults for tag() from types Audited and Traced
+   compiled: false
+== resolved with X.super.m()
+   compiled: true</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Три правила выбора метода. Метод из класса или суперкласса важнее default-метода интерфейса. Из двух интерфейсов выигрывает более конкретный, тот, что расширяет другой. Если два несвязанных интерфейса дают одинаковые default-методы, класс обязан переопределить метод и может вызвать нужный через X.super.m().">
+            <defs><marker id="ab-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <g data-s="1">
+              <rect x="40" y="20" width="200" height="40" rx="8" class="dg-cell hit"/><text x="140" y="45" class="dg-ok" text-anchor="middle">BaseGateway.name()</text>
+              <rect x="300" y="20" width="200" height="40" rx="8" class="dg-cell"/><text x="400" y="45" class="dg-n" text-anchor="middle">Gateway.name() default</text>
+              <rect x="170" y="110" width="200" height="40" rx="8" class="dg-box"/><text x="270" y="135" class="dg-in" text-anchor="middle">Sbp</text>
+              <path d="M240 108 L 170 62" class="dg-line ok" marker-end="url(#ab-a)"/><path d="M300 108 L 380 62" class="dg-line" stroke-dasharray="5 4" marker-end="url(#ab-a)"/>
+              <text x="20" y="200" class="dg-t">1. Метод класса или суперкласса важнее любого default: «класс выигрывает».</text>
+            </g>
+            <g data-s="2">
+              <rect x="40" y="20" width="200" height="40" rx="8" class="dg-cell"/><text x="140" y="45" class="dg-n" text-anchor="middle">Gateway.name()</text>
+              <rect x="300" y="20" width="200" height="40" rx="8" class="dg-cell hit"/><text x="400" y="45" class="dg-ok" text-anchor="middle">CardGateway.name()</text>
+              <path d="M300 40 L 242 40" class="dg-line" marker-end="url(#ab-a)"/><text x="271" y="32" class="dg-n" text-anchor="middle">extends</text>
+              <rect x="170" y="110" width="200" height="40" rx="8" class="dg-box"/><text x="270" y="135" class="dg-in" text-anchor="middle">Visa</text>
+              <path d="M240 108 L 170 62" class="dg-line" stroke-dasharray="5 4" marker-end="url(#ab-a)"/><path d="M300 108 L 380 62" class="dg-line ok" marker-end="url(#ab-a)"/>
+              <text x="20" y="200" class="dg-t">2. Из интерфейсов выигрывает самый конкретный — тот, что расширяет другой.</text>
+            </g>
+            <g data-s="3">
+              <rect x="40" y="20" width="200" height="40" rx="8" class="dg-cell miss"/><text x="140" y="45" class="dg-bad" text-anchor="middle">Audited.tag()</text>
+              <rect x="300" y="20" width="200" height="40" rx="8" class="dg-cell miss"/><text x="400" y="45" class="dg-bad" text-anchor="middle">Traced.tag()</text>
+              <rect x="120" y="110" width="300" height="40" rx="8" class="dg-cell hit"/><text x="270" y="135" class="dg-in" text-anchor="middle">Refunds.tag() — обязан переопределить</text>
+              <path d="M220 108 L 160 62" class="dg-line bad" marker-end="url(#ab-a)"/><path d="M320 108 L 380 62" class="dg-line bad" marker-end="url(#ab-a)"/>
+              <text x="560" y="135" class="dg-n" text-anchor="middle">Audited.super.tag()</text>
+              <text x="20" y="200" class="dg-bad">3. Несвязанные интерфейсы с одинаковым default — ошибка компиляции, пока класс не решит сам.</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>Sbp</code> получает <code>name()</code> и от суперкласса, и как default от <code>Gateway</code>. Выигрывает класс — вывод <code>base-class</code>. Правило защищает существующие классы: если интерфейс получит default с тем же именем, поведение класса не изменится.</li>
+          <li><code>Visa</code> реализует <code>Gateway</code> и <code>CardGateway</code>, который его расширяет и переопределяет <code>name()</code>. Выигрывает более конкретный — <code>card</code>.</li>
+          <li><code>Audited</code> и <code>Traced</code> не связаны, оба дают <code>tag()</code>. Компилятор не выбирает за программиста: <code>inherits unrelated defaults</code>. Класс переопределяет метод и может вызвать нужные версии через <code>Audited.super.tag()</code>.</li>
+        </ol>
+      </figure>
+      <p>Это «ромб», который Java решает без множественного наследования состояния: default-методы наследуют поведение, но не поля, поэтому классической проблемы C++ — две копии полей общего предка — нет. Ещё одно ограничение: default-метод не может переопределить метод <code>Object</code> — <code>equals</code>, <code>hashCode</code>, <code>toString</code>. Компилятор отвечает <code>default method equals in interface Identified overrides a member of java.lang.Object</code>: по первому правилу такой default всё равно никогда бы не выполнился — метод класса <code>Object</code> важнее.</p>
+      <pre class="out">== default method cannot override Object.equals
+   line 1: default method equals in interface Identified overrides a member of java.lang.Object
+   compiled: false</pre>
+    </section>
+
+    <section class="step" id="evolution">
+      <h2>Эволюция интерфейса: зачем появились default-методы</h2>
+<pre><code class="language-java">// v1                            // v2                                         // v3
+String pay(long amount);         default String refund(long amount) {...}      String refund(long amount);
+// Sbp собран против v1 и больше не пересобирается</code></pre>
+      <pre class="out">== Gateway v2, old Sbp.class
+   pay:    sbp paid 500
+   refund: refund not supported
+== Gateway v3, old Sbp.class
+   pay:    sbp paid 500
+   refund: AbstractMethodError
+== recompile Sbp against v3
+Sbp.java:2: error: Sbp is not abstract and does not override abstract method refund(long) in Gateway</pre>
+      <p>Скрипт <a href="../examples/abstraction/evolve.sh">evolve.sh</a> собирает <code>Sbp</code> против первой версии интерфейса и больше его не трогает — как реализацию из чужого модуля или библиотеки. Добавление default-метода совместимо: старый <code>Sbp.class</code> работает, вызов <code>refund</code> получает реализацию по умолчанию. Добавление абстрактного метода ломает: код загружается и <code>pay</code> работает, но вызов <code>refund</code> падает <code>AbstractMethodError</code> во время выполнения, а пересборка <code>Sbp</code> — ошибкой компиляции.</p>
+      <p>Именно ради этого default-методы появились в Java 8: в <code>Collection</code> нужно было добавить <code>stream()</code>, <code>removeIf</code>, <code>forEach</code>, не сломав миллионы реализаций коллекций во всех библиотеках мира. Обратная сторона видна в <a href="inheritance.html">Inheritance &amp; Composition</a>: новый default достаётся реализациям молча и может обойти их проверки. Поэтому default-метод в публичном API — решение о поведении для всех чужих реализаций; его пишут через абстрактные методы интерфейса и документируют. До Java 8 эту задачу решали парой «интерфейс + скелетная реализация»: <code>List</code> и <code>AbstractList</code>, <code>Map</code> и <code>AbstractMap</code> — паттерн жив и сейчас, когда скелету нужно состояние.</p>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>Как выбрать и где абстракция вредит</h2>
+      <p>По умолчанию — интерфейс: он не забирает единственного родителя, его можно добавить к существующему классу, замокать в тесте, реализовать лямбдой, обернуть прокси JDK из <a href="reflection.html">Annotations &amp; Reflection</a>. Абстрактный класс — когда у реализаций есть общее состояние или общий алгоритм, который нужно зафиксировать: шаблонный метод, как <code>AbstractRoutingDataSource</code>, <code>OncePerRequestFilter</code> в Spring или <code>RetryingGateway</code> в демо. Частая комбинация — интерфейс как контракт и абстрактный класс как необязательная база для реализаций. Закрытый набор вариантов — не абстракция для расширения, а sealed-иерархия из <a href="sealed-patterns.html">Sealed &amp; Pattern Matching</a>.</p>
+      <p>Абстракция стоит денег: лишний уровень косвенности, который читатель проходит, чтобы найти реальный код. Интерфейс с единственной реализацией «на будущее» — частый шум; для мока в тесте он сейчас не обязателен, Mockito мокает классы. Интерфейс оправдан, когда реализаций несколько или граница действительно важна: модуль, внешняя система, порт в гексагональной архитектуре, где ядро определяет интерфейс, а адаптер его реализует, — инверсия зависимостей из <a href="polymorphism.html">Polymorphism</a>. Абстракция, выделенная по двум похожим кускам кода, а не по смыслу, ломается на третьем: правило трёх — обобщать, когда случаев три, — защищает от неверной абстракции, которая хуже дублирования.</p>
+      <div class="trap">
+        <p class="myth">Default-методы дают в Java множественное наследование, как в C++.</p>
+        <p class="fact">Наследуется только поведение, не состояние: у интерфейса нет полей экземпляра. Конфликт решают три правила — класс важнее интерфейса, конкретный интерфейс важнее общего, остальное компилятор требует переопределить, как в демо с <code>Audited</code> и <code>Traced</code>.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Абстракция — контракт, за которым меняется реализация; формулируется в терминах задачи, не протекает, минимальна.</li>
+        <li>Интерфейс: без состояния, abstract/default/static/private методы, реализаций сколько угодно, лямбда.</li>
+        <li>Абстрактный класс: поля, конструктор, final-шаблонный метод; родитель один.</li>
+        <li>Правила default: класс выигрывает, конкретный интерфейс выигрывает, конфликт — переопределить и X.super.m().</li>
+        <li>Default не может переопределить методы Object; static-методы интерфейса не наследуются.</li>
+        <li>Новый default совместим со старыми реализациями, новый абстрактный — AbstractMethodError.</li>
+        <li>По умолчанию интерфейс; абстрактный класс — для общего состояния и алгоритма; без лишних интерфейсов «на будущее».</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ab-vs" data-freq="3">
+      <h3>Чем абстрактный класс отличается от интерфейса и когда что выбрать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Интерфейс — контракт без состояния: только константы, абстрактные, default-, static- и private-методы; класс реализует сколько угодно интерфейсов. Абстрактный класс может иметь поля, конструктор, методы с любым доступом и final-методы, но наследовать можно только один. Интерфейс выбирают для контракта и ролей, абстрактный класс — когда реализациям нужны общее состояние или зафиксированный алгоритм с точками расширения.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Частая пара: интерфейс + скелетная реализация (List и AbstractList).</li>
+            <li>Интерфейс реализуется лямбдой и проксируется JDK Proxy.</li>
+            <li>Интерфейс с одной реализацией «на будущее» — шум.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ab-default" data-freq="3">
+      <h3>Зачем нужны default-методы и как решается конфликт двух default?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Default-методы позволили добавлять методы в интерфейсы, не ломая существующие реализации: так в Java 8 в Collection появились stream и removeIf. Конфликт решается правилами: метод класса важнее default; из интерфейсов выигрывает более конкретный; если два несвязанных интерфейса дают одинаковый default, класс обязан переопределить метод и может вызвать нужный через <code>Interface.super.method()</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Default не может переопределить equals, hashCode, toString.</li>
+            <li>Старый класс с новым абстрактным методом — AbstractMethodError при вызове.</li>
+            <li>Новый default молча достаётся всем реализациям — может обойти их инварианты.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что напечатает вызов и почему?</summary>
+          <pre><code class="language-java">interface Named { default String name() { return "named"; } }
+class Base { public String name() { return "base"; } }
+class Gateway extends Base implements Named { }
+System.out.println(new Gateway().name());</code></pre>
+          <p><code>base</code>. Метод класса или суперкласса всегда важнее default-метода интерфейса. Правило гарантирует, что добавление default-метода в интерфейс не изменит поведение классов, у которых метод с таким именем уже есть.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ab-static" data-freq="2">
+      <h3>Что можно объявить в интерфейсе в современной Java?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Абстрактные методы; default-методы с реализацией (Java 8); static-методы (Java 8) — вызываются только через имя интерфейса и не наследуются; private-методы (Java 9) — общие помощники для default-методов; константы — неявно public static final. Полей экземпляра и конструкторов нет; также можно объявлять вложенные типы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Static-методы интерфейса не наследуются, чтобы их добавление не ломало классы с методом того же имени.</li>
+            <li>Sealed-интерфейсы (Java 17) ограничивают круг реализаций.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ab-leak" data-freq="2">
+      <h3>Что такое протекающая абстракция?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Абстракция, которая заставляет вызывающего знать детали реализации, чтобы правильно ею пользоваться. Например, Gateway, бросающий SocketTimeoutException или SQLException, раскрывает HTTP или базу под собой. Шлюз должен переводить их в исключения своего уровня. Ленивые ассоциации JPA — классическая утечка: LazyInitializationException вне транзакции.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Закон протекающих абстракций Спольски: все нетривиальные абстракции протекают.</li>
+            <li>Неверная абстракция хуже дублирования — правило трёх.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-9.html#jls-9.4.1">JLS §9.4.1 Inheritance and Overriding</a>, <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html#jls-8.4.8">§8.4.8</a>.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-13.html#jls-13.5.6">JLS §13.5.6 Interface Method Declarations — binary compatibility</a>.</li>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, items 20–22 — интерфейсы вместо абстрактных классов, проектирование интерфейсов на будущее.</li>
+      <li>Joel Spolsky, <a href="https://www.joelonsoftware.com/2002/11/11/the-law-of-leaky-abstractions/">The Law of Leaky Abstractions</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

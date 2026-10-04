@@ -375,7 +375,7 @@ window.KB_TREE = [
           scope: 'extends и super, хрупкий базовый класс, композиция вместо наследования, LSP' },
         { id: 'polymorphism', freq: 3, status: 'draft', title: 'Polymorphism',
           scope: 'позднее связывание, перегрузка и переопределение, правила override, поля и static, вызов из конструктора, sealed и switch' },
-        { id: 'abstraction', freq: 3, status: 'empty', title: 'Abstraction',
+        { id: 'abstraction', freq: 3, status: 'draft', title: 'Abstraction',
           scope: 'abstract class или interface, default, static и private методы интерфейса, когда что выбрать' },
         { id: 'nested-classes', freq: 1, status: 'empty', title: 'Nested Classes',
           scope: 'static nested, inner, локальные, анонимные, утечка ссылки на внешний объект' },
