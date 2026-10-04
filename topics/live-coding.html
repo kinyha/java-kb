@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Live Coding · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="live-coding">
+<main class="page">
+  <header class="topic-head"><h1>Live Coding</h1></header>
+  <div class="lesson">
+    <div class="note tip"><p>На live coding нужно сделать путь к решению проверяемым. Сначала согласуй ответ на маленьком примере, затем объясни простой подход и работу, которую хочешь убрать. У каждого изменения должен сохраняться смысл состояния. Код проверяется на случаях, где правдоподобная ошибка даёт другой результат. В конце назови сложность, цену памяти и границы решения.</p></div>
+    <section class="step" id="agree-on-result">
+      <h2>Сначала уточни, какой ответ будет считаться правильным</h2>
+<p>Интервьюер просит: «У платёжного сервиса повторяются уведомления. Найди первый дубликат». Можно быстро написать HashSet и всё равно решить другую задачу. «Первый» может означать ID, впервые появившийся раньше других, или повторную доставку, которую раньше других увидел сервис. На входе [A,B,B,A] эти ответы различаются.</p>
+      <p>Уточнение должно менять решение. Спроси: «Возвращаем ID или индекс? Первый по моменту повторного получения? ID сравниваем по содержимому? Если повтора нет, что вернуть?» Затем зафиксируй пример: «Для [A,B,B,A] возвращаю индекс 2: второй B пришёл раньше второго A». Один такой пример проверяет понимание лучше длинного пересказа.</p>
+      <p>Теперь ограничения: массив уже в порядке получения, ID — непустые строки без null, пустой массив допустим, вход сохраняется, отсутствие ответа обозначается −1. Узнай размер входа и длину ID. Для учебного метода пусть n≤100000, длина ID≤64 символов. Это допускает память под множество. Сортировка меняла бы порядок и исходные позиции, поэтому её цена включает сохранение индексов и копию входа.</p>
+      <p>Простой перебор уже может показать ошибку в трактовке. В правильной версии внешний цикл идёт по моменту повторной доставки j, а внутренний ищет совпадение среди более ранних i. Если поменять циклы, первым найдётся исходный A, хотя его повтор придёт позже.</p>
+<pre><code class="language-java">static int baseline(String[] ids) {
+    for (int j = 0; j &lt; ids.length; j++) { // сначала минимизируем индекс повтора
+        for (int i = 0; i &lt; j; i++) {
+            if (ids[i].equals(ids[j])) return j;
+        }
+    }
+    return -1;
+}
+
+static int wrongOrder(String[] ids) {
+    for (int i = 0; i &lt; ids.length; i++) { // этот порядок минимизирует первый индекс
+        for (int j = i + 1; j &lt; ids.length; j++) {
+            if (ids[i].equals(ids[j])) return j;
+        }
+    }
+    return -1;
+}
+
+System.out.println("== first means different things ==");
+String[] ids = {"A", "B", "B", "A"};
+System.out.println("baseline=" + baseline(ids));
+System.out.println("first original=" + wrongOrder(ids));</code></pre><pre class="out">== first means different things ==
+baseline=2
+first original=3</pre>
+      <p class="src">Фрагмент <a href="../examples/live-coding/FirstRepeatDemo.java">FirstRepeatDemo.java</a>; полный запуск: <code>java examples/live-coding/FirstRepeatDemo.java</code>, JDK 21. Различие — в порядке поиска, а не в скорости коллекций.</p>
+      <p>Уточнять всё возможное заранее тоже дорого. Выбирай вопросы, от которых зависят ответ, структура данных или безопасная арифметика. Если интервьюер предлагает решить на разумных предположениях, назови их и двигайся дальше. Проверять null в коде нужно только при согласованном поведении для null: допустимое значение, ошибка или отсутствие входа — разные условия.</p>
+      <div class="note tip"><p>Удобная фраза: «Верну индекс первой повторной доставки. Проверю равенство строк по содержимому, вход не меняю, без повтора верну −1. Для [A,B,B,A] ответ 2. Верно?» Это рабочее уточнение на конкретных значениях.</p></div>
+    </section>
+    <section class="step" id="explain-the-state">
+      <h2>Улучшение должно сохранять смысл простого решения</h2>
+<p>Перебор — исходная точка для объяснения и проверки. Для n разных ID он сравнивает каждый новый ID со всем префиксом: 0+1+…+(n−1)=n(n−1)/2 сравнений. При n=1000 это 499500. Для большого входа повторяется один вопрос: «Такой ID раньше был?» Сохраним ответ на него в множестве.</p>
+      <p>Перед чтением позиции j множество seen содержит ровно ID из позиций 0…j−1. Это инвариант — утверждение о состоянии, которое сохраняется на каждом шаге. Если ID уже есть, более ранняя доставка найдена. Если его ещё нет, добавляем и переходим к j+1. До этого все позиции проверены без повтора, поэтому найденный j минимален.</p>
+<figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 266" role="img" aria-label="Массив A,B,B,A. До текущей позиции seen содержит только уже прочитанные ID. A и B добавляются; на позиции2 B уже есть, метод возвращает2 и не читает позицию3.">
+      <defs><marker id="lcp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+      <text x="24" y="24" class="dg-cap" text-anchor="start">ПРЕФИКС ДО ЧТЕНИЯ ТЕКУЩЕГО ID</text>
+      <rect x="40" y="62" width="76" height="44" rx="5" class="dg-cell"/>
+      <rect x="144" y="62" width="76" height="44" rx="5" class="dg-cell"/>
+      <rect x="248" y="62" width="76" height="44" rx="5" class="dg-cell"/>
+      <rect x="352" y="62" width="76" height="44" rx="5" class="dg-cell"/>
+      <rect x="480" y="62" width="214" height="100" rx="5" class="dg-box"/>
+      <text x="494" y="86" class="dg-t" text-anchor="start">seen</text>
+      <g data-s="1">
+<rect x="40" y="62" width="76" height="44" rx="5" class="dg-cell hit"/>
+<path d="M78 62 C78 40,460 40,476 78" class="dg-line" marker-end="url(#lcp-n)"/>
+<text x="494" y="122" class="dg-in" text-anchor="start">{}</text>
+<text x="24" y="196" class="dg-in" text-anchor="start">j=0: A ещё не было</text>
+<text x="24" y="228" class="dg-s" text-anchor="start">все предыдущие позиции уже проверены</text>
+</g>
+      <g data-s="2">
+<rect x="144" y="62" width="76" height="44" rx="5" class="dg-cell hit"/>
+<path d="M182 62 C182 40,460 40,476 78" class="dg-line" marker-end="url(#lcp-n)"/>
+<text x="494" y="122" class="dg-in" text-anchor="start">{A}</text>
+<text x="24" y="196" class="dg-in" text-anchor="start">j=1: B ещё не было</text>
+<text x="24" y="228" class="dg-s" text-anchor="start">A записан после обработки позиции 0</text>
+</g>
+      <g data-s="3">
+<rect x="248" y="62" width="76" height="44" rx="5" class="dg-cell hit"/>
+<path d="M286 62 C286 40,460 40,476 78" class="dg-line" marker-end="url(#lcp-n)"/>
+<text x="494" y="122" class="dg-in" text-anchor="start">{A,B}</text>
+<text x="24" y="196" class="dg-in" text-anchor="start">j=2: B уже есть</text>
+<text x="24" y="228" class="dg-s" text-anchor="start">add(B)=false → вернуть 2</text>
+</g>
+      <g data-s="4">
+<text x="494" y="122" class="dg-in" text-anchor="start">{A,B}</text>
+<text x="24" y="196" class="dg-in" text-anchor="start">ответ 2; позицию 3 не читаем</text>
+<text x="24" y="228" class="dg-s" text-anchor="start">минимальный повтор найден слева направо</text>
+</g>
+      <text x="78" y="90" class="dg-in" text-anchor="middle">A</text>
+      <text x="182" y="90" class="dg-in" text-anchor="middle">B</text>
+      <text x="286" y="90" class="dg-in" text-anchor="middle">B</text>
+      <text x="390" y="90" class="dg-in" text-anchor="middle">A</text>
+      <text x="78" y="126" class="dg-n" text-anchor="middle">0</text>
+      <text x="182" y="126" class="dg-n" text-anchor="middle">1</text>
+      <text x="286" y="126" class="dg-n" text-anchor="middle">2</text>
+      <text x="390" y="126" class="dg-n" text-anchor="middle">3</text>
+    </svg>
+  </div>
+<ol class="play-steps">
+  <li>Перед позицией 0 множество пусто. A ещё нет; после этого чтения он попадёт в seen.</li>
+  <li>Перед позицией 1 seen={A}. B ещё нет; после чтения множество станет {A,B}.</li>
+  <li>Перед позицией 2 в seen уже есть B. add возвращает false. Ответ — 2.</li>
+  <li>Метод завершён. Последний A мог бы дать повтор на позиции 3, но ответ 2 уже меньше.</li>
+</ol>
+<figcaption>seen показан до обработки текущей позиции. Само множество не обязано хранить порядок: порядок ответа задаёт проход по массиву.</figcaption>
+</figure>
+      <p>HashSet.add совмещает проверку и вставку: true означает, что элемент добавлен, false — такой элемент уже содержался. Если сначала вызвать add, а затем contains, второй вызов увидит текущий элемент. Смысл «был раньше» исчезнет. Причина результата должна быть понятна по коду на странице.</p>
+<pre><code class="language-java">static int firstRepeat(String[] ids) {
+    Set&lt;String&gt; seen = new HashSet&lt;&gt;();
+    for (int j = 0; j &lt; ids.length; j++) {
+        if (!seen.add(ids[j])) return j; // add=false: такой ID был в префиксе
+    }
+    return -1;
+}
+
+static int wrongWrite(String[] ids) {
+    Set&lt;String&gt; seen = new HashSet&lt;&gt;();
+    for (int j = 0; j &lt; ids.length; j++) {
+        seen.add(ids[j]);                   // текущий элемент уже в памяти
+        if (seen.contains(ids[j])) return j; // проверка всегда проходит
+    }
+    return -1;
+}
+
+System.out.println("== update changes the question ==");
+String[] ids = {"A", "B", "B", "A"};
+System.out.println("write then contains=" + wrongWrite(ids));
+System.out.println("add result=" + firstRepeat(ids));</code></pre><pre class="out">== update changes the question ==
+write then contains=0
+add result=2</pre>
+      <p>Равенство ID относится к содержимому строк. Две доставки могут создать два объекта String с одинаковым ID. HashSet использует hashCode и equals, поэтому это повтор; сравнение ссылок через == пропустило бы его. Порядок обхода множества здесь не используется: ответ выбирается порядком массива.</p>
+<pre><code class="language-java">System.out.println("== equal content, different objects ==");
+String[] equal = {new String("p7"), new String("p7")};
+System.out.println("same reference=" + (equal[0] == equal[1]));
+System.out.println("repeat=" + firstRepeat(equal));
+System.out.println("empty=" + firstRepeat(new String[0]));</code></pre><pre class="out">== equal content, different objects ==
+same reference=false
+repeat=1
+empty=-1</pre>
+      <p>Расскажи цену улучшения через операции. На входе без повторов выполняется n вставок; хранится до n ссылок на ID и служебные записи таблицы. При хорошем распределении хеша базовые операции HashSet имеют постоянную стоимость. Для ID ограниченной длины ожидаемое время метода O(n), дополнительная память O(n). Это оценка при указанных условиях, а не обещание одинакового времени для любых строк.</p>
+<pre><code class="language-java">record Work(long comparisons, int inserts) {}
+static Work uniqueWork(int n) {
+    String[] ids = new String[n];
+    for (int i = 0; i &lt; n; i++) ids[i] = "p" + i;
+    long comparisons = 0;
+    for (int j = 0; j &lt; n; j++) {
+        for (int i = 0; i &lt; j; i++) {
+            comparisons++;                // считаем сравнения, а не миллисекунды
+            if (ids[i].equals(ids[j])) throw new AssertionError("unique input");
+        }
+    }
+    Set&lt;String&gt; seen = new HashSet&lt;&gt;();
+    int inserts = 0;
+    for (String id : ids) {
+        inserts++;
+        if (!seen.add(id)) throw new AssertionError("unique input");
+    }
+    return new Work(comparisons, inserts);
+}
+
+System.out.println("== count the repeated work ==");
+Work w = uniqueWork(1000);
+System.out.println("comparisons=" + w.comparisons());
+System.out.println("set inserts=" + w.inserts());</code></pre><pre class="out">== count the repeated work ==
+comparisons=499500
+set inserts=1000</pre>
+      <p>Счётчики измеряют разные операции и доказывают устранение повторного поиска; они не сравнивают наносекунды. Если длина ID не ограничена, хеширование и сравнение строк тоже читают символы. При длине не больше L перебор требует до O(n²L), вариант с множеством при обычном распределении — O(nL). Строки уже существуют во входе: набор хранит ссылки, а не копирует их содержимое.</p>
+      <p>Фраза вслух: «Сначала O(n²) без дополнительного хранения. Заменю проверку префикса множеством. Перед каждым шагом оно содержит только прошлые ID; первый отказ add даёт нужный индекс. Выиграю время ценой O(n) памяти». После такого объяснения код занимает несколько строк. Устройство таблицы разобрано в <a href="hash-tables.html">Hash Tables</a>, варианты задач — в <a href="hash-counting.html">Arrays &amp; Hashing</a>.</p>
+    </section>
+    <section class="step" id="test-the-claim">
+      <h2>Проверка ищет нарушение условия, а не только красивый результат</h2>
+<p>После успешной компиляции решение ещё нужно проверить. Для каждого требования выбери вход, который отличит правильный код от правдоподобной ошибки. Пустой массив проверяет отсутствие ответа, одиночный — выход за границу, [A,B,B,A] — смысл «первого», два новых String("A") — равенство по содержимому. Одинаковые элементы, отсутствие повторов и сохранность входа проверяют другие свойства.</p>
+      <p>В задаче о двух платежах равенства суммы недостаточно: нужны два разных индекса. Перед поиском дополнения карта должна содержать только позиции i&lt;j. Запись текущего индекса до поиска меняет это условие. Самый короткий контрпример — один платёж 7 и цель 14; две семёрки скрывают ошибку.</p>
+<figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 290" role="img" aria-label="Для единственного платежа7 и цели14 правильная карта проверяется до записи текущего индекса. Поиск в пустой карте не даёт пару. Запись до поиска создаёт ложную Pair0,0.">
+      <defs><marker id="lcps-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+      <text x="24" y="24" class="dg-cap" text-anchor="start">ПРОВЕРКА ПРЕФИКСА ИЛИ ТЕКУЩЕГО ЭЛЕМЕНТА</text>
+      <rect x="26" y="64" width="146" height="58" rx="5" class="dg-cell"/>
+      <text x="44" y="86" class="dg-n" text-anchor="start">amounts[0]</text>
+      <text x="44" y="110" class="dg-in" text-anchor="start">7, target=14</text>
+      <rect x="280" y="58" width="160" height="124" rx="5" class="dg-box"/>
+      <rect x="518" y="58" width="176" height="124" rx="5" class="dg-box"/>
+      <text x="294" y="81" class="dg-n" text-anchor="start">ПОИСК → ЗАПИСЬ</text>
+      <text x="532" y="81" class="dg-n" text-anchor="start">ЗАПИСЬ → ПОИСК</text>
+      <g data-s="1">
+<text x="294" y="126" class="dg-in" text-anchor="start">{}</text>
+<text x="532" y="126" class="dg-in" text-anchor="start">{}</text>
+<text x="24" y="226" class="dg-in" text-anchor="start">i&lt;j ещё некому выполнить</text>
+<text x="24" y="258" class="dg-s" text-anchor="start">Обе карты пусты; текущий индекс j=0.</text>
+</g>
+      <g data-s="2">
+<text x="294" y="126" class="dg-in" text-anchor="start">{}</text>
+<text x="532" y="126" class="dg-in" text-anchor="start">{7→0}</text>
+<text x="24" y="226" class="dg-in" text-anchor="start">справа записали текущий 0</text>
+<text x="24" y="258" class="dg-s" text-anchor="start">Правый вариант сначала сохраняет amounts[0]=7.</text>
+<path d="M172 112 C200 200,500 200,514 140" class="dg-line" marker-end="url(#lcps-n)"/>
+</g>
+      <g data-s="3">
+<text x="294" y="126" class="dg-in" text-anchor="start">нет пары</text>
+<text x="532" y="126" class="dg-in" text-anchor="start">{7→0}</text>
+<text x="24" y="226" class="dg-in" text-anchor="start">need=14−7=7</text>
+<text x="24" y="258" class="dg-s" text-anchor="start">Слева ищем в пустой карте, справа — уже в карте с текущим индексом.</text>
+<path d="M172 112 C200 200,500 200,514 140" class="dg-line" marker-end="url(#lcps-n)"/>
+<path d="M172 74 L276 100" class="dg-line" marker-end="url(#lcps-n)"/>
+</g>
+      <g data-s="4">
+<text x="294" y="126" class="dg-in" text-anchor="start">{7→0}</text>
+<text x="532" y="126" class="dg-in" text-anchor="start">Pair(0,0)</text>
+<text x="24" y="226" class="dg-in" text-anchor="start">справа нарушено i&lt;j</text>
+<text x="24" y="258" class="dg-s" text-anchor="start">Слева можно сохранить 0 для будущих элементов; справа ошибочно вернули пару.</text>
+</g>
+      <g data-s="5">
+<text x="294" y="126" class="dg-in" text-anchor="start">empty</text>
+<text x="532" y="126" class="dg-in" text-anchor="start">Pair(0,0)</text>
+<text x="24" y="226" class="dg-in" text-anchor="start">один элемент → пары нет</text>
+<text x="24" y="258" class="dg-s" text-anchor="start">Правильный метод дошёл до конца. Два разных индекса получить невозможно.</text>
+</g>
+    </svg>
+  </div>
+<ol class="play-steps">
+  <li>На входе один платёж 7. Нужна сумма 14 из двух различных позиций; обе карты пусты.</li>
+  <li>Неверный вариант записывает 7→0 до поиска. Карта уже описывает префикс вместе с текущим элементом.</li>
+  <li>Ищем дополнение 7. Правильная карта пуста, а неверная содержит индекс 0.</li>
+  <li>Неверный вариант возвращает Pair(0,0). Правильный сохраняет индекс 0 только для следующего шага.</li>
+  <li>Следующего элемента нет. Верный результат — отсутствие пары; равенство сумм ещё не подтверждает различие индексов.</li>
+</ol>
+<figcaption>Ошибка находится в моменте обновления состояния. Тест с двумя семёрками её скрывает: там настоящая пара существует.</figcaption>
+</figure><pre><code class="language-java">record Pair(int i, int j) {}
+
+static Optional&lt;Pair&gt; solve(int[] amounts, int target) {
+    Map&lt;Integer, Integer&gt; firstIndex = new HashMap&lt;&gt;();
+    for (int j = 0; j &lt; amounts.length; j++) {
+        long need = (long) target - amounts[j]; // расширяем ДО вычитания
+        if (need &gt;= Integer.MIN_VALUE &amp;&amp; need &lt;= Integer.MAX_VALUE) {
+            Integer i = firstIndex.get((int) need);
+            if (i != null) return Optional.of(new Pair(i, j)); // i строго меньше j
+        }
+        firstIndex.putIfAbsent(amounts[j], j); // сохраняем самый ранний i
+    }
+    return Optional.empty();
+}
+
+static Optional&lt;Pair&gt; wrongSelf(int[] amounts, int target) {
+    Map&lt;Integer, Integer&gt; seen = new HashMap&lt;&gt;();
+    for (int j = 0; j &lt; amounts.length; j++) {
+        seen.putIfAbsent(amounts[j], j); // записали текущий индекс до поиска
+        long need = (long) target - amounts[j];
+        if (need &gt;= Integer.MIN_VALUE &amp;&amp; need &lt;= Integer.MAX_VALUE) {
+            Integer i = seen.get((int) need);
+            if (i != null) return Optional.of(new Pair(i, j));
+        }
+    }
+    return Optional.empty();
+}
+
+System.out.println("== a payment cannot pair with itself ==");
+System.out.println("write first=" + wrongSelf(new int[]{7}, 14));
+System.out.println("read first=" + solve(new int[]{7}, 14));
+System.out.println("two positions=" + solve(new int[]{7, 7}, 14));</code></pre><pre class="out">== a payment cannot pair with itself ==
+write first=Optional[Pair[i=0, j=0]]
+read first=Optional.empty
+two positions=Optional[Pair[i=0, j=1]]</pre>
+      <p>Границы чисел проверяются по арифметике самого выражения. Если target и amount — int, вычитание в int может завернуться и найти чужую сумму. Присваивание в long после вычитания уже опоздало. Расширь операнд до вычисления; если дополнение за диапазоном int, ни один элемент этого int-массива ему не равен.</p>
+<pre><code class="language-java">static Optional&lt;Pair&gt; wrongInt(int[] amounts, int target) {
+    Map&lt;Integer, Integer&gt; seen = new HashMap&lt;&gt;();
+    for (int j = 0; j &lt; amounts.length; j++) {
+        int need = target - amounts[j]; // переполнение создаёт ложное дополнение
+        Integer i = seen.get(need);
+        if (i != null) return Optional.of(new Pair(i, j));
+        seen.putIfAbsent(amounts[j], j);
+    }
+    return Optional.empty();
+}
+
+System.out.println("== widen before subtracting ==");
+int[] large = {Integer.MAX_VALUE, 1};
+System.out.println("int complement=" + wrongInt(large, Integer.MIN_VALUE));
+System.out.println("long complement=" + solve(large, Integer.MIN_VALUE));
+System.out.println("actual sum=" + ((long) large[0] + large[1]));
+System.out.println("late cast=" + (long) (Integer.MIN_VALUE - 1));
+System.out.println("early cast=" + ((long) Integer.MIN_VALUE - 1));</code></pre><pre class="out">== widen before subtracting ==
+int complement=Optional[Pair[i=0, j=1]]
+long complement=Optional.empty
+actual sum=2147483648
+late cast=2147483647
+early cast=-2147483649</pre>
+      <p class="src">Оба опыта — из <a href="../examples/live-coding/PairDemo.java">PairDemo.java</a>. В данных разрешены отрицательные int-суммы; проверяется математическое равенство, а не равенство после переполнения.</p>
+      <p>При ошибке назови первое место, где фактическое состояние расходится с инвариантом. «В карту попал текущий индекс, поэтому вернулся Pair(0,0); перенесу запись после поиска и повторю тест с одной и двумя семёрками». Это проверяемая причина. Несвязанные изменения по очереди только прячут её.</p>
+      <p>Для небольшой задачи полезен независимый эталон: простой перебор. Здесь можно перечислить все строки из A,B,C длины 0…6 и сравнить быстрый ответ с baseline. У эталона внешний цикл j выбран непосредственно из определения ответа. Он не использует множество и потому не повторяет способ обновления быстрой версии.</p>
+<pre><code class="language-java">static String[] input(int length, int code) {
+    String[] ids = new String[length];
+    String[] alphabet = {"A", "B", "C"};
+    for (int i = length - 1; i &gt;= 0; i--) {
+        ids[i] = alphabet[code % 3];
+        code /= 3;
+    }
+    return ids;
+}
+static void compareAll() {
+    int checked = 0;
+    String[] counterexample = null;
+    for (int length = 0, count = 1; length &lt;= 6; length++, count *= 3) {
+        for (int code = 0; code &lt; count; code++) {
+            String[] ids = input(length, code);
+            int want = baseline(ids);          // независимый перебор всех ранних пар
+            if (firstRepeat(ids) != want) throw new AssertionError(Arrays.toString(ids));
+            if (counterexample == null &amp;&amp; wrongOrder(ids) != want) {
+                counterexample = ids.clone(); // первый короткий случай, где версии расходятся
+            }
+            checked++;
+        }
+    }
+    System.out.println("checked=" + checked);
+    System.out.println("first mismatch=" + Arrays.toString(counterexample));
+    System.out.println("baseline=" + baseline(counterexample));
+    System.out.println("wrong order=" + wrongOrder(counterexample));
+}
+
+System.out.println("== small exhaustive oracle ==");
+compareAll();</code></pre><pre class="out">== small exhaustive oracle ==
+checked=1093
+first mismatch=[A, B, B, A]
+baseline=2
+wrong order=3</pre>
+      <p class="src">Фрагмент <a href="../examples/live-coding/OracleDemo.java">OracleDemo.java</a> использует baseline, firstRepeat и wrongOrder из предыдущих шагов. Перечислено 1+3+9+27+81+243+729=1093 массива. Случай [A,B,B,A] появился автоматически, а не был подставлен в поиск.</p>
+      <p>Такой перебор хорошо находит короткие ошибки порядка и краёв. Он охватывает конечный набор, поэтому общее доказательство через инвариант остаётся нужным. Длинные строки, null и миллионы элементов в этот опыт не входят. На собеседовании достаточно нескольких осмысленных проверок; полный перебор полезен при самостоятельной тренировке.</p>
+    </section>
+    <section class="step" id="finish-with-boundaries">
+      <h2>Заканчивай проверенным решением и точными границами</h2>
+<p>Рассуждать вслух — делать решения понятными собеседнику. Говори в моменты выбора: что уточнил, какая работа повторяется, какое состояние сохраняешь, почему индекс правильный и какой тест ломает неверную версию. Называть каждое нажатие клавиши дорого. Перед длинным молчанием скажи: «Возьму полминуты, чтобы проверить границу цикла». Это поддерживает совместный разбор.</p>
+      <p>Если застрял, уменьши вход до двух-трёх элементов и выпиши состояние вручную. Вернись к перебору: что он вычисляет заново? Какие части ответа уже известны? Если подсказка изменила подход, объясни её роль: «Сохраним только прошлые суммы — тогда дополнение проверяется одним поиском». Так видно, что ты применил идею. При изменении требования перечитай пример и инвариант: новый смысл «первого» может потребовать другой порядок, а не дополнительный if.</p>
+      <p>Оставь время на работающий вариант и тесты. Для учебной тренировки на 35 минут можно выделить 4 минуты на условие, 6 на подход, 17 на код и 8 на проверку с итогом. Это предлагаемый режим практики, а не регламент компании. Если оптимизация не складывается, покажи корректный простой вариант, его узкое место и следующий шаг. Завершённая причина и честная сложность полезнее скрытого TODO в ключевой ветке.</p>
+      <p>Итог решения занимает несколько фраз: что возвращает метод, почему, время, дополнительная память и случаи без ответа. Различай память входа, рабочее хранение и память результата. У рюкзака или графа нужны отдельные параметры, например n и m; два вложенных цикла сами по себе не означают O(n²), если указатели суммарно проходят вход один раз. Проверки с long не исправляют вычисление, которое уже произошло в int.</p>
+      <p>У метода firstRepeat память живёт один вызов и видит один массив. Для постоянного потока seen растёт с числом разных ID. Очистка или TTL меняет требование: старый повтор может снова стать «новым». Перезапуск теряет память, две копии сервиса имеют разные множества. Подмена HashSet потокобезопасным набором не делает проверку общей между процессами и не связывает её атомарно с записью платежа.</p>
+      <p>На уточнение «а в настоящем сервисе?» обозначь границу текущего решения. Долговременная идемпотентность требует общего устойчивого ключа и атомарной фиксации эффекта в согласованном хранилище; частный вариант — уникальный ключ в БД и транзакция с изменением состояния. Это уже отдельная задача о <a href="api-practices.html">практике API</a> и <a href="outbox.html">Outbox</a>. В алгоритмической задаче остаёмся внутри согласованного массива.</p>
+      <div class="note tip"><p>Финальная фраза: «Верну минимальный индекс повторной доставки. До шага в seen только прошлые ID, поэтому отказ add даёт нужный ответ. Проверил пустой массив, одиночный ID, два равных объекта и [A,B,B,A]. При длине ID≤64 ожидаемое время O(n), дополнительная память O(n). Массив сохраняется; отсутствие ответа — −1».</p></div>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Уточнение полезно, когда меняет ответ, выбор алгоритма или безопасность вычисления. Проверь его конкретным примером.</li>
+      <li>Простой перебор помогает объяснить результат и проверить оптимизацию. Инвариант связывает быстрый код с тем же условием.</li>
+      <li>Проверка перед обновлением состояния отличает прошлые элементы от текущего. Порядок прохода задаёт правило выбора ответа.</li>
+      <li>Крайний случай должен ловить конкретную ошибку: самопару, равную границу, неверный индекс, переполнение или потерю последней группы.</li>
+      <li>Заверши код, прогони проверки и назови время и память с нужными параметрами. Локальный алгоритм и постоянный сервис живут при разных условиях.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview"><h2>Задачи</h2>
+    <p>Решай вслух. До открытия подсказок сформулируй ответ, ограничения и два показательных теста. После решения объясни инвариант, сложность и случай, который ломает неверную версию. Это авторские мини-собеседования на платежах; подробные доказательства паттернов есть в соседних темах <a href="hash-counting.html">Arrays &amp; Hashing</a>, <a href="intervals.html">Intervals</a>, <a href="sliding-window.html">Sliding Window</a> и <a href="graph-search.html">Graph Search</a>.</p>
+    <article class="q" id="first-repeat" data-freq="3" data-type="task">
+      <h3>Первый повтор: уточни значение слова «первый»</h3>
+      <div class="task">
+        <p>Даны ID уведомлений в порядке получения. Верни минимальный индекс j, для которого есть i&lt;j с таким же ID. Если повтора нет, верни −1. Сравнение строк — по содержимому.</p>
+        <p>0≤n≤100000, ID — непустые строки длины≤64, null отсутствует. Вход сохраняется. Перед кодом объясни, чем ответ отличается от ID с самым ранним первым появлением, который повторится когда-нибудь позже.</p>
+        <pre class="io">[A,B,B,A] → 2
+[A,B,C] → −1
+[] → −1</pre>
+        <p class="src">Авторская задача · разминка · уточнение ответа и инвариант префикса</p>
+        <details><summary>Заготовка: FirstRepeat.java</summary>
+<pre><code class="language-java">import java.util.*;
+public class FirstRepeat {
+
+    static int solve(String[] ids) {
+        throw new UnsupportedOperationException("TODO");
+    }
+    static void check(String name, Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(name + ": " + got + " != " + want);
+        System.out.println(name + " OK");
+    }
+    public static void main(String[] args) {
+        check("empty", solve(new String[0]), -1);
+        check("single", solve(new String[]{"A"}), -1);
+        check("none", solve(new String[]{"A", "B", "C"}), -1);
+        check("repeat", solve(new String[]{"A", "B", "A"}), 2);
+        check("first arrival", solve(new String[]{"A", "B", "B", "A"}), 2);
+        check("same content", solve(new String[]{new String("A"), new String("A")}), 1);
+        check("all same", solve(new String[]{"A", "A", "A"}), 1);
+        String[] ids = {"C", "A", "C"};
+        String[] before = ids.clone();
+        solve(ids);
+        check("input unchanged", Arrays.equals(ids, before), true);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+<details><summary>Подсказка 1</summary><p>Пройди по j слева направо. Перебор ищет совпадение только в позициях меньше j.</p></details>
+<details><summary>Подсказка 2</summary><p>Храни прошлые ID в HashSet. Отказ add означает, что повтор встретился на текущем j.</p></details>
+
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>«Сначала согласую пример [A,B,B,A]→2. В seen перед шагом лежат прошлые ID. Если текущий добавился, раньше его не было; если нет — повтор найден. Все более ранние j уже проверены, поэтому этот минимален». Равные String сравниваются через equals внутри множества.</p>
+<pre><code class="language-java">static int solve(String[] ids) {
+    Set&lt;String&gt; seen = new HashSet&lt;&gt;();
+    for (int j = 0; j &lt; ids.length; j++) {
+        if (!seen.add(ids[j])) return j; // add=false: такой ID был в префиксе
+    }
+    return -1;
+}</code></pre>
+<pre class="out">empty OK
+single OK
+none OK
+repeat OK
+first arrival OK
+same content OK
+all same OK
+input unchanged OK</pre>
+        <p>Ожидаемое время O(n) при ограниченной длине ID и хорошем распределении хеша; дополнительная память O(n). Вход не изменяется.</p>
+
+        <p class="src">Решение и проверки: <a href="../examples/live-coding/FirstRepeat.java">FirstRepeat.java</a>. Запуск: <code>java examples/live-coding/FirstRepeat.java</code>.</p>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>После задачи интервьюер требует O(1) дополнительной памяти. Что предложить?</summary><p>Уточни, сохраняется ли порядок и можно ли менять вход. Для произвольных ID и сохранения исходных позиций простой перебор даёт O(1) памяти и O(n²) сравнений. Сортировка меняет порядок; для ответа по исходному j нужны индексы, и это дополнительное хранение. Ограниченный диапазон ID может дать другую структуру, но это новое условие, которое нужно получить.</p></details></div>
+    </article>
+    <article class="q" id="refund-pair" data-freq="3" data-type="task">
+      <h3>Два платежа на заданную сумму: не потеряй индексы</h3>
+      <div class="task">
+        <p>Дан int-массив сумм и int target. Найди два различных индекса i&lt;j с математической суммой amounts[i]+amounts[j]=target. Выбери минимальный j, а при нём минимальный i. Верни Optional&lt;Pair&gt;; при отсутствии — Optional.empty().</p>
+        <p>0≤n≤100000, разрешены отрицательные суммы и повторы; null отсутствует, вход сохраняется. Перед кодом назови два разных нарушения: использование одной позиции дважды и переполнение вычисления.</p>
+        <pre class="io">[7], target=14 → empty
+[7,7], target=14 → Pair(0,1)
+[1,4,6,9], target=10 → Pair(1,2)</pre>
+        <p class="src">Авторская задача · базовая · порядок ответа, безопасная арифметика и момент обновления</p>
+        <details><summary>Заготовка: RefundPair.java</summary>
+<pre><code class="language-java">import java.util.*;
+public class RefundPair {
+    record Pair(int i, int j) {}
+    static Optional&lt;Pair&gt; solve(int[] amounts, int target) {
+        throw new UnsupportedOperationException("TODO");
+    }
+    static void check(String name, Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(name + ": " + got + " != " + want);
+        System.out.println(name + " OK");
+    }
+    public static void main(String[] args) {
+        check("empty", solve(new int[0], 14), Optional.empty());
+        check("one position", solve(new int[]{7}, 14), Optional.empty());
+        check("same amount", solve(new int[]{7, 7}, 14), Optional.of(new Pair(0, 1)));
+        check("earliest j", solve(new int[]{1, 4, 6, 9}, 10), Optional.of(new Pair(1, 2)));
+        check("earliest i", solve(new int[]{2, 2, 3}, 5), Optional.of(new Pair(0, 2)));
+        check("signed", solve(new int[]{-5, 8, 3}, 3), Optional.of(new Pair(0, 1)));
+        check("overflow", solve(new int[]{Integer.MAX_VALUE, 1}, Integer.MIN_VALUE), Optional.empty());
+        check("min value", solve(new int[]{Integer.MIN_VALUE, 0}, Integer.MIN_VALUE), Optional.of(new Pair(0, 1)));
+        int[] values = {3, 1, 7};
+        int[] before = values.clone();
+        solve(values, 10);
+        check("input unchanged", Arrays.equals(values, before), true);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+<details><summary>Подсказка 1</summary><p>Для текущего j нужен элемент target−amounts[j] только среди прошлых позиций.</p></details>
+<details><summary>Подсказка 2</summary><p>Карта хранит самый ранний индекс каждой суммы. Ищи до записи, используй putIfAbsent, дополнение вычисляй в long.</p></details>
+
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>«Прохожу по j слева направо. До поиска карта содержит только i&lt;j. У каждого значения храню минимальный i, поэтому первый найденный j и его i соответствуют правилу выбора». Дополнение двух int вычисляется в long без переполнения; если оно вне int, подходящего элемента в массиве быть не может.</p>
+<pre><code class="language-java">static Optional&lt;Pair&gt; solve(int[] amounts, int target) {
+    Map&lt;Integer, Integer&gt; firstIndex = new HashMap&lt;&gt;();
+    for (int j = 0; j &lt; amounts.length; j++) {
+        long need = (long) target - amounts[j]; // расширяем ДО вычитания
+        if (need &gt;= Integer.MIN_VALUE &amp;&amp; need &lt;= Integer.MAX_VALUE) {
+            Integer i = firstIndex.get((int) need);
+            if (i != null) return Optional.of(new Pair(i, j)); // i строго меньше j
+        }
+        firstIndex.putIfAbsent(amounts[j], j); // сохраняем самый ранний i
+    }
+    return Optional.empty();
+}</code></pre>
+<pre class="out">empty OK
+one position OK
+same amount OK
+earliest j OK
+earliest i OK
+signed OK
+overflow OK
+min value OK
+input unchanged OK</pre>
+        <p>Ожидаемое время O(n), дополнительная память O(n) при обычном распределении хешей. Отрицательные суммы не меняют переход. put вместо putIfAbsent мог бы потерять минимальный i.</p>
+
+        <p class="src">Решение и проверки: <a href="../examples/live-coding/RefundPair.java">RefundPair.java</a>. Запуск: <code>java examples/live-coding/RefundPair.java</code>.</p>
+      </details>
+      <div class="check"><details data-kind="ревью"><summary>Код возвращает любую правильную пару. Этого достаточно?</summary><p>Для этого условия — нет. Сумма и различие индексов подтверждают допустимость, но ещё нужны минимальный j и минимальный i. Тест [1,4,6,9], target=10 различает раннюю пару (1,2) и позднюю (0,3). Тест [2,2,3], target=5 проверяет сохранение первого индекса 0. Правило выбора входит в корректность.</p></details></div>
+    </article>
+    <article class="q" id="merge-activity" data-freq="3" data-type="task">
+      <h3>Объедини интервалы активности: согласуй касание</h3>
+      <div class="task">
+        <p>Даны непустые полуоткрытые интервалы активности [start,end), где start&lt;end. Верни их объединение как упорядоченный список неперекрывающихся интервалов. Если конец одного равен началу другого, склей их: в объединении нет промежутка.</p>
+        <p>0≤n≤100000, start/end — неотрицательные long, вход сохраняется. record Range неизменяем. Пустых интервалов и null нет. Перед кодом поясни разницу: [1,3) и [3,5) не пересекаются, но их объединение всё равно [1,5).</p>
+        <pre class="io">[[3,8),[1,5)] → [[1,8)]
+[[1,3),[3,5)] → [[1,5)]
+[[1,2),[5,7)] → [[1,2),[5,7)]</pre>
+        <p class="src">Авторская задача · средняя · границы, копия входа и завершение последней группы</p>
+        <details><summary>Заготовка: MergeActivity.java</summary>
+<pre><code class="language-java">import java.util.*;
+public class MergeActivity {
+    record Range(long start, long end) {}
+    static List&lt;Range&gt; solve(Range[] input) {
+        throw new UnsupportedOperationException("TODO");
+    }
+    static void check(String name, Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(name + ": " + got + " != " + want);
+        System.out.println(name + " OK");
+    }
+    public static void main(String[] args) {
+        check("empty", solve(new Range[0]), List.of());
+        check("one", solve(new Range[]{new Range(2, 4)}), List.of(new Range(2, 4)));
+        check("overlap", solve(new Range[]{new Range(3, 8), new Range(1, 5)}), List.of(new Range(1, 8)));
+        check("touch", solve(new Range[]{new Range(1, 3), new Range(3, 5)}), List.of(new Range(1, 5)));
+        check("nested", solve(new Range[]{new Range(1, 10), new Range(2, 3)}), List.of(new Range(1, 10)));
+        check("gap", solve(new Range[]{new Range(5, 7), new Range(1, 2)}), List.of(new Range(1, 2), new Range(5, 7)));
+        check("duplicate", solve(new Range[]{new Range(1, 3), new Range(1, 3)}), List.of(new Range(1, 3)));
+        check("large endpoints", solve(new Range[]{new Range(Long.MAX_VALUE - 2, Long.MAX_VALUE), new Range(0, 1)}),
+                List.of(new Range(0, 1), new Range(Long.MAX_VALUE - 2, Long.MAX_VALUE)));
+        Range[] values = {new Range(5, 7), new Range(1, 3)};
+        Range[] before = values.clone();
+        solve(values);
+        check("input unchanged", Arrays.equals(values, before), true);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+<details><summary>Подсказка 1</summary><p>После сортировки по началу достаточно текущего интервала и следующего. Короткий вложенный интервал не уменьшает текущий конец.</p></details>
+<details><summary>Подсказка 2</summary><p>Сортируй копию через comparingLong. При next.start≤end продли end через max; при разрыве выдай текущий интервал. Последний выдаётся после цикла.</p></details>
+
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>«Согласовали объединение со склеиванием касания. Сортирую копию, чтобы сохранить вход. Накопленный [start,end) — объединение последней связной группы уже прочитанных интервалов. Следующий либо продолжает её, либо начинает новую после разрыва». При вложении конец берётся через max, иначе широкий интервал мог бы сжаться.</p>
+<pre><code class="language-java">static List&lt;Range&gt; solve(Range[] input) {
+    if (input.length == 0) return List.of();
+    Range[] sorted = input.clone();       // переставляем копию; record неизменяем
+    Arrays.sort(sorted, Comparator.comparingLong(Range::start)
+            .thenComparingLong(Range::end)); // сравнение без вычитания long
+    List&lt;Range&gt; result = new ArrayList&lt;&gt;();
+    long start = sorted[0].start(), end = sorted[0].end();
+    for (int i = 1; i &lt; sorted.length; i++) {
+        Range next = sorted[i];
+        if (next.start() &lt;= end) {         // касание тоже образует один интервал объединения
+            end = Math.max(end, next.end());
+        } else {
+            result.add(new Range(start, end));
+            start = next.start();
+            end = next.end();
+        }
+    }
+    result.add(new Range(start, end));     // последний накопленный интервал ещё не выдан
+    return List.copyOf(result);
+}</code></pre>
+<pre class="out">empty OK
+one OK
+overlap OK
+touch OK
+nested OK
+gap OK
+duplicate OK
+large endpoints OK
+input unchanged OK</pre>
+        <p>Время O(n log n+n). Дополнительная память O(n) на копию и сортировку; результат содержит до n интервалов. Пустой вход возвращается до чтения sorted[0]. comparingLong сохраняет сравнение long: сужение разности до int могло бы поменять знак и порядок далёких начал.</p>
+
+        <p class="src">Решение и проверки: <a href="../examples/live-coding/MergeActivity.java">MergeActivity.java</a>. Запуск: <code>java examples/live-coding/MergeActivity.java</code>.</p>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Интервьюер теперь требует оставить касающиеся интервалы раздельно. Где изменится решение?</summary><p>Условие объединения станет next.start&lt;end, а тест касания должен ожидать два интервала. Для полуоткрытых интервалов общих точек у них нет. Это новое правило представления объединения; оно меняет предикат и ожидаемый ответ. Сохранение входа и обработка вложения останутся теми же.</p></details></div>
+    </article>
+    <article class="q" id="burst-window" data-freq="3" data-type="task">
+      <h3>Найди максимальный поток за окно: проверь точную границу</h3>
+      <div class="task">
+        <p>Даны уже отсортированные неотрицательные long timestamps. Несколько уведомлений могут иметь одинаковое время. Для положительной long width найди максимальное число событий в любом полуоткрытом окне [s,s+width). Верни только число.</p>
+        <p>0≤n≤1000000, width&gt;0; null отсутствует, вход сохраняется. Событие на правой границе не входит. Перед кодом уточни, что вход уже отсортирован, и объясни, как избежать переполнения при timestamps около Long.MAX_VALUE.</p>
+        <pre class="io">[0,5], width=5 → 1
+[2,2,2], width=1 → 3
+[0,2,3,6,7], width=5 → 3</pre>
+        <p class="src">Авторская задача · средняя · полуоткрытая граница, линейный проход и область безопасной разности</p>
+        <details><summary>Заготовка: BurstWindow.java</summary>
+<pre><code class="language-java">import java.util.*;
+public class BurstWindow {
+
+    static int solve(long[] times, long width) {
+        throw new UnsupportedOperationException("TODO");
+    }
+    static void check(String name, Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(name + ": " + got + " != " + want);
+        System.out.println(name + " OK");
+    }
+    public static void main(String[] args) {
+        check("empty", solve(new long[0], 5), 0);
+        check("one", solve(new long[]{7}, 5), 1);
+        check("boundary", solve(new long[]{0, 5}, 5), 1);
+        check("duplicates", solve(new long[]{2, 2, 2}, 1), 3);
+        check("dense", solve(new long[]{0, 2, 3, 6, 7}, 5), 3);
+        check("several removals", solve(new long[]{0, 1, 2, 100}, 3), 3);
+        check("near max", solve(new long[]{Long.MAX_VALUE - 2, Long.MAX_VALUE - 1, Long.MAX_VALUE}, 3), 3);
+        check("max width boundary", solve(new long[]{0, Long.MAX_VALUE}, Long.MAX_VALUE), 1);
+        long[] values = {1, 2, 3};
+        long[] before = values.clone();
+        solve(values, 2);
+        check("input unchanged", Arrays.equals(values, before), true);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+<details><summary>Подсказка 1</summary><p>Любую непустую группу событий можно покрыть окном, начинающимся в её первом timestamp. При поступлении right оставь самые ранние события, которые ещё помещаются вместе с ним.</p></details>
+<details><summary>Подсказка 2</summary><p>Сжимай слева, пока times[right]−times[left]≥width. Две границы только растут; сложение times[left]+width не требуется.</p></details>
+
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>«После сжатия все события от left до right помещаются в окно, начинающееся в times[left]. Предыдущие left уже слишком далеки от right. Для текущего right это самая широкая допустимая группа, поэтому сравниваю её размер с best». Разность безопасна: оба timestamp неотрицательны, right не меньше left, максимальная разность не больше Long.MAX_VALUE.</p>
+<pre><code class="language-java">static int solve(long[] times, long width) {
+    int left = 0, best = 0;
+    for (int right = 0; right &lt; times.length; right++) {
+        while (times[right] - times[left] &gt;= width) { // правая граница полуоткрытая
+            left++;                           // сортировка и width&gt;0 оставят хотя бы right
+        }
+        best = Math.max(best, right - left + 1);
+    }
+    return best;
+}</code></pre>
+<pre class="out">empty OK
+one OK
+boundary OK
+duplicates OK
+dense OK
+several removals OK
+near max OK
+max width boundary OK
+input unchanged OK</pre>
+        <p>Время O(n): right проходит массив один раз, left суммарно тоже. Дополнительная память O(1). width&gt;0 гарантирует, что событие right помещается само с собой; left не уйдёт за right. Для произвольных знаковых timestamps безопасность разности нужно решать отдельно.</p>
+<figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="На временной оси точки0 и5. Полуоткрытое окно ширины5, начиная с0, исключает5. После появления точки5 левая граница перемещается к5. Максимальное число событий в окне1.">
+      <defs><marker id="lcw-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+      <text x="24" y="24" class="dg-cap" text-anchor="start">ПРАВАЯ ГРАНИЦА НЕ ВХОДИТ В ОКНО</text>
+      <path d="M70 152 L660 152" class="dg-line"/>
+      <path d="M120 144 L120 160 M380 144 L380 160 M640 144 L640 160" class="dg-line"/>
+      <text x="120" y="180" class="dg-n" text-anchor="middle">0</text>
+      <text x="380" y="180" class="dg-n" text-anchor="middle">5</text>
+      <text x="640" y="180" class="dg-n" text-anchor="middle">10</text>
+      <g data-s="1">
+<rect x="120" y="70" width="260" height="28" rx="5" class="dg-cell hit"/>
+<text x="134" y="89" class="dg-n" text-anchor="start">[0,5)</text>
+<circle cx="120" cy="152" r="5" class="dg-arrow"/>
+<circle cx="380" cy="152" r="6" class="dg-line" fill="none"/>
+<text x="24" y="222" class="dg-in" text-anchor="start">right=0: один timestamp 0</text>
+<text x="24" y="253" class="dg-s" text-anchor="start">width=5; вход [0,5]; ответ 1</text>
+<path d="M120 128 L120 102" class="dg-line" marker-end="url(#lcw-n)"/>
+</g>
+      <g data-s="2">
+<rect x="120" y="70" width="260" height="28" rx="5" class="dg-cell hit"/>
+<text x="134" y="89" class="dg-n" text-anchor="start">[0,5)</text>
+<circle cx="120" cy="152" r="5" class="dg-arrow"/>
+<circle cx="380" cy="152" r="6" class="dg-line" fill="none"/>
+<text x="24" y="222" class="dg-in" text-anchor="start">right=1: 5−0=5, граница исключена</text>
+<text x="24" y="253" class="dg-s" text-anchor="start">width=5; вход [0,5]; ответ 1</text>
+<path d="M120 128 L120 102" class="dg-line" marker-end="url(#lcw-n)"/>
+<path d="M380 128 L380 102" class="dg-line" marker-end="url(#lcw-n)"/>
+</g>
+      <g data-s="3">
+<rect x="380" y="70" width="260" height="28" rx="5" class="dg-cell hit"/>
+<text x="394" y="89" class="dg-n" text-anchor="start">[5,10)</text>
+<circle cx="380" cy="152" r="5" class="dg-arrow"/>
+<circle cx="640" cy="152" r="6" class="dg-line" fill="none"/>
+<text x="24" y="222" class="dg-in" text-anchor="start">left=1: timestamp 0 вышел</text>
+<text x="24" y="253" class="dg-s" text-anchor="start">width=5; вход [0,5]; ответ 1</text>
+<path d="M380 128 L380 102" class="dg-line" marker-end="url(#lcw-n)"/>
+</g>
+      <g data-s="4">
+<rect x="380" y="70" width="260" height="28" rx="5" class="dg-cell hit"/>
+<text x="394" y="89" class="dg-n" text-anchor="start">[5,10)</text>
+<circle cx="380" cy="152" r="5" class="dg-arrow"/>
+<circle cx="640" cy="152" r="6" class="dg-line" fill="none"/>
+<text x="24" y="222" class="dg-in" text-anchor="start">best=1; оба события вместе не помещаются</text>
+<text x="24" y="253" class="dg-s" text-anchor="start">width=5; вход [0,5]; ответ 1</text>
+<path d="M380 128 L380 102" class="dg-line" marker-end="url(#lcw-n)"/>
+</g>
+    </svg>
+  </div>
+<ol class="play-steps">
+  <li>Первое событие — 0. В окне [0,5) пока одно событие.</li>
+  <li>Добавили событие 5. Разность 5 равна ширине, а правая граница исключена: условие сжатия уже выполнено.</li>
+  <li>left стал 1. Событие 0 вышло; окно, начинающееся в 5, содержит событие 5.</li>
+  <li>Максимум остался 1. Условие > вместо >= ошибочно оставило бы два события.</li>
+</ol>
+<figcaption>Здесь точки времени и границы окна разнесены по высоте. Открытый кружок показывает исключённую правую границу.</figcaption>
+</figure>
+        <p class="src">Решение и проверки: <a href="../examples/live-coding/BurstWindow.java">BurstWindow.java</a>. Запуск: <code>java examples/live-coding/BurstWindow.java</code>.</p>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Вход приходит в произвольном порядке. Можно сохранить O(n) и O(1)?</summary><p>Этот алгоритм использует неубывание времени: после удаления старого события оно не пригодится для более позднего right. Для произвольного входа сначала нужна сортировка либо иная структура. В общем сравнительном варианте сортировка стоит O(n log n), а сохранение входа требует копии. Поток с запаздывающими событиями — отдельное условие, простая очередь по порядку прихода его не решает.</p></details></div>
+    </article>
+    <article class="q" id="dependency-order" data-freq="3" data-type="task">
+      <h3>Порядок этапов платежа: закончи решение при цикле</h3>
+      <div class="task">
+        <p>Есть n этапов с ID 0…n−1 и зависимости Edge(before,after): before выполняется раньше after. Верни лексикографически минимальный допустимый порядок всех этапов. Если есть цикл, верни Optional.empty(). Для n=0 верни Optional с пустым списком.</p>
+        <p>0≤n≤10000, 0≤m≤50000, концы каждого ребра допустимы; повторные рёбра разрешены, null отсутствует, вход сохраняется. Лексикографический минимум означает: на первом отличающемся месте меньший ID выигрывает. Перед кодом уточни направление ребра и результат при цикле; после кода объясни, почему обычная очередь может нарушить правило выбора.</p>
+        <pre class="io">n=4, edges=[1→0] → [1,0,2,3]
+n=3, edges=[1→2,2→1] → empty
+n=0, edges=[] → present []</pre>
+        <p class="src">Авторская задача · сложнее · несколько требований к ответу, цикл и точная сложность n/m</p>
+        <details><summary>Заготовка: DependencyOrder.java</summary>
+<pre><code class="language-java">import java.util.*;
+public class DependencyOrder {
+    record Edge(int before, int after) {}
+    static Optional&lt;List&lt;Integer&gt;&gt; solve(int n, Edge[] edges) {
+        throw new UnsupportedOperationException("TODO");
+    }
+    static void check(String name, Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(name + ": " + got + " != " + want);
+        System.out.println(name + " OK");
+    }
+    public static void main(String[] args) {
+        check("empty graph", solve(0, new Edge[0]), Optional.of(List.of()));
+        check("independent", solve(3, new Edge[0]), Optional.of(List.of(0, 1, 2)));
+        check("chain", solve(3, new Edge[]{new Edge(2, 1), new Edge(1, 0)}), Optional.of(List.of(2, 1, 0)));
+        check("new minimum", solve(4, new Edge[]{new Edge(1, 0)}), Optional.of(List.of(1, 0, 2, 3)));
+        check("diamond", solve(4, new Edge[]{new Edge(0, 2), new Edge(1, 2), new Edge(2, 3)}), Optional.of(List.of(0, 1, 2, 3)));
+        check("duplicate edge", solve(2, new Edge[]{new Edge(0, 1), new Edge(0, 1)}), Optional.of(List.of(0, 1)));
+        check("self cycle", solve(1, new Edge[]{new Edge(0, 0)}), Optional.empty());
+        check("cycle after prefix", solve(3, new Edge[]{new Edge(1, 2), new Edge(2, 1)}), Optional.empty());
+        Edge[] values = {new Edge(2, 1), new Edge(1, 0)};
+        Edge[] before = values.clone();
+        solve(3, values);
+        check("input unchanged", Arrays.equals(values, before), true);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+<details><summary>Подсказка 1</summary><p>incoming считает оставшиеся зависимости. Готовы этапы с incoming=0. После выдачи этапа сними все его исходящие рёбра.</p></details>
+<details><summary>Подсказка 2</summary><p>Среди готовых выбирай минимальный ID через PriorityQueue. Если выдано меньше n, остался цикл; частичный список не является ответом. Повторное ребро учитывай симметрично при добавлении и снятии.</p></details>
+
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>«В ready лежат все ещё не выданные этапы без оставшихся предшественников. Любой допустимый следующий этап должен быть из ready. Выбираю минимальный ID — это минимизирует ближайшую ещё не выбранную позицию ответа». В DAG такой выбор всегда продолжается до всех вершин; снятие исходящих рёбер открывает новые готовые этапы. Если ready опустела до n, оставшийся подграф имеет цикл.</p>
+        <p>Обычная очередь может после выдачи 1 положить новый 0 в конец за 2 и 3, получив [1,2,3,0]. Все зависимости соблюдены, но лексикографический минимум потерян. Куча повторно выбирает минимум из текущего множества, а не только сортирует исходные вершины.</p>
+<pre><code class="language-java">static Optional&lt;List&lt;Integer&gt;&gt; solve(int n, Edge[] edges) {
+    List&lt;List&lt;Integer&gt;&gt; next = new ArrayList&lt;&gt;();
+    for (int i = 0; i &lt; n; i++) next.add(new ArrayList&lt;&gt;());
+    int[] incoming = new int[n];
+    for (Edge edge : edges) {
+        next.get(edge.before()).add(edge.after());
+        incoming[edge.after()]++;          // повторное ребро учитывается и здесь, и при снятии
+    }
+    PriorityQueue&lt;Integer&gt; ready = new PriorityQueue&lt;&gt;();
+    for (int i = 0; i &lt; n; i++) if (incoming[i] == 0) ready.add(i);
+    List&lt;Integer&gt; order = new ArrayList&lt;&gt;();
+    while (!ready.isEmpty()) {
+        int id = ready.remove();           // минимальный ID среди допустимых прямо сейчас
+        order.add(id);
+        for (int after : next.get(id)) {
+            if (--incoming[after] == 0) ready.add(after);
+        }
+    }
+    if (order.size() != n) return Optional.empty(); // частичный порядок скрывал бы цикл
+    return Optional.of(List.copyOf(order));
+}</code></pre>
+<pre class="out">empty graph OK
+independent OK
+chain OK
+new minimum OK
+diamond OK
+duplicate edge OK
+self cycle OK
+cycle after prefix OK
+input unchanged OK</pre>
+        <p>Время O(n+m+n log n) для n≥2: граф строится и рёбра снимаются по одному разу, каждая вершина входит и выходит из кучи один раз. Для n&lt;2 — O(n+m+1). Рабочая память O(n+m), список результата O(n). Пустой граф и отсутствие допустимого порядка различаются через Optional.</p>
+
+        <p class="src">Решение и проверки: <a href="../examples/live-coding/DependencyOrder.java">DependencyOrder.java</a>. Запуск: <code>java examples/live-coding/DependencyOrder.java</code>.</p>
+      </details>
+      <div class="check"><details data-kind="ревью"><summary>Метод вернул [0] для графа 0, 1→2, 2→1. Что сломано?</summary><p>Он выдал готовый этап 0 и остановился на цикле между 1 и 2, но принял частичный результат за полный. После цикла нужна проверка order.size()==n. Это видно на тесте с независимым префиксом перед циклом; один только тест самопетли не проверяет поведение уже накопленного ответа. Поиск конкретного цикла — дополнительное требование, текущий результат сообщает только невозможность полного порядка.</p></details></div>
+    </article>
+
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://www.techinterviewhandbook.org/coding-interview-cheatsheet/">Tech Interview Handbook: Coding interview cheatsheet</a> — основа подачи: разделы об уточнении задачи, обсуждении подхода, объяснении кода и проверке. Задачи и примеры страницы авторские.</li>
+    <li><a href="https://careers.microsoft.com/v2/global/en/hiring-tips/technical-interviewing">Microsoft Careers: Technical interviewing</a> — реальные ожидания к разбору задачи, работающему коду, тестам и объяснению сложности; формат конкретного собеседования уточняется у организатора.</li>
+    <li><a href="https://amazon.jobs/content/en/how-we-hire/interview-prep/software-development-topics">Amazon Jobs: Software development interview topics</a> — применение знаний к решению, практика в среде задания и проверка краёв.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/HashSet.html">JDK 21: HashSet</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/HashMap.html">HashMap</a> — add, equals и условия постоянной стоимости базовых операций.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

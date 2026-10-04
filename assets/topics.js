@@ -82,7 +82,7 @@ window.KB_TREE = [
         { id: 'dp', freq: 1, status: 'draft', title: 'Dynamic Programming',
           scope: 'подзадачи, мемоизация и таблица, лестница и монеты, рюкзак, LCS, жадные алгоритмы' },
       ] },
-      { id: 'live-coding', freq: 3, status: 'empty', title: 'Live Coding',
+      { id: 'live-coding', freq: 3, status: 'draft', title: 'Live Coding',
         scope: 'уточнить условие, рассуждать вслух, крайние случаи, тесты, оценка сложности' },
     ],
   },
