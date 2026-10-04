@@ -367,7 +367,7 @@ window.KB_TREE = [
           scope: 'retention, meta-аннотации, обработка аннотаций, Reflection API, dynamic proxy' },
       ] },
       { id: 'oop', title: 'OOP', source: 'roadmap.sh/java: Basics of OOP; Effective Java, гл. 4', items: [
-        { id: 'classes-objects', freq: 2, status: 'empty', title: 'Classes & Objects',
+        { id: 'classes-objects', freq: 2, status: 'draft', title: 'Classes & Objects',
           scope: 'конструкторы, this, static, final, блоки инициализации, порядок инициализации, модификаторы доступа' },
         { id: 'encapsulation', freq: 3, status: 'empty', title: 'Encapsulation',
           scope: 'инварианты, модификаторы доступа, геттеры и сеттеры, неизменяемость, защитные копии, reflection и модули' },
