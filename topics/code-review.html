@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code Review · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="code-review">
+<main class="page">
+  <header class="topic-head"><h1>Code Review</h1></header>
+  <div class="lesson">
+    <div class="note tip"><p>Code review проверяет, что изменение сохраняет нужное поведение системы. Ревьюер восстанавливает путь от входа до эффекта, ищет разрывы при ошибках и проверяет, что тесты их ловят. Замечание становится полезным, когда объясняет последствие и нужное свойство. Небольшой PR помогает удержать этот путь целиком, а одобрение относится к проверенной итоговой версии.</p></div>
+    <section class="step" id="start-with-behavior">
+      <h2>Сначала восстанови поведение, которое обещает PR</h2>
+<p>Автор добавил защиту от повторных уведомлений о платеже. В описании PR написано: «Один ID обрабатывается один раз». Тесты зелёные; новая коллекция называется done. Ревьюер предлагает переименовать её в processedIds. Но банк иногда отказывает до списания, а уведомление затем приходит снова. Если ID записан до вызова банка, второй запрос будет пропущен вместе с ещё не выполненным платежом.</p>
+      <p>Начни с результата, который должен увидеть пользователь. Для k7 на сумму 100 после временного отказа и успешного повтора должно быть одно списание 100. Нужно уточнить, что значит «обработан»: запрос получен, попытка начата или платёж подтверждён. Это разные состояния. Имя done не доказывает переход между ними.</p>
+      <p>Прочитай описание изменения, условие задачи и вызывающий код. Восстанови вход, границы эффекта, ответ и повторный вызов. Затем смотри diff: где появился новый переход, что переживает исключение и кто повторяет операцию. Проверка по одному успешному запросу не показывает окно между локальной записью и внешним действием.</p>
+<figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 284" role="img" aria-label="Обработчик отмечает k7 до вызова банка. Банк отказывает до списания. Повтор пропускается по отметке; done true, списано0 вместо100.">
+      <defs><marker id="crf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+      <text x="24" y="24" class="dg-cap" text-anchor="start">ОТМЕТКА О ПОВТОРЕ И РЕАЛЬНЫЙ ЭФФЕКТ</text>
+      <rect x="20" y="72" width="220" height="92" rx="5" class="dg-box"/>
+      <rect x="400" y="72" width="280" height="92" rx="5" class="dg-box"/>
+      <text x="36" y="96" class="dg-t" text-anchor="start">Handler</text>
+      <text x="416" y="96" class="dg-t" text-anchor="start">Bank — локальная модель</text>
+      <g data-s="1">
+<text x="36" y="131" class="dg-in" text-anchor="start">done[k7]=false</text>
+<text x="416" y="131" class="dg-in" text-anchor="start">charged=0</text>
+<text x="416" y="153" class="dg-n" text-anchor="start">calls=0</text>
+<text x="24" y="224" class="dg-in" text-anchor="start">Вход: k7, amount=100</text>
+</g>
+      <g data-s="2">
+<text x="36" y="131" class="dg-in" text-anchor="start">done[k7]=true</text>
+<text x="416" y="131" class="dg-in" text-anchor="start">charged=0</text>
+<text x="416" y="153" class="dg-n" text-anchor="start">calls=0</text>
+<text x="24" y="224" class="dg-in" text-anchor="start">ID отмечен до обращения к банку</text>
+</g>
+      <g data-s="3">
+<text x="36" y="131" class="dg-in" text-anchor="start">done[k7]=true</text>
+<text x="416" y="131" class="dg-in" text-anchor="start">charged=0</text>
+<text x="416" y="153" class="dg-n" text-anchor="start">calls=1</text>
+<text x="24" y="224" class="dg-in" text-anchor="start">TEMPORARY_FAILURE: списания ещё нет</text>
+<path d="M240 120 L396 120" class="dg-line" marker-end="url(#crf-n)"/>
+<text x="254" y="111" class="dg-n" text-anchor="start">charge(k7,100)</text>
+<path d="M400 150 L244 150" class="dg-line" marker-end="url(#crf-n)"/>
+<text x="252" y="185" class="dg-n" text-anchor="start">сбой до эффекта</text>
+</g>
+      <g data-s="4">
+<text x="36" y="131" class="dg-in" text-anchor="start">done[k7]=true</text>
+<text x="416" y="131" class="dg-in" text-anchor="start">charged=0</text>
+<text x="416" y="153" class="dg-n" text-anchor="start">calls=1</text>
+<text x="24" y="224" class="dg-in" text-anchor="start">Повтор k7 → SKIPPED; банк не вызван</text>
+</g>
+      <g data-s="5">
+<text x="36" y="131" class="dg-in" text-anchor="start">done[k7]=true</text>
+<text x="416" y="131" class="dg-in" text-anchor="start">charged=0</text>
+<text x="416" y="153" class="dg-n" text-anchor="start">calls=1</text>
+<text x="24" y="224" class="dg-in" text-anchor="start">done=true, но charged=0</text>
+</g>
+      <text x="24" y="258" class="dg-s" text-anchor="start">Проверка должна смотреть на эффект платежа, а не на наличие ID</text>
+    </svg>
+  </div>
+<ol class="play-steps">
+  <li>Уведомление k7 на сумму 100 принято. Локальной отметки пока нет; банк не вызван.</li>
+  <li>Handler записал done[k7]=true, хотя платёж ещё не состоялся.</li>
+  <li>Bank вызван один раз и бросил TemporaryFailure до эффекта. В модели charged осталось 0.</li>
+  <li>При повторе Handler увидел done[k7] и вернул SKIPPED. Второго вызова банка не произошло.</li>
+  <li>Последовательность закончилась потерянным платежом: отметка есть, бизнес-эффекта нет.</li>
+</ol>
+<figcaption>Одинаковый ID остановил повтор, но не подтвердил успешный платёж. Сравнение только со счастливым сценарием скрывает это окно сбоя.</figcaption>
+</figure>
+      <p>Ниже минимальная локальная модель для ревью. charged — счётчик эффекта в минимальных единицах, Bank не выполняет HTTP и не хранит деньги. TemporaryFailure бросается до эффекта, ReplyLost — после него. Флаги позволяют увидеть обе стороны окна; useKey позже покажет гарантию на стороне провайдера.</p>
+<pre><code class="language-java">record Request(String key, long amount) {}
+
+static final class TemporaryFailure extends RuntimeException {}
+static final class ReplyLost extends RuntimeException {}
+static final class PayloadConflict extends RuntimeException {}
+
+static final class Bank {
+    final Map&lt;String, Long&gt; accepted = new HashMap&lt;&gt;();
+    long charged;
+    int calls;
+    boolean failBefore, loseReply;
+
+    String charge(Request request, boolean useKey) {
+        calls++;
+        if (failBefore) {
+            failBefore = false;
+            throw new TemporaryFailure();     // эффект ещё не произошёл
+        }
+        if (useKey &amp;&amp; accepted.containsKey(request.key())) {
+            if (accepted.get(request.key()) != request.amount()) {
+                throw new PayloadConflict();   // тот же ключ с другой суммой запрещён
+            }
+            return "REPLAY";                  // прошлый эффект не выполняется повторно
+        }
+        charged = Math.addExact(charged, request.amount());
+        if (useKey) accepted.put(request.key(), request.amount());
+        if (loseReply) {
+            loseReply = false;
+            throw new ReplyLost();             // эффект есть, клиент ответа не увидел
+        }
+        return "CHARGED";
+    }
+}
+
+static final class Handler {
+    final Set&lt;String&gt; done = new HashSet&lt;&gt;();
+    final Bank bank;
+    final boolean markFirst, useKey;
+
+    Handler(Bank bank, boolean markFirst, boolean useKey) {
+        this.bank = bank;
+        this.markFirst = markFirst;
+        this.useKey = useKey;
+    }
+
+    String pay(Request request) {
+        if (done.contains(request.key())) return "SKIPPED";
+        if (markFirst) done.add(request.key());   // пока лишь локальная отметка
+        String result = bank.charge(request, useKey);
+        if (!markFirst) done.add(request.key());  // сюда не попадём при потере ответа
+        return result;
+    }
+}
+
+static String attempt(Handler handler, Request request) {
+    try {
+        return handler.pay(request);
+    } catch (TemporaryFailure e) {
+        return "TEMPORARY_FAILURE";
+    } catch (ReplyLost e) {
+        return "REPLY_LOST";
+    }
+}
+
+Bank bank = new Bank();
+bank.failBefore = true;
+Handler handler = new Handler(bank, true, false);
+Request request = new Request("k7", 100);
+System.out.println("== mark before external effect ==");
+System.out.println("first=" + attempt(handler, request));
+System.out.println("retry=" + attempt(handler, request));
+System.out.println("done=" + handler.done.contains("k7"));
+System.out.println("bank calls=" + bank.calls + " charged=" + bank.charged);</code></pre><pre class="out">== mark before external effect ==
+first=TEMPORARY_FAILURE
+retry=SKIPPED
+done=true
+bank calls=1 charged=0</pre>
+      <p class="src">Фрагмент <a href="../examples/code-review/PaymentReviewDemo.java">PaymentReviewDemo.java</a>; запуск <code>java examples/code-review/PaymentReviewDemo.java</code>, JDK 21. Все объекты в этом опыте используются последовательно одним потоком.</p>
+      <p>Блокирующее замечание здесь относится к потерянному платежу. Оно должно ссылаться на конкретный переход и наблюдение: «После отказа до списания ключ уже в done; повтор возвращает SKIPPED, а charged остаётся 0. Нужен путь завершения платежа при повторе». Выбор коллекции и имя переменной рассматриваются после этого.</p>
+    </section>
+    <section class="step" id="follow-context">
+      <h2>Проверяй связи и чередование вызовов вокруг изменённых строк</h2>
+<p>В diff видны несколько строк, но их смысл определяется окружающим кодом. Проследи путь уведомление → проверка ID → вызов банка → сохранение результата → ответ. Найди владельца ключа, обработку исключений и границу транзакции. Уточни, откуда приходит повтор и остаётся ли ключ тем же. Если ключ создаётся заново на каждой попытке, одинаковый payload ещё не делает попытки одной операцией.</p>
+      <p>Для Java backend полезно пройти по конкретным вопросам. Проверка доступа относится к нужному плательщику или только к существованию ID? Сумма хранится в нужных единицах и безопасно вычисляется? Состояние не меняется до проверки допустимого перехода? Ресурс закрывается, число обращений к БД ограничено, ожидание внешнего сервиса имеет границу? Для миграции проверь совместимость читающей и пишущей версии, backfill и момент появления ограничения.</p>
+      <p>Конкурентность проверяется на составном решении. ConcurrentHashMap защищает отдельные операции, но «проверить отсутствие → записать → списать» занимает несколько действий. Два обработчика могут оба получить false. Это видно только при рассмотрении чередования, даже если последовательный тест идеален.</p>
+<figure class="fig play">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 284" role="img" aria-label="Два обработчика читают отсутствие k7 до любой записи. После этого каждый добавляет ID и создаёт эффект. ConcurrentHashMap содержит одну запись, а эффектов2.">
+      <defs><marker id="crr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+      <text x="24" y="24" class="dg-cap" text-anchor="start">ПОТОКОБЕЗОПАСНЫЕ ОПЕРАЦИИ НЕ ДЕЛАЮТ РЕШЕНИЕ АТОМАРНЫМ</text>
+      <rect x="20" y="64" width="180" height="66" rx="5" class="dg-box"/>
+      <rect x="250" y="64" width="180" height="66" rx="5" class="dg-box"/>
+      <rect x="500" y="64" width="200" height="66" rx="5" class="dg-box"/>
+      <text x="34" y="87" class="dg-t" text-anchor="start">Обработчик 1</text>
+      <text x="264" y="87" class="dg-t" text-anchor="start">Обработчик 2</text>
+      <text x="514" y="87" class="dg-t" text-anchor="start">Общая карта</text>
+      <g data-s="1">
+<text x="34" y="113" class="dg-in" text-anchor="start">не проверял</text>
+<text x="264" y="113" class="dg-in" text-anchor="start">не проверял</text>
+<text x="514" y="113" class="dg-in" text-anchor="start">{}</text>
+<text x="24" y="218" class="dg-in" text-anchor="start">Оба потока получили один и тот же k7</text>
+<text x="24" y="252" class="dg-in" text-anchor="start">число эффектов=0</text>
+</g>
+      <g data-s="2">
+<text x="34" y="113" class="dg-in" text-anchor="start">false</text>
+<text x="264" y="113" class="dg-in" text-anchor="start">не проверял</text>
+<text x="514" y="113" class="dg-in" text-anchor="start">{}</text>
+<text x="24" y="218" class="dg-in" text-anchor="start">containsKey у первого → false</text>
+<text x="24" y="252" class="dg-in" text-anchor="start">число эффектов=0</text>
+<path d="M200 76 C220 36,460 36,496 76" class="dg-line" marker-end="url(#crr-n)"/>
+</g>
+      <g data-s="3">
+<text x="34" y="113" class="dg-in" text-anchor="start">false</text>
+<text x="264" y="113" class="dg-in" text-anchor="start">false</text>
+<text x="514" y="113" class="dg-in" text-anchor="start">{}</text>
+<text x="24" y="218" class="dg-in" text-anchor="start">containsKey у второго → false; барьер открыт</text>
+<text x="24" y="252" class="dg-in" text-anchor="start">число эффектов=0</text>
+<path d="M430 108 L496 108" class="dg-line" marker-end="url(#crr-n)"/>
+</g>
+      <g data-s="4">
+<text x="34" y="113" class="dg-in" text-anchor="start">создал эффект</text>
+<text x="264" y="113" class="dg-in" text-anchor="start">false</text>
+<text x="514" y="113" class="dg-in" text-anchor="start">{k7:true}</text>
+<text x="24" y="218" class="dg-in" text-anchor="start">Первый записал ID и создал эффект</text>
+<text x="24" y="252" class="dg-in" text-anchor="start">число эффектов=1</text>
+<path d="M200 120 C220 176,470 176,496 120" class="dg-line" marker-end="url(#crr-n)"/>
+</g>
+      <g data-s="5">
+<text x="34" y="113" class="dg-in" text-anchor="start">создал эффект</text>
+<text x="264" y="113" class="dg-in" text-anchor="start">создал эффект</text>
+<text x="514" y="113" class="dg-in" text-anchor="start">{k7:true}</text>
+<text x="24" y="218" class="dg-in" text-anchor="start">Второй использовал сохранённый false</text>
+<text x="24" y="252" class="dg-bad" text-anchor="start">число эффектов=2</text>
+<path d="M430 108 L496 108" class="dg-line" marker-end="url(#crr-n)"/>
+</g>
+      <g data-s="6">
+<text x="34" y="113" class="dg-in" text-anchor="start">создал эффект</text>
+<text x="264" y="113" class="dg-in" text-anchor="start">создал эффект</text>
+<text x="514" y="113" class="dg-in" text-anchor="start">{k7:true}</text>
+<text x="24" y="218" class="dg-in" text-anchor="start">В карте один ID; эффект выполнен дважды</text>
+<text x="24" y="252" class="dg-bad" text-anchor="start">число эффектов=2</text>
+</g>
+    </svg>
+  </div>
+<ol class="play-steps">
+  <li>Начальная карта пуста. Оба обработчика получили одинаковое уведомление.</li>
+  <li>Первый проверил containsKey и получил false. Он пока не записывает ID.</li>
+  <li>Второй тоже получил false. В демо барьер допускает запись только после обеих проверок.</li>
+  <li>Первый выполнил put и создал эффект. Карта теперь содержит k7.</li>
+  <li>Второй использует результат своей прежней проверки, поэтому тоже выполняет put и эффект.</li>
+  <li>Итог: один ключ в карте, два эффекта. Отдельные операции с картой корректны; составная проверка была разорвана.</li>
+</ol>
+<figcaption>Барьер фиксирует допустимое чередование двух реальных потоков. Вывод не зависит от того, какой из них после барьера первым выполнит put.</figcaption>
+</figure><pre><code class="language-java">import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class ConcurrentReviewDemo {
+    static void unsafe(ConcurrentMap&lt;String, Boolean&gt; done, AtomicInteger charged,
+                       CyclicBarrier bothRead) throws Exception {
+        boolean existed = done.containsKey("k7"); // обе проверки пройдут до записи
+        bothRead.await(5, TimeUnit.SECONDS);      // фиксируем нужное чередование
+        if (!existed) {
+            done.put("k7", true);
+            charged.incrementAndGet();           // каждый поток создаёт эффект
+        }
+    }
+
+    static void atomicClaim(ConcurrentMap&lt;String, Boolean&gt; done, AtomicInteger charged,
+                            CyclicBarrier start) throws Exception {
+        start.await(5, TimeUnit.SECONDS);
+        if (done.putIfAbsent("k7", true) == null) { // один победитель внутри одной карты
+            charged.incrementAndGet();
+        }
+    }
+
+    static int race(boolean atomic) throws Exception {
+        ConcurrentMap&lt;String, Boolean&gt; done = new ConcurrentHashMap&lt;&gt;();
+        AtomicInteger charged = new AtomicInteger();
+        CyclicBarrier gate = new CyclicBarrier(2);
+        try (ExecutorService pool = Executors.newFixedThreadPool(2)) {
+            Callable&lt;Void&gt; task = () -&gt; {
+                if (atomic) atomicClaim(done, charged, gate);
+                else unsafe(done, charged, gate);
+                return null;
+            };
+            Future&lt;Void&gt; first = pool.submit(task);
+            Future&lt;Void&gt; second = pool.submit(task);
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        }
+        return charged.get();
+    }
+
+    static int sequential() {
+        ConcurrentMap&lt;String, Boolean&gt; done = new ConcurrentHashMap&lt;&gt;();
+        AtomicInteger charged = new AtomicInteger();
+        for (int i = 0; i &lt; 2; i++) {
+            if (!done.containsKey("k7")) {
+                done.put("k7", true);
+                charged.incrementAndGet();
+            }
+        }
+        return charged.get();
+    }
+
+    public static void main(String[] args) throws Exception {
+        System.out.println("== thread-safe map, compound decision ==");
+        System.out.println("sequential effects=" + sequential());
+        System.out.println("two reads before write=" + race(false));
+        System.out.println("atomic claim effects=" + race(true));
+    }
+}</code></pre><pre class="out">== thread-safe map, compound decision ==
+sequential effects=1
+two reads before write=2
+atomic claim effects=1</pre>
+      <p class="src">Полный <a href="../examples/code-review/ConcurrentReviewDemo.java">ConcurrentReviewDemo.java</a>; запуск <code>java examples/code-review/ConcurrentReviewDemo.java</code>. CyclicBarrier удерживает оба потока до завершения проверок. sleep не используется; таймауты ограничивают ожидание неисправного опыта.</p>
+      <p>putIfAbsent даёт одного победителя внутри этой карты при успешном выполнении эффекта. Это исправление показанной гонки, но окно отказа из первого шага остаётся: победитель мог отметить ключ и упасть до списания. Между двумя процессами карты вообще разные. Замечание «добавь synchronized» без указания общей границы координации ещё не решает требование.</p>
+      <p>Не нужно повторно проверять всё устройство технологий в одном PR. Сосредоточься на изменённых путях и затронутых гарантиях. Если затронута незнакомая область, назови её и привлеки владельца: например, протокол банка или миграцию горячей таблицы. Когда части разделены между ревьюерами, у каждого должна быть понятная зона проверки.</p>
+    </section>
+    <section class="step" id="review-the-tests">
+      <h2>Зелёный тест полезен только тогда, когда ловит нужную ошибку</h2>
+<p>В тесте сломанного Handler можно проверить, что done содержит k7. Такой тест зелёный именно после потерянного платежа: он подтверждает наличие отметки, а не обещанный эффект. Посмотри на утверждения теста и спроси: «Какую неверную версию они отвергнут?» Существование тестового файла и число покрытых строк этого не объясняют.</p>
+<pre><code class="language-java">Bank bank = new Bank();
+bank.failBefore = true;
+Handler handler = new Handler(bank, true, false);
+Request request = new Request("k7", 100);
+attempt(handler, request);
+attempt(handler, request);
+System.out.println("== green test of the wrong property ==");
+System.out.println("marker test=" + (handler.done.contains("k7") ? "PASS" : "FAIL"));
+System.out.println("payment test=" + (bank.charged == 100 ? "PASS" : "FAIL"));
+System.out.println("expected charged=100, actual=" + bank.charged);</code></pre><pre class="out">== green test of the wrong property ==
+marker test=PASS
+payment test=FAIL
+expected charged=100, actual=0</pre>
+      <p>Для этого сценария проверяется одно успешное списание после допустимого повтора, его сумма и отсутствие второго эффекта. Полезны отдельные случаи: временный отказ до эффекта, потеря ответа после эффекта, одновременные попытки, тот же ключ с иной суммой. В каждом есть конкретная наблюдаемая гарантия. В тесте отказа нужно знать, произошёл эффект или нет: один общий mock «бросает исключение» этого не различает.</p>
+      <p>Автор может исправить первый тест перестановкой done.add после charge. Отказ до списания тогда допускает повтор. Но при потере ответа списание уже произошло, а локальной отметки ещё нет. Следующая попытка повторит эффект. Это второй тест, который должен пережить исправление первого.</p>
+<pre><code class="language-java">Bank bank = new Bank();
+bank.loseReply = true;
+Handler handler = new Handler(bank, false, false);
+Request request = new Request("k7", 100);
+System.out.println("== external effect before mark ==");
+System.out.println("first=" + attempt(handler, request));
+System.out.println("retry=" + attempt(handler, request));
+System.out.println("done=" + handler.done.contains("k7"));
+System.out.println("bank calls=" + bank.calls + " charged=" + bank.charged);</code></pre><pre class="out">== external effect before mark ==
+first=REPLY_LOST
+retry=CHARGED
+done=true
+bank calls=2 charged=200</pre>
+      <p>В обоих опытах исключение означает, что клиент не получил обычный ответ. Оно не сообщает, что внешний эффект отсутствует. Ревьюер смотрит на место сбоя и гарантию повторной операции, а не только на catch. Тесты с правильными фазами сбоя защищают именно эту связь.</p>
+      <p>Фейк из демо задаёт простую модель, а реальный адаптер может передать другой заголовок, потерять ключ или интерпретировать конфликт как успех. Для исправления нужны проверка логики и проверка границы с фактическим API: стабильность ключа, поведение при повторе, ограничения срока хранения. Для БД уникальность проверяется на реальном ограничении и конкурентных транзакциях. Как выбирать уровни тестов — в <a href="testing-strategy.html">Testing Strategy</a>, как не скопировать ошибку в подмену — в <a href="test-doubles.html">Test Doubles</a>.</p>
+      <p>Проверяй и обслуживание изменения. Нужны ли обновлённая документация ошибки, тест обратной совместимости, миграция данных, метрика неопределённого результата? Это определяется поведением PR. Мелкое переименование не требует той же инфраструктуры, что новое взаимодействие с банком; проверка должна закрывать реальную развилку.</p>
+    </section>
+    <section class="step" id="make-comments-actionable">
+      <h2>Замечание связывает место в коде, риск и проверяемое требование</h2>
+<p>«Плохо», «переделай» и «так не принято» заставляют автора угадывать, что исправлять. Напиши наблюдение, затем последствие, затем нужное свойство. Добавь короткий пример или способ проверки. Автор сможет предложить другое исправление, которое сохранит то же свойство.</p>
+      <p>Для сломанного Handler: «Здесь k7 записывается до ответа банка. При TemporaryFailure до списания повтор вернёт SKIPPED, хотя платёж ещё не выполнен. Это блокирует изменение: нужен повтор, который сможет довести операцию до одного эффекта. Проверь отказ до списания и потерю ответа после него; простая перестановка строки второй случай не закрывает». Замечание предъявляет результат, а не назначает единственный шаблон классов.</p>
+      <table class="mx"><thead><tr><th>Пометка команды</th><th>Что означает</th><th>Пример на этом PR</th></tr></thead><tbody>
+        <tr><td>Блокирует</td><td>Нарушено требуемое поведение или граница безопасности</td><td>После отказа платёж потерян; после потери ответа может повториться</td></tr>
+        <tr><td>Вопрос</td><td>Не хватает контекста, от ответа зависит вывод</td><td>Ключ сохраняется между попытками или генерируется при каждом вызове?</td></tr>
+        <tr><td>Предложение</td><td>Улучшение с объяснённой ценой и пользой</td><td>Вынести построение банковского запроса в адаптер, чтобы отдельно проверить ключ</td></tr>
+        <tr><td>Nit</td><td>Необязательная правка вкуса или мелкая полировка</td><td>Более точное имя для локальной переменной, если текущий смысл уже ясен</td></tr>
+      </tbody></table>
+      <p>Это пример соглашения команды, а не встроенные статусы Git. Вопрос может стать блокирующим после ответа. Нарушение принятого обязательного форматирования проще исправлять автоматом; личное предпочтение по допустимым вариантам не стоит выдавать за дефект. Укажи, какие замечания нужны до слияния, а какие оставлены как предложение.</p>
+      <p>При несогласии сравните варианты на одной цели. «Карта потокобезопасная» и «решение атомарное» — разные утверждения; расписание двух потоков даёт общий предмет разговора. Для спорной цены абстракции покажи зависимость, сценарий изменения и добавляемую сложность. Если обсуждение ходит по кругу, коротко разберите его голосом с владельцем решения и сохраните вывод в PR.</p>
+      <p>Пиши о поведении кода. Полезно отметить и удачный выбор с причиной: «Хорошо, что тест различает отказ до списания и потерю ответа; теперь перестановка строки не сможет выдать себя за полное исправление». Такое замечание сохраняет инженерное объяснение, которое пригодится следующему автору.</p>
+    </section>
+    <section class="step" id="make-pr-reviewable">
+      <h2>Размер PR определяется законченной проверяемой правкой</h2>
+<p>Большой PR тяжело проверять, когда в нём одновременно новый retry, переименование пакетов, смена DTO и миграция. Ревьюер теряет связь между требованием и изменёнными строками. Маленькая правка должна иметь собственный смысл: после её слияния и проверки система находится в допустимом состоянии. Число строк само по себе этого не гарантирует.</p>
+      <p>Отдели независимую чистку от изменения поведения. Код, тесты и нужная документация одного поведения остаются вместе. Разбивать их по принципу «сначала прод, потом тест» неудобно: первый PR нельзя проверить как завершённое изменение. Для связанной цепочки назови предусловия каждой части и правила включения.</p>
+<figure class="fig">
+  <div class="fig-box">
+    <svg class="dg" viewBox="0 0 720 312" role="img" aria-label="Три связанные правки: адаптер передаёт ключ, обработчик сохраняет его между попытками, затем включаются повторы. Переименование независимо и отделено.">
+      <defs><marker id="crp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+      <text x="24" y="24" class="dg-cap" text-anchor="start">НЕЗАВИСИМОЕ ИЗМЕНЕНИЕ И ЦЕПОЧКА ПРЕДУСЛОВИЙ</text>
+      <rect x="20" y="70" width="188" height="94" rx="5" class="dg-box"/>
+      <text x="34" y="94" class="dg-t" text-anchor="start">PR 1: адаптер</text>
+      <text x="34" y="123" class="dg-in" text-anchor="start">Ключ доходит</text>
+      <text x="34" y="148" class="dg-in" text-anchor="start">до провайдера</text>
+      <rect x="270" y="70" width="188" height="94" rx="5" class="dg-box"/>
+      <text x="284" y="94" class="dg-t" text-anchor="start">PR 2: обработчик</text>
+      <text x="284" y="123" class="dg-in" text-anchor="start">Стабильный key</text>
+      <text x="284" y="148" class="dg-in" text-anchor="start">на всех попытках</text>
+      <rect x="518" y="70" width="188" height="94" rx="5" class="dg-box"/>
+      <text x="532" y="94" class="dg-t" text-anchor="start">PR 3: повторы</text>
+      <text x="532" y="123" class="dg-in" text-anchor="start">Включаем retry</text>
+      <text x="532" y="148" class="dg-in" text-anchor="start">после проверки</text>
+      <path d="M208 112 L266 112" class="dg-line" marker-end="url(#crp-n)"/>
+      <path d="M458 112 L514 112" class="dg-line" marker-end="url(#crp-n)"/>
+      <text x="216" y="98" class="dg-n" text-anchor="start">после</text>
+      <text x="466" y="98" class="dg-n" text-anchor="start">после</text>
+      <rect x="270" y="218" width="188" height="62" rx="5" class="dg-box"/>
+      <text x="284" y="242" class="dg-t" text-anchor="start">PR R: имена</text>
+      <text x="284" y="266" class="dg-n" text-anchor="start">без смены поведения</text>
+      <text x="24" y="224" class="dg-s" text-anchor="start">Переименование</text>
+      <text x="24" y="248" class="dg-s" text-anchor="start">не зависит от retry</text>
+    </svg>
+  </div>
+<figcaption>Каждый PR содержит законченное изменение с проверками. Стрелки задают предусловия включения поведения; один зелёный PR ещё не подтверждает готовность всей цепочки.</figcaption>
+</figure>
+      <p>В этом примере PR 1 добавляет в адаптер явную передачу ключа, сохраняя используемый старый путь. PR 2 переводит обработчик на стабильный ключ операции и проверяет взаимодействие. PR 3 включает дополнительные повторы только после проверки гарантии провайдера и развёртывания нужной версии обработчика. Каждый шаг можно рассмотреть отдельно; включение retry не должно обогнать готовность предыдущих шагов.</p>
+      <p>Если безопасного промежуточного состояния нет, механическое деление сделает изменение опаснее. Сохрани связанную часть вместе либо сначала введи совместимый переход. Схема БД, которую новая версия требует немедленно, и удаление поля, которое ещё читает старая версия, нуждаются в порядке развёртывания. Для такого PR важнее явный план совместимости, чем лимит строк.</p>
+      <p>Описание PR начинается с наблюдаемой проблемы и результата. Например: «Повтор после потери ответа банка мог создать второе списание. Обработчик передаёт тот же ключ операции в каждую попытку; адаптер проверяет повторный результат и конфликт payload. Проверено: отказ до эффекта, потеря ответа после эффекта, совпадающий ключ с иной суммой. Гарантия реального API подтверждается отдельной интеграционной проверкой». Это пример описания предполагаемого продуктового изменения; демо страницы проверяет только локальную модель.</p>
+      <p>Автор сначала просматривает весь собственный патч, включая новые файлы. Убирает случайные правки, показывает способ проверки и зовёт ревьюера, знающего затронутый путь. Например, <code>git diff --check</code> без аргументов не включает уже staged-правки; непроиндексированные новые файлы тоже отсутствуют в обычном diff. После <code>git add</code> проверь <code>git diff --cached --check</code>; для готового коммита — <code>git diff HEAD^ HEAD --check</code>. Варианты сравнения описаны в <a href="https://git-scm.com/docs/git-diff">документации git diff</a>; подготовка и переписывание истории — в теме <a href="git.html">Git</a>.</p>
+    </section>
+    <section class="step" id="approve-the-final-state">
+      <h2>Одобряй итоговую версию с понятными пределами проверки</h2>
+<p>После исправлений вернись к причине блокирующего замечания. Посмотри новый переход и оба окна отказа; затем прогон, который их различает. Закрытая ветка обсуждения означает, что её закрыли в интерфейсе. Она ещё не подтверждает правильность кода. Новые коммиты могут изменить соседние гарантии, поэтому решение относится к конкретной итоговой версии.</p>
+      <p>В модели повтор после ReplyLost становится безопасным, когда тот же ключ доходит до Bank, а Bank сохраняет его вместе с эффектом. Повтор возвращает прошлый результат без нового списания. Перестановка локального done этого свойства не давала.</p>
+<pre><code class="language-java">Bank bank = new Bank();
+bank.loseReply = true;
+Handler handler = new Handler(bank, false, true);
+Request request = new Request("k7", 100);
+System.out.println("== same key reaches the bank ==");
+System.out.println("first=" + attempt(handler, request));
+System.out.println("retry=" + attempt(handler, request));
+System.out.println("bank calls=" + bank.calls + " charged=" + bank.charged);</code></pre><pre class="out">== same key reaches the bank ==
+first=REPLY_LOST
+retry=REPLAY
+bank calls=2 charged=100</pre>
+      <p>Ключ должен связываться и с существенным содержимым операции. Запрос на 200 с ключом прежнего платежа 100 нельзя молча назвать тем же платежом. Модель Bank отказывает на таком повторе.</p>
+<pre><code class="language-java">Bank bank = new Bank();
+bank.charge(new Request("k7", 100), true);
+System.out.println("== the key also binds the payload ==");
+try {
+    bank.charge(new Request("k7", 200), true);
+    throw new AssertionError("conflict expected");
+} catch (PayloadConflict expected) {
+    System.out.println("same key, new amount=CONFLICT");
+}
+System.out.println("charged=" + bank.charged);</code></pre><pre class="out">== the key also binds the payload ==
+same key, new amount=CONFLICT
+charged=100</pre>
+      <p>Проверка здесь вызвала Bank напрямую. У Handler всё ещё только Set ID: для ключа в done он вернёт SKIPPED, даже если сумма другая. Поэтому это демо границы провайдера, а не законченный сервис. В настоящем обработчике нужно хранить и проверять содержание операции и возвращаемый результат. Кроме того, Map демо не переживает перезапуск и не координирует разные процессы; эти свойства надо закрепить реальным хранилищем и протоколом.</p>
+      <p>Перед одобрением сверь финальный diff, проверки нужной версии и состояние обязательных замечаний. Если после ревью изменились база ветки или затронутый код, проверь получившуюся комбинацию. Автоматический анализ, форматирование и CI помогают снять повторяющуюся работу; ревью остаётся местом для проверки смысла и предположений на границах. Порядок проверки итоговой сборки — в <a href="cicd.html">CI/CD</a>.</p>
+      <p>Code review не требует довести каждую систему до идеала в одном PR. Одобрение возможно, когда изменение удовлетворяет своим требованиям и улучшает поддерживаемость в заданных границах. Известный дефект в изменённом платёжном пути нельзя закрыть обещанием «после релиза». Независимую уборку можно вынести, если её отсутствие не ломает этот путь. Область проверки и оставшаяся работа должны быть понятны автору и следующему ревьюеру.</p>
+    </section>
+
+    <div class="summary"><ul>
+      <li>Восстанови обещанный результат пользователя. Локальная отметка, успешный HTTP-ответ и состоявшийся платёж — разные наблюдения.</li>
+      <li>Смотри на контекст вызова и составное решение. Потокобезопасная коллекция не объединяет несколько действий в одну гарантию.</li>
+      <li>Тест ценен ошибкой, которую он поймает. Отказ до эффекта и потеря ответа после эффекта проверяют разные окна.</li>
+      <li>Связывай замечание с местом, последствием и требованием; отделяй блокирующий дефект от вопроса и необязательной полировки.</li>
+      <li>PR должен давать проверяемое допустимое состояние. Повторы, миграции и зависимости между версиями требуют явного порядка включения.</li>
+      <li>Вернись к причинам замечаний на финальной версии. Одобрение модели не подтверждает свойства реальной внешней системы.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview"><h2>На собеседовании</h2>
+    <article class="q" id="what-to-review" data-freq="2">
+      <h3>Что ты смотришь на code review в первую очередь?</h3>
+      <div class="answer"><div data-level="middle">
+        <p>Сначала понимаю задачу и ожидаемое поведение. Прохожу изменённый путь от входа до эффекта и ответа: данные, права, состояние, ошибки, повторы и конкурентные вызовы. Затем смотрю, подтверждают ли тесты эти свойства. Имена и читаемость важны, когда помогают удержать смысл; форматирование по правилам команды лучше проверять автоматом.</p>
+        <p>На платеже с повтором мне нужно одно списание после допустимого retry. Наличие ID в коллекции этого не подтверждает. Поэтому проверю отказ до эффекта и потерю ответа после него, а не только две удачные доставки подряд.</p>
+      </div><div data-level="senior"><ul>
+        <li>Для внешнего эффекта различаю «ответ не получен» и «эффект не произошёл». Разрыв между провайдером и локальной записью требует явной гарантии, не только транзакции в своей БД.</li>
+        <li>Смотрю на совместимость развёртываемых версий: изменение DTO, схемы или enum может сломать старого читателя даже при зелёных тестах новой версии.</li>
+        <li>Если ревью разделено, указываю проверенную область. Граница адаптера и гарантия реального банка могут требовать владельца протокола; чтение одной стороны вызова не подтверждает вторую.</li>
+      </ul></div></div>
+    </article>
+    <article class="q" id="comments-and-blockers" data-freq="2">
+      <h3>Как написать замечание и что считать блокирующим?</h3>
+      <div class="answer"><div data-level="middle">
+        <p>Покажу место, последствие и свойство, которое нужно сохранить. Например: «Ключ записан до списания; после отказа повтор пропускается и платёж остаётся невыполненным. Нужна проверка отказа до эффекта и потери ответа после него». Автор может выбрать реализацию, если она действительно закрывает оба случая.</p>
+        <p>Блокирую нарушение требований, безопасности или обязательных правил команды. Для вопроса обозначаю, какой контекст нужен. Необязательный вариант называю предложением или Nit. Так автор понимает, что требуется до слияния, и может предметно возразить.</p>
+      </div><div data-level="senior"><ul>
+        <li>У спорного замечания проверяю исходную предпосылку. Например, атомарная операция с локальной картой действительно снимает одну гонку, но не охватывает другой процесс и отказ внешнего вызова.</li>
+        <li>У несколько одинаково пригодных дизайнов сравниваю стоимость изменения и поддержки. Личный привычный стиль не превращает альтернативу в дефект.</li>
+        <li>Если переписка повторяется, обсуждаю с автором и владельцем решения конкретный сценарий, затем фиксирую вывод в PR. Решение должно оставаться доступным следующему читателю.</li>
+      </ul></div></div>
+      <div class="check"><details data-kind="ревью"><summary>Ревьюер пишет: «Замени HashSet на ConcurrentHashMap, и повторов не будет». Достаточно?</summary><p>Нет. Нужно уточнить, какая составная операция атомарна и где общий набор. В демо две containsKey у потокобезопасной карты обе дали false, и оба обработчика создали эффект. putIfAbsent снимает показанную гонку внутри одной карты, но захват до эффекта сохраняет окно потери платежа; разные процессы не разделяют эту карту.</p></details></div>    </article>
+    <article class="q" id="pr-size" data-freq="2">
+      <h3>Какой PR считаешь достаточно маленьким?</h3>
+      <div class="answer"><div data-level="middle">
+        <p>Тот, в котором могу проследить одну законченную цель, её проверки и безопасное состояние после слияния. Новое поведение, его тесты и нужная документация идут вместе. Независимое переименование или форматирование выношу, потому что они увеличивают diff и затрудняют проверку причины изменения.</p>
+        <p>У меня нет универсального числа строк. Миграция с переходом между версиями может быть больше небольшого рефакторинга. Для цепочки PR фиксирую зависимости и момент включения поведения, чтобы retry не включился раньше стабильного ключа у провайдера.</p>
+      </div><div data-level="senior"><ul>
+        <li>Разбиение по файлам не равно разбиению по безопасным состояниям. У первого PR уже должен быть законченный результат, иначе промежуточная версия переносит риск на выпуск.</li>
+        <li>Цепочку зависимых PR нужно проверять и отдельно, и в итоговой комбинации. Изменение базового PR может пересобрать смысл и проверки следующих.</li>
+        <li>Для большой неизбежной правки даю карту затронутых путей, порядок чтения и конкретные доказательства. Подсчёт строк не заменяет эту работу.</li>
+      </ul></div></div>
+    </article>
+    <article class="q" id="green-ci" data-freq="2">
+      <h3>Тесты зелёные. Когда всё равно не одобришь?</h3>
+      <div class="answer"><div data-level="middle">
+        <p>Когда вижу нарушение требования, которое тесты не проверяют, или их утверждения описывают внутреннюю деталь вместо результата. В демо marker test зелёный при charged=0. Также не считаю проверенной гарантию банка только потому, что фейк всегда отвечает так, как удобно обработчику.</p>
+        <p>Попрошу минимальный пример по причине ошибки и подходящую проверку границы. Затем посмотрю исправление и прогон итоговой версии. Если замечание было о потере ответа после списания, один тест обычного успешного ответа его не закрывает.</p>
+      </div><div data-level="senior"><ul>
+        <li>CI относится к определённому коммиту и среде. Последующие изменения или новая база требуют проверки актуального сочетания, особенно на общих DTO и миграциях.</li>
+        <li>Для гонки прохождение многих случайных запусков не опровергает допустимое ошибочное расписание. Управляемый барьер проверяет именно то чередование, которое обсуждается.</li>
+        <li>Демо с in-memory провайдером даёт механизм, но не подтверждает долговечность и атомарность настоящего API. Вывод должен соответствовать области фактической проверки.</li>
+      </ul></div></div>
+      <div class="check"><details data-kind="уточнение"><summary>Повтор k7 с новой суммой отсекается в Handler по Set ID. Провайдер умеет проверять payload. Проблема решена?</summary><p>Нет: повтор до провайдера не дошёл. Handler вернул SKIPPED по одному ключу и не проверил, что новый запрос относится к той же операции. Нужна проверка существенных полей на локальной границе и сохранённый результат. Сценарий changedPayload страницы проверяет только прямой вызов Bank, поэтому он не доказывает корректность Handler.</p></details></div>    </article>
+
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://google.github.io/eng-practices/review/reviewer/standard.html">Google Engineering Practices: The Standard of Code Review</a> — основа урока: качество изменения, приоритет фактов, граница необязательной полировки и разрешение спора. Платёжный пример и демонстрации авторские.</li>
+    <li><a href="https://google.github.io/eng-practices/review/reviewer/looking-for.html">What to look for in a code review</a> — поведение, сложность, тесты и контекст; <a href="https://google.github.io/eng-practices/review/reviewer/navigate.html">Navigating a CL in review</a> — порядок чтения существенных частей изменения.</li>
+    <li><a href="https://google.github.io/eng-practices/review/reviewer/comments.html">How to write code review comments</a> — объяснение причины и намерения замечания, отношение к коду и ясность обязательности.</li>
+    <li><a href="https://google.github.io/eng-practices/review/developer/small-cls.html">Small CLs</a> — законченная небольшая правка, тесты вместе с поведением и независимые изменения.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ConcurrentMap.html">JDK 21: ConcurrentMap</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/CyclicBarrier.html">CyclicBarrier</a> — атомарный putIfAbsent и барьер воспроизводимого чередования.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

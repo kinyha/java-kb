@@ -589,7 +589,7 @@ window.KB_TREE = [
       { id: 'flow', title: 'Workflow', items: [
         { id: 'git', freq: 2, status: 'draft', title: 'Git',
           scope: 'ветки, merge и rebase, конфликты, cherry-pick, git flow и trunk-based' },
-        { id: 'code-review', freq: 2, status: 'empty', title: 'Code Review',
+        { id: 'code-review', freq: 2, status: 'draft', title: 'Code Review',
           scope: 'что смотреть, как писать комментарии, размер PR' },
         { id: 'process', freq: 1, status: 'empty', title: 'Team Process',
           scope: 'Scrum и Kanban, оценка задач, документация' },
