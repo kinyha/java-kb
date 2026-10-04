@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Collectors · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="collectors">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Collectors</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Коллектор — рецепт сборки стрима в результат из четырёх функций. <code>supplier</code> создаёт пустой контейнер, <code>accumulator</code> добавляет в него элемент, <code>combiner</code> сливает два контейнера — только в параллельном стриме, <code>finisher</code> превращает контейнер в результат. Стандартные коллекторы покрывают почти всё. <code>toMap</code> бросает <code>IllegalStateException</code> на повторяющемся ключе, если не задана функция слияния, и <code>NullPointerException</code> на <code>null</code>-значении. <code>groupingBy</code> возвращает <code>HashMap</code> списков и не принимает <code>null</code>-ключи.
+      Второй аргумент <code>groupingBy</code> — downstream-коллектор, который собирает каждую группу отдельно: <code>counting</code>, <code>summingLong</code>, <code>mapping</code>, <code>maxBy</code>, вложенный <code>groupingBy</code>. <code>partitioningBy</code> всегда содержит оба ключа <code>true</code> и <code>false</code>, а <code>groupingBy</code> по условию — только встретившиеся. <code>teeing</code> (Java 12) собирает поток двумя коллекторами за один проход.</p>
+    </div>
+
+    <section class="step" id="tomap">
+      <h2>toMap: дубликаты и null</h2>
+      <p>Отчёт по клиентам: сколько каждый заплатил. Естественная первая попытка — <code>toMap(Payment::client, Payment::amount)</code>. Демо <a href="../examples/collectors/CollectorsDemo.java">CollectorsDemo.java</a> на пяти платежах трёх клиентов:</p>
+<pre><code class="language-java">BATCH.stream().collect(toMap(Payment::client, Payment::amount));                          // падает
+BATCH.stream().collect(toMap(Payment::client, Payment::amount, Long::sum, TreeMap::new));  // слияние и тип карты
+BATCH.stream().collect(toMap(Payment::id, Payment::status));                               // статус p-5 = null</code></pre>
+      <pre class="out">== toMap with a duplicate key
+IllegalStateException: Duplicate key acme (attempted merging values 500 and 90000)
+with merge Long::sum into TreeMap: {acme=90500, beta=70000, zeta=120300}
+toMap with a null value: NullPointerException</pre>
+      <p>У acme два платежа, и <code>toMap</code> без функции слияния падает с <code>Duplicate key</code> — сообщение (Java 9+) называет ключ и оба значения. Это осознанное решение: молча перезаписать значение было бы хуже. Третий аргумент — функция слияния: <code>Long::sum</code> для итога, <code>(a, b) -&gt; a</code> чтобы оставить первое, <code>(a, b) -&gt; b</code> — последнее. Четвёртый — фабрика карты: <code>TreeMap::new</code> для сортировки, <code>LinkedHashMap::new</code> для порядка появления. На тестах с уникальными ключами всё работает, а в проде первый же повтор роняет запрос — поэтому вопрос «что делать с дубликатом» нужно решить при написании, а не после инцидента.</p>
+      <p>Вторая ловушка — <code>null</code>-значение: статус p-5 ещё не известен, и <code>toMap</code> бросил <code>NullPointerException</code>, хотя <code>HashMap</code> сам <code>null</code>-значения допускает. Внутри <code>toMap</code> использует <code>Map.merge</code>, а он <code>null</code>-значения запрещает. Варианты: отфильтровать, подставить значение по умолчанию или собрать через <code>collect(HashMap::new, (m, p) -&gt; m.put(...), Map::putAll)</code>. Карта с семантикой <code>HashMap</code> из <a href="hashmap.html">HashMap</a>, но неизменяемая — <code>toUnmodifiableMap</code>.</p>
+    </section>
+
+    <section class="step" id="grouping">
+      <h2>groupingBy и downstream-коллекторы</h2>
+      <pre class="out">== groupingBy and downstream collectors
+groupingBy -&gt; HashMap of ArrayList, RUB ids [p-1, p-3, p-4]
+counting:      {EUR=1, RUB=3, USD=1}
+summingLong:   {EUR=300, RUB=190500, USD=90000}
+mapping ids:   {acme=p-1,p-2, beta=p-4, zeta=p-3,p-5}
+max per client: {acme=p-2, beta=p-4, zeta=p-3}
+two levels:    {acme={RUB=1, USD=1}, beta={RUB=1}, zeta={EUR=1, RUB=1}}</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="groupingBy по валюте с downstream counting: для каждого элемента вычисляется ключ, в карте находится или создаётся контейнер этой группы, и downstream-аккумулятор добавляет элемент в него. В конце finisher превращает контейнеры в числа.">
+            <defs><marker id="cl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="28" class="dg-n">поток</text>
+            <rect x="20" y="40" width="70" height="30" rx="5" class="dg-cell"/><text x="55" y="60" class="dg-n" text-anchor="middle">p-1 RUB</text>
+            <rect x="20" y="76" width="70" height="30" rx="5" class="dg-cell"/><text x="55" y="96" class="dg-n" text-anchor="middle">p-2 USD</text>
+            <rect x="20" y="112" width="70" height="30" rx="5" class="dg-cell"/><text x="55" y="132" class="dg-n" text-anchor="middle">p-3 RUB</text>
+            <rect x="20" y="148" width="70" height="30" rx="5" class="dg-cell"/><text x="55" y="168" class="dg-n" text-anchor="middle">p-4 RUB</text>
+            <rect x="20" y="184" width="70" height="30" rx="5" class="dg-cell"/><text x="55" y="204" class="dg-n" text-anchor="middle">p-5 EUR</text>
+            <rect x="200" y="40" width="160" height="34" rx="6" class="dg-box"/><text x="280" y="62" class="dg-in" text-anchor="middle">key = currency</text>
+            <text x="440" y="28" class="dg-n">HashMap: ключ → контейнер группы</text>
+            <rect x="440" y="40" width="80" height="34" rx="6" class="dg-cell"/><text x="480" y="62" class="dg-in" text-anchor="middle">RUB</text>
+            <rect data-s="2-" x="440" y="90" width="80" height="34" rx="6" class="dg-cell"/><text data-s="2-" x="480" y="112" class="dg-in" text-anchor="middle">USD</text>
+            <rect data-s="3-" x="440" y="140" width="80" height="34" rx="6" class="dg-cell"/><text data-s="3-" x="480" y="162" class="dg-in" text-anchor="middle">EUR</text>
+            <g data-s="1"><rect x="540" y="40" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="62" class="dg-ok" text-anchor="middle">[1]</text>
+              <path d="M90 55 L 198 55" class="dg-line ok" marker-end="url(#cl-a)"/><path d="M360 57 L 438 57" class="dg-line ok" marker-end="url(#cl-a)"/>
+              <text x="20" y="226" class="dg-t" opacity="0">.</text></g>
+            <g data-s="2"><rect x="540" y="40" width="160" height="34" rx="6" class="dg-cell"/><text x="620" y="62" class="dg-n" text-anchor="middle">[1]</text>
+              <rect x="540" y="90" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="112" class="dg-ok" text-anchor="middle">[1]</text>
+              <path d="M90 91 L 198 64" class="dg-line ok" marker-end="url(#cl-a)"/><path d="M360 64 L 438 104" class="dg-line ok" marker-end="url(#cl-a)"/></g>
+            <g data-s="3"><rect x="540" y="40" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="62" class="dg-ok" text-anchor="middle">[3]</text>
+              <rect x="540" y="90" width="160" height="34" rx="6" class="dg-cell"/><text x="620" y="112" class="dg-n" text-anchor="middle">[1]</text>
+              <rect x="540" y="140" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="162" class="dg-ok" text-anchor="middle">[1]</text></g>
+            <g data-s="4"><rect x="540" y="40" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="62" class="dg-ok" text-anchor="middle">3L</text>
+              <rect x="540" y="90" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="112" class="dg-ok" text-anchor="middle">1L</text>
+              <rect x="540" y="140" width="160" height="34" rx="6" class="dg-cell hit"/><text x="620" y="162" class="dg-ok" text-anchor="middle">1L</text>
+              <text x="620" y="200" class="dg-ok" text-anchor="middle">finisher: long[] → Long</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Для <code>p-1</code> вычисляется ключ <code>RUB</code>. Группы ещё нет: <code>computeIfAbsent</code> создаёт контейнер downstream-коллектора — для <code>counting</code> это счётчик — и аккумулятор добавляет в него элемент.</li>
+          <li><code>p-2</code> даёт новый ключ <code>USD</code> — новый контейнер. Каждая группа собирается своим экземпляром downstream-коллектора; группы друг о друге не знают.</li>
+          <li>После всех элементов: в <code>RUB</code> три, в <code>USD</code> и <code>EUR</code> по одному. Список элементов группы при этом не создавался — <code>counting</code> хранит только число. С <code>groupingBy(key)</code> без второго аргумента контейнер — <code>ArrayList</code>, и вся группа держится в памяти.</li>
+          <li>Finisher каждого контейнера превращает внутреннее состояние в результат, и карта заполняется итоговыми значениями: <code>{EUR=1, RUB=3, USD=1}</code>. Тип значений — <code>Long</code>: <code>counting()</code> возвращает <code>Long</code>, и сравнение <code>count == 3</code> с <code>Integer</code> — ловушка с упаковкой.</li>
+        </ol>
+      </figure>
+      <p><code>groupingBy(classifier)</code> — <code>HashMap&lt;K, List&lt;T&gt;&gt;</code>: порядок ключей не определён, поэтому в демо результаты обёрнуты в <code>TreeMap</code> или собраны с фабрикой карты <code>groupingBy(key, TreeMap::new, downstream)</code>. Downstream-коллекторы решают, что хранить в группе: <code>counting()</code>, <code>summingLong</code>, <code>averagingDouble</code>, <code>mapping(f, downstream)</code> — преобразовать элемент до сборки, <code>filtering</code> и <code>flatMapping</code> (Java 9), <code>toSet()</code>, <code>maxBy</code>/<code>minBy</code> — возвращают <code>Optional</code>, поэтому в демо обёрнуты в <code>collectingAndThen(..., o -&gt; o.get().id())</code>; в непустой группе максимум есть всегда. Вложенный <code>groupingBy</code> даёт карту карт — отчёт клиент × валюта.</p>
+      <pre class="out">groupingBy a null key: NullPointerException (element cannot be mapped to a null key)</pre>
+      <p><code>groupingBy</code> не принимает <code>null</code>-ключ: платёж с неизвестным статусом уронил группировку по статусу с понятным сообщением. Нужен явный ключ для отсутствия — <code>Optional.ofNullable(p.status()).orElse("UNKNOWN")</code> — или фильтр. <code>filtering</code> внутри <code>groupingBy</code> отличается от <code>filter</code> перед ним: группа с нулём подходящих элементов останется в карте с пустым значением, а с внешним <code>filter</code> исчезнет.</p>
+    </section>
+
+    <section class="step" id="partition">
+      <h2>partitioningBy, joining, teeing</h2>
+      <pre class="out">== partitioningBy always has both keys
+big (&gt; 1 000 000): {false=5, true=0}
+groupingBy same:   {false=5}</pre>
+      <p><code>partitioningBy(predicate)</code> — частный случай группировки на две части, но с гарантией: в результате всегда оба ключа. Крупных платежей нет, а <code>true=0</code> в карте есть; <code>groupingBy</code> по тому же условию вернул карту только с <code>false</code>, и <code>get(true)</code> дал бы <code>null</code>. Для отчётов «прошли/не прошли» это разница между нулём и <code>NullPointerException</code>. Внутри <code>partitioningBy</code> — специальная карта из двух полей, а не <code>HashMap</code>.</p>
+      <pre class="out">== joining, teeing, summarizing
+[p-1, p-2, p-3, p-4, p-5]
+teeing min/max: p-5..p-3
+stats: count 5, sum 280800, min 300, max 120000, avg 56160.0</pre>
+      <p><code>joining(delimiter, prefix, suffix)</code> собирает строки через <code>StringBuilder</code> — это и есть правильная замена конкатенации в цикле из <a href="strings.html">Strings</a>. <code>teeing(c1, c2, merger)</code> (Java 12) пропускает поток через два коллектора одновременно и объединяет результаты — минимум и максимум за один проход, без двух стримов и без сохранения элементов. <code>summarizingLong</code> считает количество, сумму, минимум, максимум и среднее разом; среднее — <code>double</code>, для денег его округляют явно, как в <a href="bigdecimal.html">BigDecimal &amp; Money</a>.</p>
+    </section>
+
+    <section class="step" id="reports">
+      <h2>Отчёт целиком: сортировка по значению и топ-N в группе</h2>
+<pre><code class="language-java">Map&lt;String, Long&gt; totals = BATCH.stream().collect(groupingBy(Payment::client, summingLong(Payment::amount)));
+List&lt;String&gt; top = totals.entrySet().stream()
+        .sorted(Map.Entry.&lt;String, Long&gt;comparingByValue().reversed().thenComparing(Map.Entry.comparingByKey()))
+        .limit(2)
+        .map(e -&gt; e.getKey() + "=" + e.getValue())
+        .toList();</code></pre>
+      <pre class="out">== top-2 clients by total: group, then sort entries by value
+[beta=135000, acme=130500]
+== top-2 payments inside each currency
+{EUR=[p-5], RUB=[p-3, p-4], USD=[p-2]}
+== most frequent currency
+RUB=5
+== index by id, keeping order of appearance
+[p-1, p-2, p-3, p-4, p-5, p-6, p-7]</pre>
+      <p>Демо <a href="../examples/collectors/ReportDemo.java">ReportDemo.java</a> собирает задачи, которые чаще всего дают на live coding. Отсортировать карту по значению коллектор не умеет: карта упорядочена по ключам или не упорядочена вовсе. Поэтому отчёт делается в два этапа: сначала агрегат в карту, потом второй стрим по <code>entrySet()</code> с <code>Map.Entry.comparingByValue()</code>. Явный тип в <code>Map.Entry.&lt;String, Long&gt;comparingByValue()</code> нужен, потому что после <code>.reversed()</code> компилятор уже не выводит параметры. <code>thenComparing</code> по ключу делает результат детерминированным при равных суммах — без него порядок равных зависит от порядка <code>HashMap</code>.</p>
+      <p>Топ-N внутри каждой группы — <code>collectingAndThen(toList(), l -&gt; ...sorted().limit(2))</code>: группа сначала собирается целиком, потом сортируется. Самый частый элемент — <code>counting()</code> и <code>max(comparingByValue())</code> по записям. Индекс по идентификатору с сохранением порядка — <code>toMap</code> с <code>LinkedHashMap::new</code>. Больше таких задач с разбором — в <a href="stream-practice.html">Stream Practice</a>.</p>
+      <p>В рабочем коде важно ещё одно решение: где агрегировать. <code>groupingBy</code> по миллиону платежей требует сначала загрузить миллион объектов из базы в память, а <code>GROUP BY</code> в SQL вернёт три строки. Агрегаты по большим таблицам считают в базе — с индексами и без передачи данных по сети, как в <a href="sql.html">SQL</a>. Коллекторы — для данных, которые уже в памяти: ответа внешнего API, небольшой выборки, результата нескольких запросов, которые нужно свести вместе. И даже там <code>groupingBy</code> без downstream держит всю группу в списках; <code>counting</code>, <code>summingLong</code> и <code>teeing</code> хранят только агрегат.</p>
+    </section>
+
+    <section class="step" id="custom">
+      <h2>Коллектор изнутри</h2>
+<pre><code class="language-java">Collector&lt;Payment, long[], Long&gt; sum = Collector.of(
+        () -&gt; new long[1],                                    // supplier: пустой контейнер
+        (acc, p) -&gt; acc[0] += p.amount(),                     // accumulator: добавить элемент
+        (a, b) -&gt; { combines[0]++; a[0] += b[0]; return a; }, // combiner: слить два контейнера
+        acc -&gt; acc[0]);                                       // finisher: результат</code></pre>
+      <pre class="out">== a collector is four functions
+sequential: 280800, combiner calls 0
+parallel:   280800, combiner calls 4</pre>
+      <p><code>collect</code> — изменяемая свёртка: в отличие от <code>reduce</code> из <a href="streams.html">Stream API</a>, который на каждом шаге создаёт новое значение, коллектор накапливает в изменяемый контейнер. В последовательном стриме контейнер один, и <code>combiner</code> не вызывается ни разу — его ошибки на тестах не видны. В параллельном каждая часть потока собирается в свой контейнер, а потом они сливаются попарно: пять элементов — пять частей — четыре слияния. Поэтому <code>combiner</code> обязан быть корректным, даже если вы пишете последовательный код: кто-то добавит <code>.parallel()</code>. Характеристики коллектора (<code>IDENTITY_FINISH</code>, <code>UNORDERED</code>, <code>CONCURRENT</code>) дают стриму право пропустить finisher или не сохранять порядок; <code>groupingByConcurrent</code> собирает все части в одну <code>ConcurrentHashMap</code> вместо слияния — об этом в <a href="parallel-streams.html">Parallel Streams</a>.</p>
+      <p>Свой коллектор пишут редко — обычно комбинации стандартных хватает. Хорошая причина — повторяющаяся доменная агрегация (сумма в <code>Money</code> с проверкой валюты, статистика по процентилям), которую удобно назвать и протестировать отдельно. Плохая — заменить простой цикл: шесть строк с <code>Collector.of</code> читаются хуже трёх строк с <code>for</code>.</p>
+      <div class="trap">
+        <p class="myth"><code>toMap</code> ведёт себя как <code>HashMap.put</code>: повторный ключ перезапишет значение, а <code>null</code>-значение допустимо.</p>
+        <p class="fact">Повторный ключ без функции слияния — <code>IllegalStateException: Duplicate key</code>, а <code>null</code>-значение — <code>NullPointerException</code>, потому что внутри используется <code>Map.merge</code>. В демо упали оба случая.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Коллектор: supplier, accumulator, combiner (только в параллельном), finisher.</li>
+        <li>toMap: дубликат без merge — IllegalStateException; null-значение — NPE; четвёртый аргумент — тип карты.</li>
+        <li>groupingBy — HashMap списков; downstream решает, что хранить: counting (Long), summingLong, mapping, maxBy, вложенный groupingBy.</li>
+        <li>groupingBy не принимает null-ключ; filtering сохраняет пустые группы, внешний filter — нет.</li>
+        <li>partitioningBy всегда содержит true и false.</li>
+        <li>joining — StringBuilder; teeing — два коллектора за проход; summarizing — пять агрегатов.</li>
+        <li>combiner надо писать корректно, даже если стрим сейчас последовательный.</li>
+        <li>Сортировка по значению — второй стрим по entrySet с comparingByValue; большие агрегаты — в SQL, а не в памяти.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="cl-tomap" data-freq="3">
+      <h3>Что произойдёт, если в toMap встретятся одинаковые ключи?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>IllegalStateException: Duplicate key. Чтобы обработать повторы, передают третий аргумент — функцию слияния: сумма, первое, последнее значение. Четвёртый аргумент задаёт реализацию карты — TreeMap, LinkedHashMap. Ещё одна ловушка — null-значение даёт NullPointerException, потому что внутри Map.merge.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Если нужен список всех значений по ключу — groupingBy, а не toMap.</li>
+            <li>toUnmodifiableMap запрещает и null-ключи.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему выгрузка падает только в проде?</summary>
+          <pre><code class="language-java">Map&lt;String, Account&gt; byIban = accounts.stream()
+        .collect(Collectors.toMap(Account::iban, a -&gt; a));</code></pre>
+          <p>В тестовых данных IBAN уникальны, а в продакшене у одного клиента может быть закрытый и новый счёт с тем же IBAN, или данные просто содержат дубликаты. Первый повтор — <code>IllegalStateException: Duplicate key</code>. Нужно решить, что значит дубликат: оставить активный (<code>(a, b) -&gt; a.isActive() ? a : b</code>), собрать все (<code>groupingBy</code>) или явно падать с понятной ошибкой валидации.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="cl-grouping" data-freq="3">
+      <h3>Как работает groupingBy и что такое downstream-коллектор?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>groupingBy вычисляет ключ для каждого элемента и собирает элементы с одинаковым ключом. По умолчанию результат — HashMap&lt;K, List&lt;T&gt;&gt;. Второй аргумент — downstream-коллектор, который собирает каждую группу: counting, summingLong, mapping, toSet, maxBy, вложенный groupingBy. Можно задать фабрику карты, например TreeMap::new для сортировки ключей.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>counting возвращает Long; maxBy — Optional, оборачивают collectingAndThen.</li>
+            <li>null-ключ — NullPointerException.</li>
+            <li>partitioningBy всегда содержит оба ключа, groupingBy по условию — нет.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="cl-custom" data-freq="2">
+      <h3>Из чего состоит Collector?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Из четырёх функций: supplier создаёт контейнер, accumulator добавляет элемент, combiner сливает два контейнера, finisher превращает контейнер в результат. Плюс характеристики: IDENTITY_FINISH, UNORDERED, CONCURRENT. collect — изменяемая свёртка, в отличие от reduce.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>combiner вызывается только в параллельном стриме — ошибки в нём не видны на последовательных тестах.</li>
+            <li>CONCURRENT + UNORDERED позволяют собирать в один общий контейнер.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+    <article class="q" id="cl-sort-value" data-freq="3">
+      <h3>Как найти топ-3 клиентов по сумме платежей стримом?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала groupingBy по клиенту с summingLong, потом стрим по entrySet: sorted по Map.Entry.comparingByValue().reversed(), limit(3), map в нужный вид. Сортировать саму карту по значению нельзя — её порядок задают ключи. Для детерминированности при равных суммах добавляют thenComparing по ключу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Для большого числа клиентов вместо полной сортировки — куча на 3 элемента.</li>
+            <li>Если данные в базе — GROUP BY ... ORDER BY ... LIMIT 3, а не загрузка в память.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/Collectors.html">Collectors</a> — toMap, groupingBy, partitioningBy, teeing.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/Collector.html">Collector</a> — функции, характеристики, требования identity и associativity.</li>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, item 46 — prefer side-effect-free functions in streams.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

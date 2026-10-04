@@ -399,7 +399,7 @@ window.KB_TREE = [
           scope: 'зачем нужен, map и flatMap, orElse и orElseGet, антипаттерны' },
         { id: 'streams', freq: 3, status: 'draft', title: 'Stream API',
           scope: 'ленивый конвейер, intermediate и terminal, map, filter, flatMap, reduce, одноразовость стрима' },
-        { id: 'collectors', freq: 3, status: 'empty', title: 'Collectors',
+        { id: 'collectors', freq: 3, status: 'draft', title: 'Collectors',
           scope: 'toList и toMap с дубликатами, groupingBy, partitioningBy, downstream collectors, joining' },
         { id: 'parallel-streams', freq: 2, status: 'empty', title: 'Parallel Streams',
           scope: 'common ForkJoinPool, когда параллельный стрим медленнее, порядок, побочные эффекты' },
