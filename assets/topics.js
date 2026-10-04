@@ -359,7 +359,7 @@ window.KB_TREE = [
           scope: 'контракт equals и hashCode, HashMap и изменяемые ключи, toString, clone, Comparable' },
         { id: 'exceptions', freq: 3, status: 'draft', title: 'Exceptions',
           scope: 'иерархия, checked и unchecked, try-with-resources, finally, suppressed, свои исключения, обработка на границах' },
-        { id: 'generics', freq: 3, status: 'empty', title: 'Generics',
+        { id: 'generics', freq: 3, status: 'draft', title: 'Generics',
           scope: 'type erasure, wildcards, PECS, bounded types, raw types' },
         { id: 'enums', freq: 2, status: 'empty', title: 'Enums',
           scope: 'enum с полями и методами, EnumMap и EnumSet, singleton через enum, switch' },

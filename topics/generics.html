@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Generics · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="generics">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Generics</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Generics переносят проверку типов элементов из времени выполнения во время компиляции: положить строку в <code>List&lt;Payment&gt;</code> нельзя, а читать можно без приведения. Делает это только компилятор. После проверки параметры типа стираются: в байткоде <code>List&lt;Payment&gt;</code> — просто <code>List</code>, а приведение <code>checkcast</code> вставлено в каждом месте чтения. Поэтому ошибка, пропущенная через сырой тип, падает не там, где её сделали, а там, где читают. Стирание объясняет все ограничения: нельзя <code>new T()</code>, <code>instanceof List&lt;String&gt;</code> и перегрузку по <code>List&lt;String&gt;</code> и <code>List&lt;Integer&gt;</code>. Параметризованные типы инвариантны: <code>List&lt;Payment&gt;</code> — не <code>List&lt;Object&gt;</code>; гибкость дают wildcard по правилу PECS — читаешь из <code>? extends</code>, пишешь в <code>? super</code>.</p>
+    </div>
+
+    <section class="step" id="problem">
+      <h2>Чужой элемент в списке и падение в другом месте</h2>
+      <p>Сервис сверки получает пачку платежей и передаёт её в старый модуль импорта, написанный до Java 5. Тот добавляет в пачку запись о возврате — строкой. Ничего не падает. Падает позже, в коде, который суммирует платежи и ничего не знает о старом модуле. Демо <a href="../examples/generics/RawDemo.java">RawDemo.java</a>:</p>
+<pre><code class="language-java">@SuppressWarnings({"rawtypes", "unchecked"})
+static void importLegacy(List batch) {            // старый код без параметра типа
+    batch.add("REFUND:42:500");                     // строка вместо Payment — компилятор молчит
+}
+
+List&lt;Payment&gt; batch = new ArrayList&lt;&gt;();
+batch.add(new Payment("p-1", 1000));
+importLegacy(batch);                                // сюда пришёл чужой элемент
+for (Payment p : batch) total += p.amount();        // ClassCastException здесь, а не в importLegacy</code></pre>
+      <pre class="out">size = 2, contents = [Payment[id=p-1, amount=1000], REFUND:42:500]
+ClassCastException at the read site: class java.lang.String cannot be cast to class RawDemo$Payment</pre>
+      <p>Список без параметра типа — сырой тип — принимает что угодно. Строка спокойно легла рядом с платежом, и <code>batch.size()</code> честно вернул 2. Исключение возникло в цикле суммирования, и по стеку вызовов найти, кто положил строку, нельзя: тот код давно отработал. До Java 5 так выглядела любая коллекция — <code>List</code> хранил <code>Object</code>, а каждое чтение было приведением, которое могло упасть.</p>
+    </section>
+
+    <section class="step" id="idea">
+      <h2>Параметр типа: ошибку видит компилятор</h2>
+      <p>С параметром типа контракт «в этом списке только платежи» становится частью сигнатуры. Если <code>importLegacy</code> объявить как <code>importLegacy(List&lt;Payment&gt; batch)</code>, строку в него не положить: код не скомпилируется с ошибкой <code>incompatible types: String cannot be converted to Payment</code>. Ошибка находится там, где её делают, а не там, где она проявляется. А при чтении приведение больше не пишут руками: <code>batch.get(0).amount()</code>.</p>
+      <p>Предупреждения компилятора — часть этой защиты. Демо скрывает их <code>@SuppressWarnings({"rawtypes", "unchecked"})</code>, и именно так ошибки и проходят: <code>unchecked</code> означает, что компилятор не может гарантировать типобезопасность в этом месте. В рабочем коде подавление ставят на минимальную область — одну переменную или метод — и с комментарием, почему это безопасно.</p>
+    </section>
+
+    <section class="step" id="erasure">
+      <h2>Стирание: что остаётся в байткоде</h2>
+      <p>Параметры типа существуют только при компиляции. Компилятор проверяет типы, затем стирает параметры до их границ — <code>T</code> до <code>Object</code>, <code>T extends Comparable&lt;T&gt;</code> до <code>Comparable</code> — и вставляет приведения там, где значение стёртого типа используется как конкретное. Скрипт <a href="../examples/generics/javap.sh">javap.sh</a> компилирует <a href="../examples/generics/Erased.java">Erased.java</a> и показывает нужные строки <code>javap -c -v</code>:</p>
+<pre><code class="language-java">static long first(List&lt;Payment&gt; batch) {
+    return batch.get(0).amount();          // get возвращает Object; компилятор вставляет checkcast
+}
+static &lt;T extends Comparable&lt;T&gt;&gt; T max(T a, T b) {
+    return a.compareTo(b) &gt;= 0 ? a : b;    // T стирается до своей границы — Comparable
+}</code></pre>
+      <pre class="out">  static long first(java.util.List&lt;Erased$Payment&gt;);
+    descriptor: (Ljava/util/List;)J
+         2: invokeinterface #7,  2            // InterfaceMethod java/util/List.get:(I)Ljava/lang/Object;
+         7: checkcast     #13                 // class Erased$Payment
+    Signature: #32                          // (Ljava/util/List&lt;LErased$Payment;&gt;;)J
+  static &lt;T extends java.lang.Comparable&lt;T&gt;&gt; T max(T, T);
+    descriptor: (Ljava/lang/Comparable;Ljava/lang/Comparable;)Ljava/lang/Comparable;
+         2: invokeinterface #19,  2           // InterfaceMethod java/lang/Comparable.compareTo:(Ljava/lang/Object;)I
+    Signature: #36                          // &lt;T::Ljava/lang/Comparable&lt;TT;&gt;;&gt;(TT;TT;)TT;</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Компилятор проверяет List of Payment, затем стирает его до List и вставляет checkcast в месте чтения. В класс-файл попадают дескриптор со стёртым типом, который использует JVM, и атрибут Signature с полным типом, который читают рефлексия и компилятор.">
+            <defs><marker id="gn-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="70" width="180" height="70" rx="9" class="dg-box"/>
+            <text x="110" y="96" class="dg-in" text-anchor="middle">исходник</text>
+            <text x="110" y="118" class="dg-n" text-anchor="middle">List&lt;Payment&gt; batch</text>
+            <rect data-s="1-" x="260" y="70" width="180" height="70" rx="9" class="dg-cell"/>
+            <text data-s="1-" x="350" y="96" class="dg-in" text-anchor="middle">javac: проверка</text>
+            <text data-s="1-" x="350" y="118" class="dg-n" text-anchor="middle">add(String) — ошибка</text>
+            <path data-s="1-" d="M200 105 L 258 105" class="dg-line" marker-end="url(#gn-a)"/>
+            <rect data-s="2-" x="500" y="20" width="200" height="66" rx="9" class="dg-box"/>
+            <text data-s="2-" x="600" y="44" class="dg-in" text-anchor="middle">descriptor</text>
+            <text data-s="2-" x="600" y="66" class="dg-n" text-anchor="middle">(Ljava/util/List;)J</text>
+            <path data-s="2-" d="M440 92 L 498 58" class="dg-line" marker-end="url(#gn-a)"/>
+            <rect data-s="3-" x="500" y="124" width="200" height="66" rx="9" class="dg-cell hit"/>
+            <text data-s="3-" x="600" y="148" class="dg-in" text-anchor="middle">Signature</text>
+            <text data-s="3-" x="600" y="170" class="dg-n" text-anchor="middle">List&lt;Payment&gt; сохранён</text>
+            <path data-s="3-" d="M440 118 L 498 152" class="dg-line ok" marker-end="url(#gn-a)"/>
+            <text data-s="1" x="20" y="222" class="dg-t">Компилятор знает параметр типа и проверяет каждую запись и чтение.</text>
+            <text data-s="2" x="20" y="222" class="dg-t">JVM видит стёртый тип: метод принимает просто List, чтение — Object + checkcast.</text>
+            <text data-s="3" x="20" y="222" class="dg-ok">Полный тип объявления остаётся в Signature: его читают рефлексия и компилятор.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>При компиляции <code>List&lt;Payment&gt;</code> — полноценный тип: <code>add(String)</code> не пройдёт, а <code>get(0)</code> имеет тип <code>Payment</code>.</li>
+          <li>В дескриптор метода, по которому JVM связывает вызовы, попадает стёртый тип: <code>(Ljava/util/List;)J</code>. <code>List.get</code> возвращает <code>Object</code>, поэтому компилятор вставил <code>checkcast Erased$Payment</code> — то самое приведение, которое упало в первом демо.</li>
+          <li>Полный тип объявления записан в атрибут <code>Signature</code>. JVM его не использует при выполнении, но его читают компилятор, когда вы подключаете библиотеку, и рефлексия.</li>
+        </ol>
+      </figure>
+      <pre class="out">same class at runtime: true
+field type:         java.util.List
+field generic type: java.util.List&lt;ErasureDemo$Payment&gt;
+type argument:      ErasureDemo$Payment</pre>
+      <p>Демо <a href="../examples/generics/ErasureDemo.java">ErasureDemo.java</a> показывает обе стороны. <code>ArrayList&lt;String&gt;</code> и <code>ArrayList&lt;Payment&gt;</code> — один класс при выполнении: объект не знает своего параметра типа. Но объявление поля <code>static List&lt;Payment&gt; pending</code> знает: <code>getGenericType()</code> читает его из <code>Signature</code>. На этом построены super type token в Jackson (<code>new TypeReference&lt;List&lt;Payment&gt;&gt;() {}</code>) и <code>ParameterizedTypeReference</code> в Spring: анонимный подкласс сохраняет параметр в сигнатуре своего родителя, и библиотека достаёт его рефлексией, как в <a href="reflection.html">Annotations &amp; Reflection</a>.</p>
+    </section>
+
+    <section class="step" id="consequences">
+      <h2>Что следует из стирания: мост-методы и ограничения</h2>
+      <pre class="out">compareTo(Amount) bridge=false synthetic=false
+compareTo(Object) bridge=true synthetic=true
+raw compareTo("five"): ClassCastException in the bridge</pre>
+      <p>Record <code>Amount implements Comparable&lt;Amount&gt;</code> объявил один метод <code>compareTo(Amount)</code>, а в классе их два. После стирания интерфейс <code>Comparable</code> требует <code>compareTo(Object)</code>, и компилятор сгенерировал синтетический мост-метод, который приводит аргумент к <code>Amount</code> и вызывает настоящий. Вызов через сырой тип со строкой упал внутри моста — снова приведение, вставленное компилятором. Мост-методы нужны, чтобы переопределение работало после стирания; в стеке исключения они видны как строки без номера в исходнике.</p>
+      <table class="mx">
+        <thead><tr><th>Нельзя</th><th>Почему</th><th>Обход</th></tr></thead>
+        <tbody>
+          <tr><td><code>new T()</code>, <code>new T[n]</code></td><td>При выполнении T неизвестен</td><td>Передать <code>Supplier&lt;T&gt;</code> или <code>Class&lt;T&gt;</code></td></tr>
+          <tr><td><code>x instanceof List&lt;String&gt;</code></td><td>У объекта нет параметра типа</td><td><code>instanceof List&lt;?&gt;</code> и проверка элементов</td></tr>
+          <tr><td>Перегрузка <code>f(List&lt;String&gt;)</code> и <code>f(List&lt;Integer&gt;)</code></td><td>Одинаковый стёртый дескриптор: name clash</td><td>Разные имена методов</td></tr>
+          <tr><td><code>static T field</code></td><td>Статическое поле одно на класс, а T — у экземпляра</td><td>Параметр метода</td></tr>
+          <tr><td><code>List&lt;int&gt;</code></td><td>Стирание до Object, а примитив — не объект</td><td>Обёртки с боксингом или специализированные коллекции</td></tr>
+          <tr><td><code>catch (T e)</code>, generic-исключения</td><td>Обработчики выбираются по классу при выполнении</td><td>Конкретные классы исключений</td></tr>
+        </tbody>
+      </table>
+      <p>Стирание выбрали в Java 5 ради совместимости: старый байткод и библиотеки без generics работали с новым кодом без перекомпиляции, а сырые типы остались ради этой совместимости. Цена — ограничения из таблицы и то, что типобезопасность держится только на компиляторе. В C# параметры типа существуют и при выполнении, поэтому <code>new T()</code> и <code>List&lt;int&gt;</code> без боксинга там есть.</p>
+    </section>
+
+    <section class="step" id="variance">
+      <h2>Инвариантность и PECS: когда нужен wildcard</h2>
+      <pre class="out">Object[] = new Payment[1]; store String: ArrayStoreException
+sorted with Comparator&lt;Object&gt;: [p-1, p-2]</pre>
+      <p>Массивы ковариантны: <code>Payment[]</code> — подтип <code>Object[]</code>. За это платят проверкой при каждой записи: в массив, объявленный как <code>Object[]</code>, но созданный как <code>Payment[]</code>, строка не легла — <code>ArrayStoreException</code>. С generics такая проверка невозможна — параметр стёрт, — поэтому параметризованные типы инвариантны: <code>List&lt;Payment&gt;</code> не является ни подтипом, ни надтипом <code>List&lt;Object&gt;</code>, и <code>List&lt;Object&gt; list = new ArrayList&lt;Payment&gt;()</code> не компилируется. Иначе через <code>list.add("x")</code> в список платежей попала бы строка, и проверить это было бы нечем.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 200" role="img" aria-label="List of Payment и List of Object не связаны. List of CardPayment и List of Payment являются подтипами List of ? extends Payment, из которого можно читать Payment. List of Payment и List of Object являются подтипами List of ? super CardPayment, в который можно писать CardPayment.">
+            <defs><marker id="gv-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="14" width="250" height="58" rx="8" class="dg-cell hit"/>
+            <text x="145" y="38" class="dg-in" text-anchor="middle">List&lt;? extends Payment&gt;</text>
+            <text x="145" y="60" class="dg-ok" text-anchor="middle">читать Payment, не писать</text>
+            <rect x="420" y="14" width="280" height="58" rx="8" class="dg-cell hit"/>
+            <text x="560" y="38" class="dg-in" text-anchor="middle">List&lt;? super CardPayment&gt;</text>
+            <text x="560" y="60" class="dg-ok" text-anchor="middle">писать CardPayment, читать Object</text>
+            <rect x="20" y="130" width="180" height="40" rx="8" class="dg-box"/>
+            <text x="110" y="155" class="dg-in" text-anchor="middle">List&lt;CardPayment&gt;</text>
+            <rect x="270" y="130" width="180" height="40" rx="8" class="dg-box"/>
+            <text x="360" y="155" class="dg-in" text-anchor="middle">List&lt;Payment&gt;</text>
+            <rect x="520" y="130" width="180" height="40" rx="8" class="dg-box"/>
+            <text x="610" y="155" class="dg-in" text-anchor="middle">List&lt;Object&gt;</text>
+            <path d="M110 128 L 120 74" class="dg-line" marker-end="url(#gv-a)"/>
+            <path d="M330 128 L 200 74" class="dg-line" marker-end="url(#gv-a)"/>
+            <path d="M390 128 L 520 74" class="dg-line" marker-end="url(#gv-a)"/>
+            <path d="M610 128 L 600 74" class="dg-line" marker-end="url(#gv-a)"/>
+            <path d="M450 150 L 518 150" class="dg-line bad" stroke-dasharray="5 4"/>
+            <text x="484" y="190" class="dg-bad" text-anchor="middle">не подтипы друг друга</text>
+          </svg>
+        </div>
+        <figcaption>Стрелка — «является подтипом». Связь между параметризованными типами дают только wildcard.</figcaption>
+      </figure>
+<pre><code class="language-java">static long total(List&lt;? extends Payment&gt; source) {          // производитель: читаем
+    long sum = 0;
+    for (Payment p : source) sum += p.amount;
+    // source.add(new Payment(1));   // не компилируется: неизвестно, Card это список или Sbp
+    return sum;
+}
+static void addCards(List&lt;? super CardPayment&gt; sink, int n) { // потребитель: пишем
+    for (int i = 1; i &lt;= n; i++) sink.add(new CardPayment(i * 100));
+}
+static &lt;T&gt; void copy(List&lt;? super T&gt; dst, List&lt;? extends T&gt; src) { dst.addAll(src); }</code></pre>
+      <pre class="out">cards = [CardPayment:100, CardPayment:200], total = 300
+all   = [CardPayment:100, SbpPayment:700], total = 800
+audit = [CardPayment:100, SbpPayment:700]</pre>
+      <p>Правило PECS — producer extends, consumer super. Из <code>List&lt;? extends Payment&gt;</code> можно читать <code>Payment</code>: что бы там ни лежало, это подтип <code>Payment</code>. Писать нельзя: за wildcard может стоять <code>List&lt;SbpPayment&gt;</code>, и карточный платёж в нём был бы чужим. В <code>List&lt;? super CardPayment&gt;</code> можно писать <code>CardPayment</code>: список гарантированно принимает его — это <code>List&lt;CardPayment&gt;</code>, <code>List&lt;Payment&gt;</code> или <code>List&lt;Object&gt;</code>. Читать можно только <code>Object</code>. Демо <a href="../examples/generics/PecsDemo.java">PecsDemo.java</a> передаёт один и тот же <code>addCards</code> и <code>List&lt;CardPayment&gt;</code>, и <code>List&lt;Payment&gt;</code>.</p>
+      <p>Так устроены сигнатуры JDK: <code>Collections.copy(List&lt;? super T&gt; dest, List&lt;? extends T&gt; src)</code>, <code>Collections.max(Collection&lt;? extends T&gt;, Comparator&lt;? super T&gt;)</code>, <code>List.sort(Comparator&lt;? super E&gt;)</code> — поэтому в ErasureDemo список платежей отсортирован компаратором <code>Comparator&lt;Object&gt;</code>. Правило для своих API: wildcard — в параметрах методов, где он расширяет круг принимаемых аргументов; в возвращаемых типах wildcard не ставят — он заставляет вызывающий код работать с неизвестным типом.</p>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Границы: загрязнение кучи и переусложнение</h2>
+<pre><code class="language-java">@SafeVarargs   // ложное обещание: метод пишет в массив varargs
+static void poison(List&lt;String&gt;... lists) {
+    Object[] array = lists;                 // List&lt;String&gt;[] — на деле List[]
+    array[0] = List.of(42);                 // ArrayStoreException не будет: тип элемента — List
+}</code></pre>
+      <pre class="out">heap pollution: ClassCastException on read, far from poison()
+flatten = [p-1, p-2, p-3]</pre>
+      <p>Generic varargs создаёт массив стёртого типа: <code>List&lt;String&gt;...</code> при выполнении — <code>List[]</code>. В такой массив можно положить <code>List.of(42)</code>, и проверка записи массива не сработает — она знает только про <code>List</code>. Это загрязнение кучи (heap pollution): переменная параметризованного типа указывает на объект другого параметризованного типа. Демо <a href="../examples/generics/VarargsDemo.java">VarargsDemo.java</a> упало на чтении, вдали от <code>poison</code>, — та же история, что в первом демо. <code>@SafeVarargs</code> — обещание, которое компилятор не проверяет: метод не пишет в массив varargs и не отдаёт его наружу. <code>flatten</code> только читает — его обещание честное; так помечены <code>List.of</code> и <code>Arrays.asList</code>.</p>
+      <p>Обратная крайность — переусложнение: <code>&lt;K extends Comparable&lt;? super K&gt;, V, M extends Map&lt;K, List&lt;V&gt;&gt;&gt;</code> в бизнес-коде читать некому. Параметр типа оправдан, когда код действительно работает с разными типами одинаково — коллекции, кеши, репозитории, результаты, — и когда без него пришлось бы приводить типы. Сервис возвратов, который всегда работает с <code>Payment</code>, параметр типа не делает лучше.</p>
+      <div class="trap">
+        <p class="myth">Generics гарантируют, что в <code>List&lt;Payment&gt;</code> лежат только платежи.</p>
+        <p class="fact">Гарантирует компилятор и только там, где нет сырых типов, непроверенных приведений и ложных <code>@SafeVarargs</code>. При выполнении параметр стёрт: в демо строка легла в список платежей через сырой <code>List</code>, а падение случилось при чтении, на вставленном компилятором <code>checkcast</code>. Предупреждения <code>unchecked</code> — сигнал, что гарантии в этом месте нет.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Generics — проверка типов при компиляции; сырой тип пропустил строку в список платежей, и упало чтение.</li>
+        <li>Стирание: в дескрипторе <code>(Ljava/util/List;)J</code>, при чтении <code>checkcast</code>, полный тип — в <code>Signature</code> для рефлексии.</li>
+        <li><code>ArrayList&lt;String&gt;</code> и <code>ArrayList&lt;Payment&gt;</code> — один класс; объявления полей и методов свой тип помнят.</li>
+        <li>Мост-метод <code>compareTo(Object)</code> сохраняет переопределение после стирания; отсюда же ограничения: нет <code>new T()</code>, <code>instanceof List&lt;String&gt;</code>, перегрузки по параметру.</li>
+        <li>Массивы ковариантны с проверкой записи, параметризованные типы инвариантны; PECS: читать из <code>? extends</code>, писать в <code>? super</code>.</li>
+        <li><code>@SafeVarargs</code> не проверяется: запись в массив varargs загрязняет кучу.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="gn-erasure" data-freq="3">
+      <h3>Что такое стирание типов и какие у него последствия?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Параметры типа существуют только при компиляции. Компилятор проверяет типы, затем заменяет параметры их границами — обычно <code>Object</code> — и вставляет приведения <code>checkcast</code> в местах чтения. При выполнении <code>ArrayList&lt;String&gt;</code> и <code>ArrayList&lt;Integer&gt;</code> — один класс. Отсюда нельзя создать <code>new T()</code> и массив <code>T[]</code>, проверить <code>instanceof List&lt;String&gt;</code>, перегрузить метод по <code>List&lt;String&gt;</code> и <code>List&lt;Integer&gt;</code>, использовать примитив как параметр.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Полный тип объявлений хранится в атрибуте Signature — на нём работают TypeReference в Jackson и ParameterizedTypeReference в Spring.</li>
+            <li>Мост-методы сохраняют переопределение после стирания.</li>
+            <li>Стирание выбрано ради совместимости с байткодом до Java 5.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="gn-pecs" data-freq="3">
+      <h3>Что означает PECS и зачем нужны wildcard?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Параметризованные типы инвариантны: <code>List&lt;Payment&gt;</code> не подтип <code>List&lt;Object&gt;</code>, иначе через него можно было бы положить в список платежей что угодно. Wildcard дают гибкость: из <code>List&lt;? extends Payment&gt;</code> можно читать <code>Payment</code>, но нельзя писать — это производитель; в <code>List&lt;? super CardPayment&gt;</code> можно писать <code>CardPayment</code>, а читать только <code>Object</code> — это потребитель. Producer extends, consumer super.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Сигнатуры JDK: Collections.copy, Collections.max, List.sort(Comparator&lt;? super E&gt;).</li>
+            <li>Массивы ковариантны и платят ArrayStoreException при записи.</li>
+            <li>Wildcard — в параметрах, не в возвращаемых типах.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему этот метод нельзя вызвать со списком карточных платежей?</summary>
+          <pre><code class="language-java">static long total(List&lt;Payment&gt; payments) {
+    return payments.stream().mapToLong(Payment::amount).sum();
+}
+List&lt;CardPayment&gt; cards = loadCards();
+total(cards);                         // не компилируется</code></pre>
+          <p><code>List&lt;CardPayment&gt;</code> не является подтипом <code>List&lt;Payment&gt;</code>: параметризованные типы инвариантны. Метод только читает, значит, его параметр — производитель: <code>List&lt;? extends Payment&gt;</code>. Тогда он примет и <code>List&lt;CardPayment&gt;</code>, и <code>List&lt;Payment&gt;</code>, а компилятор запретит случайную запись в чужой список.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="gn-raw" data-freq="2">
+      <h3>Чем опасны сырые типы и непроверенные предупреждения?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сырой тип отключает проверку параметра: в <code>List&lt;Payment&gt;</code>, переданный как <code>List</code>, можно положить строку. Исключение возникнет не при записи, а при чтении — на вставленном компиляторе <code>checkcast</code>, далеко от места ошибки. Предупреждение <code>unchecked</code> означает, что компилятор не может гарантировать типобезопасность; подавлять его можно только на минимальной области и с обоснованием.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Heap pollution через generic varargs и ложный @SafeVarargs.</li>
+            <li>Collections.checkedList проверяет записи при выполнении для отладки.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="gn-runtime" data-freq="2">
+      <h3>Как получить параметр типа при выполнении, если он стирается?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Параметр объекта узнать нельзя, но параметры объявлений сохранены в атрибуте Signature: тип поля, параметры и возвращаемый тип метода, родительский класс. Поэтому библиотеки просят анонимный подкласс: <code>new TypeReference&lt;List&lt;Payment&gt;&gt;() {}</code> — его родитель записан с параметром, и Jackson читает его через <code>getGenericSuperclass()</code>. Другой путь — передать <code>Class&lt;T&gt;</code> явно.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Spring использует ResolvableType, чтобы внедрять бины по параметризованному типу.</li>
+            <li>Параметры типа локальных переменных и лямбд рефлексия не видит.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, глава 5 «Generics» — сырые типы, PECS, @SafeVarargs.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-4.html#jls-4.6">JLS §4.6 Type Erasure</a>, <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-4.html#jls-4.12.2">§4.12.2 Heap pollution</a>.</li>
+      <li><a href="https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.7.9">JVMS §4.7.9 The Signature Attribute</a>.</li>
+      <li><a href="https://docs.oracle.com/javase/tutorial/java/generics/bridgeMethods.html">Java Tutorial: Bridge Methods</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
