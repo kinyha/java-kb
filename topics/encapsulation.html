@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Encapsulation · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="encapsulation">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Encapsulation</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Инкапсуляция — не «private-поля с геттерами и сеттерами», а гарантия, что состояние объекта меняется только через операции, которые держат его инвариант. Правило «баланс не меньше нуля» должно жить в одном методе <code>debit</code>, а не в каждом вызывающем коде; сеттер <code>setBalance</code> это правило отменяет. Инкапсуляцию легко нарушить незаметно: геттер, отдающий внутренний список, или конструктор, сохранивший чужой список, делят состояние с внешним кодом. <code>Collections.unmodifiableList</code> — только окно на исходный список, и в демо через него стал виден чужой элемент. Защищают копиями на входе и выходе, а лучше — неизменяемостью: <code>final</code>-поля, неизменяемое содержимое, операции, возвращающие новый объект. Изменяемый ключ в <code>HashSet</code> теряется. Границу дополнительно держат package-private и модули: неэкспортированный пакет не виден ни компилятору, ни глубокой рефлексии.</p>
+    </div>
+
+    <section class="step" id="invariant">
+      <h2>Сеттеры отменяют правила</h2>
+      <p>Счёт клиента хранит баланс и историю операций. Первая версия — класс с private-полями, геттерами и сеттерами; формально поля закрыты. Демо <a href="../examples/encapsulation/InvariantDemo.java">InvariantDemo.java</a>:</p>
+<pre><code class="language-java">OpenAccount open = new OpenAccount();
+open.setBalance(500);
+open.setBalance(open.getBalance() - 800);       // сервис возвратов забыл проверку остатка
+open.getHistory().add("debit p-1 800");
+open.getHistory().clear();                      // отчёт «почистил» историю для вывода</code></pre>
+      <pre class="out">== open fields: every caller must remember the rules
+balance = -300, history = []</pre>
+      <p>Баланс ушёл в минус, история пуста — и класс в этом не участвовал. Правило «нельзя списать больше остатка» есть только в головах тех, кто вызывает <code>setBalance</code>, и одного забывчивого сервиса хватило. Геттер <code>getHistory()</code> отдал ссылку на внутренний список, и код отчёта стёр историю. Private-поле с геттером и сеттером на каждое поле закрывает поле от синтаксиса, но не от изменений: это та же открытая структура данных, только с лишними строками. Такую модель называют анемичной: данные в одном месте, правила размазаны по сервисам.</p>
+<pre><code class="language-java">void debit(String paymentId, long amount) {
+    if (amount &lt;= 0) throw new IllegalArgumentException("amount must be positive");
+    if (amount &gt; balance) throw new IllegalStateException("insufficient funds: " + balance + " &lt; " + amount);
+    balance -= amount;
+    history.add("debit " + paymentId + " " + amount);
+}
+List&lt;String&gt; history() { return List.copyOf(history); }    // снимок, а не ссылка на внутренний список</code></pre>
+      <pre class="out">== invariant kept inside the class
+rejected: insufficient funds: 200 &lt; 800
+history().clear(): UnsupportedOperationException
+balance = 200, history = [debit p-1 300]</pre>
+      <p>Инкапсулированный <code>Account</code> не даёт изменить баланс напрямую — только операцией <code>debit</code>, которая проверяет сумму, меняет баланс и пишет историю вместе. Инвариант «баланс ≥ 0, история соответствует операциям» проверяется в одном месте и держится для любого вызывающего кода. Конструктор тоже проверяет входные данные: объект не может родиться в неверном состоянии. История отдаётся снимком, и попытка её очистить падает. Такой объект в терминах <a href="ddd.html">DDD</a> — сущность или агрегат с поведением; правила предметной области живут в нём, а не в сервисах.</p>
+    </section>
+
+    <section class="step" id="copies">
+      <h2>Утечки ссылок и защитные копии</h2>
+<pre><code class="language-java">static final class LeakyBatch {
+    private final List&lt;String&gt; ids;
+    LeakyBatch(List&lt;String&gt; ids) { this.ids = ids; }                   // хранит чужой список
+    List&lt;String&gt; ids() { return Collections.unmodifiableList(ids); }    // окно на него же
+}
+static final class Batch {
+    private final List&lt;String&gt; ids;
+    Batch(List&lt;String&gt; ids) { this.ids = List.copyOf(ids); }           // копия на входе
+    List&lt;String&gt; ids() { return ids; }                                  // уже неизменяемый
+}</code></pre>
+      <pre class="out">== unmodifiable view vs copy
+unmodifiableList view: [p-1, p-2, p-evil]
+List.copyOf snapshot:  [p-1, p-2]
+List.copyOf(immutable) returns same instance: true</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="LeakyBatch хранит ссылку на тот же список, что и вызывающий код, а unmodifiableList — окно на него. Batch хранит собственную копию. Когда вызывающий добавляет p-evil в свой список, LeakyBatch видит изменение, а Batch — нет.">
+            <defs><marker id="ec-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="20" width="170" height="40" rx="8" class="dg-box"/>
+            <text x="105" y="45" class="dg-in" text-anchor="middle">source (вызывающий)</text>
+            <rect x="20" y="130" width="170" height="40" rx="8" class="dg-box"/>
+            <text x="105" y="155" class="dg-in" text-anchor="middle">LeakyBatch.ids</text>
+            <rect x="260" y="70" width="210" height="50" rx="8" class="dg-cell"/>
+            <text data-s="1" x="365" y="100" class="dg-in" text-anchor="middle">[p-1, p-2]</text>
+            <text data-s="2-" x="365" y="100" class="dg-bad" text-anchor="middle">[p-1, p-2, p-evil]</text>
+            <path d="M190 40 L 258 82" class="dg-line" marker-end="url(#ec-a)"/>
+            <path d="M190 150 L 258 108" class="dg-line bad" marker-end="url(#ec-a)"/>
+            <rect x="530" y="70" width="170" height="50" rx="8" class="dg-cell hit"/>
+            <text x="615" y="92" class="dg-n" text-anchor="middle">Batch.ids — копия</text>
+            <text x="615" y="110" class="dg-ok" text-anchor="middle">[p-1, p-2]</text>
+            <path data-s="1" d="M470 95 L 528 95" class="dg-line ok" stroke-dasharray="5 4" marker-end="url(#ec-a)"/>
+            <text data-s="1" x="499" y="86" class="dg-n" text-anchor="middle">copyOf</text>
+            <text data-s="1" x="20" y="208" class="dg-t">Обе пачки созданы из одного списка: Leaky хранит ссылку, Batch — копию.</text>
+            <text data-s="2" x="20" y="208" class="dg-bad">source.add("p-evil"): общий список изменился, Leaky видит его через окно.</text>
+            <text data-s="3" x="20" y="208" class="dg-ok">Копия Batch не связана с source: внешний код её не достанет.</text>
+            <rect data-s="3" x="526" y="66" width="178" height="58" rx="10" class="dg-line ok" stroke-width="2"/>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Конструктор <code>LeakyBatch</code> сохранил ссылку на список вызывающего — объект и внешний код делят одно состояние. <code>Batch</code> сделал копию через <code>List.copyOf</code>.</li>
+          <li>Вызывающий добавил элемент в свой список. <code>Collections.unmodifiableList</code> запрещает менять список через себя, но это окно на исходный список: изменение видно, и в пачке оказался чужой платёж.</li>
+          <li>Копия <code>Batch</code> не изменилась. Её элементы — строки, они неизменяемы, поэтому поверхностной копии достаточно; для изменяемых элементов нужно копировать и их.</li>
+        </ol>
+      </figure>
+      <p>Утечка бывает в обе стороны: конструктор или сеттер сохраняет ссылку на чужой изменяемый объект — внешний код меняет состояние после проверок; геттер отдаёт ссылку на внутренний — внешний код меняет его напрямую, как с историей счёта. Защита — копия на входе и неизменяемое представление на выходе. Классические кандидаты — коллекции, массивы (массив всегда изменяем; <code>clone()</code> или <code>List.of</code>), старый <code>java.util.Date</code> (вместо него неизменяемые типы из <a href="date-time.html">Date &amp; Time</a>).</p>
+      <p>Детали, о которых спрашивают на senior-уровне. <code>List.copyOf</code> не копирует, если аргумент уже неизменяемый список из <code>List.of</code>/<code>copyOf</code>, — демо показало тот же экземпляр; копия дешёвая там, где не нужна. Он же запрещает <code>null</code>-элементы. Копию делают до проверки аргументов, а не после: иначе другой поток может поменять оригинал между проверкой и копированием (TOCTOU — time-of-check to time-of-use), и проверенным окажется не то, что сохранили. Для изменяемых классов-аргументов, которые могут быть подменены подклассом, Блох советует не использовать <code>clone()</code>, а копировать конструктором или фабрикой.</p>
+    </section>
+
+    <section class="step" id="immutability">
+      <h2>Неизменяемость: самая сильная инкапсуляция</h2>
+<pre><code class="language-java">MutableMoney m = new MutableMoney(100, "RUB");    // equals и hashCode по amount и currency
+seen.add(m);
+m.amount = 200;                                    // хеш изменился, корзина — нет
+
+record Money(long amount, String currency) {
+    Money plus(long delta) { return new Money(amount + delta, currency); }   // новый объект вместо изменения
+}</code></pre>
+      <pre class="out">== mutable key in a HashSet
+contains after mutation: false, size = 1
+immutable: price = 100, withFee = 115</pre>
+      <p>Объект лежит в множестве, размер 1, но <code>contains</code> его не находит. <code>HashSet</code> положил его в корзину по старому хешу; после изменения суммы хеш другой, поиск идёт в другую корзину. Объект потерян внутри коллекции: удалить его тоже нельзя. Так ломаются кеши и множества с изменяемыми ключами — подробнее о корзинах в <a href="hashmap.html">HashMap</a>, о контракте <code>equals</code>/<code>hashCode</code> — в <a href="object.html">Object Methods</a>. С неизменяемым <code>Money</code> такой ошибки нет: <code>plus</code> возвращает новый объект, старый не меняется.</p>
+      <p>Неизменяемый класс: все поля <code>private final</code>; нет методов, меняющих состояние; класс <code>final</code> или с закрытым конструктором, чтобы подкласс не добавил изменяемость; изменяемые компоненты скопированы на входе и не отдаются наружу. Records дают первые пункты бесплатно, но не последний: record с полем <code>List</code> не защищён, пока компактный конструктор не сделает <code>List.copyOf</code>, — это тема <a href="records.html">Records</a>. Неизменяемые объекты можно свободно передавать, кешировать и делить между потоками без синхронизации; их <code>final</code>-поля видны любому потоку после конструктора по правилам <a href="jmm.html">JMM</a>. Цена — новый объект на каждое изменение; для горячих путей с крупными объектами её учитывают, для значений вроде денег, идентификаторов и диапазонов дат она почти всегда оправдана.</p>
+    </section>
+
+    <section class="step" id="access">
+      <h2>Уровни доступа: класс, пакет, модуль</h2>
+      <p>Модификаторы доступа — инструмент, а не цель. Минимальный уровень — лучший: поле <code>private</code>; метод, нужный только соседним классам пакета, — package-private (без модификатора); <code>public</code> — то, что составляет контракт. Пакет — естественная граница: <code>Account</code>, его фабрика и репозиторий в одном пакете могут пользоваться package-private-конструктором, а остальной код видит только публичные операции. Таблица модификаторов — в <a href="classes-objects.html">Classes &amp; Objects</a>.</p>
+      <p>Слабость пакета в том, что <code>public</code>-класс видят все. В библиотеке платежей служебный <code>Ledger</code> приходится делать <code>public</code>, потому что им пользуется <code>Payments</code> из соседнего пакета, — и тогда им может пользоваться любой клиент. Модули Java 9 добавляют уровень выше: модуль экспортирует только пакеты-контракт. Скрипт <a href="../examples/encapsulation/modules.sh">modules.sh</a> собирает модуль <code>payments</code>, экспортирующий <code>com.pay.api</code>, и модуль <code>app</code>, который от него зависит:</p>
+<pre><code class="language-java">module payments {
+    exports com.pay.api;              // internal не экспортирован
+}
+// app: import com.pay.internal.Ledger;   — public-класс неэкспортированного пакета</code></pre>
+      <pre class="out">== run app
+pay via exported API: 500
+deep reflection into payments: InaccessibleObjectException
+== run app with --add-opens payments/com.pay.api=app
+deep reflection into payments: allowed
+== compile app code that imports com.pay.internal
+BadMain.java:3: error: package com.pay.internal is not visible</pre>
+      <p><code>public</code>-класс <code>Ledger</code> из неэкспортированного пакета недоступен при компиляции: <code>package com.pay.internal is not visible</code>. Даже экспорт пакета не открывает его для глубокой рефлексии: <code>setAccessible</code> к приватному полю <code>Payments</code> бросает <code>InaccessibleObjectException</code>. Для этого пакет должен быть открыт — директивой <code>opens</code> в module-info или флагом <code>--add-opens</code> при запуске. Именно поэтому фреймворкам, которые читают приватные поля (Hibernate, Jackson), в модульном приложении открывают пакеты сущностей. На практике многие приложения запускаются с classpath, где всё в безымянном модуле, — тогда границы модулей действуют только для самого JDK.</p>
+    </section>
+
+    <section class="step" id="reflection">
+      <h2>Где инкапсуляцию обходят и сколько стоят геттеры</h2>
+      <pre class="out">== reflection vs final
+final field of a class changed via reflection: 1000000
+record field: IllegalAccessException</pre>
+      <p>Рефлексия с <code>setAccessible(true)</code> обходит <code>private</code> в коде своего модуля и classpath — и даже <code>final</code>: демо записало новое значение в <code>final</code>-поле обычного класса. Так работает десериализация и часть фреймворков. Для records, скрытых классов и <code>static final</code>-полей запись запрещена — <code>IllegalAccessException</code>. В JDK 26 запись в <code>final</code>-поля через рефлексию начинает выдавать предупреждения (JEP 500, «Prepare to Make Final Mean Final»), и в будущем её закроют по умолчанию. Вывод для своего кода: <code>private</code> защищает от ошибок коллег, а не от злонамеренного кода в том же процессе.</p>
+      <p>Геттеры и сеттеры. Геттер на неизменяемое значение безвреден и нужен фреймворкам, которые ищут свойства по соглашению JavaBeans: Jackson, JPA, шаблонизаторы. Сеттер на каждое поле — повод спросить, какую операцию он изображает: <code>setStatus(PAID)</code> скорее <code>markPaid(at)</code> с проверкой перехода из <a href="enums.html">Enums</a>. По производительности геттер ничего не стоит: JIT встраивает короткие методы, и обращение компилируется в чтение поля, как разобрано в <a href="jit.html">JIT</a>. «Tell, don't ask»: вместо того чтобы спросить объект о его данных и принять решение снаружи, попросите объект выполнить операцию.</p>
+      <p>Обратная крайность — инкапсулировать всё. DTO на границе API, записи событий, строки отчётов — это данные без поведения, и прятать их поля за операциями незачем; для них есть records. Инкапсуляция нужна там, где есть инвариант, который можно нарушить.</p>
+      <div class="trap">
+        <p class="myth">Если вернуть <code>Collections.unmodifiableList(list)</code>, внутренний список защищён.</p>
+        <p class="fact">Это окно на исходный список: менять через него нельзя, но изменения исходного видны. Если исходный список пришёл от вызывающего кода и сохранён без копии, тот может его поменять — в демо в пачку попал <code>p-evil</code>. Нужна копия на входе (<code>List.copyOf</code>).</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Инкапсуляция — изменение состояния только через операции, держащие инвариант; сеттер на каждое поле её отменяет.</li>
+        <li>Конструктор проверяет вход: объект не рождается в неверном состоянии.</li>
+        <li>Утечки: сохранённая чужая ссылка и отданная внутренняя; защита — копия на входе, неизменяемое представление на выходе.</li>
+        <li>unmodifiableList — окно, copyOf — снимок; копию делают до проверки.</li>
+        <li>Неизменяемость — самая сильная инкапсуляция; изменяемый ключ теряется в HashSet.</li>
+        <li>Модуль скрывает public-классы неэкспортированных пакетов и закрывает глубокую рефлексию без opens.</li>
+        <li>setAccessible обходит private и final обычных классов, но не records.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ec-what" data-freq="3">
+      <h3>Что такое инкапсуляция? Это просто private-поля с геттерами и сеттерами?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нет. Инкапсуляция — сокрытие состояния за операциями, которые сохраняют инвариант объекта. Если на каждое поле есть сеттер, правило «баланс не меньше нуля» должен помнить каждый вызывающий, и один забывчивый вызов его нарушит. Правильно — операция <code>debit</code>, которая проверяет и меняет состояние в одном месте, и конструктор, который не даёт создать неверный объект.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Анемичная модель против богатой: правила в сервисах или в объекте.</li>
+            <li>Tell, don't ask; уровни границ — класс, пакет, модуль.</li>
+            <li>Для DTO без инвариантов инкапсуляция не нужна — records.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим классом?</summary>
+          <pre><code class="language-java">public final class Refund {
+    private final List&lt;String&gt; paymentIds;
+    public Refund(List&lt;String&gt; paymentIds) {
+        if (paymentIds.isEmpty()) throw new IllegalArgumentException("empty");
+        this.paymentIds = paymentIds;
+    }
+    public List&lt;String&gt; getPaymentIds() { return paymentIds; }
+}</code></pre>
+          <p>Класс выглядит неизменяемым, но хранит чужой список и отдаёт его наружу. Вызывающий может очистить свой список после конструктора — и инвариант «не пусто» нарушится, а любой получатель геттера может изменить содержимое. Нужно <code>this.paymentIds = List.copyOf(paymentIds)</code> до проверки (<code>if (this.paymentIds.isEmpty())</code>) — тогда и геттер безопасен.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ec-immutable" data-freq="3">
+      <h3>Как сделать класс неизменяемым и зачем?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Все поля private final, нет методов, меняющих состояние, класс final, изменяемые компоненты копируются на входе и не отдаются наружу. Изменение — новый объект. Неизменяемые объекты безопасны как ключи HashMap, их можно кешировать и делить между потоками без синхронизации.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JMM: final-поля видны всем потокам после конструктора, если this не утёк.</li>
+            <li>Record не копирует List сам — нужен компактный конструктор.</li>
+            <li>Цена — аллокации; для значений почти всегда оправдана.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ec-copies" data-freq="2">
+      <h3>Чем Collections.unmodifiableList отличается от List.copyOf?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>unmodifiableList — обёртка-окно: менять через неё нельзя, но изменения исходного списка видны. List.copyOf — неизменяемая копия, не связанная с исходным списком. Для защиты состояния от вызывающего кода нужна копия.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>copyOf не копирует уже неизменяемый список и запрещает null.</li>
+            <li>Копию делают до проверки, иначе TOCTOU.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ec-modules" data-freq="1">
+      <h3>Как модули Java усиливают инкапсуляцию?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Модуль экспортирует только перечисленные пакеты. Public-класс из неэкспортированного пакета недоступен другим модулям при компиляции. Глубокая рефлексия к приватным членам требует, чтобы пакет был открыт через opens или --add-opens. Так JDK закрыл свои внутренние API, например String.value.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>На classpath всё в безымянном модуле — границы действуют только для JDK.</li>
+            <li>JEP 500: запись в final через рефлексию будет закрыта.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, items 15–17 и 50 — минимальный доступ, неизменяемость, защитные копии.</li>
+      <li><a href="https://openjdk.org/projects/jigsaw/spec/sotms/">The State of the Module System</a>, <a href="https://openjdk.org/jeps/403">JEP 403: Strongly Encapsulate JDK Internals</a>.</li>
+      <li><a href="https://openjdk.org/jeps/500">JEP 500: Prepare to Make Final Mean Final</a>.</li>
+      <li>Martin Fowler, <a href="https://martinfowler.com/bliki/AnemicDomainModel.html">Anemic Domain Model</a>, <a href="https://martinfowler.com/bliki/TellDontAsk.html">Tell Don't Ask</a>.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

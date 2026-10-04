@@ -369,7 +369,7 @@ window.KB_TREE = [
       { id: 'oop', title: 'OOP', source: 'roadmap.sh/java: Basics of OOP; Effective Java, гл. 4', items: [
         { id: 'classes-objects', freq: 2, status: 'draft', title: 'Classes & Objects',
           scope: 'конструкторы, this, static, final, блоки инициализации, порядок инициализации, модификаторы доступа' },
-        { id: 'encapsulation', freq: 3, status: 'empty', title: 'Encapsulation',
+        { id: 'encapsulation', freq: 3, status: 'draft', title: 'Encapsulation',
           scope: 'инварианты, модификаторы доступа, геттеры и сеттеры, неизменяемость, защитные копии, reflection и модули' },
         { id: 'inheritance', freq: 3, status: 'empty', title: 'Inheritance & Composition',
           scope: 'extends и super, хрупкий базовый класс, композиция вместо наследования, LSP' },
