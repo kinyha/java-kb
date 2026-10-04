@@ -2703,6 +2703,76 @@ window.KB_SEARCH = [
 "text": "Почему только что записанный документ не находится поиском? Elasticsearch — near-real-time: документ становится видимым для поиска после refresh, который создаёт новый сегмент Lucene, по умолчанию раз в секунду. GET по id видит документ сразу через translog. Если нужно, на запросе ставят refresh=wait_for. Частые refresh плодят мелкие сегменты и нагружают слияние. При массовой загрузке refresh_interval выключают."
 },
 {
+"topic": "enums",
+"id": "problem",
+"kind": "step",
+"title": "Статусы платежа строками и числами",
+"text": "Статусы платежа строками и числами Статус платежа в сервисе хранится как int -константа: CREATED = 0 , PENDING = 1 , SUCCEEDED = 2 . Метод setStatus(int) примет и 42, и номер способа оплаты, перепутанный местами. Переходы между статусами описаны в отдельном switch в сервисе, признак «финальный ли статус» — в другом, текст для клиента — в третьем. Новый статус нужно добавить во все три, и компилятор не подскажет, где забыли. Enum делает статус типом: setStatus(PaymentStatus) принимает только четыре значения, а поведение живёт рядом со статусом. enum PaymentStatus { CREATED(false) { PaymentStatus next() { return PENDING; } }, PENDING(false) { PaymentStatus next() { return SUCCEEDED; } }, SUCCEEDED(true) { PaymentStatus next() { throw new IllegalStateException(\"final\"); } }, FAILED(true) { PaymentStatus next() { throw new IllegalStateException(\"final\"); } }; private final boolean terminal; PaymentStatus(boolean terminal) { this.terminal = terminal; } // конструктор всегда private boolean terminal() { return terminal; } abstract PaymentStatus next(); // каждая константа обязана реализовать } У каждой константы — поле terminal , заданное в конструкторе, и своя реализация next() . Добавить статус без реализации абстрактного метода нельзя: не скомпилируется. Это полиморфизм из Polymorphism , где набор подклассов закрыт и известен компилятору."
+},
+{
+"topic": "enums",
+"id": "bytecode",
+"kind": "step",
+"title": "Во что компилируется enum",
+"text": "Во что компилируется enum public final class Channel extends java.lang.Enum<Channel> { public static final Channel CARD; public static final Channel SBP; public static final Channel WALLET; private static final Channel[] $VALUES; public static Channel[] values(); 0: getstatic #13 // Field $VALUES:[LChannel; 3: invokevirtual #17 // Method \"[LChannel;\".clone:()Ljava/lang/Object; 3: invokespecial #28 // Method java/lang/Enum.\"<init>\":(Ljava/lang/String;I)V static {}; 0: new #1 // class Channel 4: ldc #32 // String CARD 7: invokespecial #33 // Method \"<init>\":(Ljava/lang/String;I)V 13: new #1 // class Channel static {} при загрузке класса CARD (0) SBP (1) WALLET (2) $VALUES [CARD, SBP, WALLET] values() → новая копия Статический инициализатор создаёт по объекту на константу: имя и ordinal. Ссылки лежат в static final полях и в скрытом массиве $VALUES. values() каждый раз клонирует массив: снаружи его нельзя испортить. Enum — обычный класс-наследник java.lang.Enum . Его статический инициализатор вызывает приватный конструктор Enum(String name, int ordinal) для каждой константы — по одному разу при загрузке класса. Ссылки на объекты хранятся в public static final полях и в скрытом массиве $VALUES . Других экземпляров не будет: конструктор недоступен снаружи, а new для enum запрещён. values() возвращает $VALUES.clone() : массив изменяемый, и копия защищает внутренний. Поэтому values() в горячем цикле аллоцирует — его кешируют в своё поле, если вызывают часто. PaymentStatus superclass: Enum, final: false, sealed: true Channel (no constant bodies) final: true CREATED class: EnumDemo$PaymentStatus$1, getDeclaringClass: PaymentStatus values() == values(): false (a fresh copy each call) CREATED.next() = PENDING, SUCCEEDED.terminal() = true Демо EnumDemo.java подтверждает: Channel без тел констант — final -класс. PaymentStatus с телами — не final , потому что у него есть подклассы: константа CREATED — объект анонимного класса EnumDemo$PaymentStatus$1 . Поэтому getClass() у такой константы — не сам enum, а для получения enum служит getDeclaringClass() . С Java 17 такой enum неявно sealed: других подклассов, кроме тел констант, быть не может."
+},
+{
+"topic": "enums",
+"id": "ordinal",
+"kind": "step",
+"title": "ordinal и name: что хранить снаружи",
+"text": "ordinal и name: что хранить снаружи stored ordinal 2 for WALLET reads back as CRYPTO stored name WALLET reads back as WALLET valueOf(\"wallet\"): No enum constant EnumDemo.ChannelV2.wallet ordinal() — номер константы в порядке объявления. В базе сохранили 2 для WALLET, затем в новой версии кода CRYPTO вставили перед WALLET, и сохранённое число прочиталось как CRYPTO — молча, без ошибки. Так ломаются данные при обычном рефакторинге. В JPA значение по умолчанию @Enumerated — как раз EnumType.ORDINAL ; для хранения пишут @Enumerated(EnumType.STRING) , как в JPA Basics , или задают явный код в поле константы и конвертер. Имя переживает перестановку, но не переименование, и valueOf строг: регистр учитывается, неизвестное имя — IllegalArgumentException . Для внешних контрактов — API, сообщений брокера, базы — у константы делают явный стабильный код ( WALLET(\"wallet\") ) и метод поиска по нему, а неизвестное значение от другой версии сервиса обрабатывают явно: отказом или запасной константой UNKNOWN , как разобрано в API Contracts ."
+},
+{
+"topic": "enums",
+"id": "collections",
+"kind": "step",
+"title": "EnumSet и EnumMap: биты и массив по ordinal",
+"text": "EnumSet и EnumMap: биты и массив по ordinal EnumSet implementation: RegularEnumSet, contents [SUCCEEDED, FAILED] bit vector: 1100 (bit = ordinal) EnumSet of 65 constants: JumboEnumSet EnumMap iterates in declaration order: {CARD=10, WALLET=3} EnumSet хранит множество как биты: в RegularEnumSet — одно поле long , где бит с номером ordinal означает «константа в множестве». {SUCCEEDED, FAILED} — ordinal 2 и 3 — это 1100. Проверка, добавление, объединение — одна побитовая операция, без хеширования и объектов-узлов. Для enum больше 64 констант используется JumboEnumSet с массивом long . Демо читает поле рефлексией с флагом --add-opens java.base/java.util=ALL-UNNAMED : без него модульная система закрывает доступ к внутренностям JDK. EnumMap — массив значений, индексированный ordinal: поиск без хеша, обход в порядке объявления констант, а не вставки. Оба класса — лучший выбор для ключей-enum, чем HashSet и HashMap : компактнее, быстрее и с предсказуемым порядком. Набор флагов вместо битовой маски int — тот же EnumSet : EnumSet.of(READ, WRITE) читается лучше, чем READ | WRITE , и типобезопасен."
+},
+{
+"topic": "enums",
+"id": "switch",
+"kind": "step",
+"title": "switch: выражение проверяется на полноту, оператор — нет",
+"text": "switch: выражение проверяется на полноту, оператор — нет enum Channel { CARD, SBP, WALLET, CRYPTO } // добавили CRYPTO static long expr(Channel c) { return switch (c) { case CARD -> 15; case SBP -> 0; case WALLET -> 10; }; } static long stmt(Channel c) { long f = 0; switch (c) { case CARD: f = 15; break; case SBP: f = 0; break; case WALLET: f = 10; break; } return f; } line 3: the switch expression does not cover all possible input values compiled: false Демо компилирует этот исходник через javax.tools.JavaCompiler . После добавления CRYPTO switch -выражение в expr не компилируется: выражение обязано вернуть значение для любого входа, и компилятор проверяет, что все константы покрыты. Оператор switch в stmt с теми же ветками ошибки не дал — в выводе одна ошибка на строку 3, а не на 4: для CRYPTO он молча вернёт 0. Поэтому решения по enum пишут switch -выражением без default : новая константа превращается в ошибки компиляции во всех местах, где её нужно обработать. default в таком выражении отключает эту проверку. Если же новый вариант приходит из другой версии сервиса уже после компиляции — enum в клиентской библиотеке старее сервера, — выражение без default бросит MatchException при выполнении (в Java 21; раньше — IncompatibleClassChangeError ). Для данных из внешнего мира это ещё один довод держать запасную константу и явное преобразование на границе."
+},
+{
+"topic": "enums",
+"id": "singleton",
+"kind": "step",
+"title": "Singleton через enum и где enum не подходит",
+"text": "Singleton через enum и где enum не подходит reflection: Cannot reflectively create enum objects deserialized == INSTANCE: true Классический singleton с приватным конструктором ломается двумя способами: рефлексией ( setAccessible(true) и вызов конструктора) и сериализацией (десериализация создаёт новый объект, если не написать readResolve ). Enum закрыт от обоих средствами JVM: Constructor.newInstance для enum бросает IllegalArgumentException: Cannot reflectively create enum objects , а сериализация enum записывает только имя константы и при чтении возвращает тот же объект — == истинно. Поэтому Блох в «Effective Java» называет enum с одним элементом лучшим способом сделать singleton. В приложении на Spring singleton обычно — бин с областью singleton, и enum для этого не нужен; enum-singleton уместен для утилит без зависимостей. Enum не подходит, когда набор значений меняется без релиза кода — справочник валют, тарифы, список банков: это данные, им место в базе или конфигурации. И когда поведение констант разрастается до бизнес-логики с зависимостями: enum не может получить бин через внедрение, и логику переносят в стратегию, выбираемую по enum через EnumMap<Channel, FeePolicy> . Порядковый номер константы — удобный компактный код для хранения в базе. ordinal() меняется при любой перестановке или вставке константы. В демо после вставки CRYPTO сохранённое значение WALLET прочиталось как CRYPTO без ошибки. Хранят имя ( EnumType.STRING ) или явный стабильный код константы."
+},
+{
+"topic": "enums",
+"id": "en-what",
+"kind": "q",
+"title": "Как устроен enum в Java?",
+"text": "Как устроен enum в Java? Это класс-наследник java.lang.Enum с фиксированным набором экземпляров. Компилятор создаёт static final поле на каждую константу и скрытый массив $VALUES ; экземпляры создаются в статическом инициализаторе через приватный конструктор с именем и порядковым номером. У enum могут быть поля, конструкторы, методы и реализации интерфейсов; константа может переопределить метод собственным телом — тогда это анонимный подкласс. Enum без тел констант — final, с телами — неявно sealed. values() клонирует массив при каждом вызове. Константы сравнивают через ==: экземпляров ровно столько, сколько объявлено."
+},
+{
+"topic": "enums",
+"id": "en-ordinal",
+"kind": "q",
+"title": "Почему нельзя хранить ordinal в базе?",
+"text": "Почему нельзя хранить ordinal в базе? ordinal — номер в порядке объявления. Вставка или перестановка константы меняет номера, и старые данные молча прочитаются как другие значения. В JPA по умолчанию EnumType.ORDINAL , поэтому нужно явно @Enumerated(EnumType.STRING) или собственный код константы с конвертером. Имя ломается при переименовании; для внешних контрактов — явный стабильный код. Неизвестное значение от другой версии — отказ или константа UNKNOWN. Что не так с этой сущностью? @Entity class Payment { @Enumerated // ORDINAL по умолчанию PaymentStatus status; } // в новой версии: enum PaymentStatus { CREATED, AUTHORIZED, PENDING, SUCCEEDED, FAILED } Статус хранится порядковым номером, а в новой версии AUTHORIZED вставлен на позицию 1: все сохранённые PENDING прочитаются как AUTHORIZED, SUCCEEDED — как PENDING, FAILED — как SUCCEEDED. Ошибки не будет, данные испортятся молча. Нужно @Enumerated(EnumType.STRING) с миграцией существующих значений или явный код статуса с AttributeConverter ."
+},
+{
+"topic": "enums",
+"id": "en-collections",
+"kind": "q",
+"title": "Зачем EnumSet и EnumMap, если есть HashSet и HashMap?",
+"text": "Зачем EnumSet и EnumMap, если есть HashSet и HashMap? EnumSet хранит множество как биты: для enum до 64 констант — одно поле long, где бит с номером ordinal означает принадлежность. Операции — побитовые, без хеширования и узлов. EnumMap — массив значений по ordinal. Оба компактнее, быстрее и обходят элементы в порядке объявления констант. Больше 64 констант — JumboEnumSet с массивом long. EnumSet заменяет битовые маски-флаги на типобезопасный набор."
+},
+{
+"topic": "enums",
+"id": "en-singleton",
+"kind": "q",
+"title": "Почему enum — лучший способ сделать singleton?",
+"text": "Почему enum — лучший способ сделать singleton? JVM гарантирует ровно один экземпляр константы. Рефлексия не может вызвать конструктор enum — Cannot reflectively create enum objects , а сериализация enum записывает только имя и при чтении возвращает тот же объект. Классический singleton с приватным конструктором ломается и тем и другим, если не написать защиту и readResolve. Инициализация ленивая и потокобезопасная — при загрузке класса. В Spring singleton — область бина, enum для этого не нужен."
+},
+{
 "topic": "event-driven",
 "id": "why",
 "kind": "step",
