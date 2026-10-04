@@ -401,7 +401,7 @@ window.KB_TREE = [
           scope: 'ленивый конвейер, intermediate и terminal, map, filter, flatMap, reduce, одноразовость стрима' },
         { id: 'collectors', freq: 3, status: 'draft', title: 'Collectors',
           scope: 'toList и toMap с дубликатами, groupingBy, partitioningBy, downstream collectors, joining' },
-        { id: 'parallel-streams', freq: 2, status: 'empty', title: 'Parallel Streams',
+        { id: 'parallel-streams', freq: 2, status: 'draft', title: 'Parallel Streams',
           scope: 'common ForkJoinPool, когда параллельный стрим медленнее, порядок, побочные эффекты' },
         { id: 'stream-practice', freq: 3, status: 'empty', title: 'Stream Practice',
           scope: 'задачи на live coding: группировка, агрегаты, топ-N, flatMap по вложенным спискам' },

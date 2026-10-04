@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Parallel Streams · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="parallel-streams">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Parallel Streams</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p><code>parallelStream()</code> делит источник на части через <code>Spliterator</code>, обрабатывает части в общем <code>ForkJoinPool.commonPool()</code> и сливает результаты. Пул один на всю JVM, его размер — число ядер минус один, и вызывающий поток тоже работает. Выигрыш бывает, когда работы на элемент много, данных много, источник хорошо делится и операции не требуют порядка. На 18-ядерной машине тяжёлая проверка миллиона платежей ускорилась в 14,7 раза. Сумма 20 тысяч чисел, наоборот, замедлилась: координация дороже работы.
+      <code>LinkedList</code> на дешёвой работе не ускорился вовсе — его нельзя делить пополам за O(1). Порядок в <code>forEach</code> теряется, а <code>forEachOrdered</code>, <code>toList</code> и <code>findFirst</code> его сохраняют ценой синхронизации. Побочные эффекты в общем состоянии — гонка: <code>forEach(list::add)</code> в демо падал с <code>ArrayIndexOutOfBoundsException</code>. Блокирующие вызовы в общем пуле занимают потоки всей JVM: 34 задачи по 200 мс шли 409 мс вместо 200.</p>
+    </div>
+
+    <section class="step" id="pool">
+      <h2>Как устроен параллельный стрим</h2>
+      <p>Ночная сверка проверяет миллион платежей: для каждого — тяжёлая проверка подписи и правил. Однопоточно это занимает время, а у сервера 18 ядер. Одно слово <code>.parallel()</code> обещает раздать работу всем ядрам. Демо <a href="../examples/parallel-streams/ParallelDemo.java">ParallelDemo.java</a> начинает с того, кто эту работу выполняет:</p>
+      <pre class="out">== the common pool
+cores: 18, commonPool parallelism: 17
+threads used: [ForkJoinPool.commonPool-worker-N, main]</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Spliterator делит массив пополам, части делятся дальше, пока не станут достаточно малыми. Листья обрабатываются потоками общего ForkJoinPool и вызывающим потоком main, затем результаты сливаются попарно до одного.">
+            <defs><marker id="ps-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="160" y="20" width="400" height="30" rx="6" class="dg-box"/><text x="360" y="40" class="dg-in" text-anchor="middle">long[1 000 000]</text>
+            <g data-s="2-"><rect x="60" y="80" width="280" height="28" rx="6" class="dg-cell"/><text x="200" y="99" class="dg-n" text-anchor="middle">[0, 500 000)</text>
+              <rect x="380" y="80" width="280" height="28" rx="6" class="dg-cell"/><text x="520" y="99" class="dg-n" text-anchor="middle">[500 000, 1 000 000)</text>
+              <path d="M300 50 L 220 78" class="dg-line" marker-end="url(#ps-a)"/><path d="M420 50 L 500 78" class="dg-line" marker-end="url(#ps-a)"/></g>
+            <g data-s="3-"><rect x="20" y="136" width="150" height="28" rx="6" class="dg-cell hit"/><text x="95" y="155" class="dg-n" text-anchor="middle">worker-1</text>
+              <rect x="190" y="136" width="150" height="28" rx="6" class="dg-cell hit"/><text x="265" y="155" class="dg-n" text-anchor="middle">main</text>
+              <rect x="380" y="136" width="150" height="28" rx="6" class="dg-cell hit"/><text x="455" y="155" class="dg-n" text-anchor="middle">worker-2</text>
+              <rect x="550" y="136" width="150" height="28" rx="6" class="dg-cell hit"/><text x="625" y="155" class="dg-n" text-anchor="middle">worker-3</text>
+              <path d="M150 108 L 100 134" class="dg-line" marker-end="url(#ps-a)"/><path d="M250 108 L 265 134" class="dg-line" marker-end="url(#ps-a)"/>
+              <path d="M470 108 L 455 134" class="dg-line" marker-end="url(#ps-a)"/><path d="M570 108 L 620 134" class="dg-line" marker-end="url(#ps-a)"/></g>
+            <text data-s="1" x="20" y="214" class="dg-t">Источник целиком: Spliterator знает размер и может делиться пополам.</text>
+            <text data-s="2" x="20" y="214" class="dg-t">trySplit отдаёт половину; деление продолжается, пока части не станут малыми.</text>
+            <text data-s="3" x="20" y="214" class="dg-ok">Листья обрабатывают потоки общего пула и сам вызывающий поток.</text>
+            <text data-s="4" x="20" y="214" class="dg-t">Результаты листьев сливаются попарно (combiner) — обратно по дереву.</text>
+            <path data-s="4" d="M95 164 C 95 190, 265 190, 265 166" class="dg-line ok" marker-end="url(#ps-a)"/>
+            <path data-s="4" d="M455 164 C 455 190, 625 190, 625 166" class="dg-line ok" marker-end="url(#ps-a)"/>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Терминальная операция параллельного стрима получает <code>Spliterator</code> источника. У массива и <code>ArrayList</code> он знает размер (<code>SIZED</code>, <code>SUBSIZED</code>) и делится пополам за O(1) — просто пересчётом индексов.</li>
+          <li><code>trySplit</code> отдаёт половину диапазона в новый сплитератор. Каждая половина становится задачей <code>ForkJoinTask</code>; деление продолжается рекурсивно, пока часть не станет примерно в четыре раза меньше, чем «размер / параллелизм».</li>
+          <li>Задачи раскладываются по очередям потоков общего пула; свободный поток крадёт работу из чужой очереди (work stealing). Вызывающий поток <code>main</code> не ждёт, а тоже обрабатывает части — в демо он среди исполнителей.</li>
+          <li>Результаты листьев сливаются попарно функцией слияния — <code>combiner</code> коллектора или операцией <code>reduce</code> из <a href="collectors.html">Collectors</a>. Поэтому она обязана быть ассоциативной, а identity — нейтральной.</li>
+        </ol>
+      </figure>
+      <p>Общий пул — один на JVM: его используют все параллельные стримы приложения, <code>CompletableFuture.supplyAsync</code> без явного исполнителя и <code>Arrays.parallelSort</code>. Размер — <code>availableProcessors() − 1</code>, меняется системным свойством <code>java.util.concurrent.ForkJoinPool.common.parallelism</code>. В контейнере <code>availableProcessors</code> учитывает лимит CPU — с квотой в 2 ядра пул будет из одного потока, как разобрано в <a href="docker.html">Docker</a>. Устройство fork/join и кражи работы — в <a href="executors.html">Executors</a>.</p>
+    </section>
+
+    <section class="step" id="when">
+      <h2>Когда параллельность ускоряет, а когда нет</h2>
+      <pre class="out">== when it helps and when it does not
+heavy work, long[] 1M                  sequential   128.37 ms, parallel     8.72 ms, x14.7
+cheap sum, long[] 1M                   sequential     1.18 ms, parallel     0.15 ms, x7.9
+cheap sum, long[] 20k                  sequential     0.02 ms, parallel     0.06 ms, x0.4
+heavy work, ArrayList 200k             sequential    25.90 ms, parallel     1.84 ms, x14.1
+heavy work, LinkedList 200k            sequential    26.04 ms, parallel     1.91 ms, x13.6
+cheap sum, ArrayList&lt;Long&gt; 1M          sequential     2.74 ms, parallel     0.21 ms, x13.1
+cheap sum, LinkedList&lt;Long&gt; 1M         sequential     1.94 ms, parallel     1.86 ms, x1.0
+cheap work, 100 elements               sequential     0.01 ms, parallel     0.08 ms, x0.1</pre>
+      <p>Тяжёлая работа на элемент (десять <code>Math.sin</code>) на миллионе элементов — почти линейное ускорение, 14,7 раза на 17+1 потоках. Дешёвая сумма миллиона чисел тоже ускорилась, но здесь предел — пропускная способность памяти, а не ядра. На 20 тысячах элементов параллельный вариант втрое медленнее: разделение, постановка задач, пробуждение потоков и слияние стоят десятки микросекунд, а вся работа — двадцать. На ста элементах — в десять раз медленнее. Дуг Ли и Брайан Гётц предлагают грубое правило NQ: число элементов N, умноженное на стоимость обработки одного Q, должно быть больше примерно 10 000, чтобы параллельность имела шанс.</p>
+      <p>Источник важен. <code>LinkedList</code> с тяжёлой работой ускорился почти как <code>ArrayList</code> — его сплитератор отрезает пачки в массивы, и при дорогой обработке это незаметно. На дешёвой сумме миллиона элементов ускорения нет совсем: нарезка пачек идёт последовательно, обходом узлов, и вся экономия съедается. Так же плохо делятся <code>Stream.iterate</code>, <code>BufferedReader.lines</code> и всё, что не знает размера. Хорошо делятся массивы, <code>ArrayList</code>, <code>IntStream.range</code>, <code>HashMap</code> по корзинам. И, как в однопоточных стримах из <a href="streams.html">Stream API</a>, обёртки дороже примитивов.</p>
+    </section>
+
+    <section class="step" id="order">
+      <h2>Порядок и операции, которые за него платят</h2>
+      <pre class="out">== order
+forEach: 6251034789, forEachOrdered: 0123456789, toList keeps order: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+findFirst: 3, findAny: may differ run to run</pre>
+      <p>Параллельный <code>forEach</code> выполняет действие в том порядке, в каком потоки дошли до элементов, — каждый запуск по-своему. <code>forEachOrdered</code> возвращает порядок источника, но для этого буферизует и упорядочивает результаты частей — выигрыш от параллельности частично теряется. <code>toList</code> и <code>collect</code> сохраняют порядок встречи бесплатно: каждая часть собирается отдельно, а слияние идёт слева направо. <code>findFirst</code> обязан найти именно первый подходящий — части правее ждут или выбрасываются; <code>findAny</code> берёт любой и дешевле. Так же <code>limit</code>, <code>skip</code> и <code>distinct</code> на упорядоченном параллельном потоке дорогие. Если порядок не нужен, <code>unordered()</code> снимает это требование и делает их дешевле.</p>
+    </section>
+
+    <section class="step" id="state">
+      <h2>Общее изменяемое состояние</h2>
+<pre><code class="language-java">List&lt;Integer&gt; unsafe = new ArrayList&lt;&gt;();
+IntStream.range(0, 100_000).parallel().forEach(unsafe::add);         // гонка
+List&lt;Integer&gt; safe = IntStream.range(0, 100_000).parallel().boxed().toList();</code></pre>
+      <pre class="out">== shared mutable state
+forEach(list::add): ArrayIndexOutOfBoundsException; toList(): size 100000
+forEach(list::add): ArrayIndexOutOfBoundsException; toList(): size 100000
+forEach(list::add): ArrayIndexOutOfBoundsException; toList(): size 100000</pre>
+      <p>Добавление в общий <code>ArrayList</code> из нескольких потоков — гонка из <a href="lists.html">List</a>: два потока записывают в одну ячейку, рост массива идёт одновременно, и в этом прогоне все три попытки упали с <code>ArrayIndexOutOfBoundsException</code>. В другие запуски тот же код молча терял от 65 до 91% элементов. <code>toList()</code> собрал все сто тысяч: каждая часть пишет в собственный контейнер, контейнеры сливаются в конце, и синхронизация не нужна. Правило для параллельных стримов — лямбды без побочных эффектов, результат — через <code>collect</code>/<code>reduce</code>. Синхронизированная коллекция или <code>ConcurrentHashMap</code> спасают от гонки, но превращают параллельный код в очередь на блокировку. <code>AtomicLong</code>-счётчик внутри <code>forEach</code> корректен, но медленнее <code>count()</code> и <code>sum()</code> из-за борьбы потоков за одну кеш-линию.</p>
+    </section>
+
+    <section class="step" id="blocking">
+      <h2>Блокирующие вызовы и общий пул</h2>
+      <pre class="out">== blocking calls starve the common pool
+34 blocking tasks of 200 ms in the common pool: 409 ms
+same in a dedicated ForkJoinPool(34): 209 ms
+same with virtual threads: 208 ms</pre>
+      <p>Частая ошибка: распараллелить HTTP-запросы или обращения к базе через <code>parallelStream()</code>. 34 задачи по 200 мс в пуле из 17 потоков плюс <code>main</code> — две волны, 409 мс. Хуже другое: пока эти потоки спят на вводе-выводе, все остальные параллельные стримы и <code>CompletableFuture</code> приложения ждут свободного потока — один медленный внешний сервис замедляет несвязанный код. <code>ForkJoinPool</code> умеет добавлять потоки при блокировке только через <code>ManagedBlocker</code>, которого обычный <code>Thread.sleep</code> или JDBC не используют (виртуальные потоки и некоторые API JDK — используют).</p>
+      <p>Обход «запустить стрим внутри своего <code>ForkJoinPool</code>» через <code>own.submit(...)</code> работает — 209 мс, — но опирается на деталь реализации: задачи стрима выполняются в пуле того потока, который начал терминальную операцию. Для ввода-вывода правильный инструмент — исполнители, а с Java 21 — виртуальные потоки из <a href="virtual-threads.html">Virtual Threads</a>: 208 мс без настройки размеров пула. Параллельные стримы — только для работы, ограниченной процессором, и только когда замер показал выигрыш. В веб-сервисе под нагрузкой все ядра и так заняты запросами, и параллельный стрим в обработчике обычно лишь добавляет накладные расходы и конкуренцию.</p>
+      <div class="trap">
+        <p class="myth"><code>.parallel()</code> ускоряет стрим примерно во столько раз, сколько ядер.</p>
+        <p class="fact">Только при большом N × Q, хорошо делимом источнике и без порядка и общего состояния. В демо сумма 20 тысяч чисел стала втрое медленнее, <code>LinkedList</code> на дешёвой работе не ускорился, а блокирующие задачи заняли общий пул всей JVM.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Параллельный стрим делит источник Spliterator-ом и выполняется в общем ForkJoinPool (ядра − 1) вместе с вызывающим потоком.</li>
+        <li>Выигрыш — при большом N × Q (порядка 10 000+), делимом источнике (массив, ArrayList, range), CPU-работе.</li>
+        <li>Малые данные и плохо делимые источники (LinkedList, iterate, lines) — замедление или ноль.</li>
+        <li>forEach теряет порядок; forEachOrdered, findFirst, limit на упорядоченном потоке дорогие; toList сохраняет порядок дёшево.</li>
+        <li>Общее изменяемое состояние — гонка; результат только через collect/reduce.</li>
+        <li>Блокирующий ввод-вывод в общем пуле тормозит всё приложение — исполнители или виртуальные потоки.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ps-pool" data-freq="2">
+      <h3>В каком пуле выполняется параллельный стрим и чем это опасно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В общем ForkJoinPool.commonPool(), размер — число ядер минус один; вызывающий поток тоже участвует. Пул один на всю JVM: его делят все параллельные стримы и CompletableFuture без исполнителя. Блокирующие операции внутри параллельного стрима занимают потоки пула и тормозят несвязанный код.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Размер меняется свойством java.util.concurrent.ForkJoinPool.common.parallelism.</li>
+            <li>Запуск внутри своего ForkJoinPool работает, но это деталь реализации.</li>
+            <li>Для ввода-вывода — исполнители или виртуальные потоки.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему после этого изменения выросли задержки всего сервиса?</summary>
+          <pre><code class="language-java">List&lt;Rate&gt; rates = currencies.parallelStream()
+        .map(c -&gt; ratesClient.fetch(c))        // HTTP, 100–500 мс
+        .toList();</code></pre>
+          <p>HTTP-вызовы блокируют потоки общего пула. Пока они ждут ответа, другие параллельные стримы и <code>CompletableFuture</code> сервиса стоят в очереди за потоками, а число одновременных запросов к поставщику ограничено числом ядер. Нужен свой исполнитель с ограничением параллельности или виртуальные потоки (<code>Executors.newVirtualThreadPerTaskExecutor()</code>) плюс таймауты на клиент.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ps-when" data-freq="2">
+      <h3>Когда параллельный стрим медленнее последовательного?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Когда данных мало или работа на элемент дешёвая — накладные расходы на разделение и слияние больше выигрыша; когда источник плохо делится (LinkedList, Stream.iterate, строки файла); когда есть операции, требующие порядка (forEachOrdered, findFirst, limit) или синхронизация общего состояния; когда работа — ожидание ввода-вывода.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Правило NQ: N × Q больше ~10 000.</li>
+            <li>Дешёвые операции упираются в пропускную способность памяти.</li>
+            <li>В нагруженном веб-сервисе ядра уже заняты запросами.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ps-state" data-freq="2">
+      <h3>Почему нельзя добавлять в ArrayList из parallel().forEach?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>ArrayList не потокобезопасен: одновременные add теряют элементы или бросают ArrayIndexOutOfBoundsException при росте массива. Результат нужно собирать через collect или toList — каждая часть пишет в свой контейнер, и они сливаются в конце без гонок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Синхронизированные коллекции убирают гонку, но сериализуют работу.</li>
+            <li>Лямбды параллельного стрима должны быть без побочных эффектов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/package-summary.html#Parallelism">java.util.stream: Parallelism</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ForkJoinPool.html">ForkJoinPool</a>.</li>
+      <li>Doug Lea, <a href="https://gee.cs.oswego.edu/dl/html/StreamParallelGuidance.html">When to use parallel streams</a> — правило N × Q.</li>
+      <li>Joshua Bloch, «Effective Java», 3-е издание, item 48 — use caution when making streams parallel.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
