@@ -635,7 +635,7 @@ window.KB_TREE = [
           scope: 'STAR, конфликты, ошибки, решения без данных, почему уходишь' },
       ] },
       { id: 'process', title: 'Job Search', items: [
-        { id: 'resume', freq: 2, status: 'empty', title: 'Resume',
+        { id: 'resume', freq: 2, status: 'draft', title: 'Resume',
           scope: 'структура, достижения с цифрами, стек, что убрать' },
         { id: 'questions-to-ask', freq: 2, status: 'draft', title: 'Questions to Ask',
           scope: 'вопросы о команде, процессах, продукте и техдолге' },
