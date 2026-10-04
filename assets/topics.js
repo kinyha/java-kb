@@ -79,7 +79,7 @@ window.KB_TREE = [
           scope: 'острова в матрице, BFS по кратчайшему пути, topological sort, обнаружение цикла' },
         { id: 'backtracking', freq: 1, status: 'draft', title: 'Backtracking',
           scope: 'подмножества, перестановки, комбинации, отсечение ветвей' },
-        { id: 'dp', freq: 1, status: 'empty', title: 'Dynamic Programming',
+        { id: 'dp', freq: 1, status: 'draft', title: 'Dynamic Programming',
           scope: 'подзадачи, мемоизация и таблица, лестница и монеты, рюкзак, LCS, жадные алгоритмы' },
       ] },
       { id: 'live-coding', freq: 3, status: 'empty', title: 'Live Coding',
