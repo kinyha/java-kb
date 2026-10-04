@@ -77,7 +77,7 @@ window.KB_TREE = [
           scope: 'top-K элементов, K-way merge, медиана потока, две кучи' },
         { id: 'graph-search', freq: 1, status: 'draft', title: 'Graph Search',
           scope: 'острова в матрице, BFS по кратчайшему пути, topological sort, обнаружение цикла' },
-        { id: 'backtracking', freq: 1, status: 'empty', title: 'Backtracking',
+        { id: 'backtracking', freq: 1, status: 'draft', title: 'Backtracking',
           scope: 'подмножества, перестановки, комбинации, отсечение ветвей' },
         { id: 'dp', freq: 1, status: 'empty', title: 'Dynamic Programming',
           scope: 'подзадачи, мемоизация и таблица, лестница и монеты, рюкзак, LCS, жадные алгоритмы' },
