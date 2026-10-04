@@ -395,7 +395,7 @@ window.KB_TREE = [
       { id: 'lambdas-streams', title: 'Lambdas & Streams', source: 'Modern Java in Action, ч. 1–3; Effective Java, гл. 7', items: [
         { id: 'lambdas', freq: 3, status: 'draft', title: 'Lambdas',
           scope: 'синтаксис, effectively final, функциональные интерфейсы java.util.function, method references' },
-        { id: 'optional', freq: 2, status: 'empty', title: 'Optional',
+        { id: 'optional', freq: 2, status: 'draft', title: 'Optional',
           scope: 'зачем нужен, map и flatMap, orElse и orElseGet, антипаттерны' },
         { id: 'streams', freq: 3, status: 'empty', title: 'Stream API',
           scope: 'ленивый конвейер, intermediate и terminal, map, filter, flatMap, reduce, одноразовость стрима' },

@@ -7715,6 +7715,69 @@ window.KB_SEARCH = [
 "text": "Что такое золотые сигналы и почему задержку смотрят перцентилями? Трафик, ошибки, задержка и насыщение — минимальный набор для понимания здоровья сервиса. Задержку смотрят перцентилями, потому что средняя смешивает быстрые и медленные запросы: в демо средняя 35 мс при p99 440 мс. p99 показывает опыт каждого сотого пользователя, а у активного пользователя за сессию сотни запросов. Перцентили не усредняют между экземплярами — считают по гистограмме. Задержку ошибок отделяют от задержки успешных запросов. RED для сервисов, USE для ресурсов."
 },
 {
+"topic": "optional",
+"id": "problem",
+"kind": "step",
+"title": "Цепочка геттеров и NullPointerException",
+"text": "Цепочка геттеров и NullPointerException Для возврата на карту нужен BIC банка-эмитента: клиент → карта → банк → BIC. Клиента может не быть, у клиента может не быть привязанной карты, у карты — известного банка. Демо OptionalDemo.java проходит эту цепочку для четырёх клиентов двумя способами: String viaNull = DB.get(id).card().bank().bic(); String viaOptional = find(id) .flatMap(OptionalDemo::card) // метод уже возвращает Optional .map(Card::bank) // может вернуть null — станет empty .map(Bank::bic) .orElse(\"unknown\"); == null checks vs Optional chain c-1: chained getters -> SABRRUMM Optional -> SABRRUMM c-2: chained getters -> NPE Optional -> unknown c-3: chained getters -> NPE Optional -> unknown c-9: chained getters -> NPE Optional -> unknown Цепочка геттеров работает только для полностью заполненного клиента. В трёх остальных случаях — NullPointerException , причём сигнатуры методов ничего не говорили о том, что результат может отсутствовать. Защитный вариант — лесенка if (x != null) на каждом уровне, которую легко забыть на одном из них. Ошибка «миллиарда долларов», как назвал null его автор Тони Хоар, — в том, что отсутствие значения не видно в типе. С Java 14 сообщение NPE хотя бы называет, что было null (helpful NullPointerExceptions), но не предотвращает ошибку."
+},
+{
+"topic": "optional",
+"id": "chain",
+"kind": "step",
+"title": "map, flatMap и filter",
+"text": "map, flatMap и filter find(\"c-2\") Optional[c-2] flatMap(card) Optional[card] map(bank) null → empty map(bic) не вызван orElse \"unknown\" find оборачивает результат поиска: клиент есть — Optional[c-2]. card() сам возвращает Optional — flatMap не даёт получить Optional<Optional<Card>>. Card::bank вернул null: map превращает его в пустой Optional, без NPE. На пустом Optional map функцию не вызывает и передаёт пустоту дальше. В конце один выход: значение по умолчанию, исключение или действие. find — граница с миром, где есть null : Optional.ofNullable(DB.get(id)) . Для клиента c-2 значение есть. card(c) возвращает Optional<Card> . С map получилось бы Optional<Optional<Card>> ; flatMap «расплющивает» — передаёт результат функции как есть. map(Card::bank) получил null : у карты c-2 банк неизвестен. map оборачивает результат через ofNullable , и цепочка стала пустой — это и есть разница с цепочкой геттеров. Все последующие map , flatMap и filter на пустом Optional функции не вызывают. Пустота протекает до конца цепочки. Терминальная операция решает, что делать с отсутствием: orElse , orElseGet , orElseThrow , ifPresentOrElse . Проверка одна — в конце, а не на каждом уровне. == creating and unwrapping Optional.of(null): NullPointerException empty.get(): No value present orElseThrow(supplier): customer c-9 not found map(x -> null) = Optional.empty, filter = Optional.empty Optional.empty() is a singleton: true Создание: Optional.of(x) — значение обязано быть, на null сразу NPE; ofNullable(x) — на границе с кодом, который может вернуть null ; empty() — пустой, это один общий объект. Извлечение: get() на пустом бросает NoSuchElementException: No value present — замена NPE на другое исключение без информации; поэтому в Java 10 добавили orElseThrow() без аргументов с тем же поведением, но честным именем. Лучше — orElseThrow(() -> new NotFoundException(...)) с осмысленным исключением: в REST-контроллере оно превратится в 404, как в Spring Web . filter оставляет значение, только если оно проходит условие. Для двух ветвей — ifPresentOrElse (Java 9), для альтернативного источника — or(() -> findInArchive(id)) ."
+},
+{
+"topic": "optional",
+"id": "orelse",
+"kind": "step",
+"title": "orElse против orElseGet",
+"text": "orElse против orElseGet == orElse is eager, orElseGet is lazy value present, orElse(load()): load called 1 time(s) value present, orElseGet(load): load called 0 time(s) orElse(loadDefaultBic()) — обычный вызов метода с аргументом: аргумент вычисляется до вызова, всегда. Значение у клиента c-1 есть, а «дорогой» loadDefaultBic всё равно выполнился. Если там запрос в базу, HTTP-вызов или создание сущности с побочным эффектом ( orElse(repository.save(new Customer())) ), он произойдёт при каждом обращении. orElseGet(supplier) вызывает поставщика только при пустом Optional . Правило: в orElse — константы и уже вычисленные значения, всё остальное — в orElseGet . Это та же разница между вычислением выражения и лямбдой, что у ссылок на методы в Lambdas ."
+},
+{
+"topic": "optional",
+"id": "layers",
+"kind": "step",
+"title": "Optional по слоям приложения",
+"text": "Optional по слоям приложения static Optional<Payment> findById(String id) { return Optional.ofNullable(PRIMARY.get(id)); } // репозиторий static Payment get(String id) { // сервис return findById(id) .or(() -> findInArchive(id)) // запасной источник, лениво .orElseThrow(() -> new NotFound(\"payment \" + id + \" not found\")); } == repository returns Optional, service decides p-1 -> Payment[id=p-1, amount=500, status=PAID], archive calls 0 p-0 -> Payment[id=p-0, amount=900, status=REFUNDED], archive calls 1 p-404 -> NotFound: payment p-404 not found (HTTP 404), archive calls 1 statusText(p-1) = оплачен 500, statusText(p-0) = не оплачен Демо LayersDemo.java раскладывает ответственность по слоям. Для репозитория отсутствие записи — обычный результат поиска, а не ошибка, поэтому он возвращает Optional : так устроен findById в Spring Data . Сервис знает контекст и решает, что отсутствие значит здесь. Для get по идентификатору из URL это ошибка клиента: orElseThrow с доменным исключением, которое обработчик превратит в 404, как в Spring Web . Для текста статуса — нормальная ветка: «не оплачен». Запасной источник подключается через or (Java 9) — тоже лениво: для p-1 архив не запрашивался ни разу, для p-0 и p-404 — по одному разу. Чего избегать: пробрасывать Optional через все слои до контроллера и там разворачивать — решение об отсутствии должно приниматься там, где известен смысл; и превращать Optional обратно в null через orElse(null) без нужды — это допустимо только на границе со старым API, который ждёт null . Исключения о ненайденной сущности и их перевод в коды ответа — в Exceptions . Jackson без модуля jdk8 не умеет сериализовать Optional -поля DTO; Spring Boot подключает модуль сам, но это ещё одна причина не держать Optional в полях. == map is one line Optional[P-1] Optional.empty Optional.empty == equals compares contents Optional.of(\"p-1\").equals(Optional.of(new String(\"p-1\"))) = true Внутри Optional ничего сложного нет: класс с одним полем value , где null означает пустоту, и map — одна строка: isEmpty() ? empty() : ofNullable(f.apply(value)) . Демо повторяет её своими руками и получает те же результаты: преобразованное значение, пустоту для null -результата и пропуск функции на пустом. equals сравнивает содержимое, а не ссылки, — два Optional с равными строками равны; поэтому в тестах удобно писать assertEquals(Optional.of(expected), service.find(id)) ."
+},
+{
+"topic": "optional",
+"id": "where",
+"kind": "step",
+"title": "Где Optional уместен, а где нет",
+"text": "Где Optional уместен, а где нет == Optional is not for fields serialize record with Optional field: NotSerializableException java.util.Optional Брайан Гётц, архитектор языка, описывал назначение Optional узко: возвращаемый тип методов, у которых может не быть результата, — так в JDK устроены Stream.findFirst , max , reduce , а в Spring Data — findById . Всё остальное — антипаттерны: Использование Почему плохо Вместо Поле класса Не Serializable (в демо — NotSerializableException ), лишний объект на каждый экземпляр, JPA и многие мапперы его не понимают null -поле и геттер, возвращающий Optional Параметр метода Вызывающий может передать null вместо Optional ; три состояния вместо двух Перегрузка или явный @Nullable Коллекция в Optional, Optional в коллекции Пустая коллекция уже означает «нет» Пустой список, filter if (opt.isPresent()) opt.get() Та же проверка на null, только длиннее map , orElse , ifPresent Возврат null из метода с типом Optional Хуже, чем без Optional: вызывающий не проверяет Optional.empty() Optional<Integer> для чисел Две упаковки OptionalInt , OptionalLong Optional — value-based класс: у него нет идентичности, на которую можно опираться. Сравнивать через == , синхронизироваться на нём или использовать как ключ с расчётом на идентичность нельзя; empty() сейчас — синглтон, как показало демо, но это деталь реализации. В будущих версиях Java с value-классами (проект Valhalla) он может стать значением без объекта в куче. Сейчас каждый непустой Optional — аллокация 16 байт; в горячих циклах JIT обычно убирает её анализом убегания, но в структурах данных — нет. == streams of Optionals known BICs: [SABRRUMM] OptionalLong max = 1200, of empty = OptionalLong.empty Со стримами Optional сочетается через Optional.stream() (Java 9): пустой — пустой стрим, непустой — стрим из одного элемента, и flatMap(Optional::stream) отбрасывает отсутствующие значения. Примитивные стримы возвращают OptionalLong / OptionalInt / OptionalDouble : максимум пустого стрима — не 0 и не Long.MIN_VALUE , а «нет значения», и путать это нельзя — подробнее в Stream API . Альтернативы Optional в других местах — аннотации @Nullable / @NonNull (JSpecify) со статическим анализом, которые проверяют поля и параметры без обёрток, и Kotlin с nullable-типами прямо в системе типов. orElse и orElseGet делают одно и то же, второй — просто через лямбду. Аргумент orElse вычисляется всегда, даже когда значение есть: в демо loadDefaultBic() выполнился для клиента с известным банком. orElseGet вызывает поставщика только для пустого Optional ."
+},
+{
+"topic": "optional",
+"id": "op-why",
+"kind": "q",
+"title": "Зачем нужен Optional и как его правильно использовать?",
+"text": "Зачем нужен Optional и как его правильно использовать? Чтобы метод явно сообщал в сигнатуре, что результата может не быть, и вызывающий не забыл обработать отсутствие. Использовать как возвращаемый тип; обрабатывать через map, flatMap, filter и терминальные orElse, orElseGet, orElseThrow, ifPresent. Не использовать get() без проверки, не делать полем, параметром или элементом коллекции. Optional не Serializable — специально, чтобы не попадал в поля. Value-based: без ==, синхронизации и идентичности. Альтернатива для полей и параметров — @Nullable со статическим анализом."
+},
+{
+"topic": "optional",
+"id": "op-orelse",
+"kind": "q",
+"title": "Чем orElse отличается от orElseGet?",
+"text": "Чем orElse отличается от orElseGet? Аргумент orElse — обычное выражение, оно вычисляется до вызова всегда, даже когда значение есть. orElseGet принимает Supplier и вызывает его только для пустого Optional. Для констант разницы нет; для вызовов с затратами или побочными эффектами — только orElseGet. orElse(repository.save(...)) сохраняет сущность при каждом обращении. or(supplier) — альтернативный Optional, тоже ленивый. Почему в базе появляются лишние записи? Customer customer = customers.findByPhone(phone) .orElse(customers.save(new Customer(phone))); save выполняется при каждом вызове, даже когда клиент найден: аргумент orElse вычисляется заранее. Каждый поиск существующего клиента создаёт дубликат. Нужно .orElseGet(() -> customers.save(new Customer(phone))) — и уникальный индекс по телефону, потому что при параллельных запросах «найти или создать» всё равно может создать двоих."
+},
+{
+"topic": "optional",
+"id": "op-map",
+"kind": "q",
+"title": "Чем map отличается от flatMap у Optional?",
+"text": "Чем map отличается от flatMap у Optional? map применяет функцию к значению и оборачивает результат в Optional; если функция вернула null, получится пустой Optional. flatMap применяется к функции, которая сама возвращает Optional, и не оборачивает повторно — иначе получился бы Optional<Optional<T>>. На пустом Optional обе функции не вызываются. Optional.stream() (Java 9) и flatMap(Optional::stream) в стримах."
+},
+{
+"topic": "optional",
+"id": "op-layers",
+"kind": "q",
+"title": "Где разворачивать Optional: в репозитории, сервисе или контроллере?",
+"text": "Где разворачивать Optional: в репозитории, сервисе или контроллере? Репозиторий возвращает Optional: отсутствие записи для него — нормальный результат. Сервис знает, что отсутствие значит в конкретном сценарии, и разворачивает: orElseThrow с доменным исключением, если запись обязана быть, или значение по умолчанию. Контроллер получает готовый объект или исключение, которое обработчик превращает в 404. orElse(null) — только на границе со старым API. Optional в полях DTO зависит от модуля Jackson jdk8 — лучше не держать."
+},
+{
 "topic": "os-io",
 "id": "unread-bank-reply",
 "kind": "step",
