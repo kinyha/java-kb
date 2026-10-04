@@ -383,7 +383,7 @@ window.KB_TREE = [
       { id: 'collections', title: 'Collections', source: 'Core Java т. I, гл. Collections; Baeldung: Collections Interview Questions', items: [
         { id: 'collections', freq: 3, status: 'draft', title: 'Overview',
           scope: 'иерархия Collection и Map, выбор реализации, Iterator, fail-fast, Comparator, List.of, Sequenced Collections' },
-        { id: 'lists', freq: 3, status: 'empty', title: 'List',
+        { id: 'lists', freq: 3, status: 'draft', title: 'List',
           scope: 'ArrayList и LinkedList, рост массива, сложность операций, удаление при обходе' },
         { id: 'hashmap', freq: 3, status: 'empty', title: 'HashMap',
           scope: 'hash, бакеты, коллизии, treeify, resize, load factor' },
