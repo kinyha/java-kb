@@ -637,7 +637,7 @@ window.KB_TREE = [
       { id: 'process', title: 'Job Search', items: [
         { id: 'resume', freq: 2, status: 'empty', title: 'Resume',
           scope: 'структура, достижения с цифрами, стек, что убрать' },
-        { id: 'questions-to-ask', freq: 2, status: 'empty', title: 'Questions to Ask',
+        { id: 'questions-to-ask', freq: 2, status: 'draft', title: 'Questions to Ask',
           scope: 'вопросы о команде, процессах, продукте и техдолге' },
         { id: 'negotiation', freq: 2, status: 'empty', title: 'Offer & Negotiation',
           scope: 'вилка, несколько офферов, как называть цифру, что кроме зарплаты' },
