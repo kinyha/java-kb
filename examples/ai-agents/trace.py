@@ -4,10 +4,12 @@
   python3 trace.py runs/run1.jsonl            # разбор своего прогона
   python3 trace.py --sanitize in.jsonl > out  # оставить только события цикла, без путей и id сессии
 """
-import json, re, sys
+import getpass, json, re, sys
 
 def short(s, n=110):
-    s = re.sub(r'/(private/)?tmp/(agent|workflow)-demo\.\w+', '$DEMO', str(s)).replace('\n', ' | ')
+    s = re.sub(r'/(private/)?tmp/(agent|workflow|perm)-demo\.\w+', '$DEMO', str(s)).replace('\n', ' | ')
+    s = s.replace(getpass.getuser(), 'user')                     # имя пользователя из вывода ls и путей
+    s = s.rstrip()
     return s if len(s) <= n else s[:n - 1] + '…'
 
 def sanitize(path):

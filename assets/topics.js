@@ -633,7 +633,7 @@ window.KB_TREE = [
           scope: 'спека, context pack, план, vertical slices, тест первым, самопроверка, ревью диффа, гейты CI; типовые провалы' },
       ] },
       { id: 'ai-safety', title: 'Safety', items: [
-        { id: 'ai-permissions', freq: 3, status: 'empty', title: 'Least Privilege & Approval Gates',
+        { id: 'ai-permissions', freq: 3, status: 'draft', title: 'Least Privilege & Approval Gates',
           scope: 'allow, ask и deny; песочница; хуки PreToolUse; где обязателен человек; журнал прогонов агента' },
         { id: 'llm-risks', freq: 2, status: 'empty', title: 'LLM Risks',
           scope: 'OWASP Top 10 для LLM, prompt injection через данные и инструменты, утечки, избыточные полномочия, реальные случаи' },
