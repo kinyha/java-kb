@@ -7,7 +7,7 @@
 import json, re, sys
 
 def short(s, n=110):
-    s = re.sub(r'/(private/)?tmp/agent-demo\.\w+', '$DEMO', str(s)).replace('\n', ' | ')
+    s = re.sub(r'/(private/)?tmp/(agent|workflow)-demo\.\w+', '$DEMO', str(s)).replace('\n', ' | ')
     return s if len(s) <= n else s[:n - 1] + '…'
 
 def sanitize(path):
@@ -31,6 +31,10 @@ def sanitize(path):
 
 def trace(path):
     calls, last_usage = 0, None
+    denied = set()                                   # отказ гейта — только то, что агент сам записал в permission_denials
+    for line in open(path, encoding='utf-8'):
+        e = json.loads(line)
+        if e.get('type') == 'result': denied = {d['tool_use_id'] for d in e['permission_denials']}
     for line in open(path, encoding='utf-8'):
         e = json.loads(line); t = e.get('type')
         if t == 'system' and e.get('subtype') == 'init':
@@ -49,7 +53,7 @@ def trace(path):
         elif t == 'user':
             for c in e['message']['content']:
                 if isinstance(c, dict) and c.get('type') == 'tool_result':
-                    tag = 'DENIED' if c.get('is_error') else 'ok'
+                    tag = 'DENIED' if c.get('tool_use_id') in denied else ('error' if c.get('is_error') else 'ok')
                     content = c['content'] if isinstance(c['content'], str) else ' '.join(x.get('text', '') for x in c['content'])
                     print(f"  <- {tag}: {short(content, 90)}")
         elif t == 'result':

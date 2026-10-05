@@ -629,7 +629,7 @@ window.KB_TREE = [
       { id: 'agentic', title: 'Agentic Workflow', items: [
         { id: 'ai-agents', freq: 3, status: 'draft', title: 'How Code Agents Work',
           scope: 'цикл агента: модель, вызовы инструментов, результат; контекстное окно и context rot; гейт прав; Claude Code, Codex, Cursor' },
-        { id: 'ai-workflow', freq: 3, status: 'empty', title: 'AI Task Workflow',
+        { id: 'ai-workflow', freq: 3, status: 'draft', title: 'AI Task Workflow',
           scope: 'спека, context pack, план, vertical slices, тест первым, самопроверка, ревью диффа, гейты CI; типовые провалы' },
       ] },
       { id: 'ai-safety', title: 'Safety', items: [
