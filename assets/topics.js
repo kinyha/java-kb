@@ -409,7 +409,7 @@ window.KB_TREE = [
       { id: 'modern', title: 'Modern Java', source: 'dev.java: Java Platform Evolution; JEP по версиям 8–25', items: [
         { id: 'java-versions', freq: 2, status: 'empty', title: "What's New",
           scope: 'что появилось в 8, 11, 17, 21, 25: var, text blocks, switch expressions, HttpClient, Sequenced Collections' },
-        { id: 'records', freq: 2, status: 'empty', title: 'Records',
+        { id: 'records', freq: 2, status: 'draft', title: 'Records',
           scope: 'семантика record, compact constructor, ограничения, record как DTO и value object' },
         { id: 'sealed-patterns', freq: 2, status: 'empty', title: 'Sealed & Pattern Matching',
           scope: 'sealed-иерархии, pattern matching для instanceof, record patterns, исчерпывающий switch' },

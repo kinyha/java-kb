@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Records · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="records">
+<main class="page">
+  <header class="topic-head"><h1>Records</h1></header>
+  <div class="lesson">
+    <div class="note tip"><p>Record объявляет данные через компоненты и связывает с ними конструктор, доступ и равенство. Поля нельзя переназначить, но объект, на который ссылается компонент, может меняться. Надёжный record начинается с решения о владении данными: какие значения допустимы, что нужно скопировать и что должно считаться равным.</p></div>
+    <section class="step" id="incident">
+      <h2>Final-ссылка не спасает ключ от изменения hashCode</h2>
+      <p>Пачку платежей положили в HashSet, чтобы не обработать её повторно. DTO объявлен как record, сеттеров нет. Но после добавления id во входной список тот же объект перестал находиться в наборе. Размер набора остался один: потерялся не объект, а возможность найти его по новому hashCode.</p>
+      <p>В <a href="../examples/records/AliasingDemo.java">AliasingDemo.java</a> record хранит ссылку на переданный список. Его сгенерированный hashCode зависит от hashCode списка, а список считает хеш по элементам. При вставке HashSet запомнил старый хеш; при поиске вычислил новый. Record запретил заменить поле ids, но не запретил изменить список через другую ссылку.</p>
+      <pre><code class="language-java">// Фрагмент AliasingDemo.java; запуск на JDK 21 из корня проекта:
+// java examples/records/AliasingDemo.java
+record BadBatch(List&lt;String&gt; ids) {}
+List&lt;String&gt; input = new ArrayList&lt;&gt;(List.of("p1"));
+BadBatch bad = new BadBatch(input);
+Set&lt;BadBatch&gt; keys = new HashSet&lt;&gt;();
+keys.add(bad);
+System.out.println("before: " + keys.contains(bad));
+input.add("p2"); // изменился компонент, а с ним хеш уже вставленного ключа
+System.out.println("after: " + keys.contains(bad) + ", size=" + keys.size());</code></pre>
+      <pre class="out">before: true
+after: false, size=1</pre>
+      <p>Record полезен для значения, определяемого компонентами: команды платежа, результата расчёта, строки отчёта. Он делает этот контракт видимым и убирает повторяющийся код. Если компонент сам не имеет стабильной семантики значения, короткая запись не исправит модель. Поэтому вопрос «immutable ли record» начинается с графа объектов, а не с наличия final.</p>
+    </section>
+    <section class="step" id="contract">
+      <h2>Заголовок record задаёт состояние и публичный контракт</h2>
+      <p>Объявление <code>record Receipt(String id, long minorUnits)</code> обещает, что Receipt — значение из id и minorUnits. Компилятор создаёт отдельный класс со своим типом; это не анонимный tuple. В Java 16 records стали постоянной возможностью языка; примеры этой темы используют Java 21 без preview.</p>
+      <p>Каждый компонент даёт private final поле и public accessor с тем же именем: <code>id()</code>, а не <code>getId()</code>. Canonical constructor принимает все компоненты в порядке заголовка. Если ты не написал нужный метод сам, компилятор добавляет equals, hashCode и toString, основанные на компонентах. Два Receipt с одинаковыми компонентами равны через equals, хотя это два разных объекта.</p>
+      <pre><code class="language-java">// Фрагмент RecordsDemo.java; java examples/records/RecordsDemo.java
+record Receipt(String id, long minorUnits) {}
+Receipt a = new Receipt("p1", 100), b = new Receipt("p1", 100);
+System.out.println("identity=" + (a == b) + ", equals=" + a.equals(b));
+System.out.println(a);
+Class&lt;?&gt; type = Receipt.class;
+System.out.println("record=" + type.isRecord()
+        + ", final=" + Modifier.isFinal(type.getModifiers()));
+System.out.println("parent=" + type.getSuperclass().getName());</code></pre>
+      <pre class="out">identity=false, equals=true
+Receipt[id=p1, minorUnits=100]
+record=true, final=true
+parent=java.lang.Record</pre>
+      <p>У record уже есть родитель java.lang.Record, а сам класс неявно final. Наследоваться от другого класса или сделать подкласс такого DTO нельзя. Можно реализовывать интерфейсы, объявлять методы поведения и static-члены, использовать generics. Но нельзя добавить ещё одно instance-поле, не отражённое в компонентах: скрытый изменяемый кеш разрушал бы обещание заголовка о состоянии.</p>
+      <p>На Java 21 это обычный ссылочный объект: new создаёт экземпляр, == проверяет идентичность, equals — value-контракт. Record не означает автоматическое размещение на стеке или отсутствие allocation. JIT может устранить отдельное выделение при escape analysis, как и для обычного класса; обещанием языка это не становится.</p>
+      <table class="mx">
+        <thead><tr><th>Часть</th><th>Что задаёт record</th><th>Практическое следствие</th></tr></thead>
+        <tbody>
+          <tr><td>Состояние</td><td>Private final поля компонентов</td><td>Ссылки стабильны; глубокая неизменяемость не следует</td></tr>
+          <tr><td>Создание</td><td>Canonical constructor</td><td>Нет автоматически созданного no-arg constructor</td></tr>
+          <tr><td>Доступ</td><td>Методы с именами компонентов</td><td>JavaBean-инструменту нужна поддержка records</td></tr>
+          <tr><td>Равенство</td><td>Тот же record-класс и компоненты</td><td>Похожий DTO другого типа не становится равным</td></tr>
+          <tr><td>Описание</td><td>Имя record и значения компонентов</td><td>toString может раскрыть чувствительные данные</td></tr>
+        </tbody>
+      </table>
+      <p>Reflection видит компоненты через <code>getRecordComponents()</code>, их типы и методы доступа. Даже после <code>setAccessible(true)</code> изменение final-поля record через <code>Field.set</code> в нашем опыте бросает IllegalAccessException. Это дополнительное ограничение reflective API, а не доказательство, что весь граф объектов immutable.</p>
+      <details class="deep"><summary>Под капотом: класс, метаданные и сгенерированные методы</summary><p>В class-файле есть метаданные Record с описанием компонентов, отдельные поля и методы. Javap на JBR 21.0.11 показывает вызовы invokedynamic для сгенерированных equals/hashCode/toString; реализация связывается через java.lang.runtime.ObjectMethods. Точный алгоритм hashCode и порядок сравнения компонентов не являются переносимым обещанием API, поэтому их нельзя использовать как формат хранения или криптографический отпечаток.</p><p>Аннотация компонента переносится на поле, неявный accessor и параметр конструктора только там, где допускает её Target. У явно написанного accessor аннотации компонента автоматически не появляются. Наличие аннотации в DTO само по себе не запускает Bean Validation: кто и когда вызывает валидатор, разобрано в Validation &amp; Errors.</p></details>
+    </section>
+    <section class="step" id="construction">
+      <h2>Compact constructor сначала обрабатывает параметры, потом заполняет поля</h2>
+      <p>Canonical constructor — путь, который устанавливает все компоненты. Его можно написать полностью с параметрами и присваиваниями. Compact constructor сокращает именно эту форму: параметры не повторяются в заголовке, а их присваивания в поля компилятор дописывает после успешного выполнения тела.</p>
+      <p>Внутри compact constructor имя id обозначает параметр. Можно проверить его и заменить нормализованным значением. Вызов <code>id()</code> уже читает поле объекта, которое пока содержит значение по умолчанию. Поэтому нормализацию и проверку проводят по параметрам, а методы, ожидающие готовый объект, вызывают после завершения конструирования.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Compact constructor Normalized: параметр id проходит от строки с пробелами к P1; поле объекта id остаётся null во время тела, затем неявное присваивание записывает P1 и объект возвращается вызывающему коду.">
+            <defs><marker id="rc-init-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="24" y="22" class="dg-cap">ПАРАМЕТР КОНСТРУКТОРА</text><text x="408" y="22" class="dg-cap">СОЗДАВАЕМЫЙ ОБЪЕКТ</text>
+            <rect x="24" y="44" width="248" height="76" rx="8" class="dg-box"/>
+            <rect x="408" y="44" width="280" height="110" rx="8" class="dg-box"/>
+            <text x="40" y="68" class="dg-t">id</text><text x="424" y="68" class="dg-t">Normalized.id</text>
+            <text data-s="1" x="40" y="100" class="dg-in">" p1 "</text>
+            <text data-s="2-" x="40" y="100" class="dg-ok">"P1"</text>
+            <text data-s="1-2" x="424" y="100" class="dg-in">null</text>
+            <text data-s="3-" x="424" y="100" class="dg-ok">"P1"</text>
+            <text data-s="2" x="424" y="132" class="dg-bad">id() читает null</text>
+            <path data-s="3" d="M272 92 L404 92" class="dg-line" marker-end="url(#rc-init-n)"/>
+            <text data-s="3" x="302" y="78" class="dg-n">putfield</text>
+            <rect x="408" y="174" width="280" height="30" rx="5" class="dg-cell"/>
+            <text data-s="1-3" x="424" y="194" class="dg-s">объект ещё не возвращён</text>
+            <text data-s="4" x="424" y="194" class="dg-ok">после new: id() = "P1"</text>
+            <text data-s="1" x="24" y="166" class="dg-s">получили аргумент</text>
+            <text data-s="2" x="24" y="166" class="dg-s">strip + toUpperCase + проверка</text>
+            <text data-s="3" x="24" y="166" class="dg-s">тело завершилось успешно</text>
+            <text data-s="4" x="24" y="166" class="dg-s">значение доступно вызывающему</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>new передаёт аргумент " p1 ". В теле конструктора поле ещё не получило компонент.</li>
+          <li>Тело заменяет параметр на "P1" и проверяет его. Вызванный здесь accessor возвращает null, потому что читает поле.</li>
+          <li>После тела компилятор дописал присваивание параметра полю. Если проверка бросила исключение, эта стадия не выполняется.</li>
+          <li>new завершился: вызывающий получил готовый объект, accessor теперь возвращает "P1".</li>
+        </ol>
+      </figure>
+      <pre><code class="language-java">// Фрагмент RecordsDemo.java; полный файл содержит imports и main
+record Normalized(String id) {
+    Normalized {
+        id = Objects.requireNonNull(id).strip().toUpperCase(Locale.ROOT);
+        System.out.println("constructor: param=" + id + ", accessor=" + id());
+        if (id.isEmpty()) throw new IllegalArgumentException("empty id");
+    } // здесь компилятор неявно присвоит this.id = id
+    Normalized() { this("fallback"); } // дополнительный конструктор ведёт к canonical
+}
+Normalized n = new Normalized(" p1 ");
+System.out.println("after constructor=" + n.id());</code></pre>
+      <pre class="out">constructor: param=P1, accessor=null
+after constructor=P1</pre>
+      <p>В compact constructor нельзя вручную присваивать <code>this.id</code>: этот режим резервирует присваивания за компилятором. В полной canonical-форме, наоборот, поля нужно установить самому. Права доступа canonical constructor не могут быть уже прав самого record: для public record нужен public canonical constructor, а не private фабричный путь.</p>
+      <p>Дополнительные конструкторы должны делегировать через this к другому конструктору этого record, в итоге к canonical. Это сохраняет общий путь установления компонентов. Делать валидацию только в статической фабрике недостаточно: прямой вызов new обойдёт такую фабрику. Нормализация в canonical должна сохранять смысл значения и быть повторяемой при копировании уже нормализованного record.</p>
+      <details class="deep"><summary>Под капотом: где javac поставил присваивание</summary><pre><code class="language-bash"># Команды из examples/records/README.md; JDK 21
+mkdir -p /tmp/java-kb-records-classes
+javac -d /tmp/java-kb-records-classes examples/records/RecordsDemo.java
+javap -p -c -classpath /tmp/java-kb-records-classes 'RecordsDemo$Normalized'</code></pre><pre><code class="language-text">26: invokevirtual #35   // Method id:()Ljava/lang/String; — accessor внутри тела
+...
+53: athrow               // ошибка проверки: до записи в поле не дошли
+54: aload_0
+55: aload_1              // нормализованный параметр
+56: putfield #60         // Field id:Ljava/lang/String; — неявная запись после тела
+59: return</code></pre><p>Это фрагмент настоящего javap; многоточие отмечает опущенные инструкции. Номера constant pool относятся к конкретной сборке, а порядок «тело → putfield → return» объясняет наблюдаемый null.</p></details>
+    </section>
+    <section class="step" id="ownership">
+      <h2>Неизменяемость определяется всеми доступными ссылками</h2>
+      <p>Защита списка требует двух решений: не хранить изменяемый список вызывающего и не отдавать наружу изменяемый список своего объекта. <code>List.copyOf</code> в compact constructor создаёт snapshot с неизменяемой структурой. Если вход уже подходит, API может переиспользовать его; важен контракт независимости от будущих структурных изменений исходной коллекции, а не обязательное выделение памяти.</p>
+      <p><code>Collections.unmodifiableList(input)</code> решает только вторую половину. Оно запрещает изменение через представление, но исходный ArrayList остаётся тем же объектом. Владельцу input ничто не мешает добавить элемент, и DTO увидит его через это представление. Для значения нужен snapshot, а не read-only окно на чужое состояние.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="После input.add(p2) вызывающий и BadBatch ссылаются на общий ArrayList с p1 и p2. Batch после List.copyOf ссылается на отдельный snapshot только с p1. Стрелки показывают владение: final фиксирует стрелку, а не содержимое ArrayList.">
+            <defs><marker id="rc-own-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="24" y="42" width="158" height="52" rx="7" class="dg-box"/>
+            <rect x="230" y="42" width="220" height="52" rx="7" class="dg-box"/>
+            <rect x="510" y="42" width="184" height="52" rx="7" class="dg-box"/>
+            <rect x="230" y="162" width="220" height="58" rx="7" class="dg-cell miss"/>
+            <rect x="510" y="162" width="184" height="58" rx="7" class="dg-cell hit"/>
+            <path d="M182 68 C205 68 200 188 226 188" class="dg-line" marker-end="url(#rc-own-n)"/>
+            <path d="M340 94 L340 158" class="dg-line" marker-end="url(#rc-own-n)"/>
+            <path d="M602 94 L602 158" class="dg-line" marker-end="url(#rc-own-n)"/>
+            <text x="24" y="24" class="dg-cap">ПОСЛЕ input.add("p2")</text>
+            <text x="40" y="64" class="dg-t">вызывающий</text><text x="40" y="83" class="dg-s">input</text>
+            <text x="246" y="64" class="dg-t">BadBatch</text><text x="246" y="83" class="dg-s">final ids</text>
+            <text x="526" y="64" class="dg-t">Batch</text><text x="526" y="83" class="dg-s">final ids</text>
+            <text x="350" y="127" class="dg-n">та же ссылка</text><text x="612" y="127" class="dg-n">snapshot</text>
+            <text x="246" y="184" class="dg-in">ArrayList</text><text x="246" y="206" class="dg-bad">[p1, p2]</text>
+            <text x="526" y="184" class="dg-in">List.copyOf</text><text x="526" y="206" class="dg-ok">[p1]</text>
+            <text x="230" y="242" class="dg-s">изменился hashCode</text><text x="510" y="242" class="dg-s">содержимое стабильно</text>
+          </svg>
+        </div>
+        <figcaption>Final запрещает перенаправить ссылку. Copy защищает от изменения структуры списка; immutable String защищает значения элементов.</figcaption>
+      </figure>
+      <pre><code class="language-java">// Фрагмент AliasingDemo.java; исходный список здесь создаётся заново
+record BadBatch(List&lt;String&gt; ids) {}
+record Batch(List&lt;String&gt; ids) {
+    Batch { ids = List.copyOf(ids); } // копируем до неявного присваивания полю
+}
+List&lt;String&gt; input = new ArrayList&lt;&gt;(List.of("p1"));
+BadBatch bad = new BadBatch(input);
+Batch safe = new Batch(input); // snapshot содержит только p1
+input.add("p2");
+System.out.println("bad=" + bad.ids() + ", safe=" + safe.ids());
+// safe.ids().add("p3") бросит UnsupportedOperationException</code></pre>
+      <pre class="out">bad=[p1, p2], safe=[p1]</pre>
+      <p>Этот опыт использует String, который сам immutable. Если в списке лежит Item с изменяемым status, copyOf скопирует ссылки на Item. Вторая часть AliasingDemo меняет status исходного элемента и через accessor record видит PAID. Чтобы получить immutable граф, нужны неизменяемые элементы или копирование их состояния в другой тип.</p>
+      <pre><code class="language-java">// Фрагмент AliasingDemo.java: snapshot списка сохраняет ссылки на элементы
+static final class Item { String status = "NEW"; }
+record ShallowBatch(List&lt;Item&gt; items) {
+    ShallowBatch { items = List.copyOf(items); }
+}
+Item item = new Item();
+ShallowBatch shallow = new ShallowBatch(List.of(item));
+item.status = "PAID"; // тот же Item доступен через обе ссылки
+System.out.println("element status=" + shallow.items().getFirst().status);</code></pre>
+      <pre class="out">element status=PAID</pre>
+      <p>С массивом ситуация ещё строже: clone на входе защищает от вызывающего, но автоматически созданный accessor отдаст внутренний массив. Нужна копия и на выходе, а затем согласованная семантика equals/hashCode. Если модель допускает List неизменяемых элементов, её проще правильно реализовать, чем вручную поддерживать все обещания массива-компонента.</p>
+      <div class="trap"><p class="myth">Любой record можно безопасно передавать между потоками и использовать ключом карты.</p><p class="fact">Это верно только при подходящих компонентах и публикации. Final-поля не синхронизируют последующие изменения вложенного ArrayList или Item. Проверяй все пути доступа к изменяемым объектам и не публикуй this из конструктора; final-field semantics подробно разобраны в JMM.</p></div>
+    </section>
+    <section class="step" id="equality">
+      <h2>Равенство компонентов наследует их собственные правила</h2>
+      <p>Сгенерированный equals требует тот же record-класс и равные соответствующие компоненты. Для reference-компонента семантика соответствует Objects.equals, включая null; для primitive-компонента — сравнению соответствующего wrapper. Массив не переопределяет equals по содержимому, поэтому одинаковые числа в двух разных int[] не делают два ArrayKey равными.</p>
+      <pre><code class="language-java">// Фрагмент EqualityDemo.java; java examples/records/EqualityDemo.java
+record ArrayKey(int[] values) {}
+record ListKey(List&lt;Integer&gt; values) {
+    ListKey { values = List.copyOf(values); }
+}
+record Reading(double value) {}
+record Amount(BigDecimal value) {}
+System.out.println("arrays=" + new ArrayKey(new int[]{1, 2})
+        .equals(new ArrayKey(new int[]{1, 2})));
+System.out.println("lists=" + new ListKey(List.of(1, 2)).equals(new ListKey(List.of(1, 2))));
+System.out.println("NaN=" + new Reading(Double.NaN).equals(new Reading(Double.NaN)));
+System.out.println("signed zero=" + new Reading(0.0).equals(new Reading(-0.0)));
+System.out.println("decimal scale=" + new Amount(new BigDecimal("1.0"))
+        .equals(new Amount(new BigDecimal("1.00"))));</code></pre>
+      <pre class="out">arrays=false
+lists=true
+NaN=true
+signed zero=false
+decimal scale=false</pre>
+      <p>NaN и знаковый ноль ведут себя здесь иначе, чем при primitive <code>==</code>: сравнение должно поддерживать корректный equals и согласованный hashCode. BigDecimal сохраняет своё правило равенства с учётом scale. Если бизнес считает 1.0 и 1.00 одним значением, это отдельное решение модели: нормализация в canonical или согласованное переопределение равенства, а не свойство record по умолчанию.</p>
+      <p>У record есть дополнительный copy invariant: создай новый R из значений всех accessors исходного r — полученная копия должна быть равна r. Поэтому accessor не должен незаметно менять наблюдаемое значение. Если поле хранит -10, accessor возвращает 10, а generated equals читает поле -10, реконструирование через accessor создаст другое значение.</p>
+      <p>Защитный clone массива на выходе сам по себе разумен, но вместе с generated equals по ссылке на массив нарушит этот же invariant. Для массива со сравнением по содержимому нужны одновременно Arrays.equals, Arrays.hashCode и копирование в обе стороны. Переопределять один equals без hashCode нельзя; лучше выбирать компонент с уже подходящим value-контрактом.</p>
+      <div class="note warn"><p>Сгенерированный toString печатает значения компонентов. Нельзя бездумно логировать record с токеном, PAN или персональными данными. Исключи секрет из безопасного описания либо переопредели toString. Сам record не добавляет маскировку.</p></div>
+    </section>
+    <section class="step" id="boundaries">
+      <h2>Record подходит значению, а жизненному циклу нужен другой контракт</h2>
+      <p>DTO результата запроса, команда, ключ со стабильными компонентами и небольшой value object хорошо совпадают с record. Их состояние задаётся при создании и читается как целое. Методы расчёта и реализации интерфейса допустимы: record не обязан быть мешком данных без поведения. Но сущность с идентичностью, изменениями и скрытым жизненным циклом — другая модель.</p>
+      <p>По контракту Jakarta Persistence 3.2 record не может быть entity. Для entity нужны другие правила конструирования и состояния; часто также нужны ленивые прокси. Record подходит для результата проекции; спецификация 3.2 также допускает record как embeddable и класс составного ключа. Не делай из запрета entity вывод «records не работают с БД»: различай эти роли и проверяй поддержку в выбранном провайдере.</p>
+      <p>JSON-мапперу нужно распознавать компоненты и уметь вызвать canonical constructor. Обычный механизм «пустой объект плюс setters» не соответствует record. Нормализация и constructor validation тогда могут быть частью создания DTO, но аннотации Bean Validation проверяются механизмом интеграции отдельно. Поддержку и поведение при отсутствующем поле проверяют на конкретном маппере и версии.</p>
+      <p>У Java Object Serialization есть специальный record-протокол: компоненты читаются, затем создаётся объект через canonical constructor. В <a href="../examples/records/SerializationDemo.java">SerializationDemo.java</a> счётчик увеличился при new и снова при readObject. Пользовательский readObject самого record не был вызван. Полный файл запускается на JDK 21 без файлов и внешней инфраструктуры.</p>
+      <pre><code class="language-java">// Ключевые строки SerializationDemo.java
+record Invoice(String id, long minorUnits) implements Serializable {
+    static int constructions;
+    static boolean customRead;
+    Invoice {
+        constructions++;
+        if (id == null || id.isBlank() || minorUnits &lt; 0)
+            throw new IllegalArgumentException("invalid invoice");
+    }
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        customRead = true;
+        in.defaultReadObject(); // этот hook для record игнорируется
+    }
+}
+Invoice original = new Invoice("p1", 100);
+ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+try (ObjectOutputStream out = new ObjectOutputStream(bytes)) { out.writeObject(original); }
+Invoice restored;
+try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+    restored = (Invoice) in.readObject();
+}
+System.out.println("equal=" + original.equals(restored));
+System.out.println("canonical calls=" + Invoice.constructions);
+System.out.println("custom readObject=" + Invoice.customRead);</code></pre>
+      <pre class="out">equal=true
+canonical calls=2
+custom readObject=false</pre>
+      <p>Constructor invariants сохраняются этим путём, но это не повод принимать произвольный поток сериализованных объектов из сети. Для records игнорируются и ряд других обычных serialization hooks; совместимость такого формата изучают по его специальному протоколу, а не по правилам обычного Serializable-класса. Здесь важно различать Java Serialization и JSON: это разные механизмы.</p>
+      <p>Добавление компонента меняет canonical-сигнатуру, равенство, hashCode и представление. Это изменение публичной модели, а не косметика. Для долгоживущего API продумай версионирование DTO и адаптеры на границе. Если нужны скрытое mutable-состояние, подклассы или традиционный JavaBean-контракт, выбирай обычный класс.</p>
+    </section>
+    <div class="summary"><ul>
+      <li>Record — отдельный final-класс, чьё состояние и value-контракт объявлены компонентами.</li>
+      <li>Compact constructor работает с параметрами; поля присваиваются после успешного тела.</li>
+      <li>Final фиксирует ссылку. Неизменяемость требует контроля всех объектов и ссылок в графе.</li>
+      <li>Generated equals использует правила компонентов: массив, BigDecimal и double имеют разные ловушки.</li>
+      <li>Реконструирование через accessors должно сохранять равенство; custom accessor обязан поддерживать этот контракт.</li>
+      <li>DTO и value object подходят record; entity и mutable JavaBean требуют другой модели.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="what-is" data-freq="3">
+      <h3>Что такое record и что генерирует компилятор?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Я использую record для значения, которое определяется объявленными компонентами. По заголовку компилятор создаёт private final поля, accessors с именами компонентов, canonical constructor и, если я их не написал, equals, hashCode и toString. Это отдельный final-класс, унаследованный от java.lang.Record, а не просто сокращение любого JavaBean.</p><p>Например, Receipt(id, minorUnits) можно передать как результат расчёта. Два экземпляра с одинаковыми компонентами равны через equals; сеттеров у него нет. При этом record с List не становится глубоко immutable: я отдельно определяю владение коллекцией.</p></div>
+        <div data-level="senior"><ul><li>Можно реализовывать интерфейсы и писать методы, но нельзя добавить instance-поле вне компонентов или выбрать другой superclass.</li><li>Member и local records неявно static: они не захватывают внешний экземпляр как inner class.</li><li>Record component metadata доступны через getRecordComponents; аннотации переносятся с учётом Target, а явно объявленный accessor требует отдельной проверки аннотаций.</li></ul></div>
+      </div>
+    </article>
+    <article class="q" id="constructor" data-freq="2">
+      <h3>Чем compact constructor отличается от canonical constructor?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Canonical constructor принимает все компоненты record и устанавливает их. Compact constructor — сокращённая canonical-форма: параметры берутся из заголовка record, я проверяю и нормализую их, а присваивания полям компилятор добавляет после тела. Поэтому внутри этой формы работаю с параметрами, а не читаю готовые значения через accessors.</p><p>Так я могу запретить пустой id и скопировать входной список до попадания в DTO. Если проверка бросит исключение, вызывающий не получит готовый record. Дополнительный конструктор делегирует через this к canonical-пути.</p></div>
+        <div data-level="senior"><ul><li>В полной canonical-форме присваивания надо написать самому; в compact-форме присваивать component fields запрещено.</li><li>Доступ canonical constructor не может быть уже доступа record. Фабрика не закрывает прямой new, если canonical по контракту публичен.</li><li>Нормализация должна быть идемпотентной для уже нормализованных компонентов, чтобы реконструирование через accessors сохраняло значение.</li></ul></div>
+      </div>
+    </article>
+    <article class="q" id="immutable" data-freq="3">
+      <h3>Record immutable? Можно ли использовать его как ключ HashMap?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>У record неизменяемы поля компонентов, но изменяемость объектов за этими ссылками сохраняется. Если компонент — чужой ArrayList, его можно поменять после конструктора или через accessor. Для значения со списком String я делаю List.copyOf в canonical: список не меняется ни через исходный контейнер, ни через DTO.</p><p>Ключом карты использую record только со стабильными equals и hashCode. Если hashCode компонента поменялся после вставки, поиск вычислит другой хеш и ключ потеряется, хотя сам объект всё ещё находится в карте.</p></div>
+        <div data-level="senior"><ul><li>Read-only wrapper не делает snapshot, а copyOf копирует структуру, но не mutable-элементы.</li><li>Массив требует защитной копии на входе и выходе, а также согласованных content-based equals/hashCode; иначе ломается copy invariant.</li><li>Final-field semantics не заменяют синхронизацию последующих изменений вложенных объектов. Для передачи между потоками нужно учитывать весь граф и безопасную публикацию.</li></ul></div>
+      </div>
+      <div class="check"><details data-kind="ревью"><summary>Accessor возвращает abs(value). Сохранится ли контракт record?</summary><pre><code class="language-java">// Фрагмент EqualityDemo.java
+record Misleading(int value) {
+    public int value() { return Math.abs(value); }
+}
+Misleading source = new Misleading(-10);
+Misleading copy = new Misleading(source.value());
+System.out.println(source.equals(copy));</code></pre><pre class="out">false</pre><p>Accessor возвращает 10, поле source хранит -10, и generated equals сравнивает поля. Реконструирование изменило значение, нарушив copy invariant. Нормализуй параметр в canonical, если abs — настоящий смысл компонента; иначе возвращай исходное значение.</p></details></div>
+    </article>
+    <article class="q" id="usage" data-freq="2">
+      <h3>Где record подходит в backend и где обычный класс лучше?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Я беру record для DTO, команды, проекции запроса и небольшого value object, если данные задаются при создании. Canonical constructor поддерживает инварианты, а компонентное равенство помогает сравнивать результаты теста. Выбор компонента должен совпадать с бизнес-равенством: например, BigDecimal по умолчанию учитывает scale.</p><p>Для JPA entity по переносимому контракту record не подходит. Обычный класс также нужен при mutable lifecycle, скрытом состоянии или наследовании. Маппер DTO должен уметь создавать record через canonical, а не рассчитывать на no-arg constructor и setters.</p></div>
+        <div data-level="senior"><ul><li>Java Serialization десериализует record через canonical и игнорирует его readObject; это специальный протокол, отдельный от JSON.</li><li>Новый компонент меняет конструктор, equals/hashCode и наблюдаемую форму DTO. Эволюцию внешнего контракта надо проектировать явно.</li><li>Generated toString раскрывает компоненты. Токены и платёжные реквизиты нельзя автоматически выводить в лог целым DTO.</li></ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://dev.java/learn/language/oop/records/">Dev.java: Using Records to Model Immutable Data</a> — основа урока: компоненты, обещания record и конструирование. Граф владения и сбой HashSet проверены собственными демо.</li>
+    <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html#jls-8.10">JLS 21 §8.10</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Record.html">java.lang.Record</a> — поля, конструкторы, ограничения, component equality и copy invariant.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/serial-arch.html#serialization-of-records">Serialization Specification §1.13</a> — canonical constructor и игнорируемые hooks record.</li>
+    <li><a href="https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html">Jakarta Persistence 3.2 §2.1</a> — требования к entity-классам, включая запрет records.</li>
+    <li><a href="https://github.com/Hruday-Boppa/Core-Java-Interview-Questions-List">Core Java Interview Questions List §20.5</a> — отбор вопросов про generated members, immutability, inheritance и constructors. Ответы проверены по спецификации и <a href="../examples/records/README.md">четырём запущенным демо</a>.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
