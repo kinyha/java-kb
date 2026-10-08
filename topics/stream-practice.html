@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stream Practice · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+
+<body data-page="topic" data-root="../" data-topic="stream-practice">
+<main class="page">
+  <header class="topic-head"><h1>Stream Practice</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сначала назови форму результата: список id, карта сумм или карта списков. Затем реши, что считается одним элементом, как обращаться с повтором и какой порядок нужен. Только после этого выбирай операции Stream. В задачах ниже одни и те же платежи дают разные отчёты, и именно контракт определяет правильную цепочку.</p>
+    </div>
+    <section class="step" id="contract">
+      <h2>Работающий pipeline ещё не означает правильный отчёт</h2>
+      <p>Сервис получил пачку платежей и должен показать оборот клиента. Два платежа по 100 выглядят одинаково, пока не выяснится, что один в рублях, другой в долларах. <code>mapToLong(...).sum()</code> успешно вернёт 200, но это число нельзя подписать никакой валютой. Технически корректная цепочка может нарушать смысл результата.</p>
+      <p>На live coding сначала задай вопросы, которые меняют алгоритм. Нужны только оплаченные события или последнее состояние каждого платежа? Одинаковый id — дубль доставки или новая версия? Нужно сохранять порядок входа, сортировать ключи или ранжировать значения? Для равной суммы нужен второй критерий, иначе порядок зависит от того, как обходится карта.</p>
+      <p>Дальше проговори тип результата. <code>List&lt;String&gt;</code> означает проекцию и выбор элементов. <code>Map&lt;String, Long&gt;</code> — классификацию с агрегатом. <code>Map&lt;String, Map&lt;String, Long&gt;&gt;</code> добавляет ещё один уровень классификации. Направление преобразования видно до того, как ты вспомнил имя коллектора.</p>
+      <table class="mx">
+        <thead><tr><th>Контракт</th><th>Что проверить</th><th>Типичный приём</th></tr></thead>
+        <tbody>
+          <tr><td>Уникальные оплаченные id в порядке появления</td><td>NEW до PAID того же id; повтор PAID</td><td>filter → map → distinct → toList</td></tr>
+          <tr><td>Сумма отдельно по клиенту и валюте</td><td>Одинаковые числа разных валют</td><td>groupingBy → groupingBy → summingLong</td></tr>
+          <tr><td>Последнее событие каждого id</td><td>Старая версия пришла после новой</td><td>toMap с правилом слияния</td></tr>
+          <tr><td>Топ по обороту</td><td>Несколько небольших платежей обгоняют один большой</td><td>Сначала агрегировать, затем ранжировать</td></tr>
+        </tbody>
+      </table>
+      <p>Во всех задачах списки, их элементы и поля не <code>null</code>. Суммы — неотрицательные целые minor units, без переполнения <code>long</code>. Это условия упражнения, которые позволяют сосредоточиться на преобразованиях. В реальном сервисе отдельно проверяют вход, денежную модель и предел суммы; округлению отведена тема <a href="../index.html#java/stdlib/bigdecimal">BigDecimal &amp; Money</a>.</p>
+      <div class="trap"><p class="myth">distinct удалит повторные платежи по id.</p><p class="fact">distinct сравнивает текущие элементы через equals. У record Payment с полями id и status разные статусы делают записи разными. Если нужен уникальный id, сначала проецируй на id; если нужно последнее состояние, используй слияние по версии.</p></div>
+    </section>
+    <section class="step" id="reduction">
+      <h2>Группа хранит тот агрегат, который нужен результату</h2>
+      <p>Для отчёта по валюте не нужно сначала собирать все платежи в списки. Классификатор выбирает ключ, а downstream-коллектор накапливает значение именно этой группы. При <code>summingLong</code> это промежуточная сумма. Каждый оплаченный платёж увеличивает только сумму своей валюты; платежи другой валюты туда не попадают.</p>
+      <p>Пошаговая схема показывает состояние при последовательном обходе трёх оплаченных платежей. Она не означает, что JVM создаёт поток для каждой группы. У каждой группы свой накопитель; после обработки входа коллектор завершает накопление и формирует значения результата. Оба сравнения этого шага и пример с заказами запускаются одним файлом <a href="../examples/stream-practice/ShapeDemo.java">ShapeDemo.java</a>.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Три оплаченных платежа: 100 RUB, 100 USD и 250 RUB. Каждый попадает в накопитель своей валюты. Итог: RUB 350 и USD 100; валюта задаёт отдельную группу.">
+            <defs><marker id="sp-sum-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker></defs>
+            <text x="24" y="24" class="dg-cap">ОПЛАЧЕННЫЙ ВХОД</text>
+            <text x="426" y="24" class="dg-cap">НАКОПИТЕЛИ ПО ВАЛЮТЕ</text>
+            <rect x="24" y="42" width="142" height="42" rx="6" class="dg-cell"/>
+            <rect x="24" y="96" width="142" height="42" rx="6" class="dg-cell"/>
+            <rect x="24" y="150" width="142" height="42" rx="6" class="dg-cell"/>
+            <rect x="426" y="42" width="254" height="66" rx="8" class="dg-box"/>
+            <rect x="426" y="130" width="254" height="66" rx="8" class="dg-box"/>
+            <rect data-s="2-" x="24" y="42" width="142" height="42" rx="6" class="dg-cell hit"/>
+            <rect data-s="3-" x="24" y="96" width="142" height="42" rx="6" class="dg-cell hit"/>
+            <rect data-s="4" x="24" y="150" width="142" height="42" rx="6" class="dg-cell hit"/>
+            <path data-s="2" d="M166 63 L422 63" class="dg-line ok" marker-end="url(#sp-sum-arrow)"/>
+            <path data-s="3" d="M166 117 C286 117 298 163 422 163" class="dg-line ok" marker-end="url(#sp-sum-arrow)"/>
+            <path data-s="4" d="M166 171 C286 171 298 89 422 89" class="dg-line ok" marker-end="url(#sp-sum-arrow)"/>
+            <text x="95" y="68" text-anchor="middle" class="dg-in">100 RUB</text>
+            <text x="95" y="122" text-anchor="middle" class="dg-in">100 USD</text>
+            <text x="95" y="176" text-anchor="middle" class="dg-in">250 RUB</text>
+            <text x="440" y="64" class="dg-t">RUB</text><text x="440" y="152" class="dg-t">USD</text>
+            <g data-s="1"><text x="440" y="88" class="dg-s">ещё нет группы</text><text x="440" y="176" class="dg-s">ещё нет группы</text></g>
+            <g data-s="2"><text x="440" y="88" class="dg-ok">сумма = 100</text><text x="440" y="176" class="dg-s">ещё нет группы</text><text x="254" y="55" class="dg-in">+100 RUB</text></g>
+            <g data-s="3"><text x="440" y="88" class="dg-ok">сумма = 100</text><text x="440" y="176" class="dg-ok">сумма = 100</text><text x="254" y="117" class="dg-in">+100 USD</text></g>
+            <g data-s="4"><text x="440" y="88" class="dg-ok">сумма = 350</text><text x="440" y="176" class="dg-ok">сумма = 100</text><text x="254" y="158" class="dg-in">+250 RUB</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>До обхода карта пуста: рамки справа показывают места возможных групп, а не уже созданные записи.</li>
+          <li>100 RUB создаёт группу RUB и увеличивает её сумму до 100.</li>
+          <li>100 USD создаёт другую группу. Обе суммы равны 100, но объединять их нельзя.</li>
+          <li>250 RUB попадает в существующий накопитель RUB: 100 + 250 = 350. Итоговая карта содержит две валюты.</li>
+        </ol>
+      </figure>
+      <pre><code class="language-java">// Фрагмент ShapeDemo.java; java examples/stream-practice/ShapeDemo.java
+record Payment(String client, String currency, long minorUnits, boolean paid) {}
+List&lt;Payment&gt; batch = List.of(new Payment("a", "RUB", 100, true),
+        new Payment("a", "USD", 100, true), new Payment("a", "RUB", 250, true),
+        new Payment("b", "RUB", 900, false));
+Map&lt;String, Long&gt; totals = batch.stream().filter(Payment::paid)
+        .collect(groupingBy(Payment::currency, TreeMap::new,
+                summingLong(Payment::minorUnits))); // агрегат, а не список платежей
+System.out.println(totals);</code></pre>
+      <pre class="out">{RUB=350, USD=100}</pre>
+      <p><code>TreeMap::new</code> задаёт сортировку ключей. Это самостоятельная часть контракта, не свойство <code>groupingBy</code> без фабрики. Если нужен порядок первого появления, подходит <code>LinkedHashMap</code>; если порядок не нужен, не добавляй сортировку ради красивого вывода.</p>
+      <h3>Фильтр до группировки и внутри группы отвечают на разные вопросы</h3>
+      <pre><code class="language-java">// Тот же batch из ShapeDemo.java
+Map&lt;String, Long&gt; before = batch.stream().filter(Payment::paid)
+        .collect(groupingBy(Payment::client, TreeMap::new, counting()));
+Map&lt;String, Long&gt; inside = batch.stream().collect(groupingBy(Payment::client,
+        TreeMap::new, filtering(Payment::paid, counting()))); // группа b есть, PAID в ней нет
+System.out.println(before);
+System.out.println(inside);</code></pre>
+      <pre class="out">{a=3}
+{a=3, b=0}</pre>
+      <p>Первый вариант отвечает «сколько оплаченных платежей у клиентов, для которых они есть». Во втором сначала известен клиент, и downstream отбрасывает неоплаченные события уже внутри его группы. Поэтому b остаётся с нулём. Нулевое значение и отсутствие ключа — разные ответы API; выясни, какой нужен потребителю отчёта.</p>
+    </section>
+    <section class="step" id="flatten">
+      <h2>Разворачивая вложенный список, сохрани владельца</h2>
+      <p>Заказы содержат списки товаров. Если нужен один общий список, <code>flatMap</code> превращает поток заказов в поток товаров: ноль, один или несколько элементов вместо каждого заказа. Но после перехода к <code>Stream&lt;String&gt;</code> клиента уже нет в элементе. Следующий <code>groupingBy</code> не сможет восстановить потерянную связь.</p>
+      <p>Когда результат должен быть «клиент → товары», можно сохранить пару клиент–товар при разворачивании. Однако заказ без товаров не выдаст ни одной пары, и такой клиент исчезнет. Другой путь — классифицировать заказ по клиенту первым, а внутри группы использовать <code>flatMapping</code>. Тогда пустой список товаров даёт пустое значение существующей группы.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 226" role="img" aria-label="Два заказа: клиент a с товарами tea и milk, клиент b без товаров. Стрелки идут от заказов к группам клиентов. Товары a разворачиваются внутри группы a; группа b существует, хотя товаров у неё нет.">
+            <defs><marker id="sp-owner-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="24" y="22" class="dg-cap">ЗАКАЗЫ</text><text x="434" y="22" class="dg-cap">РЕЗУЛЬТАТ ПО КЛИЕНТУ</text>
+            <rect x="24" y="38" width="232" height="86" rx="8" class="dg-box"/>
+            <rect x="24" y="146" width="232" height="56" rx="8" class="dg-box"/>
+            <rect x="434" y="38" width="260" height="86" rx="8" class="dg-box"/>
+            <rect x="434" y="146" width="260" height="56" rx="8" class="dg-box"/>
+            <rect x="40" y="78" width="82" height="30" rx="5" class="dg-cell"/>
+            <rect x="140" y="78" width="94" height="30" rx="5" class="dg-cell"/>
+            <rect x="450" y="78" width="92" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="560" y="78" width="116" height="30" rx="5" class="dg-cell hit"/>
+            <path d="M256 80 L430 80" class="dg-line" marker-end="url(#sp-owner-arrow)"/>
+            <path d="M256 174 L430 174" class="dg-line" marker-end="url(#sp-owner-arrow)"/>
+            <text x="40" y="61" class="dg-t">client = a</text><text x="40" y="169" class="dg-t">client = b</text>
+            <text x="40" y="188" class="dg-s">products = []</text>
+            <text x="450" y="61" class="dg-in">a → TreeSet</text><text x="450" y="169" class="dg-in">b → пустой TreeSet</text>
+            <text x="81" y="99" class="dg-in" text-anchor="middle">tea</text><text x="187" y="99" class="dg-in" text-anchor="middle">milk</text>
+            <text x="496" y="99" class="dg-in" text-anchor="middle">milk</text><text x="618" y="99" class="dg-in" text-anchor="middle">tea</text>
+            <text x="276" y="68" class="dg-n">товары a</text><text x="276" y="161" class="dg-n">0 товаров b</text>
+            <text x="450" y="188" class="dg-s">ключ сохраняется</text>
+          </svg>
+        </div>
+        <figcaption>Группа создаётся по заказу, а товары разворачиваются уже внутри неё. Нулевое число товаров не удаляет клиента.</figcaption>
+      </figure>
+      <pre><code class="language-java">// Фрагмент ShapeDemo.java
+record Order(String client, List&lt;String&gt; products) {}
+List&lt;Order&gt; orders = List.of(new Order("a", List.of("tea", "milk")),
+        new Order("b", List.of()));
+System.out.println(orders.stream().flatMap(o -&gt; o.products().stream()).toList());
+Map&lt;String, Set&lt;String&gt;&gt; byClient = orders.stream().collect(
+        groupingBy(Order::client, TreeMap::new,
+                flatMapping(o -&gt; o.products().stream(), toCollection(TreeSet::new))));
+System.out.println(byClient);</code></pre>
+      <pre class="out">[tea, milk]
+{a=[milk, tea], b=[]}</pre>
+      <p>Тип downstream подсказывает, где удалить дубли: <code>TreeSet</code> собирает уникальные названия в каждой группе и одновременно сортирует их. Глобальный <code>distinct</code> перед группировкой удалял бы данные между клиентами, если элементом было бы только название товара. Нужна уникальность пары либо отдельное множество у каждого клиента.</p>
+    </section>
+    <section class="step" id="limits">
+      <h2>Порядок операций определяет и ответ, и стоимость</h2>
+      <p>Для топа клиентов сначала посчитай оборот каждого клиента, затем сортируй записи карты по обороту и только потом делай <code>limit(k)</code>. Если сначала выбрать k крупнейших платежей, клиент с множеством небольших платежей не попадёт в кандидаты. Это другой вопрос, даже если названия операций совпадают.</p>
+      <p>У ранжирования два порядка: сумма по убыванию и id или имя по возрастанию при равенстве. <code>comparingLong(...).reversed().thenComparing(...)</code> разворачивает только первый критерий. Если поставить <code>reversed()</code> после <code>thenComparing</code>, развернутся оба. Вычитание сумм в компараторе тоже не подходит: разность может переполниться и нарушить порядок.</p>
+      <p>Оценка сложности должна учитывать контейнер и накопитель. Хеш-группировка с суммой обычно делает O(n) работы и хранит O(g) агрегатов для g ключей. Сортировка g агрегатов добавляет O(g log g). Используемый в задачах <code>TreeMap</code> делает поиск группы за O(log g). Если downstream — список всех платежей, память уже O(n), даже если финальный результат содержит только k элементов.</p>
+      <p>Топ внутри каждой группы через <code>collectingAndThen(toList(), ...)</code> прост для объяснения: собрать группу, отсортировать, взять первые k. Его цена — O(Σ nᵢ log nᵢ) времени для сортировок и O(n) памяти. Для больших групп и малого k можно держать ограниченный heap размера k: каждый кандидат сравнивается с худшим сохранённым, затем итог сортируется. У такого решения больше кода и нужно корректно сливать частичные heap; паттерн разобран в <a href="top-k.html">Top K</a>.</p>
+      <div class="note warn"><p>Не добавляй найденные элементы через forEach во внешний ArrayList. При parallelStream несколько потоков начнут менять один список. collect с подходящим коллектором задаёт правила накопления и слияния; mutable reduce с одним общим identity их не заменяет. Полные контракты — в <a href="collectors.html">Collectors</a>, условия полезного параллелизма — в <a href="parallel-streams.html">Parallel Streams</a>.</p></div>
+      <p>Если миллионы платежей уже лежат в БД, выгрузка всех строк ради in-memory группировки увеличит трафик и heap. Обсуди SQL-агрегат и пагинацию результата. На интервью сначала представь простое проверяемое решение, затем объясни, какое ограничение заставит его поменять. Усложнение оправдывает размер данных, а не желание показать больше методов Stream.</p>
+    </section>
+    <div class="summary"><ul>
+      <li>До pipeline договорись о форме результата, дублях, пустом входе и порядке.</li>
+      <li>Группируй по всем измерениям, которые нельзя складывать: валюты остаются разными суммами.</li>
+      <li>Downstream накапливает результат группы; filtering и flatMapping сохраняют её даже с пустым значением.</li>
+      <li>Топ агрегатов начинается с агрегации. Для ничьей нужен явный второй критерий.</li>
+      <li>limit после sorted сокращает результат, но не память, нужную сортировке всей группы.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>Задачи</h2>
+    <article class="q" id="paid-ids" data-freq="3" data-type="task">
+      <h3>Уникальные id оплаченных платежей</h3>
+      <div class="task">
+        <p>Верни id событий со статусом PAID, без повторов, в порядке первого появления среди оплаченных событий. Статус NEW того же id до PAID не мешает включить этот id позже. Результат — неизменяемый список; вход — упорядоченный List.</p>
+        <pre class="io">[p2 NEW, p1 PAID, p2 PAID, p1 PAID] → [p1, p2]</pre>
+        <p class="src">Авторская backend-задача · JDK 21 · без зависимостей</p>
+        <details><summary>Заготовка: PaidIds.java; запуск java PaidIds.java</summary>
+          <pre><code class="language-java">import java.util.*;
+
+public class PaidIds {
+    record Payment(String id, String status) {}
+
+    static List&lt;String&gt; paidIds(List&lt;Payment&gt; payments) {
+        // твоё решение
+        return List.of();
+    }
+
+    public static void main(String[] args) {
+        check(paidIds(List.of(new Payment(&quot;p2&quot;, &quot;NEW&quot;), new Payment(&quot;p1&quot;, &quot;PAID&quot;),
+                new Payment(&quot;p2&quot;, &quot;PAID&quot;), new Payment(&quot;p1&quot;, &quot;PAID&quot;))), List.of(&quot;p1&quot;, &quot;p2&quot;));
+        check(paidIds(List.of()), List.of());
+        check(paidIds(List.of(new Payment(&quot;x&quot;, &quot;FAILED&quot;))), List.of());
+        check(paidIds(List.of(new Payment(&quot;z&quot;, &quot;PAID&quot;), new Payment(&quot;a&quot;, &quot;PAID&quot;))), List.of(&quot;z&quot;, &quot;a&quot;));
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+        <details><summary>Подсказка 1</summary><p>Сначала реши, по какому типу должно работать равенство: по Payment или по String.</p></details>
+        <details><summary>Подсказка 2</summary><p>Отфильтруй PAID, получи id через map, затем distinct. Не сортируй: порядок задан входом.</p></details>
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>У filter на выходе всё ещё Payment. После map равенство сравнивает только id, поэтому distinct удаляет повторные оплаченные id. Упорядоченный поток сохраняет первый из равных элементов. Пустой вход даёт пустой список без отдельной ветки.</p>
+        <pre><code class="language-java">    static List&lt;String&gt; paidIds(List&lt;Payment&gt; payments) {
+        return payments.stream()
+                .filter(p -&gt; p.status().equals(&quot;PAID&quot;)) // сначала отбираем события
+                .map(Payment::id)                       // равенство теперь по id
+                .distinct()                            // первый id в encounter order
+                .toList();                             // неизменяемый список
+    }</code></pre>
+        <p>Ожидаемое время O(n), память O(u) для u уникальных оплаченных id и результата. toList возвращает неизменяемый список, поэтому не обещай вызывающему возможность add.</p>
+        <p>Подставь метод в заготовку. Полный проверенный файл: <a href="../examples/stream-practice/PaidIds.java">PaidIds.java</a>.</p>
+        <pre class="out">OK [p1, p2]
+OK []
+OK []
+OK [z, a]</pre>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Почему нельзя сначала distinct по всем событиям?</summary><p>У record с полями id и status равенство учитывает оба поля; это не уникальность по id. Если же вручную убрать повтор id до фильтра, событие NEW p2 может вытеснить PAID p2. Условия удаления дублей определяются смыслом отчёта, а не удобством перестановки операторов.</p></details></div>
+    </article>
+    <article class="q" id="totals" data-freq="3" data-type="task">
+      <h3>Оборот клиента отдельно в каждой валюте</h3>
+      <div class="task">
+        <p>Верни карту client → currency → сумма minorUnits, учитывая только paid=true. Клиент без оплаченных платежей отсутствует; нулевая оплаченная сумма создаёт группу. Оба уровня ключей должны быть по алфавиту. Суммы каждой группы помещаются в long.</p>
+        <pre class="io">a: [100 RUB paid, 100 USD paid, 250 RUB paid]
+b: [900 RUB unpaid]
+→ {a={RUB=350, USD=100}}</pre>
+        <p class="src">Авторская backend-задача · JDK 21 · без зависимостей</p>
+        <details><summary>Заготовка: Totals.java; запуск java Totals.java</summary>
+          <pre><code class="language-java">import java.util.*;
+import static java.util.stream.Collectors.*;
+
+public class Totals {
+    record Payment(String client, String currency, long minorUnits, boolean paid) {}
+
+    static Map&lt;String, Map&lt;String, Long&gt;&gt; totals(List&lt;Payment&gt; payments) {
+        // твоё решение
+        return Map.of();
+    }
+
+    public static void main(String[] args) {
+        check(totals(List.of(new Payment(&quot;a&quot;, &quot;RUB&quot;, 100, true), new Payment(&quot;a&quot;, &quot;USD&quot;, 100, true),
+                new Payment(&quot;a&quot;, &quot;RUB&quot;, 250, true), new Payment(&quot;b&quot;, &quot;RUB&quot;, 900, false))),
+                Map.of(&quot;a&quot;, Map.of(&quot;RUB&quot;, 350L, &quot;USD&quot;, 100L)));
+        check(totals(List.of()), Map.of());
+        check(totals(List.of(new Payment(&quot;a&quot;, &quot;RUB&quot;, 100, false))), Map.of());
+        check(totals(List.of(new Payment(&quot;b&quot;, &quot;EUR&quot;, 0, true))), Map.of(&quot;b&quot;, Map.of(&quot;EUR&quot;, 0L)));
+        check(totals(List.of(new Payment(&quot;x&quot;, &quot;RUB&quot;, 2_000_000_000L, true),
+                new Payment(&quot;x&quot;, &quot;RUB&quot;, 2_000_000_000L, true))), Map.of(&quot;x&quot;, Map.of(&quot;RUB&quot;, 4_000_000_000L)));
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+        <details><summary>Подсказка 1</summary><p>Прочитай тип результата справа налево: сумма, сумма по валюте, валюты по клиенту.</p></details>
+        <details><summary>Подсказка 2</summary><p>Внешний groupingBy выбирает клиента. Его downstream — ещё groupingBy по валюте; самым внутренним будет summingLong.</p></details>
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>filter убирает неоплаченные события до появления групп. Внешний классификатор выбирает клиента, внутренний — валюту; summingLong увеличивает только соответствующий накопитель. TreeMap задаёт порядок обоих наборов ключей. Проверка на четыре миллиарда ловит случайный выбор int.</p>
+        <pre><code class="language-java">    static Map&lt;String, Map&lt;String, Long&gt;&gt; totals(List&lt;Payment&gt; payments) {
+        return payments.stream().filter(Payment::paid)
+                .collect(groupingBy(Payment::client, TreeMap::new,
+                        groupingBy(Payment::currency, TreeMap::new,
+                                summingLong(Payment::minorUnits)))); // сумма отдельно в каждой валюте
+    }</code></pre>
+        <p>O(n(log c + log v)) времени, где c — число клиентов, v — максимальное число валют клиента. Память O(g) для g пар клиент–валюта. С HashMap ожидаемое накопление O(n), но порядок вывода пришлось бы обеспечивать отдельно.</p>
+        <p>Подставь метод в заготовку. Полный проверенный файл: <a href="../examples/stream-practice/Totals.java">Totals.java</a>.</p>
+        <pre class="out">OK {a={RUB=350, USD=100}}
+OK {}
+OK {}
+OK {b={EUR=0}}
+OK {x={RUB=4000000000}}</pre>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Какая перестановка оставит клиента b в результате?</summary><p>Если внешний groupingBy идёт до отбора paid, а filtering находится внутри его downstream, ключ b уже будет создан. В зависимости от расположения второго groupingBy получишь пустую карту валют либо валюту RUB с нулевой суммой. Прежде чем менять цепочку, назови нужную форму пустого значения.</p></details></div>
+    </article>
+    <article class="q" id="latest" data-freq="3" data-type="task">
+      <h3>Последняя версия события для каждого платежа</h3>
+      <div class="task">
+        <p>Поступил упорядоченный список Event(id, version, status). Верни по одному событию на id с максимальной version. При одинаковой version выбирай событие, стоящее позже во входном списке. Ключи результата сортируются по алфавиту. Версия задаёт порядок состояний; позиция во входе используется только для ничьей.</p>
+        <pre class="io">[p1 v2 PAID, p1 v1 NEW, p2 v1 FAILED]
+→ {p1=v2 PAID, p2=v1 FAILED}</pre>
+        <p class="src">Авторская backend-задача · JDK 21 · без зависимостей</p>
+        <details><summary>Заготовка: Latest.java; запуск java Latest.java</summary>
+          <pre><code class="language-java">import java.util.*;
+import java.util.function.Function;
+import static java.util.stream.Collectors.*;
+
+public class Latest {
+    record Event(String id, long version, String status) {}
+
+    static Map&lt;String, Event&gt; latest(List&lt;Event&gt; events) {
+        // твоё решение
+        return Map.of();
+    }
+
+    public static void main(String[] args) {
+        Event paid = new Event(&quot;p1&quot;, 2, &quot;PAID&quot;), failed = new Event(&quot;p2&quot;, 1, &quot;FAILED&quot;);
+        check(latest(List.of(paid, new Event(&quot;p1&quot;, 1, &quot;NEW&quot;), failed)), Map.of(&quot;p1&quot;, paid, &quot;p2&quot;, failed));
+        check(latest(List.of()), Map.of());
+        Event replacement = new Event(&quot;p1&quot;, 2, &quot;REFUNDED&quot;);
+        check(latest(List.of(paid, replacement)), Map.of(&quot;p1&quot;, replacement));
+        check(latest(List.of(replacement, paid)), Map.of(&quot;p1&quot;, paid));
+        check(latest(List.of(paid, paid)), Map.of(&quot;p1&quot;, paid));
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+        <details><summary>Подсказка 1</summary><p>groupingBy с последующим поиском максимума возможен, но хранение списка событий не нужно.</p></details>
+        <details><summary>Подсказка 2</summary><p>Используй toMap с id как ключом и Event как значением. Merge-функция выбирает большую версию; на равенстве — правый аргумент.</p></details>
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>Два аргумента merge — уже выбранное событие и очередной кандидат для этого id. Выбор максимальной версии не даёт старой поздней доставке откатить состояние. На равенстве выбор правого аргумента реализует оговорённый порядок входа. Это свёртка группы без хранения всех её элементов.</p>
+        <pre><code class="language-java">    static Map&lt;String, Event&gt; latest(List&lt;Event&gt; events) {
+        return events.stream().collect(toMap(Event::id, Function.identity(),
+                (a, b) -&gt; a.version() &gt; b.version() ? a : b, // равная версия: позже во входном списке
+                TreeMap::new));                              // ключи по алфавиту, не по версии
+    }</code></pre>
+        <p>O(n log u) времени с TreeMap, O(u) памяти для u уникальных id. При хеш-карте ожидаемое время O(n). В отличие от distinct, правило выбирает содержимое победившего события.</p>
+        <p>Подставь метод в заготовку. Полный проверенный файл: <a href="../examples/stream-practice/Latest.java">Latest.java</a>.</p>
+        <pre class="out">OK {p1=Event[id=p1, version=2, status=PAID], p2=Event[id=p2, version=1, status=FAILED]}
+OK {}
+OK {p1=Event[id=p1, version=2, status=REFUNDED]}
+OK {p1=Event[id=p1, version=2, status=PAID]}
+OK {p1=Event[id=p1, version=2, status=PAID]}</pre>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Подходит ли эта merge-функция для параллельной свёртки?</summary><p>Она ассоциативна: для последовательности выбирается правый из элементов максимальной версии независимо от расстановки скобок. Но она не коммутативна на равных версиях. Нужен сохранённый encounter order; unordered источник или concurrent unordered collector меняют смысл «позже». В распределённой обработке порядок доставки не задаёт глобальный tie-break: нужен отдельный идентификатор или правило конфликта.</p></details></div>
+    </article>
+    <article class="q" id="top-clients" data-freq="3" data-type="task">
+      <h3>Топ клиентов по обороту одной валюты</h3>
+      <div class="task">
+        <p>Верни до k имён клиентов по сумме платежей заданной currency: сумма по убыванию, имя по возрастанию при ничьей. k=0 даёт пустой список; k&lt;0 — IllegalArgumentException, даже при пустом входе. Все входные платежи уже оплачены. Не смешивай валюты; суммы помещаются в long.</p>
+        <pre class="io">RUB: z=150, a=100+50, b=140; USD: b=9000
+currency=RUB, k=2 → [a, z]</pre>
+        <p class="src">Авторская backend-задача · JDK 21 · без зависимостей</p>
+        <details><summary>Заготовка: TopClients.java; запуск java TopClients.java</summary>
+          <pre><code class="language-java">import java.util.*;
+import static java.util.stream.Collectors.*;
+
+public class TopClients {
+    record Payment(String client, String currency, long minorUnits) {}
+
+    static List&lt;String&gt; topClients(List&lt;Payment&gt; payments, String currency, int k) {
+        // твоё решение
+        return List.of();
+    }
+
+    public static void main(String[] args) {
+        List&lt;Payment&gt; data = List.of(new Payment(&quot;z&quot;, &quot;RUB&quot;, 150), new Payment(&quot;a&quot;, &quot;RUB&quot;, 100),
+                new Payment(&quot;a&quot;, &quot;RUB&quot;, 50), new Payment(&quot;b&quot;, &quot;RUB&quot;, 140), new Payment(&quot;b&quot;, &quot;USD&quot;, 9_000));
+        check(topClients(data, &quot;RUB&quot;, 2), List.of(&quot;a&quot;, &quot;z&quot;));
+        check(topClients(data, &quot;RUB&quot;, 0), List.of());
+        check(topClients(data, &quot;RUB&quot;, 20), List.of(&quot;a&quot;, &quot;z&quot;, &quot;b&quot;));
+        check(topClients(data, &quot;EUR&quot;, 2), List.of());
+        check(topClients(List.of(), &quot;RUB&quot;, 2), List.of());
+        try {
+            topClients(data, &quot;RUB&quot;, -1);
+            throw new AssertionError(&quot;negative k accepted&quot;);
+        } catch (IllegalArgumentException expected) {
+            System.out.println(&quot;OK negative k rejected&quot;);
+        }
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+        <details><summary>Подсказка 1</summary><p>Топ платежей и топ клиентов — разные результаты. У клиента a два платежа.</p></details>
+        <details><summary>Подсказка 2</summary><p>После отбора валюты собери Map client → sum. Новая цепочка по entrySet сортирует по value.reversed, затем key, и делает limit.</p></details>
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>Выделенный Map фиксирует переход от платежа к клиентскому агрегату. Сортировка входных платежей до группировки этого перехода не делает. Второй критерий гарантирует воспроизводимый результат при равных оборотах, независимо от порядка обхода хеш-карты. Вызов limit до sorted выбрал бы случайных кандидатов.</p>
+        <pre><code class="language-java">    static List&lt;String&gt; topClients(List&lt;Payment&gt; payments, String currency, int k) {
+        if (k &lt; 0) throw new IllegalArgumentException(&quot;negative k&quot;);
+        Map&lt;String, Long&gt; totals = payments.stream()
+                .filter(p -&gt; p.currency().equals(currency)) // сначала одна валюта
+                .collect(groupingBy(Payment::client, summingLong(Payment::minorUnits)));
+        return totals.entrySet().stream()
+                .sorted(Map.Entry.&lt;String, Long&gt;comparingByValue().reversed()
+                        .thenComparing(Map.Entry.comparingByKey())) // стабильное правило для ничьей
+                .limit(k).map(Map.Entry::getKey).toList();
+    }</code></pre>
+        <p>Ожидаемое O(n + c log c) времени, O(c) памяти, где c — число клиентов выбранной валюты. Сортировка хранит все c записей; limit(k) не превращает её в heap размера k.</p>
+        <p>Подставь метод в заготовку. Полный проверенный файл: <a href="../examples/stream-practice/TopClients.java">TopClients.java</a>.</p>
+        <pre class="out">OK [a, z]
+OK []
+OK [a, z, b]
+OK []
+OK []
+OK negative k rejected</pre>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Почему не сравнивать обороты через (int)(b.getValue() - a.getValue())?</summary><p>Разность long может переполниться; приведение к int дополнительно отбрасывает старшие биты. Знак перестаёт выражать числовой порядок. comparingByValue для Long и comparingLong сравнивают значения, не вычисляя опасную разность. Тест с близкими суммами не заменяет понимания этого контракта.</p></details></div>
+    </article>
+    <article class="q" id="products" data-freq="3" data-type="task">
+      <h3>Уникальные товары каждого клиента, включая пустые заказы</h3>
+      <div class="task">
+        <p>У каждого Order есть client и список названий products. Верни карту client → уникальные товары по алфавиту; ключи клиентов тоже по алфавиту. Клиент только с пустыми заказами должен остаться с пустым множеством. Товар одного клиента не удаляет такой же товар у другого.</p>
+        <pre class="io">a: [tea, milk, tea], [bread]; b: []
+→ {a=[bread, milk, tea], b=[]}</pre>
+        <p class="src">Авторская backend-задача · JDK 21 · без зависимостей</p>
+        <details><summary>Заготовка: Products.java; запуск java Products.java</summary>
+          <pre><code class="language-java">import java.util.*;
+import static java.util.stream.Collectors.*;
+
+public class Products {
+    record Order(String client, List&lt;String&gt; products) {}
+
+    static Map&lt;String, Set&lt;String&gt;&gt; products(List&lt;Order&gt; orders) {
+        // твоё решение
+        return Map.of();
+    }
+
+    public static void main(String[] args) {
+        check(products(List.of(new Order(&quot;a&quot;, List.of(&quot;tea&quot;, &quot;milk&quot;, &quot;tea&quot;)),
+                new Order(&quot;a&quot;, List.of(&quot;bread&quot;)), new Order(&quot;b&quot;, List.of()))),
+                Map.of(&quot;a&quot;, Set.of(&quot;tea&quot;, &quot;milk&quot;, &quot;bread&quot;), &quot;b&quot;, Set.of()));
+        check(products(List.of()), Map.of());
+        check(products(List.of(new Order(&quot;b&quot;, List.of()))), Map.of(&quot;b&quot;, Set.of()));
+        check(products(List.of(new Order(&quot;a&quot;, List.of(&quot;tea&quot;)), new Order(&quot;b&quot;, List.of(&quot;tea&quot;)))),
+                Map.of(&quot;a&quot;, Set.of(&quot;tea&quot;), &quot;b&quot;, Set.of(&quot;tea&quot;)));
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+        <details><summary>Подсказка 1</summary><p>Проверь решение на единственном заказе b с пустым списком: глобальное разворачивание его потеряет.</p></details>
+        <details><summary>Подсказка 2</summary><p>groupingBy выбирает клиента ещё по Order, затем flatMapping разворачивает products внутри группы. Собирай в TreeSet.</p></details>
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>Ключ создаётся при обработке заказа, даже если downstream не получил ни одного товара. TreeSet удаляет повторы внутри группы и задаёт порядок названий. Глобальный flatMap в пары клиент–товар с последующей группировкой требует отдельно добавить пустых клиентов, иначе нарушается условие.</p>
+        <pre><code class="language-java">    static Map&lt;String, Set&lt;String&gt;&gt; products(List&lt;Order&gt; orders) {
+        return orders.stream().collect(groupingBy(Order::client, TreeMap::new,
+                flatMapping(o -&gt; o.products().stream(),
+                        toCollection(TreeSet::new)))); // flatMapping после выбора клиента сохраняет пустую группу
+    }</code></pre>
+        <p>O(o log c + m log u) времени: o заказов, c клиентов, m вхождений товаров, u — максимум уникальных товаров клиента. Память O(c + U), где U — число уникальных пар клиент–товар.</p>
+        <p>Подставь метод в заготовку. Полный проверенный файл: <a href="../examples/stream-practice/Products.java">Products.java</a>.</p>
+        <pre class="out">OK {a=[bread, milk, tea], b=[]}
+OK {}
+OK {b=[]}
+OK {a=[tea], b=[tea]}</pre>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Как вернуть общий список товаров и одновременно не потерять связь с заказом?</summary><p>Если результат плоский, сделай flatMap в записи Line(client, product), а не только в String. Тогда каждое вхождение сохраняет владельца. Но нулевой список всё равно не создаст Line: существование пустого заказа или клиента нужно представить отдельно либо сохранить внешнюю группировку, как в этой задаче.</p></details></div>
+    </article>
+    <article class="q" id="top-payments" data-freq="3" data-type="task">
+      <h3>Топ-N платежей внутри каждой валюты</h3>
+      <div class="task">
+        <p>Верни карту currency → до k id платежей. Внутри группы сумма по убыванию, при равенстве id по возрастанию. Ключи валют — по алфавиту. id уникальны, все платежи оплачены. При k=0 существующие валюты остаются с пустыми списками; при k&lt;0 брось IllegalArgumentException. Вход менять нельзя.</p>
+        <pre class="io">[b RUB 100, a RUB 100, c RUB 50, x USD 900], k=2
+→ {RUB=[a, b], USD=[x]}</pre>
+        <p class="src">Авторская backend-задача · JDK 21 · без зависимостей</p>
+        <details><summary>Заготовка: TopPayments.java; запуск java TopPayments.java</summary>
+          <pre><code class="language-java">import java.util.*;
+import static java.util.stream.Collectors.*;
+
+public class TopPayments {
+    record Payment(String id, String currency, long minorUnits) {}
+
+    static Map&lt;String, List&lt;String&gt;&gt; topPayments(List&lt;Payment&gt; payments, int k) {
+        // твоё решение
+        return Map.of();
+    }
+
+    public static void main(String[] args) {
+        List&lt;Payment&gt; data = List.of(new Payment(&quot;b&quot;, &quot;RUB&quot;, 100), new Payment(&quot;a&quot;, &quot;RUB&quot;, 100),
+                new Payment(&quot;c&quot;, &quot;RUB&quot;, 50), new Payment(&quot;x&quot;, &quot;USD&quot;, 900));
+        check(topPayments(data, 2), Map.of(&quot;RUB&quot;, List.of(&quot;a&quot;, &quot;b&quot;), &quot;USD&quot;, List.of(&quot;x&quot;)));
+        check(topPayments(data, 0), Map.of(&quot;RUB&quot;, List.of(), &quot;USD&quot;, List.of()));
+        check(topPayments(data, 10), Map.of(&quot;RUB&quot;, List.of(&quot;a&quot;, &quot;b&quot;, &quot;c&quot;), &quot;USD&quot;, List.of(&quot;x&quot;)));
+        check(topPayments(List.of(), 2), Map.of());
+        try {
+            topPayments(data, -1);
+            throw new AssertionError(&quot;negative k accepted&quot;);
+        } catch (IllegalArgumentException expected) {
+            System.out.println(&quot;OK negative k rejected&quot;);
+        }
+        // Независимый эталон: сортируем весь вход циклом и выбираем первые k по каждой валюте.
+        Random random = new Random(42);
+        for (int test = 0; test &lt; 100; test++) {
+            List&lt;Payment&gt; input = new ArrayList&lt;&gt;();
+            int size = random.nextInt(50);
+            for (int i = 0; i &lt; size; i++) {
+                input.add(new Payment(&quot;p&quot; + i, &quot;C&quot; + random.nextInt(3), random.nextInt(5)));
+            }
+            int k = random.nextInt(6);
+            Map&lt;String, List&lt;String&gt;&gt; want = new TreeMap&lt;&gt;();
+            for (Payment p : input) want.computeIfAbsent(p.currency(), ignored -&gt; new ArrayList&lt;&gt;());
+            input.sort((a, b) -&gt; {
+                int c = Long.compare(b.minorUnits(), a.minorUnits());
+                return c != 0 ? c : a.id().compareTo(b.id());
+            });
+            for (Payment p : input) {
+                List&lt;String&gt; ids = want.get(p.currency());
+                if (ids.size() &lt; k) ids.add(p.id());
+            }
+            if (!Objects.equals(topPayments(input, k), want)) throw new AssertionError(&quot;random case &quot; + test);
+        }
+        System.out.println(&quot;OK 100 randomized cases&quot;);
+    }
+
+    static void check(Object got, Object want) {
+        if (!Objects.equals(got, want)) throw new AssertionError(&quot;got &quot; + got + &quot;, want &quot; + want);
+        System.out.println(&quot;OK &quot; + got);
+    }
+}</code></pre>
+        </details>
+      </div>
+      <div class="hints">
+        <details><summary>Подсказка 1</summary><p>Один глобальный limit(k) не даст k элементов каждой валюты.</p></details>
+        <details><summary>Подсказка 2</summary><p>Собери groupingBy(currency) с collectingAndThen(toList(), ...). Finisher сортирует одну группу, выбирает k и получает id.</p></details>
+      </div>
+      <details class="solution"><summary>Решение</summary>
+        <p>Коллектор сначала сохраняет платежи каждой валюты. Finisher работает с внутренним списком, а не с исходным входом; stream().sorted(...) не сортирует входной List на месте. При k=0 группы уже созданы, поэтому значения становятся пустыми списками. Comparator разворачивает сумму перед thenComparing, сохраняя возрастающий id.</p>
+        <pre><code class="language-java">    static Map&lt;String, List&lt;String&gt;&gt; topPayments(List&lt;Payment&gt; payments, int k) {
+        if (k &lt; 0) throw new IllegalArgumentException(&quot;negative k&quot;);
+        Comparator&lt;Payment&gt; rank = Comparator.comparingLong(Payment::minorUnits).reversed()
+                .thenComparing(Payment::id); // reversed только для суммы: id остаётся по возрастанию
+        return payments.stream().collect(groupingBy(Payment::currency, TreeMap::new,
+                collectingAndThen(toList(), group -&gt; group.stream()
+                        .sorted(rank).limit(k).map(Payment::id).toList())));
+    }</code></pre>
+        <p>O(n log g + Σ nᵢ log nᵢ) времени с TreeMap и сортировкой групп, O(n + g) памяти накопления. Финальные списки неизменяемые, внешняя карта остаётся изменяемой: глубокую неизменяемость нужно обеспечивать отдельно.</p>
+        <p>Подставь метод в заготовку. Полный проверенный файл: <a href="../examples/stream-practice/TopPayments.java">TopPayments.java</a>.</p>
+        <pre class="out">OK {RUB=[a, b], USD=[x]}
+OK {RUB=[], USD=[]}
+OK {RUB=[a, b, c], USD=[x]}
+OK {}
+OK negative k rejected
+OK 100 randomized cases</pre>
+      </details>
+      <div class="check"><details data-kind="уточнение"><summary>Что изменить для миллиона платежей одной валюты и k=10?</summary><p>Список и полная сортировка держат миллион элементов ради десяти. Ограниченный heap размера k хранит худшего выбранного кандидата на вершине: лучший новый кандидат заменяет его, затем десять элементов сортируются для ответа. Цена выбора O(n log k), память O(gk), плюс финальная сортировка. Для параллельного коллектора обязательно слияние двух heap по тому же полному компаратору, а не простое добавление всех элементов без ограничения.</p></details></div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://dev.java/learn/api/streams/using-collectors/">Dev.java: Using a Collector as a Terminal Operation</a> — основа урока: выбор формы результата, группы и downstream. Задачи и домен платежей разработаны для этого практикума.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/Collectors.html">Javadoc Java 21: Collectors</a> — контракты groupingBy, filtering, flatMapping, toMap и collectingAndThen.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/Stream.html">Javadoc Java 21: Stream</a> — порядок distinct, sorted, limit и неизменяемость toList.</li>
+    <li><a href="https://github.com/enhorse/java-interview">enhorse/java-interview</a> — перечень тем уточнений: Stream API, collect и reduce, операции и parallel; технические ответы сверены с Javadoc и запуском.</li>
+    <li><a href="../examples/stream-practice/README.md">Запуск и карта покрытия</a> — все семь демо, проверки крайних случаев и независимый эталон топа.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

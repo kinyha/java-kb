@@ -403,7 +403,7 @@ window.KB_TREE = [
           scope: 'toList и toMap с дубликатами, groupingBy, partitioningBy, downstream collectors, joining' },
         { id: 'parallel-streams', freq: 2, status: 'draft', title: 'Parallel Streams',
           scope: 'common ForkJoinPool, когда параллельный стрим медленнее, порядок, побочные эффекты' },
-        { id: 'stream-practice', freq: 3, status: 'empty', title: 'Stream Practice',
+        { id: 'stream-practice', freq: 3, status: 'draft', title: 'Stream Practice',
           scope: 'задачи на live coding: группировка, агрегаты, топ-N, flatMap по вложенным спискам' },
       ] },
       { id: 'modern', title: 'Modern Java', source: 'dev.java: Java Platform Evolution; JEP по версиям 8–25', items: [
