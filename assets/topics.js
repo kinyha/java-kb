@@ -491,7 +491,7 @@ window.KB_TREE = [
           scope: 'потоки байтов и символов, буферизация, Files и Path, каналы, Serializable и serialVersionUID' },
       ] },
       { id: 'tools', title: 'Tooling', items: [
-        { id: 'build', freq: 2, status: 'empty', title: 'Maven & Gradle',
+        { id: 'build', freq: 2, status: 'draft', title: 'Maven & Gradle',
           scope: 'жизненный цикл, зависимости и конфликты версий, плагины, многомодульный проект' },
         { id: 'logging', freq: 1, status: 'empty', title: 'Logging',
           scope: 'SLF4J, Logback, уровни, MDC, структурные логи' },

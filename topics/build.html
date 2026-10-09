@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Maven &amp; Gradle · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="build">
+<main class="page">
+  <header class="topic-head"><h1>Maven &amp; Gradle</h1></header>
+  <div class="lesson">
+    <div class="note tip">
+      <p>Сборщик превращает исходники и объявления зависимостей в конкретный набор файлов для запуска. Он выбирает версии библиотек, строит порядок работ и вызывает компилятор, тесты и упаковку. Успешная компиляция проверяет только тот код и classpath, которые участвовали в ней. Если чужой готовый JAR вызывает метод из другой версии API, ошибка обнаружится уже в JVM.</p>
+    </div>
+
+    <section class="step" id="artifact">
+      <h2>Собранный JAR ещё не содержит всё приложение</h2>
+      <p>Сервис платежей состоит из <code>app</code>, своей библиотеки <code>domain</code> и двух адаптеров банка. На ноутбуке команда сборки зелёная, но в контейнер скопировали только <code>app-1.0.jar</code>. При запуске JVM не находит <code>demo.Fee</code> из domain. Первое, что надо восстановить, — какие файлы сборщик создал и какой набор файлов получил процесс.</p>
+      <p>Maven и Gradle задают повторяемую процедуру вместо ручного <code>javac -cp …</code>. Для Java оба понимают привычные каталоги <code>src/main/java</code>, <code>src/main/resources</code>, <code>src/test/java</code> и <code>src/test/resources</code>: основной код, его ресурсы и отдельные тестовые входы. Maven пишет результат в <code>target</code>, Gradle — в <code>build</code>. Тестовый класс не становится частью основной библиотеки лишь потому, что тест прошёл.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 258" role="img" aria-label="App.java компилируется в App.class и попадает внутрь app.jar. Fee.class остаётся в domain.jar. JVM запускает App только с classpath, содержащим оба jar и библиотеки адаптеров.">
+            <defs><marker id="ba-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="22" y="22" class="dg-cap">СБОРКА app</text>
+            <rect x="22" y="52" width="132" height="44" rx="7" class="dg-box"/>
+            <text x="38" y="79" class="dg-in">App.java</text>
+            <path d="M154 74 L222 74" class="dg-line" marker-end="url(#ba-arrow)"/>
+            <text x="163" y="61" class="dg-s">javac</text>
+            <rect x="228" y="52" width="132" height="44" rx="7" class="dg-cell"/>
+            <text x="242" y="79" class="dg-in">App.class</text>
+            <path d="M360 74 L416 74" class="dg-line" marker-end="url(#ba-arrow)"/>
+            <rect x="422" y="40" width="270" height="70" rx="9" class="dg-box"/>
+            <text x="438" y="60" class="dg-t">app-1.0.jar</text>
+            <rect x="438" y="70" width="112" height="28" rx="5" class="dg-cell hit"/>
+            <text x="448" y="89" class="dg-s">App.class</text>
+            <text x="560" y="89" class="dg-bad">нет Fee.class</text>
+            <line x1="22" y1="130" x2="692" y2="130" class="dg-sep"/>
+            <text x="22" y="153" class="dg-cap">CLASSPATH ПРОЦЕССА</text>
+            <rect x="22" y="174" width="120" height="52" rx="7" class="dg-box"/>
+            <text x="35" y="204" class="dg-t">JVM → App</text>
+            <path d="M142 200 L182 200" class="dg-line" marker-end="url(#ba-arrow)"/>
+            <rect x="188" y="166" width="144" height="68" rx="7" class="dg-cell"/>
+            <text x="200" y="187" class="dg-in">app.jar</text>
+            <text x="200" y="210" class="dg-s">App.class</text>
+            <rect x="344" y="166" width="152" height="68" rx="7" class="dg-cell hit"/>
+            <text x="356" y="187" class="dg-in">domain.jar</text>
+            <text x="356" y="210" class="dg-s">Fee.class</text>
+            <rect x="508" y="166" width="184" height="68" rx="7" class="dg-cell"/>
+            <text x="520" y="187" class="dg-in">adapter / money</text>
+            <text x="520" y="210" class="dg-s">чужие классы</text>
+          </svg>
+        </div>
+        <figcaption>Обычная упаковка JAR кладёт внутрь код и ресурсы своего модуля. Список зависимостей в POM не превращает внешние JAR в содержимое этого архива.</figcaption>
+      </figure>
+      <p>Зависимость определяется координатами, например <code>demo.fixture:money-api:2.0</code>: group, artifact, version. В Maven для различения артефактов важны также type и classifier — основной JAR, sources и tests могут иметь одни координаты GAV, но разные файлы. Репозиторий отдаёт метаданные POM и сам JAR: POM нужен для обхода транзитивных зависимостей, JAR — для компиляции или исполнения. Gradle умеет читать POM и более богатые Gradle Module Metadata с вариантами.</p>
+      <p>Полный <a href="../examples/build/README.md">проверяемый проект</a> использует одни Java-исходники для двух сборок. Запуски ниже выполнены на JDK 21.0.11, Maven 3.9.16 и Gradle 9.6.1. <a href="../examples/build/verify.py">verify.py</a> компилирует собственные фикстуры, создаёт отдельный файловый репозиторий и сохраняет реальные логи. Плагины и JUnit 5.11.4 загружаются из Maven Central; production-сервис или контейнер здесь не нужны.</p>
+      <pre><code class="language-bash"># Из подготовленной копии проекта; Maven создал app/target/app-1.0.jar.
+java -cp app/target/app-1.0.jar demo.App
+# В classpath только app: внешней библиотеки domain здесь нет.</code></pre>
+      <pre class="out">Exception in thread "main" java.lang.NoClassDefFoundError: demo/Fee</pre>
+      <p>Это первая строка реального исключения, без последующего стектрейса. Для запуска нужен полный runtime classpath, дистрибутив с каталогом библиотек либо специальная упаковка: shaded JAR или Spring Boot executable JAR. <code>jar</code> и <code>package</code> сами по себе такую упаковку не обещают. После восстановления classpath нас ждёт другая ошибка: библиотека есть, но её API не совпадает.</p>
+    </section>
+
+    <section class="step" id="maven-phases">
+      <h2>Maven выполняет цели плагинов до выбранной фазы</h2>
+      <p>В Maven <code>package</code> — фаза жизненного цикла, а <code>compiler:compile</code> — цель плагина. Фаза задаёт место работы в последовательности; цель выполняет конкретную работу. Для packaging <code>jar</code> Maven связывает <code>compile</code> с Compiler Plugin, <code>test</code> с Surefire и <code>package</code> с Jar Plugin. У packaging <code>pom</code> нет такой же компиляции: родитель описывает сборку, а не обязательно содержит код.</p>
+      <p>Вызов <code>mvn verify</code> проходит default lifecycle от начала до verify включительно. Промежуточные фазы есть и между знакомыми названиями: ресурсы надо скопировать до компиляции, тесты — скомпилировать до запуска. Если к фазе не привязана работа, само её название ничего не запускает. Поэтому verify не создаёт интеграционные тесты из воздуха: соответствующие цели надо подключить.</p>
+      <table class="mx">
+        <thead><tr><th>Команда</th><th>Что получает проект</th><th>Чего она ещё не делает</th></tr></thead>
+        <tbody>
+          <tr><td><code>mvn test</code></td><td>Основной и тестовый код, запуск unit-тестов</td><td>Не упаковывает JAR</td></tr>
+          <tr><td><code>mvn package</code></td><td>Предыдущие фазы и упакованный артефакт</td><td>Не проходит фазы после package</td></tr>
+          <tr><td><code>mvn verify</code></td><td>Также настроенные integration-test, post-integration-test и проверки verify</td><td>Не устанавливает артефакт в локальный репозиторий</td></tr>
+          <tr><td><code>mvn install</code></td><td>Также JAR и POM в локальном репозитории</td><td>Не публикует их коллегам</td></tr>
+          <tr><td><code>mvn deploy</code></td><td>Также публикацию в удалённый репозиторий артефактов</td><td>Не выкатывает сервис в Kubernetes</td></tr>
+        </tbody>
+      </table>
+      <p>Версии плагинов фиксируем в родительском <code>pluginManagement</code>, а Java API — через <code>maven.compiler.release</code>. Management даёт настройки, когда плагин используется. Compiler уже вызван стандартной привязкой packaging; произвольный дополнительный плагин одной записью в management не включается. Ему нужна запись в <code>build/plugins</code> и execution с goal и фазой либо прямой вызов цели.</p>
+      <pre><code class="language-xml">&lt;!-- Фрагмент корневого pom.xml: версии наследуют domain и app. --&gt;
+&lt;properties&gt;
+  &lt;maven.compiler.release&gt;21&lt;/maven.compiler.release&gt;
+&lt;/properties&gt;
+&lt;build&gt;
+  &lt;pluginManagement&gt;
+    &lt;plugins&gt;
+      &lt;plugin&gt;
+        &lt;groupId&gt;org.apache.maven.plugins&lt;/groupId&gt;
+        &lt;artifactId&gt;maven-compiler-plugin&lt;/artifactId&gt;
+        &lt;version&gt;3.14.0&lt;/version&gt;
+      &lt;/plugin&gt;
+    &lt;/plugins&gt;
+  &lt;/pluginManagement&gt;
+&lt;/build&gt;</code></pre>
+      <pre><code class="language-bash"># clean — отдельный lifecycle: verify сам не удаляет target.
+mvn -pl app -am verify
+# Только цель compile после clean: нет прохождения test и package.
+mvn -pl domain clean org.apache.maven.plugins:maven-compiler-plugin:3.14.0:compile</code></pre>
+      <pre class="out">[INFO] --- compiler:3.14.0:compile (default-compile) @ domain ---
+[INFO] --- compiler:3.14.0:testCompile (default-testCompile) @ domain ---
+[INFO] --- surefire:3.5.3:test (default-test) @ domain ---
+[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0
+[INFO] --- jar:3.4.2:jar (default-jar) @ domain ---</pre>
+      <p>Это выбранные строки первого запуска, в исходном порядке. Во втором запуске создался <code>Fee.class</code>, но не появились ни <code>surefire-reports</code>, ни <code>domain-1.0.jar</code>: драйвер проверил это по файлам. Прямой goal не эквивалентен фазе. Например, голый <code>surefire:test</code> не обязан предварительно скомпилировать тесты.</p>
+      <details class="deep">
+        <summary>Почему интеграционные тесты заканчивают через verify</summary>
+        <p>Failsafe выполняет тесты в integration-test и проверяет их результат в verify. Ошибка теста не останавливает lifecycle раньше post-integration-test, где можно выключить поднятую среду. Если остановиться командой <code>mvn integration-test</code>, до этого cleanup и окончательной проверки не дойдёшь. Обе цели Failsafe подключают явно; подробный выбор тестов — в теме <a href="java-testing.html">Testing</a>.</p>
+        <p><code>-DskipTests</code> пропускает запуск тестов Surefire, но сохраняет их компиляцию. <code>-Dmaven.test.skip=true</code> понимают также Compiler и Failsafe, поэтому он пропускает и test-compile. Эти флаги меняют смысл зелёной сборки: успешная упаковка без исполнения тестов не доказывает корректность поведения.</p>
+      </details>
+    </section>
+
+    <section class="step" id="gradle-graph">
+      <h2>Gradle выбирает граф задач, а не префикс фаз</h2>
+      <p>В Gradle <code>settings.gradle(.kts)</code> определяет состав сборки, а build-скрипты применяют плагины и настраивают проекты. При initialization появляются проекты; при configuration регистрируются задачи и определяется нужный граф; при execution выполняются их действия. Код верхнего уровня build-скрипта работает при конфигурации. <code>doLast</code> относится к выполнению задачи: сетевой запрос в верхнем уровне может неожиданно происходить даже при просмотре списка задач.</p>
+      <p>Java Plugin добавляет <code>compileJava</code>, <code>test</code>, <code>jar</code> и lifecycle-задачи. <code>build</code> объединяет <code>assemble</code> и <code>check</code>; для Java они ведут к упаковке и тестам. Задача <code>jar</code> тянет подготовку основных классов, но не тестовую ветку. Поэтому порядок «compile, test, jar» из Maven нельзя переносить в Gradle как универсальное правило.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 366" role="img" aria-label="Граф задач Gradle: build требует assemble и check. Assemble требует jar, check требует test. Jar требует classes, test требует testClasses и основные классы. Classes зависит от compileJava и processResources. Вызов jar не выбирает ветку test.">
+            <defs><marker id="bg-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="20" class="dg-cap">СТРЕЛКА: ЗАДАЧА ТРЕБУЕТ ДРУГУЮ</text>
+            <path d="M322 68 L208 94" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M398 68 L512 94" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M208 130 L208 158" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M512 130 L512 158" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M208 198 L334 256" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M512 198 L512 218" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M434 238 L396 256" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M324 298 L208 320" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <path d="M396 298 L512 320" class="dg-line" marker-end="url(#bg-arrow)"/>
+            <rect x="294" y="34" width="132" height="34" rx="7" class="dg-box"/>
+            <text x="360" y="56" class="dg-in" text-anchor="middle">build</text>
+            <rect x="142" y="96" width="132" height="34" rx="7" class="dg-box"/>
+            <text x="208" y="118" class="dg-in" text-anchor="middle">assemble</text>
+            <rect x="446" y="96" width="132" height="34" rx="7" class="dg-box"/>
+            <text x="512" y="118" class="dg-in" text-anchor="middle">check</text>
+            <rect x="142" y="162" width="132" height="36" rx="7" class="dg-cell hit"/>
+            <text x="208" y="185" class="dg-in" text-anchor="middle">jar</text>
+            <rect x="446" y="162" width="132" height="36" rx="7" class="dg-cell"/>
+            <text x="512" y="185" class="dg-in" text-anchor="middle">test</text>
+            <rect x="434" y="220" width="156" height="36" rx="7" class="dg-cell"/>
+            <text x="512" y="243" class="dg-in" text-anchor="middle">testClasses</text>
+            <rect x="294" y="260" width="132" height="38" rx="7" class="dg-cell hit"/>
+            <text x="360" y="285" class="dg-in" text-anchor="middle">classes</text>
+            <rect x="124" y="324" width="168" height="32" rx="7" class="dg-cell hit"/>
+            <text x="208" y="346" class="dg-in" text-anchor="middle">compileJava</text>
+            <rect x="418" y="324" width="188" height="32" rx="7" class="dg-cell hit"/>
+            <text x="512" y="346" class="dg-in" text-anchor="middle">processResources</text>
+            <text x="20" y="242" class="dg-ok">jar выбирает</text>
+            <text x="20" y="263" class="dg-s">зелёную ветку</text>
+          </svg>
+        </div>
+        <figcaption>Упрощённый граф Java Plugin: тестовые compile/resources-задачи скрыты внутри testClasses. Это зависимости работ, а не обещание порядка независимых веток. Исполнение идёт от prerequisites к запрошенной задаче.</figcaption>
+      </figure>
+      <p>Плагин добавляет модель предметной области: Java Plugin знает source sets, Application Plugin — main class, runtime classpath и дистрибутив. В <a href="../examples/build/app/build.gradle">нашем app</a> Application Plugin запускает <code>demo.App</code> через <code>run</code>. Groovy DSL и Kotlin DSL настраивают одну модель Gradle; разница в синтаксисе и проверке скрипта, а не в правиле выбора зависимостей.</p>
+      <pre><code class="language-groovy">// Фрагмент app/build.gradle: application добавляет run и дистрибутив.
+plugins { id 'application' }
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+tasks.withType(JavaCompile).configureEach { options.release = 21 }
+application { mainClass = 'demo.App' }
+dependencies {
+    implementation project(':domain') // Порядок компиляции выводится из зависимости.
+    implementation 'demo.fixture:legacy-adapter:1.0'
+    implementation 'demo.fixture:new-adapter:1.0'
+}</code></pre>
+      <p>Для своих работ <code>tasks.register</code> позволяет отложить создание задачи до необходимости. <code>dependsOn</code> добавляет обязательную работу в граф. <code>mustRunAfter</code> лишь ограничивает порядок уже выбранных задач: он не означает «всегда выполни подготовку». В отдельном <a href="../examples/build/lifecycle/build.gradle">минимальном проекте</a> это различие видно без шума Java Plugin.</p>
+      <pre><code class="language-groovy">// settings.gradle
+rootProject.name = 'lifecycle'
+println 'INIT settings'
+
+// build.gradle
+println 'CONFIG build'
+tasks.register('prepare') { doLast { println 'EXEC prepare' } }
+tasks.register('ship') {
+    dependsOn('prepare') // ship включает prepare.
+    doLast { println 'EXEC ship' }
+}
+tasks.register('audit') {
+    mustRunAfter('prepare') // audit не включает prepare.
+    doLast { println 'EXEC audit' }
+}</code></pre>
+      <pre><code class="language-bash"># Из lifecycle; configuration cache отключён, чтобы видеть чтение скриптов.
+gradle -q --no-configuration-cache ship
+gradle -q --no-configuration-cache audit</code></pre>
+      <pre class="out">INIT settings
+CONFIG build
+EXEC prepare
+EXEC ship
+
+INIT settings
+CONFIG build
+EXEC audit</pre>
+      <p>Пустая строка разделяет два реальных запуска. Во втором prepare не выбран. Для диагностики используй <code>gradle :app:build --dry-run</code>: граф часто объясняет пропущенный тест или генератор лучше догадки о «неправильном порядке» строк в скрипте.</p>
+    </section>
+
+    <section class="step" id="version-selection">
+      <h2>Один граф запросов даёт разные выбранные версии</h2>
+      <p>Теперь внешние JAR в classpath есть. <code>legacy-adapter:1.0</code> просит money-api 1.0; <code>new-adapter:1.0</code> просит 2.0. Новый адаптер уже скомпилирован с методом <code>minorUnits()</code>. Его готовый байткод сборщик заново не компилирует. На этапе сборки app компилятору достаточно публичного метода самого адаптера, а внутренний вызов API JVM свяжет при исполнении.</p>
+      <p>Maven по умолчанию выбирает ближайшее объявление зависимости; при одинаковой глубине выигрывает первое. Gradle по умолчанию выбирает наибольшую из запрошенных версий одного модуля, независимо от глубины. Это выбор среди требований графа, а не загрузка «последней версии из интернета». Дополнительные management, constraints и resolution rules меняют эти правила.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 290" role="img" aria-label="App требует legacy-adapter и new-adapter. Они запрашивают версии money-api 1.0 и 2.0 на одинаковой глубине. Maven выбирает 1.0 по первому объявлению и вызов minorUnits падает. Gradle выбирает 2.0, а Maven dependencyManagement 2.0 исправляет тот же граф.">
+            <defs>
+              <marker id="bv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="bv-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="20" class="dg-cap">ЗАПРОСЫ ВЕРСИЙ И ВЫБРАННЫЙ JAR</text>
+            <rect x="20" y="96" width="106" height="50" rx="8" class="dg-box"/>
+            <text x="73" y="126" class="dg-in" text-anchor="middle">app</text>
+            <path d="M126 110 L204 64" class="dg-line" marker-end="url(#bv-arrow)"/>
+            <path d="M126 132 L204 178" class="dg-line" marker-end="url(#bv-arrow)"/>
+            <rect x="210" y="38" width="210" height="52" rx="8" class="dg-box"/>
+            <text x="222" y="60" class="dg-in">legacy-adapter:1.0</text>
+            <text x="222" y="79" class="dg-s">объявлен первым</text>
+            <rect x="210" y="152" width="210" height="52" rx="8" class="dg-box"/>
+            <text x="222" y="174" class="dg-in">new-adapter:1.0</text>
+            <text x="222" y="193" class="dg-s">вызовет minorUnits()</text>
+            <g data-s="1-">
+              <path d="M420 64 L510 64" class="dg-line" marker-end="url(#bv-arrow)"/>
+              <path data-s="1-2" d="M420 178 L510 178" class="dg-line" marker-end="url(#bv-arrow)"/>
+              <path data-s="4-5" d="M420 178 L510 178" class="dg-line" marker-end="url(#bv-arrow)"/>
+              <rect x="516" y="38" width="180" height="52" rx="8" class="dg-cell"/>
+              <text x="528" y="59" class="dg-in">money-api:1.0</text>
+              <text x="528" y="79" class="dg-s">currency()</text>
+              <rect x="516" y="152" width="180" height="52" rx="8" class="dg-cell"/>
+              <text x="528" y="173" class="dg-in">money-api:2.0</text>
+              <text x="528" y="193" class="dg-s">+ minorUnits()</text>
+            </g>
+            <g data-s="2-3">
+              <rect x="516" y="38" width="180" height="52" rx="8" class="dg-line ok" stroke-width="2"/>
+              <rect x="516" y="152" width="180" height="52" rx="8" class="dg-line bad" stroke-width="2"/>
+              <text x="526" y="124" class="dg-ok">выбрана 1.0</text>
+            </g>
+            <g data-s="3">
+              <path d="M420 178 C470 178 470 76 510 76" class="dg-line bad" marker-end="url(#bv-bad)"/>
+              <text x="430" y="110" class="dg-bad">вызов</text>
+            </g>
+            <g data-s="4-5">
+              <rect x="516" y="152" width="180" height="52" rx="8" class="dg-line ok" stroke-width="2"/>
+              <text x="526" y="124" class="dg-ok">выбрана 2.0</text>
+            </g>
+            <g data-s="1"><text x="20" y="247" class="dg-t">Два запроса одного модуля; глубина обоих = 2.</text></g>
+            <g data-s="2"><text x="20" y="247" class="dg-t">Maven: ближайшая; при равной глубине — первая.</text></g>
+            <g data-s="3"><text x="20" y="247" class="dg-bad">JVM: new-adapter → API 1.0 → NoSuchMethodError</text></g>
+            <g data-s="4"><text x="20" y="247" class="dg-t">Gradle: highest из запросов → API 2.0 → new=2</text></g>
+            <g data-s="5"><text x="20" y="247" class="dg-t">Maven: management 2.0 заменяет выбор по глубине.</text></g>
+            <text x="20" y="276" class="dg-s">Выбор JAR не проверяет бинарную совместимость его методов.</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Два адаптера ведут к одному модулю money-api. Это конфликт версий, а не два независимых API. Обход метаданных находит оба запроса.</li>
+          <li>У Maven одинаковая глубина, поэтому первая ветка legacy выбирает 1.0. Версия 2.0 исключается из результата. В runtime classpath остаётся один money-api.</li>
+          <li>Компиляция app прошла, но new-adapter вызывает отсутствующий метод. JVM выбрасывает NoSuchMethodError, когда доходит до этого вызова. Перезапуск с тем же classpath не исправит API.</li>
+          <li>На тех же POM Gradle выбирает 2.0. В ней есть и старый currency(), и новый minorUnits(), поэтому оба адаптера в этом опыте работают.</li>
+          <li>В Maven management явно задаёт money-api 2.0. Оба транзитивных запроса разрешаются в неё; это решение команды о совместимом наборе версий.</li>
+        </ol>
+      </figure>
+      <pre><code class="language-java">// Собственные фикстуры: два варианта одной demo.fixture.MoneyApi.
+// money-api:1.0
+public final class MoneyApi {
+    public static String currency() { return "EUR"; }
+}
+// money-api:2.0 — тот же FQCN, добавлен метод.
+public final class MoneyApi {
+    public static String currency() { return "EUR"; }
+    public static int minorUnits() { return 2; }
+}
+// legacy-adapter скомпилирован с API 1.0; его POM просит 1.0.
+public static String currency() { return MoneyApi.currency(); }
+// new-adapter скомпилирован с API 2.0; его POM просит 2.0.
+public static int minorUnits() { return MoneyApi.minorUnits(); }
+
+// App.main: компилятор app видит методы адаптеров.
+System.out.println("fee=" + Fee.minorUnits(101));
+System.out.println("legacy=" + LegacyAdapter.currency());
+System.out.println("new=" + NewAdapter.minorUnits());</code></pre>
+      <p>Это фрагменты четырёх <a href="../examples/build/fixtures/new/demo/fixture/NewAdapter.java">полных классов фикстур</a> и <a href="../examples/build/app/src/main/java/demo/App.java">App</a>; они не вставляются в один Java-файл. Их POM создаёт драйвер: legacy и new имеют обычную compile-зависимость money-api нужной версии. В app оба адаптера объявлены в указанном порядке. Domain считает комиссию для 101 minor units как <code>(101 + 49) / 50 = 3</code>; подробная денежная модель — в <a href="bigdecimal.html">BigDecimal &amp; Money</a>.</p>
+      <pre><code class="language-bash"># После install: отдельному goal доступны метаданные своего domain.
+mvn -pl app org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree \
+  -Dverbose -Dincludes='demo.fixture:*'
+# Конкретная причина выбора в runtime-конфигурации Gradle.
+gradle :app:dependencyInsight --dependency money-api --configuration runtimeClasspath</code></pre>
+      <pre class="out">[INFO] demo.build:app:jar:1.0
+[INFO] +- demo.fixture:legacy-adapter:jar:1.0:compile
+[INFO] |  \- demo.fixture:money-api:jar:1.0:compile
+[INFO] \- demo.fixture:new-adapter:jar:1.0:compile
+[INFO]    \- (demo.fixture:money-api:jar:2.0:compile - omitted for conflict with 1.0)</pre>
+      <p>В tree <code>omitted</code> означает отброшенную ветку, а не вторую версию на classpath. В Gradle dependencyInsight надо читать <code>Selection reasons</code> и пути требований, а не только прямые строки build-скрипта. Драйвер построил runtime classpath Maven через <code>dependency:build-classpath</code>, добавил app JAR и запустил настоящую JVM; Gradle запустил тот же App через <code>:app:run</code>.</p>
+      <pre class="out">fee=3
+legacy=EUR
+Exception in thread "main" java.lang.NoSuchMethodError: 'int demo.fixture.MoneyApi.minorUnits()'</pre>
+      <p>Это Maven с исходным порядком, первые строки без стектрейса. В Gradle и в исправленном Maven последний результат — <code>new=2</code>. Наличие более высокого номера версии не доказывает совместимость вообще: в опыте 2.0 сохранила старый метод, а реальный major-релиз способен его удалить. Если одинаковые классы приходят из разных artifactId, обычная медиация одного модуля такой конфликт не устраняет.</p>
+      <div class="trap">
+        <p class="myth">Maven кладёт все версии, а JVM потом сама выбирает правильную.</p>
+        <p class="fact">Для одного конфликтующего модуля Maven заранее выбирает версию. JVM не читает POM и не согласовывает версии: она загружает доступный класс и связывает нужный метод. При ручном classpath с дубликатами порядок поиска создаёт отдельную проблему.</p>
+      </div>
+    </section>
+
+    <section class="step" id="classpath-policy">
+      <h2>Версия и видимость зависимости — разные решения</h2>
+      <p>В Maven <code>dependencyManagement</code> задаёт параметры зависимости, когда она встречается в графе. Запись сама не добавляет библиотеку. В нашем профиле <code>align</code> money-api уже приходит через адаптеры; management выбирает 2.0 для этих транзитивных запросов. Если app прямо использует MoneyApi, dependency стоит объявить явно, чтобы обновление адаптера не удалило случайно её единственный путь.</p>
+      <pre><code class="language-xml">&lt;!-- Фрагмент профиля align в родителе; включается -Palign. --&gt;
+&lt;dependencyManagement&gt;
+  &lt;dependencies&gt;
+    &lt;dependency&gt;
+      &lt;groupId&gt;demo.fixture&lt;/groupId&gt;
+      &lt;artifactId&gt;money-api&lt;/artifactId&gt;
+      &lt;version&gt;2.0&lt;/version&gt; &lt;!-- Управляет уже пришедшей зависимостью. --&gt;
+    &lt;/dependency&gt;
+  &lt;/dependencies&gt;
+&lt;/dependencyManagement&gt;</code></pre>
+      <p>BOM — POM с согласованными версиями целого семейства библиотек. Maven импортирует его с <code>type=pom</code> и <code>scope=import</code> в management; конкретные dependencies всё равно объявляются отдельно. Управление зависимостями приложения не управляет зависимостями Maven-плагина: плагин работает в своём контексте загрузки. Поэтому обновление библиотеки приложения не всегда устраняет ошибку старого плагина.</p>
+      <p>В Gradle обычная constraint <code>1.0</code> не закрепляет верхнюю границу: запрос 2.0 по-прежнему способен выиграть. <code>strictly</code> ограничивает допустимый выбор. В опыте строгое 1.0 разрешается успешно, но запуск ломается — метаданные не знают, что готовый new-adapter использует новый метод. Это полезное различие между удовлетворением правил resolver и бинарной совместимостью.</p>
+      <pre><code class="language-groovy">// Фрагменты app/build.gradle; адаптеры объявлены выше в обоих случаях.
+// -Pordinary: обычная constraint допускает выбор более высокой 2.0.
+constraints { implementation 'demo.fixture:money-api:1.0' }
+
+// -Pstrict: строгая constraint заставляет этот граф выбрать 1.0.
+constraints {
+    implementation('demo.fixture:money-api') {
+        version { strictly '1.0' }
+    }
+}</code></pre>
+      <pre><code class="language-bash"># Три раздельных запуска: условия меняет свойство проекта.
+gradle -q :app:run
+gradle -q :app:run -Pordinary
+gradle :app:run -Pstrict
+# Maven: изменить политику или только поменять местами два объявления.
+# В драйвере для запуска с каждым набором заново строится runtime classpath.
+mvn -pl app org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath \
+  -DincludeScope=runtime -Palign
+mvn -pl app org.apache.maven.plugins:maven-dependency-plugin:3.8.1:build-classpath \
+  -DincludeScope=runtime -Dfirst.adapter=new-adapter -Dsecond.adapter=legacy-adapter</code></pre>
+      <pre class="out">fee=3
+legacy=EUR
+new=2</pre>
+      <p>Одинаковый stdout получили Gradle по умолчанию, Gradle с ordinary, Maven с align и Maven с обратным порядком. Strict 1.0 получил тот же NoSuchMethodError, что исходный Maven. Перестановка случайно меняет победителя при равной глубине; management выражает намерение. Для приложения удобнее согласованный набор через BOM/platform, а опасное расхождение можно превращать в ошибку сборки проверками Maven Enforcer или политиками Gradle.</p>
+      <p>Scope/configuration отвечает на другой вопрос: в каком classpath нужен файл. В Maven compile — значение по умолчанию и присутствует в основных compile/runtime и тестах; provided есть для компиляции и тестов, но ожидается от среды при запуске; runtime нужен при исполнении и в тестах, но не для основных исходников; test — только для тестов. Provided и test не распространяются на потребителей как обычная compile-зависимость. Например, JDBC-драйвер можно подключить runtime, если код компилируется только против <code>java.sql</code>.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 228" role="img" aria-label="Client зависит от Lib, Lib использует MoneyApi. Implementation скрывает MoneyApi от compile classpath клиента, но сохраняет её в runtime. Api добавляет её также в compile classpath. У самой Lib зависимость видна при компиляции в обоих случаях.">
+            <defs><marker id="bc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="20" class="dg-cap">ГРАФ БИБЛИОТЕК</text>
+            <rect x="20" y="48" width="126" height="44" rx="7" class="dg-box"/>
+            <text x="83" y="75" class="dg-in" text-anchor="middle">client</text>
+            <path d="M146 70 L244 70" class="dg-line" marker-end="url(#bc-arrow)"/>
+            <rect x="250" y="48" width="126" height="44" rx="7" class="dg-box"/>
+            <text x="313" y="75" class="dg-in" text-anchor="middle">lib</text>
+            <path d="M376 70 L534 70" class="dg-line" marker-end="url(#bc-arrow)"/>
+            <text x="392" y="57" class="dg-s">implementation / api</text>
+            <rect x="540" y="48" width="160" height="44" rx="7" class="dg-cell"/>
+            <text x="620" y="75" class="dg-in" text-anchor="middle">money-api</text>
+            <text x="20" y="124" class="dg-cap">ЧТО ПОЛУЧИЛ CLIENT</text>
+            <rect x="20" y="143" width="326" height="70" rx="8" class="dg-box"/>
+            <text x="34" y="164" class="dg-t">compile classpath</text>
+            <rect x="34" y="177" width="54" height="24" rx="5" class="dg-cell"/>
+            <text x="43" y="194" class="dg-s">lib</text>
+            <rect x="102" y="177" width="132" height="24" rx="5" class="dg-cell hit"/>
+            <text x="112" y="194" class="dg-s">money: только api</text>
+            <rect x="368" y="143" width="332" height="70" rx="8" class="dg-box"/>
+            <text x="382" y="164" class="dg-t">runtime classpath</text>
+            <rect x="382" y="177" width="54" height="24" rx="5" class="dg-cell"/>
+            <text x="391" y="194" class="dg-s">lib</text>
+            <rect x="450" y="177" width="228" height="24" rx="5" class="dg-cell hit"/>
+            <text x="460" y="194" class="dg-s">money: implementation и api</text>
+          </svg>
+        </div>
+        <figcaption>Разница api/implementation относится к потребителю библиотеки, а не к способности самой библиотеки использовать зависимость. Для такого разделения применён java-library.</figcaption>
+      </figure>
+      <p>Gradle <code>implementation</code> видна основному коду своего проекта и в runtime. <code>api</code> дополнительно экспортирует типы в compile classpath потребителя. Если публичная сигнатура lib возвращает тип MoneyApi, потребителю нужен этот тип для компиляции — зависимость относится к api. Внутренний вызов, возвращающий клиенту обычную строку, можно оставить implementation: меньше связности и меньше причин перекомпилировать клиента. <code>compileOnly</code>, <code>runtimeOnly</code>, <code>testImplementation</code> и <code>testRuntimeOnly</code> позволяют описать остальные потребности; compileOnly не является полным синонимом Maven provided, включая тесты.</p>
+      <pre><code class="language-groovy">// visibility/lib/build.gradle: ровно одна из двух веток.
+plugins { id 'java-library' }
+dependencies {
+    if (providers.gradleProperty('expose').isPresent()) {
+        api 'demo.fixture:money-api:2.0'
+    } else {
+        implementation 'demo.fixture:money-api:2.0'
+    }
+}
+// visibility/client/build.gradle
+dependencies { implementation project(':lib') }
+def compilePath = configurations.compileClasspath
+def runtimePath = configurations.runtimeClasspath
+tasks.register('paths') {
+    doLast {
+        println "compile money-api=${compilePath.files.any { it.name == 'money-api-2.0.jar' }}"
+        println "runtime money-api=${runtimePath.files.any { it.name == 'money-api-2.0.jar' }}"
+    }
+}</code></pre>
+      <pre><code class="language-bash"># Из visibility; два запуска одной модели потребителя.
+gradle -q :client:paths --no-configuration-cache
+gradle -q :client:paths -Pexpose --no-configuration-cache</code></pre>
+      <pre class="out">compile money-api=false
+runtime money-api=true
+
+compile money-api=true
+runtime money-api=true</pre>
+      <p>Пустая строка разделяет запуски. В этом опыте lib не содержит Java-кода: проверяется именно resolver и видимость файлов, а не вызов методов. Установка api не встраивает деньги в JAR lib. Отдельные наборы файлов сохраняются до упаковки специальным плагином.</p>
+    </section>
+
+    <section class="step" id="modules">
+      <h2>Состав сборки, наследование и зависимость не совпадают</h2>
+      <p>В Maven родитель передаёт свойства, management и настройки через <code>parent</code>. Aggregator перечисляет <code>modules</code>, которые участвуют в одном запуске. Эти роли часто совмещают в корневом POM с packaging pom, но они независимы: модуль может наследовать корпоративный parent из репозитория, а собираться в другом агрегаторе. Наличие общей папки не означает зависимость классов одного модуля от другого.</p>
+      <p>Reactor собирает выбранные проекты и сортирует их по настоящим связям. В корневом POM нашего примера app перечислен раньше domain, но app зависит от <code>demo.build:domain:1.0</code>, поэтому domain собирается первым. Простая запись в dependencyManagement не создаёт эту зависимость и не задаёт порядок reactor. Цикл app → domain → app не имеет корректного порядка и указывает на проблему границы модулей.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 264" role="img" aria-label="Корневой payments POM включает app и domain как модули и отдельно передаёт им настройки parent. App зависит от domain. Поэтому фактический reactor order payments, domain, app, хотя modules перечисляет app первым.">
+            <defs>
+              <marker id="bm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="bm-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <rect x="210" y="22" width="300" height="68" rx="9" class="dg-box"/>
+            <text x="226" y="46" class="dg-in">payments · packaging pom</text>
+            <text x="226" y="69" class="dg-s">modules: app, domain</text>
+            <path d="M250 90 L158 158" class="dg-line" marker-end="url(#bm-arrow)"/>
+            <path d="M470 90 L562 158" class="dg-line" marker-end="url(#bm-arrow)"/>
+            <text x="50" y="126" class="dg-s">включает app</text>
+            <text x="520" y="126" class="dg-s">включает domain</text>
+            <path d="M212 164 L300 94" class="dg-line ok" marker-end="url(#bm-ok)"/>
+            <path d="M508 164 L420 94" class="dg-line ok" marker-end="url(#bm-ok)"/>
+            <text x="288" y="140" class="dg-ok">parent</text>
+            <text x="384" y="140" class="dg-ok">parent</text>
+            <rect x="50" y="164" width="210" height="44" rx="8" class="dg-cell"/>
+            <text x="155" y="191" class="dg-in" text-anchor="middle">app</text>
+            <rect x="460" y="164" width="210" height="44" rx="8" class="dg-cell hit"/>
+            <text x="565" y="191" class="dg-in" text-anchor="middle">domain</text>
+            <path d="M260 187 L454 187" class="dg-line" marker-end="url(#bm-arrow)"/>
+            <text x="292" y="173" class="dg-s">dependency</text>
+            <text x="50" y="248" class="dg-t">Reactor: payments → domain → app</text>
+          </svg>
+        </div>
+        <figcaption>Чёрные линии от корня показывают состав запуска, зелёные вверх — наследование настроек. Горизонтальная зависимость даёт app классы domain и заставляет собрать domain раньше.</figcaption>
+      </figure>
+      <pre><code class="language-xml">&lt;!-- payments/pom.xml: это состав сборки, не classpath app. --&gt;
+&lt;packaging&gt;pom&lt;/packaging&gt;
+&lt;modules&gt;&lt;module&gt;app&lt;/module&gt;&lt;module&gt;domain&lt;/module&gt;&lt;/modules&gt;
+&lt;!-- app/pom.xml: parent наследует настройки. --&gt;
+&lt;parent&gt;
+  &lt;groupId&gt;demo.build&lt;/groupId&gt;&lt;artifactId&gt;payments&lt;/artifactId&gt;&lt;version&gt;1.0&lt;/version&gt;
+&lt;/parent&gt;
+&lt;!-- Отдельно нужна настоящая зависимость на код domain. --&gt;
+&lt;dependencies&gt;
+  &lt;dependency&gt;
+    &lt;groupId&gt;demo.build&lt;/groupId&gt;&lt;artifactId&gt;domain&lt;/artifactId&gt;&lt;version&gt;1.0&lt;/version&gt;
+  &lt;/dependency&gt;
+&lt;/dependencies&gt;</code></pre>
+      <pre><code class="language-bash"># Из корня: app и необходимые ему проекты reactor.
+mvn -pl app -am verify
+# После этого отдельный запуск app не видит domain из прошлого reactor.
+mvn -o -pl app verify
+# install делает артефакты доступными новым отдельным запускам.
+mvn install
+# -amd добавляет зависимые от выбранного модуля проекты для проверки изменения.
+# Его не надо путать с -am: направление обхода противоположное.</code></pre>
+      <pre class="out">[INFO] Reactor Build Order:
+[INFO]
+[INFO] payments                                                           [pom]
+[INFO] domain                                                             [jar]
+[INFO] app                                                                [jar]</pre>
+      <p>Это фрагмент первого запуска. Второй упал на неустановленном <code>demo.build:domain:jar:1.0</code> в изолированном локальном репозитории. После install отдельный запуск нашёл его. Успех <code>dependency:tree</code> до install не опровергает это: он вывел предупреждение о недостающем POM domain и частичный граф, а полноценной компиляции нужен сам JAR. Проверяй предупреждения рядом с BUILD SUCCESS.</p>
+      <p>В Gradle <code>include('app', 'domain')</code> в settings создаёт проекты, а <code>implementation project(':domain')</code> задаёт потребление результатов domain. Gradle получает зависимости работ из этой модели; вручную привязывать app.compileJava к domain.jar не требуется. При этом <code>:app:build</code> тянет необходимый domain.jar, но не означает «запусти все тесты domain». В проверенном dry-run domain.test отсутствовал. Вызов <code>gradle build</code> из корня нашего проекта выбрал build в обоих подпроектах и запустил тесты domain.</p>
+      <p>Модули полезны для разных API, ответственности и независимой компиляции. Деление по каждой технической папке без устойчивых границ добавляет настройку, но не убирает связанность. Общую build-логику в Maven держат в parent, в Gradle — в convention plugins; копирование сотни одинаковых настроек между модулями оставляет пространство для дрейфа.</p>
+    </section>
+
+    <section class="step" id="boundaries">
+      <h2>Воспроизводимость требует одинаковых входов, а не только clean</h2>
+      <p>Если ноутбук и CI выбирают разные библиотеки, сначала сравни версию инструмента, effective-конфигурацию, активные profiles, repositories и нужный classpath. Для Maven помогают <code>mvn -version</code>, <code>help:effective-pom</code>, <code>help:active-profiles</code> и tree; для Gradle — версия wrapper, <code>dependencies --configuration runtimeClasspath</code>, insight и <code>--info</code>. Maven settings управляет зеркалами и доступом к репозиториям, поэтому одинаковый POM ещё не означает одинаковую среду. Пароли остаются в пользовательских/CI секретах, а не в проектном POM.</p>
+      <p>Wrapper фиксирует Maven/Gradle, toolchain выбирает JDK для работ, а <code>--release</code> задаёт уровень языка, байткода и доступного стандартного API. Это три разных входа. На JDK 21 один <code>-source 17 -target 17</code> всё ещё позволяет скомпилировать вызов нового API <code>List.getFirst()</code>, которого нет в Java 17. <code>--release 17</code> отвергает его при компиляции. Даже release не проверяет совместимость сторонних JAR с целевой JVM.</p>
+      <pre><code class="language-java">// Полный проверяемый ReleaseProbe; getFirst появился в JDK 21.
+import java.util.List;
+class ReleaseProbe {
+    Object first() { return List.of("EUR").getFirst(); }
+}</code></pre>
+      <pre><code class="language-bash"># Обе команды выполняются javac из JDK 21 на одном файле.
+javac -source 17 -target 17 ReleaseProbe.java # Проходит: API взят из текущего JDK.
+javac --release 17 ReleaseProbe.java        # Ошибка: API ограничен Java 17.</code></pre>
+      <pre class="out">  symbol:   method getFirst()
+  location: interface List&lt;String&gt;</pre>
+      <p>Это две строки диагностики второго запуска; путь файла и строка кода опущены. Toolchain в демо выбирает установленный JDK 21, не требует скачивать его. Для команд Gradle на странице использован установленный инструмент, версия зафиксирована в условиях опыта; в рабочем сервисе wrapper и его файлы хранят вместе с кодом. Замена XML на Kotlin не заменяет фиксацию версии инструмента.</p>
+      <p>Фиксируй версии зависимостей и плагинов; SNAPSHOT и динамическое <code>1.+</code> позволяют менять входы без изменения исходников. Gradle version catalog даёт имена и централизованные объявления, platform/BOM согласует набор требований, dependency locking записывает фактически разрешённые версии для конфигураций. Это разные функции: наличие каталога само не превращает все запросы графа в строгую фиксацию. Для byte-for-byte результата также нужны детерминированные генераторы и архивы: одинаковые версии — необходимое, но не полное условие.</p>
+      <table class="mx">
+        <thead><tr><th>Механизм</th><th>Что переиспользуется</th><th>Почему clean его не заменяет</th></tr></thead>
+        <tbody>
+          <tr><td>Кеш зависимостей</td><td>Загруженные JAR и метаданные</td><td>Удаление target/build не меняет правила resolver и не очищает репозиторий</td></tr>
+          <tr><td>Gradle UP-TO-DATE</td><td>Уже имеющиеся выходы при неизменных объявленных входах</td><td>Clean удаляет выходы, и без другого кеша работу придётся повторить</td></tr>
+          <tr><td>Gradle FROM-CACHE</td><td>Сохранённые выходы задачи для того же ключа входов</td><td>Можно восстановить выходы после clean, если задача допускает кеширование и кеш включён</td></tr>
+          <tr><td>Configuration cache</td><td>Подготовленная конфигурация выбранных работ</td><td>Он экономит подготовку сборки, а не подменяет выходы компилятора</td></tr>
+        </tbody>
+      </table>
+      <pre><code class="language-bash"># Из корня, два раза; build cache и configuration cache явно выключены.
+gradle build --console=plain --no-build-cache --no-configuration-cache
+gradle build --console=plain --no-build-cache --no-configuration-cache</code></pre>
+      <pre class="out">&gt; Task :domain:compileJava UP-TO-DATE
+&gt; Task :app:compileJava UP-TO-DATE
+&gt; Task :domain:jar UP-TO-DATE
+&gt; Task :domain:test UP-TO-DATE</pre>
+      <p>Это выбранные строки повторной сборки. Тестовое действие не исполнилось заново: его входы и выходы не изменились. Своя задача обязана честно объявлять файлы, параметры и окружение, влияющие на результат; иначе сборщик способен принять устаревший результат за актуальный. У задачи с побочным сетевым действием нельзя механически включить кеш как у чистого преобразования файлов.</p>
+      <p>Offline-режим Maven <code>-o</code> или Gradle <code>--offline</code> ограничивает работу доступными зависимостями и метаданными, а не делает пустую машину самодостаточной. Первое скачивание, другой profile или новая версия плагина потребуют недостающие входы. Для малого однофайлового опыта достаточно javac, но сервису с библиотеками и проверками нужен объявленный процесс сборки. Выбор между Maven и Gradle определяется существующей сборкой, плагинами и ценой поддержки её логики; универсальное «Gradle всегда быстрее» не объясняет ни граф, ни корректность.</p>
+      <p>Сборка проверяет выбранные тесты и формирует артефакты. Она не доказывает отсутствие ошибок в неисполненных путях, не гарантирует одинаковую production-конфигурацию и не выкатывает приложение сама. Границы тестов — в <a href="java-testing.html">Testing</a>, доставка артефактов и окружений — в <a href="cicd.html">CI/CD</a>, связывание классов — в <a href="classloading.html">Class Loading</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Артефакт своего модуля и runtime classpath — разные результаты. Обычный JAR не включает внешние библиотеки.</li>
+        <li>Maven идёт до фазы и выполняет привязанные цели. Gradle выбирает задачи вместе с их prerequisites; jar не означает test.</li>
+        <li>Maven без management выбирает ближайшую версию, при равной глубине первую; Gradle без специальных правил — наибольшую запрошенную.</li>
+        <li>Resolver не проверяет методы чужого байткода. Успешная сборка способна закончиться NoSuchMethodError при запуске.</li>
+        <li>Management/constraints управляют выбором, scopes/configurations — доступностью, parent/modules/project dependencies — разными связями между проектами.</li>
+        <li>Повторяемая сборка требует фиксированных входов и честно описанных работ. Clean не заменяет wrapper, release, согласование библиотек и проверки.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="lifecycle-goal-task" data-freq="3">
+      <h3>Чем фаза Maven отличается от goal и от задачи Gradle?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>В Maven я выбираю этап жизненного цикла, например verify. Maven проходит предыдущие фазы и запускает связанные с ними цели плагинов: компиляцию, тесты, упаковку. Goal — сама работа, например compiler:compile; прямой вызов этой цели не равен прохождению фаз до compile.</p>
+          <p>В Gradle я выбираю задачу и получаю её граф prerequisites. Build включает упаковку и проверки, но jar сам тесты не тянет. Поэтому в CI смотрю на реальную команду и подключённые плагины: зелёный package или jar ещё не означает, что прошёл весь набор проверок.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Clean — отдельный Maven lifecycle. Install публикует в локальный репозиторий, deploy — в удалённый репозиторий артефактов; это не выкладка сервиса.</li>
+            <li>Failsafe разделяет integration-test и verify, чтобы ошибка теста не помешала post-integration-test очистить среду. Проверять сборку надо до verify.</li>
+            <li>В Gradle configuration и task action происходят в разные моменты. DependsOn включает prerequisite; mustRunAfter лишь упорядочивает уже выбранные работы.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="сценарий">
+          <summary>CI выполняет mvn package -DskipTests. Что подтверждает зелёный результат?</summary>
+          <p>Код и тесты скомпилировались и артефакт упакован, но тесты Surefire не исполнились. Фазы после package также не пройдены. Если нужен согласованный набор unit/integration-проверок, его подключают и запускают до verify без такого пропуска.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="dependency-conflict" data-freq="3">
+      <h3>Как Maven и Gradle разрешают конфликт версий и почему сборка проходит, а сервис падает?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я сначала смотрю граф нужного classpath. В Maven без специальных настроек выигрывает ближайшее объявление, а при равной глубине первое. В Gradle по умолчанию выигрывает наибольшая запрошенная версия. Tree и dependencyInsight показывают, откуда пришли требования и что выбрано.</p>
+          <p>Выбор одной версии не проверяет внутренние вызовы уже скомпилированных библиотек. Если адаптер собирали с новым методом API, а при запуске ему дали старую библиотеку, получим NoSuchMethodError. Я согласую совместимые версии через management или constraints и проверяю именно runtime classpath и проблемный путь, а не лечу ошибку перезапуском.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>DependencyManagement не добавляет JAR и не управляет classpath Maven-плагинов. BOM импортирует набор настроек, а реальные зависимости остаются в declarations.</li>
+            <li>Обычная Gradle constraint не запрещает повышение версии. Strictly ограничивает выбор, но способна закрепить бинарно несовместимую версию: в нашем демо strict 1.0 снова ломает new-adapter.</li>
+            <li>Медиация одного модуля не устраняет одинаковые FQCN из разных artifactId. Тут нужны диагностика дубликатов и проверка реального способа загрузки классов.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="multi-module-build" data-freq="2">
+      <h3>Как устроить многомодульную сборку и проверить изменение общей библиотеки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я разделяю три связи: parent передаёт настройки, modules включает проекты в запуск, dependency даёт одному проекту код другого. В Maven reactor сортирует по настоящим зависимостям, поэтому список modules не обязан быть порядком компиляции. Для сборки app вместе с нужной библиотекой использую -pl app -am; для проверки потребителей изменения смотрю также на -amd.</p>
+          <p>В Gradle включаю проекты в settings и объявляю project dependency, чтобы порядок работ выводился из модели. При этом сборка одного app не обещает тестировать все библиотеки. Для изменения domain выбираю команду, которая проверяет его тесты и нужных потребителей, а не только пересобирает JAR.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>После Maven verify артефакт есть в target и доступен текущему reactor. Новая отдельная сборка потребителя ищет его в репозиториях: нужен install или опубликованная версия.</li>
+            <li>Management не создаёт ребро reactor. Корневой aggregator может включать модули с другим parent; наследование не равно совместному выпуску.</li>
+            <li>Циклический граф модулей ломает порядок. Выделение малого общего контракта полезнее взаимных зависимостей app и domain или копирования классов между ними.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="сценарий">
+          <summary>В Gradle :app:build прошёл после правки domain. Достаточно этого, чтобы считать тесты domain проверенными?</summary>
+          <p>Нет. Project dependency тянет результаты domain, нужные app, но не обязана выбирать domain.test. В демо dry-run включал domain.jar и не включал domain.test. Надо выбрать отдельную проверку domain либо согласованную корневую команду, включающую оба набора тестов.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="reproducible-classpath" data-freq="2">
+      <h3>Почему одинаковый исходный код собирается по-разному локально и в CI?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Я сравниваю все входы: версию сборщика и JDK, profiles, repositories, версии плагинов и фактически выбранные библиотеки. Wrapper фиксирует инструмент, toolchain выбирает JDK, release ограничивает Java API и байткод. Динамическая версия или SNAPSHOT позволяют изменить результат без изменения нашего кода.</p>
+          <p>Ещё важно сравнивать один и тот же classpath: тесты могут видеть библиотеку, которой нет в runtime. В Gradle implementation скрывает внутреннюю зависимость от компиляции потребителя, но оставляет её при запуске; api экспортирует её типы. Я диагностирую конкретное расхождение и фиксирую входы, а clean использую для удаления результатов, а не как объяснение проблемы.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Source/target не заменяют release: JDK 21 с target 17 способен разрешить getFirst(), отсутствующий на Java 17. Release отвергает такой код раньше запуска.</li>
+            <li>Version catalog централизует объявления, platform согласует требования, locking хранит выбранные версии. Их задачи различаются; каталог сам не фиксирует весь транзитивный граф.</li>
+            <li>UP-TO-DATE проверяет текущие входы/выходы, build cache восстанавливает выходы, configuration cache переиспользует подготовку работ. Неполно объявленные inputs создают ложную актуальность, а не ускоряют корректную сборку.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://maven.apache.org/guides/getting-started/maven-in-five-minutes.html">Maven in 5 Minutes</a> и <a href="https://docs.gradle.org/current/userguide/part1_gradle_init.html">Gradle Beginner Tutorial, Part 1</a> — учебная последовательность: проект, файлы сборки, команда, артефакт. Числа и результаты на странице взяты из собственного опыта, а не из старых логов учебников.</li>
+      <li><a href="https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html">Maven Build Lifecycle</a>, <a href="https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html">Dependency Mechanism</a>, <a href="https://maven.apache.org/guides/mini/guide-multiple-modules.html">Multiple Modules, Maven 3</a> — фазы, медиация, scopes и reactor.</li>
+      <li><a href="https://maven.apache.org/surefire/maven-failsafe-plugin/">Failsafe</a> и <a href="https://maven.apache.org/surefire/maven-surefire-plugin/examples/skipping-tests.html">Surefire: Skipping Tests</a> — проверка integration-тестов и точный смысл пропуска.</li>
+      <li><a href="https://docs.gradle.org/current/userguide/build_lifecycle.html">Gradle Build Lifecycle</a>, <a href="https://docs.gradle.org/current/userguide/java_library_plugin.html">Java Library Plugin</a>, <a href="https://docs.gradle.org/current/userguide/dependency_versions.html">Declaring Versions</a> — модель задач, граница api и rich versions.</li>
+      <li><a href="https://docs.gradle.org/current/userguide/toolchains.html">Toolchains</a>, <a href="https://docs.gradle.org/current/userguide/incremental_build.html">Incremental Build</a>, <a href="https://docs.gradle.org/current/userguide/dependency_locking.html">Dependency Locking</a>, <a href="https://docs.gradle.org/current/userguide/build_cache.html">Build Cache</a> и <a href="https://docs.gradle.org/current/userguide/configuration_cache.html">Configuration Cache</a> — выбор JDK, входы/выходы и фиксация графа. Документация current при исследовании — 9.8.1; собственные запуски — 9.6.1.</li>
+    </ul>
+  </div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
