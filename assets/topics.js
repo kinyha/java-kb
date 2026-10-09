@@ -483,7 +483,7 @@ window.KB_TREE = [
           scope: 'jcmd, jstack, jmap, jstat, thread dump, heap dump, HeapDumpOnOutOfMemoryError, JFR, поиск утечек памяти' },
       ] },
       { id: 'stdlib', title: 'Standard Library', source: 'Core Java т. II: Input and Output, Date and Time', items: [
-        { id: 'bigdecimal', freq: 3, status: 'empty', title: 'BigDecimal & Money',
+        { id: 'bigdecimal', freq: 3, status: 'draft', title: 'BigDecimal & Money',
           scope: 'почему не double, scale и precision, RoundingMode, equals и compareTo, хранение денег' },
         { id: 'date-time', freq: 2, status: 'empty', title: 'Date & Time',
           scope: 'java.time, Instant и LocalDateTime, ZonedDateTime и часовые пояса, Duration и Period, форматирование' },
