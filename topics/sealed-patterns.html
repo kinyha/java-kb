@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sealed &amp; Pattern Matching · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sealed-patterns">
+<main class="page">
+  <header class="topic-head"><h1>Sealed &amp; Pattern Matching</h1></header>
+  <div class="lesson">
+    <div class="note tip"><p>Платёж может завершиться успехом, отказом или просьбой повторить попытку. Sealed-тип ограничивает варианты результата, а pattern matching проверяет вариант и даёт доступ к его данным. Компилятор помогает обнаружить пропущенный вариант, но не проверяет бизнес-условия и отсутствие null внутри данных. При разборе проследи три вещи: какие типы возможны, что извлекает pattern и какая ветка первой подходит.</p></div>
+    <section class="step" id="incident">
+      <h2>Новый результат должен заставить пересмотреть обработчики</h2>
+      <p>Сервис раньше возвращал Paid или Rejected. В обработчике два instanceof и общий ответ 500 для всего остального. Позже провайдер добавил Retry: это временный результат с задержкой, а не внутренняя ошибка. Код продолжил компилироваться и стал отправлять 500 вместо планирования повторной попытки. Проблема не в cast, а в том, что обработчик не выражает обещание разобрать все варианты.</p>
+      <p>В <a href="../examples/sealed-patterns/PatternDemo.java">PatternDemo.java</a> результат задан sealed interface. Варианты содержат разные данные, поэтому один enum с флагами потребовал бы дополнительных проверок: например, у отказа нет суммы успешного платежа. Отдельные типы позволяют связать данные с конкретным исходом.</p>
+      <pre><code class="language-java">// Фрагмент PatternDemo.java; JDK 21, без --enable-preview
+sealed interface Outcome permits Paid, Rejected, Retry {}
+record Money(long minorUnits, String currency) {}
+record Paid(String id, Money amount) implements Outcome {}
+record Rejected(String reason) implements Outcome {}
+record Retry(int afterSeconds) implements Outcome {}
+
+static int legacyStatus(Outcome outcome) {
+    if (outcome instanceof Paid) return 200;
+    if (outcome instanceof Rejected) return 422;
+    return 500; // новый Retry попадает сюда без ошибки компиляции
+}
+System.out.println("legacy retry=" + legacyStatus(new Retry(30)));</code></pre>
+      <pre class="out">legacy retry=500</pre>
+      <p>У switch expression есть обязанность вернуть значение или завершиться исключением для каждого варианта. Если перечислить Paid и Rejected, но забыть Retry, javac отвергнет код. Sealed даёт компилятору сведения, которых нет у открытого интерфейса: список допустимых прямых потомков. При повторной компиляции нового обработчика этот список превращается в полезную проверку полноты.</p>
+      <pre><code class="language-java">// negative/MissingCase.java намеренно не компилируется; imports не нужны
+sealed interface Outcome permits Paid, Rejected, Retry {}
+record Paid() implements Outcome {}
+record Rejected() implements Outcome {}
+record Retry() implements Outcome {}
+static int status(Outcome value) {
+    return switch (value) {
+        case Paid p -> 200;
+        case Rejected r -> 422;
+    }; // Retry не покрыт; добавление default убрало бы эту проверку вариантов
+}</code></pre>
+      <pre class="out">error: the switch expression does not cover all possible input values</pre>
+      <p>Это сокращённая диагностика настоящего запуска javac: путь, указатель позиции и итоговое «1 error» опущены. Полные команды и все отрицательные примеры есть в <a href="../examples/sealed-patterns/README.md">README</a>. В этой теме instanceof patterns — постоянная возможность Java 16, sealed — Java 17, record patterns и pattern switch — Java 21. Все демо запущены на JDK 21 без preview.</p>
+    </section>
+    <section class="step" id="hierarchy">
+      <h2>Sealed закрывает прямые ветви, а каждый потомок решает судьбу своей</h2>
+      <p>Permits перечисляет именно прямые subclasses или subinterfaces. Само перечисление не создаёт наследование: Paid должен написать implements Outcome. Такой потомок обязан определить дальнейшее расширение. Класс выбирает final, sealed или non-sealed; интерфейс — sealed или non-sealed. Record уже неявно final.</p>
+      <p>В <a href="../examples/sealed-patterns/HierarchyDemo.java">HierarchyDemo.java</a> обычные исходы закрыты, временная ошибка уточняется ещё на одном уровне, а External оставляет точку расширения для провайдера. Это дерево ограничивает не все конечные классы навсегда, а каждую ветвь согласно её объявлению. Любая новая реализация External всё ещё является Outcome.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 368" role="img" aria-label="Outcome sealed разрешает Paid final, Rejected final и Temporary sealed. Temporary разрешает Retry final и External non-sealed. ProviderWait реализует External; ветвь External открыта другим реализациям. Стрелки идут от родителя к разрешённым потомкам.">
+            <defs><marker id="sp-tree-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="260" y="16" width="200" height="54" rx="8" class="dg-box"/>
+            <text x="276" y="38" class="dg-t">Outcome</text><text x="276" y="58" class="dg-s">sealed · permits 3</text>
+            <path d="M360 70 L360 86 L110 86 L110 110" class="dg-line" marker-end="url(#sp-tree-a)"/>
+            <path d="M360 70 L360 110" class="dg-line" marker-end="url(#sp-tree-a)"/>
+            <path d="M360 86 L610 86 L610 110" class="dg-line" marker-end="url(#sp-tree-a)"/>
+            <rect x="20" y="110" width="180" height="54" rx="8" class="dg-box"/>
+            <rect x="270" y="110" width="180" height="54" rx="8" class="dg-box"/>
+            <rect x="520" y="110" width="180" height="54" rx="8" class="dg-box"/>
+            <text x="36" y="132" class="dg-t">Paid</text><text x="36" y="152" class="dg-s">record · final</text>
+            <text x="286" y="132" class="dg-t">Rejected</text><text x="286" y="152" class="dg-s">record · final</text>
+            <text x="536" y="132" class="dg-t">Temporary</text><text x="536" y="152" class="dg-s">sealed · permits 2</text>
+            <path d="M610 164 L610 190 L402 190 L402 218" class="dg-line" marker-end="url(#sp-tree-a)"/>
+            <path d="M610 164 L610 218" class="dg-line" marker-end="url(#sp-tree-a)"/>
+            <rect x="320" y="218" width="164" height="54" rx="8" class="dg-box"/>
+            <rect x="520" y="218" width="180" height="54" rx="8" class="dg-cell hit"/>
+            <text x="336" y="240" class="dg-t">Retry</text><text x="336" y="260" class="dg-s">record · final</text>
+            <text x="536" y="240" class="dg-t">External</text><text x="536" y="260" class="dg-s">non-sealed</text>
+            <path d="M610 272 L610 302" class="dg-line" marker-end="url(#sp-tree-a)"/>
+            <rect x="520" y="302" width="180" height="48" rx="8" class="dg-box"/>
+            <text x="536" y="324" class="dg-t">ProviderWait</text><text x="536" y="342" class="dg-s">и другие реализации</text>
+            <text x="20" y="224" class="dg-cap">ЗАКРЫТЫЕ ВЕТВИ</text>
+            <text x="20" y="250" class="dg-s">Paid и Rejected</text><text x="20" y="272" class="dg-s">нельзя расширить</text>
+            <text x="20" y="314" class="dg-s">case External e покрывает</text><text x="20" y="336" class="dg-s">всех потомков External</text>
+          </svg>
+        </div>
+        <figcaption>Non-sealed открывает только свою ветвь. Посторонний класс не получает права напрямую реализовать Outcome.</figcaption>
+      </figure>
+      <pre><code class="language-java">// Фрагмент HierarchyDemo.java; отдельная модель с точкой расширения
+sealed interface Outcome permits Paid, Rejected, Temporary {}
+record Paid(String id) implements Outcome {}
+record Rejected(String reason) implements Outcome {}
+sealed interface Temporary extends Outcome permits Retry, External {}
+record Retry(int seconds) implements Temporary {}
+non-sealed interface External extends Temporary {}
+record ProviderWait(String provider) implements External {}
+
+static String route(Outcome value) {
+    return switch (value) {
+        case Paid p -> "paid";
+        case Rejected r -> "rejected";
+        case Retry r -> "retry";
+        case External e -> "external"; // достаточно охватить открытую ветвь её типом
+    };
+}
+System.out.println("sealed=" + Outcome.class.isSealed());
+System.out.println("direct=" + Arrays.stream(Outcome.class.getPermittedSubclasses())
+        .map(Class::getSimpleName).sorted().toList());
+System.out.println("external sealed=" + External.class.isSealed());
+System.out.println("provider=" + route(new ProviderWait("bank")));</code></pre>
+      <pre class="out">sealed=true
+direct=[Paid, Rejected, Temporary]
+external sealed=false
+provider=external</pre>
+      <p>В named module разрешённые прямые потомки должны находиться в том же модуле; в unnamed module — в том же package. Это одна область сопровождения модели, а не список плагинов из любых библиотек. Если подходящие объявления находятся в одной compilation unit, permits можно опустить: компилятор выведет прямых потомков с canonical names. Это не поиск всех классов в package; local и anonymous классы в такой список не попадают.</p>
+      <p>Sealed не означает abstract или immutable. Sealed class может быть конкретным и иметь mutable-поля. Тогда одних case для потомков недостаточно: возможен экземпляр самого базового класса. Правило исчерпывающего покрытия через permits относится к sealed interface или abstract sealed class. Non-sealed допустим, когда у типа есть sealed прямой родитель, чьё ограничение он продолжает; это не универсальный модификатор обычного интерфейса. JVM также проверяет разрешённость наследования: обход через старый или вручную созданный class-файл не превращает закрытую ветвь в открытую.</p>
+    </section>
+    <section class="step" id="flow">
+      <h2>Pattern-переменная существует там, куда можно попасть только после совпадения</h2>
+      <p>Старый instanceof отвечал только на вопрос о типе, затем приходилось повторять тип в cast. <code>value instanceof Paid p</code> соединяет проверку с получением ссылки подходящего типа. P не новый объект и не копия: это тот же target, доступный через переменную Paid. При несовпадении и при null выражение возвращает false.</p>
+      <p>Область видимости определяется потоком управления — flow scoping. В правую часть &amp;&amp; попадём только после true слева, поэтому p уже есть. При отрицательной проверке с ранним return до следующих строк доходят только Paid. Компилятор знает этот факт и разрешает p после if.</p>
+      <pre><code class="language-java">// Фрагмент PatternDemo.java; Paid и Money объявлены в первом шаге
+static String paidId(Object value) {
+    if (!(value instanceof Paid p)) return "not paid";
+    return p.id(); // путь с несовпадением уже завершился
+}
+static boolean positive(Object value) {
+    return value instanceof Paid p &amp;&amp; p.amount() != null
+            &amp;&amp; p.amount().minorUnits() > 0;
+}
+Paid paid = new Paid("p1", new Money(100, "EUR"));
+System.out.println("id=" + paidId(paid) + ", positive=" + positive(paid));
+System.out.println("null instanceof=" + positive(null));</code></pre>
+      <pre class="out">id=p1, positive=true
+null instanceof=false</pre>
+      <p>Для || логика обратная: если matching не прошёл, нужно вычислить правую часть. Там ещё нет pattern-переменной. Если убрать return из отрицательной ветки и позволить ей продолжиться, p также исчезнет из области видимости после if. Это не требование «обязательно использовать фигурные скобки», а доказательство, какие пути способны дойти до чтения переменной.</p>
+      <pre><code class="language-java">// negative/OrScope.java: правая часть достижима без совпадения
+return value instanceof String s || !s.isEmpty();</code></pre>
+      <pre class="out">error: cannot find symbol
+  symbol:   variable s</pre>
+      <p>Pattern-переменные не являются неявно final; при необходимости final пишут явно. Но изменять такую ссылку обычно мешает смыслу проверки. Из matching не следует глубокая неизменяемость объекта: Paid из примера — record, а его контракт и граф владения разобраны в <a href="records.html">Records</a>. Sealed для instanceof вообще не требуется: String, коллекция или обычный открытый интерфейс тоже могут быть pattern-типом.</p>
+    </section>
+    <section class="step" id="deconstruction">
+      <h2>Record pattern извлекает компоненты через accessors и проверяет вложенную структуру</h2>
+      <p><code>Paid p</code> даёт весь объект, а <code>Paid(var id, Money(var units, var currency))</code> проверяет Paid, получает id и amount через accessors, затем проверяет amount как Money и получает его компоненты. Количество и порядок component patterns соответствуют заголовку record. Дополнительный конструктор не задаёт новую форму деконструкции.</p>
+      <p>Var в component pattern выводит статический тип компонента: здесь id и currency — String, units — long. Это не динамический тип и не разрешение пропустить проверки. Если компонент объявлен Object, более узкий String pattern будет дополнительным условием. Generic record patterns также выводят type arguments из статического контекста, но не восстанавливают потерянную при erasure информацию.</p>
+      <pre><code class="language-java">// GenericDemo.java: Text допустим для Result&lt;String&gt;, но не Result&lt;Integer&gt;
+sealed interface Result&lt;T&gt; permits Text, Value {}
+record Text(String text) implements Result&lt;String&gt; {}
+record Value&lt;T&gt;(T value) implements Result&lt;T&gt; {}
+static int number(Result&lt;Integer&gt; result) {
+    return switch (result) {
+        case Value&lt;Integer&gt;(var n) -> n; // n имеет тип Integer
+    }; // Text не нужен для полноты именно этого selector type
+}
+System.out.println("number=" + number(new Value&lt;&gt;(42)));</code></pre>
+      <pre class="out">number=42</pre>
+      <p>Для Object нельзя проверить <code>Box&lt;String&gt;(var s)</code>, потому что такой cast потребовал бы unchecked conversion. В negative/Unchecked.java javac сообщает <code>Object cannot be safely cast to Box&lt;String&gt;</code>. Если target имеет известный Box&lt;String&gt; тип, эта деконструкция допустима. Проверять сам компонент через <code>Box(String s)</code> — другая операция: она смотрит на значение внутри, а не доказывает generic-тип всего контейнера.</p>
+      <p>Accessors действительно вызываются. Record pattern не читает private-поля напрямую и не обходит переопределённый метод. Поэтому defensive copy в accessor может выделять память, а исключение accessor прерывает matching: оно оборачивается в MatchException с исходной причиной. Скрывать I/O или побочные эффекты в accessor — плохая опора для декларативного разбора. В EdgeDemo этот случай показан отдельно.</p>
+      <details class="deep"><summary>Под капотом: почему это не универсальная деконструкция любого класса</summary><p>На Java 21 record pattern опирается на известные компилятору record components и методы доступа. Обычный JavaBean с getAmount не получает такой pattern автоматически. Top-level type patterns на этой версии используют reference types; primitive-компонент record может извлекаться pattern того же primitive-типа. Это не общее разрешение написать switch с boolean или long selector на Java 21. Более поздние возможности языка надо оценивать отдельно, вместе с их preview-статусом.</p></details>
+    </section>
+    <section class="step" id="dispatch">
+      <h2>Switch выбирает первое совпадение, а guard уточняет данные после деконструкции</h2>
+      <p>Успешный платёж в EUR с положительной суммой идёт в автоматическое проведение. Остальные Paid отправляются на ручной разбор, Rejected сохраняет причину, Retry планирует задержку. Здесь pattern отвечает за тип и структуру, а when — за бизнес-условие. Guard выполняется только после совпадения pattern; его переменные уже инициализированы.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 274" role="img" aria-label="Разбор Paid p2 с Money -1 EUR. Сначала совпадает вложенная структура Paid и Money, затем извлекаются units=-1 и currency=EUR. Guard units больше нуля возвращает false. Следующая ветка Paid p подходит и возвращает manual.">
+            <defs><marker id="sp-route-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <rect x="20" y="18" width="680" height="50" rx="8" class="dg-box"/>
+            <text x="36" y="48" class="dg-t">selector: Paid("p2", Money(-1, "EUR"))</text>
+            <rect x="20" y="102" width="206" height="112" rx="8" class="dg-box"/>
+            <rect x="260" y="102" width="206" height="112" rx="8" class="dg-box"/>
+            <rect x="500" y="102" width="200" height="112" rx="8" class="dg-box"/>
+            <text x="36" y="128" class="dg-cap">RECORD PATTERN</text>
+            <text x="276" y="128" class="dg-cap">WHEN</text>
+            <text x="516" y="128" class="dg-cap">СЛЕДУЮЩИЙ CASE</text>
+            <text data-s="1-" x="36" y="155" class="dg-ok">Paid + Money: match</text>
+            <g data-s="2-"><text x="36" y="178" class="dg-in">units = -1</text><text x="36" y="198" class="dg-in">currency = "EUR"</text></g>
+            <g data-s="3-"><path d="M226 164 L260 164" class="dg-line" marker-end="url(#sp-route-a)"/><text x="276" y="160" class="dg-in">units &gt; 0</text><text x="276" y="187" class="dg-bad">false → пропустить</text></g>
+            <g data-s="4"><path d="M466 164 L500 164" class="dg-line" marker-end="url(#sp-route-a)"/><text x="516" y="159" class="dg-ok">Paid p: match</text><text x="516" y="188" class="dg-ok">return "manual"</text></g>
+            <text data-s="1-2" x="20" y="246" class="dg-s">Тело case ещё не выполнялось</text>
+            <text data-s="3" x="20" y="246" class="dg-s">Тип подошёл; условие данных не подошло</text>
+            <text data-s="4" x="20" y="246" class="dg-s">Выбрана fallback-ветка для Paid, дальнейшие case не нужны</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Selector вычислен один раз. Он Paid, amount — Money: вложенная структура подходит.</li>
+          <li>Matching через accessors дал id="p2", units=-1 и currency="EUR". Теперь эти переменные доступны guard.</li>
+          <li>Guard проверил units &gt; 0 и получил false. Тело book не выполняется; выбор продолжается.</li>
+          <li>Следующий case Paid p не требует положительной суммы. Он подходит и возвращает manual.</li>
+        </ol>
+      </figure>
+      <pre><code class="language-java">// Фрагмент PatternDemo.java; типы Outcome, Paid, Money — в первом шаге
+static String route(Outcome outcome) {
+    return switch (outcome) {
+        case null -> "bad request";
+        case Paid(var id, Money(var units, var currency))
+                when units > 0 &amp;&amp; "EUR".equals(currency) -> "book:" + id;
+        case Paid p -> "manual"; // guard false или amount == null
+        case Rejected(var reason) -> "reject:" + reason;
+        case Retry(var seconds) -> "retry:" + seconds;
+    };
+}
+System.out.println(route(new Paid("p1", new Money(100, "EUR"))));
+System.out.println(route(new Paid("p2", new Money(-1, "EUR"))));
+System.out.println(route(new Paid("p3", null)));
+System.out.println(route(new Rejected("limit")));
+System.out.println(route(new Retry(30)));
+System.out.println(route(null));</code></pre>
+      <pre class="out">book:p1
+manual
+manual
+reject:limit
+retry:30
+bad request</pre>
+      <p>Если поставить case Paid p первым, специализированный Paid pattern после него станет недостижимым. Это dominance: все значения поздней ветки уже принимает ранняя. Аналогично CharSequence перед String закрывает String, и javac выдаёт <code>this case label is dominated by a preceding case label</code>. У unguarded-ветки шире покрытие, чем у того же pattern с guard.</p>
+      <p>Компилятор не решает произвольную бизнес-логику guard. Ветка <code>case Integer i when i &gt; 0</code> перед <code>case 1</code> допустима, но для 1 вернётся positive, а не one. Этот отдельный опыт PatternDemo печатает <code>guarded 1=positive</code>. Константы ставь перед широкими guarded patterns, узкие условия — перед общей веткой. Guard с константным true имеет особое правило и учитывается как безусловный.</p>
+      <pre><code class="language-java">// Фрагмент PatternDemo.java: логически закрытый case 1 всё же компилируется
+static String guardedOrder(Integer n) {
+    return switch (n) {
+        case Integer i when i > 0 -> "positive";
+        case 1 -> "one"; // javac не доказывает свойства произвольного guard
+        case Integer i -> "other";
+    };
+}
+System.out.println("guarded 1=" + guardedOrder(1));</code></pre>
+      <pre class="out">guarded 1=positive</pre>
+      <p>Полнота — проверка type coverage, а не «сумма условий вроде n &gt; 0 и n &lt;= 0». Обычные guards не доказывают исчерпывающий охват типа; нужна ветка без такого условия. Все switch expressions и enhanced switch statements с patterns должны быть exhaustive. Устаревший statement с обычными константами может иметь другие требования. Синтаксис выражения, yield и fall-through относится к теме о switch expressions; здесь стрелки исключают проваливание в следующую ветку.</p>
+    </section>
+    <section class="step" id="nulls">
+      <h2>Null selector, null компонент и сбой accessor — три разных границы</h2>
+      <p>Default означает «прочие значения selector», но не заменяет case null. Если selector равен null и такой метки нет, pattern switch на Java 21 бросает NullPointerException. Даже <code>case Object o</code> этого не меняет. Можно явно отклонить null, обработать его отдельно или объединить только в форме <code>case null, default</code>. Выбор зависит от контракта входа.</p>
+      <pre><code class="language-java">// Фрагмент EdgeDemo.java; show печатает имя пойманного RuntimeException
+static String withDefault(Object value) {
+    return switch (value) {
+        case String s -> "string";
+        default -> "other"; // null сюда не попадает
+    };
+}
+static String totalType(Object value) {
+    return switch (value) { case Object o -> "object"; };
+}
+show("default null", () -> withDefault(null));
+show("Object null", () -> totalType(null));</code></pre>
+      <pre class="out">default null=NullPointerException
+Object null=NullPointerException</pre>
+      <p>Сам record pattern тоже не совпадает с null. Но его компонентный type pattern может принимать null, если безусловен для статического типа компонента. Поэтому Box(var text) подходит Box с null строкой, а Envelope(Box(var text)) не подходит Envelope с null вместо Box. Это различие между «значение компонента получено» и «вложенный объект существует и его можно разобрать».</p>
+      <pre><code class="language-java">// Фрагмент EdgeDemo.java; выведи результат до раскрытия
+record Box(String value) {}
+record Envelope(Box box) {}
+static String nested(Envelope envelope) {
+    return switch (envelope) {
+        case Envelope(Box(var text)) -> String.valueOf(text);
+    }; // javac считает покрытие Envelope исчерпывающим
+}
+System.out.println("null record=" + ((Object) null instanceof Box(var text)));
+Box box = new Box(null);
+if (box instanceof Box(var text)) System.out.println("component=" + text);
+show("null nested", () -> nested(new Envelope(null)));
+System.out.println("nested component=" + nested(new Envelope(new Box(null))));</code></pre>
+      <pre class="out">null record=false
+component=null
+null nested=MatchException
+nested component=null</pre>
+      <p>Null nested не равен null selector: Envelope существует, но единственный вложенный pattern не подошёл. Runtime сообщает MatchException для неожиданной невозможности выбрать ветку у статически полного switch. Защитой может быть constructor invariant, запрещающий null Box, либо отдельный fallback для Envelope. Case null вверху не лечит null внутри Envelope.</p>
+      <pre><code class="language-java">// Фрагмент EdgeDemo.java: pattern вызывает accessor, а не читает поле
+record Broken(int value) {
+    public int value() { throw new IllegalStateException("broken accessor"); }
+}
+try {
+    if (new Broken(1) instanceof Broken(var value)) System.out.println(value);
+} catch (MatchException e) {
+    System.out.println("accessor=" + e.getClass().getSimpleName()
+            + ", cause=" + e.getCause().getClass().getSimpleName());
+}</code></pre>
+      <pre class="out">accessor=MatchException, cause=IllegalStateException</pre>
+      <p>Guard — обычное выражение, выполняемое после matching. Его собственное исключение распространяется как исключение выражения; специальное оборачивание относится к accessor во время record matching. Поэтому не стоит ловить MatchException как универсальный сигнал «платёж временно не прошёл». Retry — вариант доменной модели, а MatchException показывает нарушение предпосылок разбора.</p>
+    </section>
+    <section class="step" id="evolution">
+      <h2>Исчерпывающий разбор требует согласованной версии модели и клиента</h2>
+      <p>При добавлении Retry и полной пересборке компилятор покажет обработчики без этой ветки. Но библиотеку результата можно обновить отдельно от клиентского class-файла. Добавление разрешённого потомка само по себе сохраняет binary compatibility: старый клиент способен загрузиться. Его прежнее доказательство полноты больше не отражает runtime-модель.</p>
+      <p>В <a href="../examples/sealed-patterns/evolution/v1/Client.java">Client.java</a> v1 знает два типа. Затем опыт заменяет только API-классы на v2 с Retry, сохраняя Client.class. Run из v2 передаёт Retry в старый обработчик. Так мы проверяем реальную отдельную компиляцию, а не имитируем невозможный тип через cast.</p>
+      <pre><code class="language-java">// evolution/v1: Client.class компилируется с API из двух вариантов
+public sealed interface Outcome permits Paid, Rejected {}
+record Paid() implements Outcome {}
+record Rejected() implements Outcome {}
+public static String route(Outcome value) {
+    return switch (value) {
+        case Paid p -> "paid";
+        case Rejected r -> "rejected";
+    };
+}
+// evolution/v2: Outcome заменён, Client.class оставлен старым
+public sealed interface Outcome permits Paid, Rejected, Retry {}
+record Paid() implements Outcome {}
+record Rejected() implements Outcome {}
+record Retry() implements Outcome {}
+try { System.out.println(Client.route(new Retry())); }
+catch (MatchException e) {
+    System.out.println("old client=" + e.getClass().getSimpleName());
+}</code></pre>
+      <pre class="out">old client=MatchException</pre>
+      <p>Фрагмент показывает две разные версии файла, а не одну compilation unit; README даёт команды с отдельными каталогами. Javap подтвердил в Client.class аварийную ветку с java.lang.MatchException. Повторная компиляция Client.java уже против API v2 отвергает неполный switch с той же диагностикой, что в первом шаге. Совместимость загрузки не означает прежнюю семантику всех вызовов.</p>
+      <p>Добавить default — осознанный выбор политики эволюции. Если это закрытая доменная модель, отсутствие default заставляет при пересборке принять решение о новом варианте. Для открытой External-ветви общий case External уже выражает поддержку расширений. На внешней границе всё равно нужны проверка входных данных, версионирование сообщения и обработка неизвестных вариантов протокола: Java permits не валидирует JSON.</p>
+      <p>Выбирай sealed, когда варианты принадлежат одной модели и один владелец контролирует её расширение. Если каждое расширение само знает поведение, обычный полиморфный метод может дать проще поддерживаемый код. Pattern switch полезен для нескольких внешних операций над известными вариантами, но большой switch в каждом слое заставляет менять много мест. Sealed не заменяет SPI для независимых плагинов, records не делают результат глубоко immutable, а matching не является проверкой бизнес-инвариантов.</p>
+    </section>
+    <div class="summary"><ul>
+      <li>Sealed ограничивает прямых потомков; final закрывает ветвь, non-sealed открывает её, sealed продолжает контроль.</li>
+      <li>Instanceof pattern связывает проверку с доступом к тому же объекту; flow scoping следует успешным путям.</li>
+      <li>Record pattern вызывает accessors и рекурсивно проверяет компоненты.</li>
+      <li>Switch выбирает первый подходящий case; guard уточняет значения, а dominance запрещает заведомо закрытые ветки.</li>
+      <li>Exhaustiveness не доказывает отсутствие null и не защищает старый class-файл от эволюции API.</li>
+      <li>Null selector без case null даёт NPE; неподошедшая вложенная структура полного switch или сбой accessor могут дать MatchException.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="sealed" data-freq="2">
+      <h3>Зачем sealed и чем он отличается от final и non-sealed?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Sealed позволяет владельцу модели ограничить её прямых наследников. Например, Outcome может быть Paid, Rejected или Retry, и посторонний класс не реализует его напрямую. Permits перечисляет разрешённые типы, а каждый из них действительно пишет extends или implements.</p><p>Final закрывает дальнейшее наследование, sealed передаёт контроль следующему уровню, non-sealed открывает конкретную ветвь. Record уже final. Такой набор вариантов полезен для доменных результатов и исчерпывающего switch; для независимых плагинов я выберу открытый контракт.</p></div>
+        <div data-level="senior"><ul><li>Прямые потомки должны быть в том же named module, либо в том же package для unnamed module; это единая область сопровождения.</li><li>Без permits вывод идёт по одной compilation unit и canonical names, а не по всему package или classpath.</li><li>Case открытой ветви покрывает неизвестных потомков этой ветви. Sealed ограничивает наследование, но не гарантирует abstract или immutable.</li></ul></div>
+      </div>
+    </article>
+    <article class="q" id="instanceof" data-freq="2">
+      <h3>Как работает instanceof pattern и где доступна его переменная?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Value instanceof Paid p одновременно проверяет тип и даёт ссылку Paid на тот же объект. Мне не нужно повторять cast. При null и неподходящем типе получится false; новая переменная доступна на путях, где matching точно успешен.</p><p>Поэтому p можно использовать справа от &amp;&amp;, в успешной ветке if или после отрицательной проверки с ранним return. Справа от || он обычно недоступен: туда можно попасть после false, когда никакого p ещё нет.</p></div>
+        <div data-level="senior"><ul><li>Flow scoping учитывает завершение путей через return и throw; одних фигурных скобок для объяснения области недостаточно.</li><li>Pattern-переменная не неявно final и не означает копирование или неизменяемость target.</li><li>Parameterized pattern допустим при checked cast; erasure не позволяет распознать Box&lt;String&gt; из произвольного Object.</li></ul></div>
+      </div>
+    </article>
+    <article class="q" id="switch" data-freq="3">
+      <h3>Что проверяет компилятор в pattern switch: guards, dominance и exhaustiveness?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Switch выбирает первый подходящий case. Pattern проверяет тип или структуру и связывает переменные, а when добавляет условие по данным. Я ставлю узкие случаи перед общей веткой: иначе общий Paid поглотит специализированный Paid с условием.</p><p>Dominance запрещает ветку, которую всегда закроет предыдущая, например String после CharSequence. Exhaustiveness требует охватить все варианты статического типа. У sealed-модели я могу перечислить их без default и получить ошибку при пропуске нового типа. Обычные guards не доказывают полное покрытие.</p></div>
+        <div data-level="senior"><ul><li>Javac не решает произвольные условия guard: positive перед case 1 может скомпилироваться и первым перехватить 1. When true — особый безусловный случай.</li><li>У generic sealed selector учитывается применимость конкретных type arguments: реализация Result&lt;String&gt; не нужна для Result&lt;Integer&gt;.</li><li>Default скрывает необходимость обновить обработчик при пересборке; эта политика подходит только при продуманном поведении для остальных вариантов.</li></ul></div>
+      </div>
+    </article>
+    <article class="q" id="record-null" data-freq="2">
+      <h3>Как record patterns обрабатывают null и почему полный switch может бросить MatchException?</h3>
+      <div class="answer">
+        <div data-level="middle"><p>Record pattern проверяет тип и разбирает компоненты через accessors. Null вместо самого record не совпадает. Но Box(var text) может получить null в компонент text, а вложенный Envelope(Box(var text)) не совпадёт с Envelope, у которого box равен null.</p><p>Null selector без case null приводит к NPE; default его не закрывает. Для существующего Envelope с неподходящей вложенной структурой статически полный switch может бросить MatchException. Я определяю constructor invariants и fallback для допустимых данных, вместо того чтобы считать exhaustiveness доказательством null safety.</p></div>
+        <div data-level="senior"><ul><li>Если accessor record бросает исключение во время matching, оно становится cause у MatchException; исключение обычного guard распространяется само.</li><li>После отдельного обновления sealed API старый исчерпывающий switch может встретить новый вариант и бросить MatchException. Полная пересборка обнаружила бы пропущенный case.</li><li>Деконструкция следует компонентам canonical-формы, не дополнительным конструкторам; custom accessor может добавить копирование или побочный эффект.</li></ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://dev.java/learn/using-pattern-matching/">Dev.java: Using Pattern Matching</a> — основа подачи: target → pattern → связанные переменные; от instanceof к record deconstruction. Примеры платежей и проверки границ разработаны здесь; версии и семантика сверены с JLS 21.</li>
+    <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-8.html#jls-8.1.6">JLS 21 §8.1.6</a> и <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-9.html#jls-9.1.4">§9.1.4</a> — разрешённые прямые потомки, permits и область модели.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/language/pattern-matching-instanceof.html">Oracle: instanceof patterns</a>, <a href="https://docs.oracle.com/en/java/javase/21/language/record-patterns.html">record patterns</a> и <a href="https://docs.oracle.com/en/java/javase/21/language/pattern-matching-switch.html">pattern switch</a> — flow scoping, guards, dominance и type coverage.</li>
+    <li><a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-14.html#jls-14.30.2">JLS 21 §14.30</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/MatchException.html">MatchException API</a> и <a href="https://docs.oracle.com/javase/specs/jls/se21/html/jls-13.html#jls-13.5.2">§13.5.2</a> — null matching, accessor failures и отдельная компиляция.</li>
+    <li><a href="https://github.com/Hruday-Boppa/Core-Java-Interview-Questions-List">Core Java Interview Questions List §20.6–20.7</a> — отбор вопросов про sealed, domain modeling, casting, guards и null. <a href="../examples/sealed-patterns/README.md">Проверенные примеры и карта покрытия</a> — JDK 21, четыре демо, четыре ошибки компилятора и две версии API.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

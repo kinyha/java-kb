@@ -411,7 +411,7 @@ window.KB_TREE = [
           scope: 'что появилось в 8, 11, 17, 21, 25: var, text blocks, switch expressions, HttpClient, Sequenced Collections' },
         { id: 'records', freq: 2, status: 'draft', title: 'Records',
           scope: 'семантика record, compact constructor, ограничения, record как DTO и value object' },
-        { id: 'sealed-patterns', freq: 2, status: 'empty', title: 'Sealed & Pattern Matching',
+        { id: 'sealed-patterns', freq: 2, status: 'draft', title: 'Sealed & Pattern Matching',
           scope: 'sealed-иерархии, pattern matching для instanceof, record patterns, исчерпывающий switch' },
       ] },
       { id: 'concurrency', title: 'Concurrency', source: 'Java Concurrency in Practice; enhorse/java-interview: Многопоточность', items: [
