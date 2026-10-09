@@ -487,7 +487,7 @@ window.KB_TREE = [
           scope: 'почему не double, scale и precision, RoundingMode, equals и compareTo, хранение денег' },
         { id: 'date-time', freq: 2, status: 'draft', title: 'Date & Time',
           scope: 'java.time, Instant и LocalDateTime, ZonedDateTime и часовые пояса, Duration и Period, форматирование' },
-        { id: 'io', freq: 1, status: 'empty', title: 'I/O & NIO',
+        { id: 'io', freq: 1, status: 'draft', title: 'I/O & NIO',
           scope: 'потоки байтов и символов, буферизация, Files и Path, каналы, Serializable и serialVersionUID' },
       ] },
       { id: 'tools', title: 'Tooling', items: [

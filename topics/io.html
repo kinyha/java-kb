@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>I/O &amp; NIO · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="io">
+<main class="page">
+  <header class="topic-head"><h1>I/O &amp; NIO</h1></header>
+  <div class="lesson">
+    <div class="note tip"><p>Экспорт движется через источник байтов, декодер текста, буфер и файл. У каждого слоя свои границы: порция чтения, символ, свободная память или законченная запись. Короткий read ещё не конец данных, flush ещё не гарантия сохранности, а Serializable ещё не обещание совместимости релизов. Для надёжного переноса нужно понимать, какой слой уже закончил работу и кто владеет оставшимися данными.</p></div>
+    <section class="step" id="incident">
+      <h2>Один read переносит порцию, а конец данных обозначает −1</h2>
+      <p>Сервис скачивает текстовый отчёт A€B и читает в массив размером 4 байта. Первый read вернул 2. Разработчик записал весь массив и закончил экспорт: файл содержит неполный текст и лишние нули. Вызов выполнился успешно; ошибка в предположении, что один read обязан заполнить массив или прочитать весь отчёт.</p>
+      <p>InputStream — источник последовательности байтов: файл, сокет, память или обёртка. Read(byte[]) возвращает фактическое количество; валидны только первые n байтов, остальные элементы массива сохраняют прежнее содержимое. При ненулевой длине запрос блокируется до хотя бы одного байта, EOF или ошибки. EOF обозначает −1; короткое чтение означает, что сейчас получена только часть запрошенного.</p>
+      <p><a href="../examples/io/ChunkDemo.java">ChunkDemo.java</a> использует управляемый поток Chunks: максимум два байта за read и available равен нулю. Это проверка допустимых границ контракта, а не обещание, что обычный файл всегда читается такими порциями. Available оценивает байты без блокировки; его нельзя использовать как длину файла или признак EOF.</p>
+      <pre><code class="language-java">// Фрагмент ChunkDemo.java; JDK 21 без зависимостей
+static class Chunks extends ByteArrayInputStream {
+    Chunks(byte[] data) { super(data); }
+    @Override public synchronized int read(byte[] b, int off, int len) {
+        return super.read(b, off, Math.min(len, 2)); // намеренно короткие порции
+    }
+    @Override public synchronized int available() { return 0; }
+}
+byte[] source = "A€B".getBytes(StandardCharsets.UTF_8);
+System.out.println("source hex=" + HexFormat.of().formatHex(source));
+byte[] buffer = new byte[4];
+try (InputStream in = new Chunks(source)) {
+    int n = in.read(buffer);
+    System.out.println("one read=" + n + ", available=" + in.available());
+    System.out.println("one chunk=" + new String(buffer, 0, n, StandardCharsets.UTF_8));
+}</code></pre>
+      <pre class="out">source hex=41e282ac42
+one read=2, available=0
+one chunk=A�</pre>
+      <p>Для бинарного копирования читай до −1 и записывай именно n байтов. Для известной ограниченной длины readNBytes собирает несколько порций, но при раннем EOF может вернуть меньше: длину всё равно проверяют. TransferTo переносит остаток в OutputStream и не закрывает стороны за тебя. ReadAllBytes удобен для маленьких ограниченных данных; для большого отчёта он удерживает всё содержимое в heap. Ошибка в середине копирования не делает уже записанную часть полным отчётом.</p>
+    </section>
+    <section class="step" id="decoding">
+      <h2>Декодер хранит незаконченный символ между порциями байтов</h2>
+      <p>В UTF-8 символ € состоит из E2 82 AC. Наш поток разделил его между двумя reads: [41 E2], [82 AC], [42]. Если каждую порцию независимо превратить в new String, первый декодер увидит оборванное начало, а следующий — два продолжения без начала. Символы замены появились из-за сброса состояния на границе буфера, хотя исходные байты были правильными.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 278" role="img" aria-label="UTF-8 A€B содержит байты 41 E2 82 AC 42. Короткие reads дают порции 41 E2, 82 AC, 42. Независимые String-декодеры теряют общий символ и получают A с тремя заменами и B. Один InputStreamReader сохраняет E2 до получения 82 AC и выводит A€B.">
+            <defs><marker id="io-dec-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="24" class="dg-cap">ПОРЦИИ READ ≠ ГРАНИЦЫ СИМВОЛОВ</text>
+            <rect x="20" y="48" width="164" height="44" rx="6" class="dg-cell"/>
+            <rect x="232" y="48" width="164" height="44" rx="6" class="dg-cell"/>
+            <rect x="444" y="48" width="164" height="44" rx="6" class="dg-cell"/>
+            <text x="36" y="75" class="dg-in">41 E2</text><text x="248" y="75" class="dg-in">82 AC</text><text x="460" y="75" class="dg-in">42</text>
+            <path d="M184 70 L228 70" class="dg-line" marker-end="url(#io-dec-a)"/>
+            <path d="M396 70 L440 70" class="dg-line" marker-end="url(#io-dec-a)"/>
+            <text x="20" y="118" class="dg-s">A + начало €</text><text x="232" y="118" class="dg-s">продолжение €</text><text x="444" y="118" class="dg-s">B</text>
+            <rect x="20" y="150" width="376" height="102" rx="8" class="dg-box"/>
+            <rect x="444" y="150" width="256" height="102" rx="8" class="dg-cell hit"/>
+            <path d="M174 92 L174 146" class="dg-line" marker-end="url(#io-dec-a)"/>
+            <path d="M382 92 L382 146" class="dg-line" marker-end="url(#io-dec-a)"/>
+            <path d="M596 92 L596 136 L364 136 L364 146" class="dg-line" marker-end="url(#io-dec-a)"/>
+            <path d="M396 201 L440 201" class="dg-line" marker-end="url(#io-dec-a)"/>
+            <text x="36" y="176" class="dg-t">Один InputStreamReader</text>
+            <text x="36" y="206" class="dg-in">E2 сохраняется до 82 AC</text>
+            <text x="36" y="234" class="dg-s">decoder state между reads</text>
+            <text x="460" y="176" class="dg-t">Текст: A€B</text>
+            <text x="460" y="206" class="dg-s">3 code points</text><text x="460" y="234" class="dg-s">5 исходных байтов</text>
+          </svg>
+        </div>
+        <figcaption>Reader преобразует поток с состоянием. Буферизация сама по себе не выбирает кодировку и не соединяет независимые декодеры.</figcaption>
+      </figure>
+      <pre><code class="language-java">// Фрагмент ChunkDemo.java; Chunks и source объявлены выше
+ByteArrayOutputStream collected = new ByteArrayOutputStream();
+StringBuilder broken = new StringBuilder();
+List&lt;Integer&gt; sizes = new ArrayList&lt;&gt;();
+try (InputStream in = new Chunks(source)) {
+    int n;
+    while ((n = in.read(buffer)) != -1) {
+        sizes.add(n);
+        collected.write(buffer, 0, n); // копирование сохраняет байты
+        broken.append(new String(buffer, 0, n, StandardCharsets.UTF_8)); // состояние теряется
+    }
+}
+System.out.println("reads=" + sizes + ", chunk decoding=" + broken);
+System.out.println("whole decoding=" + collected.toString(StandardCharsets.UTF_8));
+try (Reader reader = new InputStreamReader(new Chunks(source), StandardCharsets.UTF_8)) {
+    StringBuilder text = new StringBuilder();
+    char[] chars = new char[3];
+    int n;
+    while ((n = reader.read(chars)) != -1) text.append(chars, 0, n);
+    System.out.println("reader decoding=" + text);
+}</code></pre>
+      <pre class="out">reads=[2, 2, 1], chunk decoding=A���B
+whole decoding=A€B
+reader decoding=A€B</pre>
+      <p>InputStream/OutputStream переносят 8-битные байты, Reader/Writer — UTF-16 char units. InputStreamReader и OutputStreamWriter связывают эти миры через Charset. Один char не всегда один Unicode code point: у 💳 два char. Детали surrogate pairs, code points и graphemes находятся в <a href="strings.html">Strings</a> и <a href="data-repr.html">Numbers &amp; Text</a>. Даже read(char[]) может разрезать пару; алгоритм текста должен учитывать свой уровень границ.</p>
+      <p>Политику повреждённого текста тоже выбирают явно. New String с Charset заменяет некорректные последовательности; для импорта, где тихая замена меняет идентификатор, используй CharsetDecoder с REPORT. Явный UTF-8 закрепляет контракт файла независимо от окружения; default charset JDK 21 не исправляет файл Windows-1251 и не означает одинаковую кодировку всех консолей.</p>
+      <pre><code class="language-java">// Фрагмент ChunkDemo.java: один E2 в конце — оборванный UTF-8
+CharsetDecoder strict = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT);
+try (Reader reader = new InputStreamReader(new ByteArrayInputStream(new byte[]{(byte) 0xe2}), strict)) {
+    reader.read();
+    throw new AssertionError("truncated UTF-8 accepted");
+} catch (MalformedInputException expected) { System.out.println("strict truncated UTF-8 rejected"); }
+String emoji = "💳";
+System.out.println("emoji chars=" + emoji.length() + ", code points=" + emoji.codePointCount(0, emoji.length()));</code></pre>
+      <pre class="out">strict truncated UTF-8 rejected
+emoji chars=2, code points=1</pre>
+    </section>
+    <section class="step" id="buffering">
+      <h2>Обёртка накапливает данные, а владелец закрывает весь путь</h2>
+      <p>BufferedOutputStream собирает мелкие записи и передаёт их нижнему stream более крупной порцией. BufferedReader хранит уже декодированные chars и добавляет readLine, который возвращает строку без её разделителя. Это разные слои: byte buffer, charset bridge и character buffer могут быть вложены друг в друга. Обёртки работают как decorator и не меняют назначение исходного stream.</p>
+      <p>В <a href="../examples/io/BufferingDemo.java">BufferingDemo.java</a> буфер размером 4 выбран явно. Нижний Sink считает вызовы Java write и полученные байты; это не измерение системных вызовов. Три write(int) ещё не дошли до него; flush переносит их одной порцией. Close обёртки дописывает последнюю порцию и закрывает нижний stream.</p>
+      <pre><code class="language-java">// Фрагмент BufferingDemo.java; Sink — счётчик нижних операций
+static class Sink extends OutputStream {
+    int calls, bytes;
+    boolean closed;
+    @Override public void write(int b) { calls++; bytes++; }
+    @Override public void write(byte[] b, int off, int len) { calls++; bytes += len; }
+    @Override public void close() { closed = true; }
+}
+Sink sink = new Sink();
+try (OutputStream out = new BufferedOutputStream(sink, 4)) {
+    out.write(1); out.write(2); out.write(3);
+    System.out.println("before flush: calls=" + sink.calls + ", bytes=" + sink.bytes);
+    out.flush();
+    System.out.println("after flush: calls=" + sink.calls + ", bytes=" + sink.bytes);
+    out.write(4);
+}
+System.out.println("after close: calls=" + sink.calls + ", bytes=" + sink.bytes + ", closed=" + sink.closed);</code></pre>
+      <pre class="out">before flush: calls=0, bytes=0
+after flush: calls=1, bytes=3
+after close: calls=2, bytes=4, closed=true</pre>
+      <p>Владелец ресурса задаётся на границе API. Метод, получивший общий OutputStream для части отчёта, не должен закрывать его без такого договора: следующая часть потеряет назначение. Если ты создал всю цепочку для файла, закрывай внешнюю обёртку через try-with-resources. При исключении в теле try закрытие всё равно выполняется; исключение close может попасть в suppressed исходной ошибки, что разобрано в <a href="exceptions.html">Exceptions</a>.</p>
+      <p>Flush проталкивает данные из буферов Java дальше, но не обещает durable storage. После него нижний слой может хранить их в кэше ОС. Закрытие освобождает дескриптор и завершает обёртку; авария процесса или устройства — другая граница, которую рассмотрим в последнем шаге.</p>
+      <p>PrintWriter удобен для форматированного текста, но его методы записи не пробрасывают IOException. Отчёт может остаться неполным при внешне успешном println. Проверяй checkError либо выбирай Writer, который сохраняет исключения как основной способ отказа.</p>
+      <pre><code class="language-java">// Фрагмент BufferingDemo.java: нижний Writer всегда отказывает
+PrintWriter print = new PrintWriter(new Writer() {
+    public void write(char[] b, int off, int len) throws IOException { throw new IOException("sink failed"); }
+    public void flush() {}
+    public void close() {}
+});
+print.println("export"); // IOException здесь не выходит наружу
+System.out.println("PrintWriter error=" + print.checkError());
+print.close();</code></pre>
+      <pre class="out">PrintWriter error=true</pre>
+    </section>
+    <section class="step" id="files">
+      <h2>Path описывает имя, а Files выполняет действие с выбранными условиями</h2>
+      <p>Path может обозначать ещё не существующий файл. Resolve соединяет компоненты, normalize убирает лексические избыточности, toAbsolutePath добавляет основу относительному пути. Эти операции не читают содержимое и не гарантируют существование. ToRealPath обращается к файловой системе, по умолчанию разрешает symlinks и требует существующего пути. Java.io.File — старое представление имени; Path вместе с Files даёт операции, атрибуты и информативные IOException.</p>
+      <p>Выбирай режим записи заранее. Files.writeString без options создаёт отсутствующий файл или обнуляет существующий. APPEND сохраняет старое содержимое и дописывает; CREATE_NEW атомарно отказывается, если имя уже занято. Проверка exists перед созданием не заменяет CREATE_NEW: между двумя операциями другой процесс может создать файл. Полный <a href="../examples/io/FilesDemo.java">FilesDemo.java</a> создаёт и удаляет собственный временный каталог.</p>
+      <pre><code class="language-java">// Фрагмент FilesDemo.java; file — путь в собственном temporary directory
+Files.writeString(file, "first\nsecond\n", StandardCharsets.UTF_8);
+Files.writeString(file, "third\n", StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+try (Stream&lt;String&gt; lines = Files.lines(file, StandardCharsets.UTF_8)) {
+    System.out.println("lines=" + lines.count());
+}
+Files.writeString(file, "new", StandardCharsets.UTF_8); // default: truncate, не append
+System.out.println("default write=" + Files.readString(file, StandardCharsets.UTF_8));
+try { Files.writeString(file, "oops", StandardCharsets.UTF_8, StandardOpenOption.CREATE_NEW); }
+catch (FileAlreadyExistsException expected) { System.out.println("CREATE_NEW refused overwrite"); }
+Path lexical = Path.of("exports", "..", "report.txt");
+System.out.println("normalized=" + lexical.normalize() + ", exists=" + Files.exists(lexical));</code></pre>
+      <pre class="out">lines=3
+default write=new
+CREATE_NEW refused overwrite
+normalized=report.txt, exists=false</pre>
+      <p>Вывод exists относится к отсутствующему пути в этом запуске, а normalize дал результат без создания каталога exports. Нормализация не доказывает, что пользовательский путь остаётся внутри разрешённого дерева: symlink способен направить обращение в другой каталог, а состояние FS меняется между проверкой и открытием. Для недоверенного имени нужно отдельное ограничение файловых операций; лексический startsWith сам этого не обеспечивает.</p>
+      <p>ReadString/readAllBytes/readAllLines загружают всё содержимое; BufferedReader обрабатывает постепенно, хотя одна слишком длинная строка тоже требует памяти. Files.lines, list, walk возвращают ленивые Stream, связанные с открытыми ресурсами. Terminal operation не заменяет close: оборачивай поток в try-with-resources даже с findFirst или limit. Это использование java.util.stream поверх I/O, а не тот же класс InputStream.</p>
+    </section>
+    <section class="step" id="channels">
+      <h2>Channel двигает position, а limit ограничивает доступные данные</h2>
+      <p>NIO делает рабочий буфер явным. У ByteBuffer capacity — размер памяти, position — место следующего get/put, limit — первая недоступная позиция. Remaining равен limit − position. При заполнении put продвигает position; перед чтением flip устанавливает limit в прежнюю position и возвращает position к нулю. Байты при этом не копируются.</p>
+      <p>После частичной обработки compact переносит непрочитанный диапазон [position, limit) к началу, ставит position после остатка и limit в capacity. Следующая порция дописывается за остатком. Clear только сбрасывает границы на весь буфер и не стирает память. Его нельзя применять вместо compact, если остаток ещё нужен; иначе он перестанет быть защищён от следующей записи. <a href="../examples/io/BufferDemo.java">BufferDemo.java</a> печатает и границы, и всю raw memory.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 324" role="img" aria-label="ByteBuffer capacity 6: put ABCD даёт position 4 limit 6, flip position 0 limit 4, get AB position 2. Compact переносит CD к началу и даёт position 2 limit 6; старые байты CD физически остаются справа. Put EF и flip создают читаемый CDEF с position 0 limit 4. Channel переносит его за две частичные записи, position становится 4. Непрочитанный диапазон выделен; raw memory не очищается.">
+            <defs><marker id="io-buf-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker></defs>
+            <text x="20" y="24" class="dg-cap">BYTEBUFFER · CAPACITY 6 · RAW MEMORY</text>
+            <rect x="80" y="82" width="80" height="48" class="dg-cell"/>
+            <text x="120" y="64" class="dg-n" text-anchor="middle">0</text>
+            <rect x="160" y="82" width="80" height="48" class="dg-cell"/>
+            <text x="200" y="64" class="dg-n" text-anchor="middle">1</text>
+            <rect x="240" y="82" width="80" height="48" class="dg-cell"/>
+            <text x="280" y="64" class="dg-n" text-anchor="middle">2</text>
+            <rect x="320" y="82" width="80" height="48" class="dg-cell"/>
+            <text x="360" y="64" class="dg-n" text-anchor="middle">3</text>
+            <rect x="400" y="82" width="80" height="48" class="dg-cell"/>
+            <text x="440" y="64" class="dg-n" text-anchor="middle">4</text>
+            <rect x="480" y="82" width="80" height="48" class="dg-cell"/>
+            <text x="520" y="64" class="dg-n" text-anchor="middle">5</text>
+            <g data-s="1">
+              <text x="120" y="112" class="dg-in" text-anchor="middle">A</text>
+              <text x="200" y="112" class="dg-in" text-anchor="middle">B</text>
+              <text x="280" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="360" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="440" y="112" class="dg-in" text-anchor="middle">00</text>
+              <text x="520" y="112" class="dg-in" text-anchor="middle">00</text>
+              <path d="M400 162 L400 134" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="400" y="184" class="dg-n" text-anchor="middle">pos 4</text>
+              <path d="M560 82 L560 144" class="dg-sep"/>
+              <text x="560" y="206" class="dg-n" text-anchor="middle">limit 6</text>
+              <text x="20" y="246" class="dg-t">put ABCD: p=4, l=6</text>
+              <text x="20" y="278" class="dg-s">Заполнен префикс [0, 4); дальше можно писать.</text>
+            </g>
+            <g data-s="2">
+              <rect x="80" y="82" width="320" height="48" class="dg-cell hit"/>
+              <text x="120" y="112" class="dg-in" text-anchor="middle">A</text>
+              <text x="200" y="112" class="dg-in" text-anchor="middle">B</text>
+              <text x="280" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="360" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="440" y="112" class="dg-in" text-anchor="middle">00</text>
+              <text x="520" y="112" class="dg-in" text-anchor="middle">00</text>
+              <path d="M80 162 L80 134" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="80" y="184" class="dg-n" text-anchor="middle">pos 0</text>
+              <path d="M400 82 L400 144" class="dg-sep"/>
+              <text x="400" y="206" class="dg-n" text-anchor="middle">limit 4</text>
+              <text x="20" y="246" class="dg-t">flip: p=0, l=4</text>
+              <text x="20" y="278" class="dg-s">Читаемый диапазон [0, 4): ABCD.</text>
+            </g>
+            <g data-s="3">
+              <rect x="240" y="82" width="160" height="48" class="dg-cell hit"/>
+              <text x="120" y="112" class="dg-in" text-anchor="middle">A</text>
+              <text x="200" y="112" class="dg-in" text-anchor="middle">B</text>
+              <text x="280" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="360" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="440" y="112" class="dg-in" text-anchor="middle">00</text>
+              <text x="520" y="112" class="dg-in" text-anchor="middle">00</text>
+              <path d="M240 162 L240 134" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="240" y="184" class="dg-n" text-anchor="middle">pos 2</text>
+              <path d="M400 82 L400 144" class="dg-sep"/>
+              <text x="400" y="206" class="dg-n" text-anchor="middle">limit 4</text>
+              <text x="20" y="246" class="dg-t">get AB: p=2, l=4</text>
+              <text x="20" y="278" class="dg-s">Прочитан AB; остаток [2, 4): CD.</text>
+            </g>
+            <g data-s="4">
+              <text x="120" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="200" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="280" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="360" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="440" y="112" class="dg-in" text-anchor="middle">00</text>
+              <text x="520" y="112" class="dg-in" text-anchor="middle">00</text>
+              <path d="M240 50 L240 78" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="240" y="44" class="dg-n" text-anchor="middle">pos 2</text>
+              <path d="M560 82 L560 144" class="dg-sep"/>
+              <text x="560" y="206" class="dg-n" text-anchor="middle">limit 6</text>
+              <text x="20" y="246" class="dg-t">compact: p=2, l=6</text>
+              <text x="20" y="278" class="dg-s">CD сохранён в [0, 2); новые байты пишутся с 2.</text>
+            </g>
+            <g data-s="5">
+              <rect x="80" y="82" width="320" height="48" class="dg-cell hit"/>
+              <text x="120" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="200" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="280" y="112" class="dg-in" text-anchor="middle">E</text>
+              <text x="360" y="112" class="dg-in" text-anchor="middle">F</text>
+              <text x="440" y="112" class="dg-in" text-anchor="middle">00</text>
+              <text x="520" y="112" class="dg-in" text-anchor="middle">00</text>
+              <path d="M80 162 L80 134" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="80" y="184" class="dg-n" text-anchor="middle">pos 0</text>
+              <path d="M400 82 L400 144" class="dg-sep"/>
+              <text x="400" y="206" class="dg-n" text-anchor="middle">limit 4</text>
+              <text x="20" y="246" class="dg-t">put EF, flip: p=0, l=4</text>
+              <text x="20" y="278" class="dg-s">Читаемый диапазон [0, 4): CDEF.</text>
+            </g>
+            <g data-s="6">
+              <text x="120" y="112" class="dg-in" text-anchor="middle">C</text>
+              <text x="200" y="112" class="dg-in" text-anchor="middle">D</text>
+              <text x="280" y="112" class="dg-in" text-anchor="middle">E</text>
+              <text x="360" y="112" class="dg-in" text-anchor="middle">F</text>
+              <text x="440" y="112" class="dg-in" text-anchor="middle">00</text>
+              <text x="520" y="112" class="dg-in" text-anchor="middle">00</text>
+              <path d="M400 162 L400 134" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="400" y="184" class="dg-n" text-anchor="middle">pos 4</text>
+              <path d="M400 82 L400 144" class="dg-sep"/>
+              <text x="400" y="206" class="dg-n" text-anchor="middle">limit 4</text>
+              <text x="20" y="246" class="dg-t">2 × write: p=4, l=4</text>
+              <text x="20" y="278" class="dg-s">Весь CDEF передан. Remaining = 0.</text>
+            </g>
+            <g data-s="4">
+              <path d="M320 130 C320 172 160 172 160 134" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="590" y="106" class="dg-n">копия CD</text>
+              <text x="590" y="128" class="dg-n">не очистка</text>
+            </g>
+            <g data-s="6">
+              <rect x="510" y="220" width="190" height="84" rx="8" class="dg-cell"/>
+              <path d="M560 106 L680 106 L680 216" class="dg-line" marker-end="url(#io-buf-a)"/>
+              <text x="526" y="246" class="dg-t">PartialSink</text>
+              <text x="526" y="276" class="dg-in">CD + EF = CDEF</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>В буфер размером 6 записан ABCD. Position равен 4, limit пока 6; два нулевых байта ещё не данные отчёта.</li>
+          <li>Flip меняет только границы: position 0, limit 4. Читаемый диапазон выделен; память осталась прежней.</li>
+          <li>Два get потребили AB и продвинули position до 2. Непрочитанным остаётся CD; байты AB физически не исчезли.</li>
+          <li>Compact копирует CD к началу. Position 2 позволяет дописать за ним; старые CD справа не очищаются и уже не являются сохранённым остатком.</li>
+          <li>За остатком дописан EF, затем flip открыл CDEF для чтения: position 0, limit 4.</li>
+          <li>Channel принял по два байта за вызов: сначала CD, затем EF. Position дошёл до limit 4, remaining стал нулём.</li>
+        </ol>
+      </figure>
+      <pre><code class="language-java">// Фрагмент BufferDemo.java; state печатает границы и raw memory в hex
+ByteBuffer b = ByteBuffer.allocate(6);
+b.put("ABCD".getBytes(StandardCharsets.US_ASCII)); state("put ABCD", b);
+b.flip(); state("flip", b);
+System.out.println("consumed=" + (char) b.get() + (char) b.get()); state("get AB", b);
+b.compact(); state("compact", b); // только CD остаётся логически сохранённым
+b.put("EF".getBytes(StandardCharsets.US_ASCII)); b.flip(); state("put EF, flip", b);</code></pre>
+      <pre class="out">put ABCD: pos=4, limit=6, capacity=6, memory=414243440000
+flip: pos=0, limit=4, capacity=6, memory=414243440000
+consumed=AB
+get AB: pos=2, limit=4, capacity=6, memory=414243440000
+compact: pos=2, limit=6, capacity=6, memory=434443440000
+put EF, flip: pos=0, limit=4, capacity=6, memory=434445460000</pre>
+      <p>WritableByteChannel.write тоже не обязан забрать весь remaining. В управляемом PartialSink один вызов принимает максимум два байта; цикл переносит CDEF за две записи. Забытый flip заставляет channel читать свободный хвост вместо заполненного префикса — наш второй буфер отправит один нулевой байт вместо ABC.</p>
+      <pre><code class="language-java">// Фрагмент BufferDemo.java; sink моделирует partial write, не скорость диска
+static class PartialSink implements WritableByteChannel {
+    final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    int calls;
+    boolean open = true;
+    public int write(ByteBuffer src) {
+        calls++;
+        int n = Math.min(2, src.remaining());
+        for (int i = 0; i &lt; n; i++) bytes.write(src.get());
+        return n;
+    }
+    public boolean isOpen() { return open; }
+    public void close() { open = false; }
+}
+try (PartialSink sink = new PartialSink()) {
+    while (b.hasRemaining()) sink.write(b); // этот sink всегда делает progress
+    System.out.println("channel output=" + sink.bytes.toString(StandardCharsets.US_ASCII)
+            + ", writes=" + sink.calls + ", pos=" + b.position());
+}
+b.clear(); state("clear", b);
+System.out.println("clear first byte=" + (char) b.get()); // память сохранила C
+ByteBuffer noFlip = ByteBuffer.allocate(4);
+noFlip.put("ABC".getBytes(StandardCharsets.US_ASCII));
+try (PartialSink sink = new PartialSink()) {
+    while (noFlip.hasRemaining()) sink.write(noFlip);
+    System.out.println("without flip hex=" + HexFormat.of().formatHex(sink.bytes.toByteArray()));
+}</code></pre>
+      <pre class="out">channel output=CDEF, writes=2, pos=4
+clear: pos=0, limit=6, capacity=6, memory=434445460000
+clear first byte=C
+without flip hex=00</pre>
+      <p>NIO не означает автоматически non-blocking. FileChannel не регистрируется в Selector; selectable socket channels могут работать в non-blocking mode. Selector сообщает готовность операции, а не готовность полного сообщения. Если write вернул 0, event loop ждёт готовности и сохраняет остаток; крутить такой цикл без прогресса нельзя. В read канала 0 означает отсутствие перенесённых байтов, −1 — EOF, это отличается от контракта ненулевого InputStream.read.</p>
+      <details class="deep"><summary>Под капотом: direct buffer и mmap не обещают бесплатного ускорения</summary><p>AllocateDirect даёт буфер, для которого JVM старается выполнить native I/O без промежуточного копирования; выделение и освобождение дороже, память учитывают отдельно от heap. FileChannel.map связывает диапазон файла с виртуальной памятью: обращение может вызвать page fault, а modified pages требует MappedByteBuffer.force для принудительной записи. Закрытие channel не отменяет mapping. Эти способы выбирают по измеренной нагрузке и управлению памятью, а не по названию NIO. Для простого последовательного экспорта blocking stream часто достаточно; модель множества блокирующих задач обсуждается в Virtual Threads.</p></details>
+    </section>
+    <section class="step" id="objects">
+      <h2>Object stream сохраняет граф ссылок и проверяет локальную версию класса</h2>
+      <p>ObjectOutputStream кодирует не только значения полей, но и связи графа. При первом объекте назначается handle, при повторной ссылке пишется ссылка на него. Reader регистрирует восстанавливаемый обычный объект до прохода его полей, поэтому может замкнуть цикл и сохранить alias. Получается новый граф с прежней внутренней идентичностью, а не ссылки в исходный heap. <a href="../examples/io/GraphDemo.java">GraphDemo.java</a> проверяет оба свойства на цикле A ↔ B.</p>
+      <p>Serializable — marker interface и наследуется подклассами. По умолчанию сохраняются non-static, non-transient поля serializable частей объекта; достижимые значения должны поддерживать протокол. Для обычного serializable класса его конструктор и field initializers при чтении не вызываются. Выполняется доступный no-arg constructor первой non-serializable superclass, её поля восстанавливаются по обычной инициализации. Поэтому transient поле с initializer тоже станет default null, если readObject не задаст другое значение.</p>
+      <pre><code class="language-java">// Фрагмент GraphDemo.java; serialize использует обычный ObjectOutputStream
+static class Base {
+    static int calls;
+    String origin = "base-default";
+    Base() { calls++; }
+}
+static class Node extends Base implements Serializable {
+    @Serial private static final long serialVersionUID = 1L;
+    static int constructors;
+    static String environment = "before";
+    String name;
+    transient String cache = "initializer";
+    Node next;
+    Node(String name) { constructors++; this.name = name; origin = "changed"; cache = "calculated"; }
+}
+Node a = new Node("A"), b = new Node("B"); a.next = b; b.next = a;
+byte[] bytes = serialize(new Node[]{a, a, b}); // a встречается дважды и участвует в цикле
+Base.calls = 0; Node.constructors = 0; Node.environment = "after";
+try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
+    Node[] copy = (Node[]) in.readObject();
+    System.out.println("alias=" + (copy[0] == copy[1]) + ", cycle=" + (copy[0].next.next == copy[0])
+            + ", original=" + (copy[0] == a));
+    System.out.println("node constructors=" + Node.constructors + ", base constructors=" + Base.calls);
+    System.out.println("transient=" + copy[0].cache + ", base field=" + copy[0].origin
+            + ", static=" + Node.environment);
+}</code></pre>
+      <pre class="out">alias=true, cycle=true, original=false
+node constructors=0, base constructors=2
+transient=null, base field=base-default, static=after</pre>
+      <p>Если достижимый обычный объект не Serializable, запись бросает NotSerializableException; полный GraphDemo подтверждает это для new Object(). Transient исключает поле из default form, но не запрещает custom writeObject сохранить его вручную и не делает секрет автоматически защищённым. Static принадлежит классу reader и не переносится с конкретным объектом.</p>
+      <p>Для обычного класса serialVersionUID в дескрипторе потока сравнивается с UID локального класса. Несовпадение даёт InvalidClassException, а совпадение лишь допускает проверку совместимости формы. Явный UID удерживает совместимые изменения; если его нет, default вычисляется из структуры класса, включая подходящие методы и конструкторы. Это не номер приложения и не инструкция автоматически мигрировать смысл поля.</p>
+      <pre><code class="language-java">// Фрагменты evolution/v1, v2 и incompatible/Snapshot.java; разные classpaths
+// Writer v1: сохраняет count=7, label ещё нет
+public class Snapshot implements Serializable {
+    @Serial private static final long serialVersionUID = 1L;
+    int count = 7;
+}
+// Reader v2: совместимое добавление поля, UID сохранён
+public class Snapshot implements Serializable {
+    @Serial private static final long serialVersionUID = 1L;
+    int count;
+    String label = "initializer"; // при default deserialization initializer не исполняется
+}
+// В третьей версии та же форма v2, но serialVersionUID = 2L</code></pre>
+      <pre><code class="language-bash"># Реальная запись v1 и чтение двумя отдельными JVM, --release 21
+python3 examples/io/verify_evolution.py</code></pre>
+      <pre class="out">writer: UID=1, count=7
+reader: count=7, label=null
+reader: UID mismatch -> InvalidClassException</pre>
+      <p>Добавленный label получил default null из отсутствующих данных. Даже при одном UID изменение типа primitive поля или переход Serializable ↔ Externalizable несовместимы. Долгий архив требует explicit form и миграций; для межсервисного контракта выбор JSON/Protobuf/Avro разобран в <a href="serialization.html">Serialization Formats</a>.</p>
+      <details class="deep"><summary>Под капотом: hooks и исключения из default протокола</summary><p>Private readObject/writeObject позволяют дополнить форму; defaultReadObject/defaultWriteObject сохраняют её стандартную часть. После чтения проверяют инварианты, которые конструктор обычного serializable класса не проверил. ReadResolve может заменить восстановленный объект, например вернуть существующий singleton; enum имеет специальный протокол по имени. Externalizable полностью задаёт порядок и состав через writeExternal/readExternal и требует public no-arg constructor самого класса. Records восстанавливаются через canonical constructor, а matching UID для них не требуется: это отдельные правила, разобранные в <a href="records.html">Records</a>.</p></details>
+    </section>
+    <section class="step" id="boundaries">
+      <h2>Законченный экспорт, опубликованное имя и durable storage — разные границы</h2>
+      <p>Читатель не должен увидеть половину нового отчёта по окончательному имени. Можно записать временный файл в том же каталоге, завершить данные и переименовать через ATOMIC_MOVE. Это атомарная смена имени при поддержке файловой системы; между файловыми системами или у другого provider она может быть недоступна. Не заменяй её обычным move молча, если атомарность нужна контракту.</p>
+      <pre><code class="language-java">// Фрагмент FilesDemo.java; pending и published находятся в собственном temp directory
+Path pending = dir.resolve("pending.txt");
+try (FileChannel channel = FileChannel.open(pending, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+    ByteBuffer bytes = ByteBuffer.wrap("published".getBytes(StandardCharsets.UTF_8));
+    while (bytes.hasRemaining()) channel.write(bytes);
+    channel.force(true); // content + metadata файла; это не flush буфера Java
+}
+try {
+    Files.move(pending, dir.resolve("published.txt"), StandardCopyOption.ATOMIC_MOVE);
+    System.out.println("atomic move supported");
+    System.out.println("published=" + Files.readString(dir.resolve("published.txt"), StandardCharsets.UTF_8));
+} catch (AtomicMoveNotSupportedException expected) {
+    System.out.println("atomic move unsupported; pending retained");
+}</code></pre>
+      <pre class="out">atomic move supported
+published=published</pre>
+      <p>Этот результат относится к локальной FS проверенного запуска. FileChannel.force(true) заставляет записать изменения содержимого и метаданных файла на локальное устройство в рамках контракта API. Сохранность переименования и directory entry при crash зависит от ОС/FS и протокола записи; вызов force файла сам по себе её не доказывает. Power-loss опыт здесь не проводился. Atomic visibility, успешное закрытие и durability нужно обсуждать отдельно.</p>
+      <p>ObjectInputStream тоже пересекает более сильную границу, чем простое чтение байтов: он загружает локальные классы и вызывает hooks восстановления. Десериализацию произвольных внешних Java graphs нельзя считать безопасным парсингом DTO. Если native format необходим, ограничивай классы, depth, references и arrays до readObject, а доменные инварианты проверяй отдельно.</p>
+      <pre><code class="language-java">// Фрагмент GraphDemo.java; bytes содержит наш циклический Node[] из предыдущего шага
+try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
+    in.setObjectInputFilter(info -> info.depth() > 2
+            ? ObjectInputFilter.Status.REJECTED : ObjectInputFilter.Status.UNDECIDED);
+    try { in.readObject(); throw new AssertionError("deep graph accepted"); }
+    catch (InvalidClassException expected) { System.out.println("depth filter rejected"); }
+}</code></pre>
+      <pre class="out">depth filter rejected</pre>
+      <p>Фильтр в опыте доказывает только отказ по depth; это не готовый allow-list для внешних данных. UNDECIDED делегирует дальнейшей политике, а не утверждает безопасность. Для нового внешнего контракта выбирай форму с явной схемой и контролируемыми DTO. Для производительности сначала измерь размер, память, блокировки и число операций: другой buffer, channel или mmap не исправит неправильные границы записи и чтения.</p>
+    </section>
+    <div class="note"><p><strong>Что восстановить из памяти</strong></p><ul>
+      <li>Порция read — только n действительных байтов. −1 означает EOF, available не длина отчёта.</li>
+      <li>Reader сохраняет состояние декодера; границы UTF-8 не совпадают с границами массива.</li>
+      <li>Обёртки закрывает владелец. Flush, atomic publish и durable storage подтверждают разные свойства.</li>
+      <li>Flip ограничивает чтение заполненным префиксом, compact сохраняет остаток, clear не стирает память.</li>
+      <li>Native serialization сохраняет граф и связывает его с локальными классами; UID не заменяет миграцию.</li>
+    </ul></div>
+  </div>
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+    <article class="q" id="streams" data-freq="2">
+      <h3>Чем байтовые потоки отличаются от Reader/Writer и почему одного read недостаточно?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>InputStream и OutputStream переносят байты, Reader и Writer работают с UTF-16 chars. Для текста между ними нужен charset bridge, например InputStreamReader с UTF-8. Я не декодирую независимые порции через new String: многобайтный символ может оказаться на границе.</p>
+          <p>Read возвращает фактическое количество байтов, а −1 означает конец потока. Для копирования я читаю циклом и пишу только n байтов, либо использую transferTo. Available не сообщает размер файла. Для readNBytes проверяю ранний EOF, а загрузку всех данных допускаю только при известном ограничении размера.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>CharsetDecoder с REPORT отвергает malformed text вместо тихой замены, которая способна изменить идентификатор.</li>
+          <li>Char тоже не всегда полный code point; алгоритм должен учитывать surrogate pairs.</li>
+          <li>TransferTo не передаёт владение ресурсами и не закрывает streams. Частичный результат при IOException ещё не полный экспорт.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="buffers-files" data-freq="2">
+      <h3>Зачем буферизация и что меняют flush, close и Files?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Буфер собирает мелкие операции в крупные порции и уменьшает обращения к нижнему слою. Он не выбирает кодировку. Flush переносит накопленное дальше, close завершает обёртку и освобождает ресурс. Я закрываю созданную цепочку через try-with-resources и заранее определяю, кто владеет полученным stream.</p>
+          <p>Для файлов использую Path как имя и Files как операции. Режим записи выбираю явно: default writeString обнуляет существующий файл, APPEND дописывает, CREATE_NEW отказывается перезаписать. Ленивые Files.lines/list/walk тоже закрываю, даже если чтение закончилось раньше конца.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Flush не равен force и не гарантирует durability. ATOMIC_MOVE отвечает за видимость смены имени при поддержке FS.</li>
+          <li>PrintWriter скрывает IOException записи; для отказа нужно checkError либо другой Writer.</li>
+          <li>Normalize — лексическая операция; symlinks и гонка check/open не позволяют считать её полноценным ограничением доступа.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="nio-state" data-freq="2">
+      <h3>Как работают position/limit, flip, clear и compact и означает ли NIO non-blocking?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Position — следующая позиция get/put, limit ограничивает доступ, capacity задаёт память. После заполнения flip ставит limit в конец записанных данных и position в ноль. Compact переносит непрочитанный остаток в начало, чтобы дописать новую порцию; clear сбрасывает границы, но не стирает байты.</p>
+          <p>Channel может прочитать или записать только часть remaining, поэтому я сохраняю состояние до следующего вызова. NIO поддерживает разные модели: FileChannel не selectable, а socket channel можно сделать non-blocking. Selector сообщает готовность I/O, но не обещает полный запрос или сообщение.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>Write с результатом 0 требует ожидания progress/readiness, иначе получится busy loop. −1 в read означает EOF.</li>
+          <li>Direct buffer имеет отдельную цену памяти и выделения; он не является обещанием «zero-copy» всего пути.</li>
+          <li>Mapping переживает close channel; modified mapped pages принудительно сохраняются через MappedByteBuffer.force.</li>
+        </ul></div>
+      </div>
+    </article>
+    <article class="q" id="java-serialization" data-freq="2">
+      <h3>Что сохраняет Serializable, зачем serialVersionUID и какие конструкторы вызываются?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Object stream сохраняет граф: значения non-static, non-transient полей и ссылки через handles. Alias и цикл восстанавливаются внутри нового графа. Обычный Serializable-класс читается без его конструктора и initializers; вызывается доступный no-arg constructor первой non-serializable superclass. Поэтому transient cache получает default null.</p>
+          <p>SerialVersionUID связывает форму в потоке с локальной версией обычного класса. Несовпадение даёт InvalidClassException; одинаковый UID допускает совместимую эволюцию, но не делает любую смену типа или смысла безопасной. Для долгого хранения я проектирую явную форму и миграции, а не просто ставлю 1L навсегда.</p>
+        </div>
+        <div data-level="senior"><ul>
+          <li>ReadObject/writeObject задают hooks, readResolve заменяет объект. Externalizable требует public no-arg constructor и полностью управляет формой.</li>
+          <li>У records выполняется canonical constructor и waived UID matching; стандартный ответ о конструкторах нельзя применять ко всем видам.</li>
+          <li>ObjectInputFilter ограничивает классы и размер графа; transient не шифрует данные и может быть записан custom hook.</li>
+        </ul></div>
+      </div>
+    </article>
+  </section>
+  <div class="qa"></div>
+  <div class="refs"><ul>
+    <li><a href="https://horstmann.com/corejava/livelessons2/lesson03/index.html">Cay Horstmann: Core Java Advanced LiveLessons, Lesson 3</a> — учебная основа Core Java Volume II: bytes → charset bridge → Files → channels → object references. Версионные детали сверены по JDK 21.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/InputStream.html">InputStream API 21</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/InputStreamReader.html">InputStreamReader</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/charset/CharsetDecoder.html">CharsetDecoder</a> — short reads, EOF и decoding.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/BufferedOutputStream.html">BufferedOutputStream</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/PrintWriter.html">PrintWriter</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Path.html">Path</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Files.html">Files</a> — обёртки, ресурсные streams и режимы файла.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/ByteBuffer.html">ByteBuffer</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileChannel.html">FileChannel</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/Selector.html">Selector</a> — buffer state, progress и force.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/serial-arch.html">Object Serialization: Architecture</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/input.html">Object Input</a>, <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/class.html">Class Descriptors</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/specs/serialization/version.html">Versioning</a> — поля, конструкторы, handles и UID.</li>
+    <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/io/ObjectInputFilter.html">ObjectInputFilter API 21</a> — ограничения восстановления; <a href="https://srisairevanth.github.io/java-interview-handbook/">Java Interview Handbook: I/O/NIO</a> — отбор вопросов; <a href="../examples/io/README.md">демо, условия запуска и карта покрытия</a> — все пять программ и отдельный опыт эволюции.</li>
+  </ul></div>
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
