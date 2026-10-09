@@ -493,7 +493,7 @@ window.KB_TREE = [
       { id: 'tools', title: 'Tooling', items: [
         { id: 'build', freq: 2, status: 'draft', title: 'Maven & Gradle',
           scope: 'жизненный цикл, зависимости и конфликты версий, плагины, многомодульный проект' },
-        { id: 'logging', freq: 1, status: 'empty', title: 'Logging',
+        { id: 'logging', freq: 1, status: 'draft', title: 'Logging',
           scope: 'SLF4J, Logback, уровни, MDC, структурные логи' },
         { id: 'java-testing', freq: 3, status: 'empty', title: 'Testing',
           scope: 'JUnit 5, Mockito, AssertJ, Testcontainers, что мокать' },
