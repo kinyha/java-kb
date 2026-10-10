@@ -495,7 +495,7 @@ window.KB_TREE = [
           scope: 'жизненный цикл, зависимости и конфликты версий, плагины, многомодульный проект' },
         { id: 'logging', freq: 1, status: 'draft', title: 'Logging',
           scope: 'SLF4J, Logback, уровни, MDC, структурные логи' },
-        { id: 'java-testing', freq: 3, status: 'empty', title: 'Testing',
+        { id: 'java-testing', freq: 3, status: 'draft', title: 'Testing',
           scope: 'JUnit 5, Mockito, AssertJ, Testcontainers, что мокать' },
       ] },
     ],
