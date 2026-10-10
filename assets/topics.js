@@ -635,7 +635,7 @@ window.KB_TREE = [
       { id: 'ai-safety', title: 'Safety', items: [
         { id: 'ai-permissions', freq: 3, status: 'draft', title: 'Least Privilege & Approval Gates',
           scope: 'allow, ask и deny; песочница; хуки PreToolUse; где обязателен человек; журнал прогонов агента' },
-        { id: 'llm-risks', freq: 2, status: 'empty', title: 'LLM Risks',
+        { id: 'llm-risks', freq: 2, status: 'draft', title: 'LLM Risks',
           scope: 'OWASP Top 10 для LLM, prompt injection через данные и инструменты, утечки, избыточные полномочия, реальные случаи' },
       ] },
     ],
