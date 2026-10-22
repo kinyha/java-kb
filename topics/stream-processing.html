@@ -1,0 +1,791 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stream Processing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="stream-processing">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Stream Processing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Антифрод считает платежи каждой карты за последнюю минуту и поднимает тревогу на четвёртом. Счётчик — это состояние: он должен пережить рестарт, переехать вместе с партицией на другой экземпляр и не задвоиться после сбоя. Kafka Streams держит его в локальном store рядом с задачей, а копию пишет в changelog-топик. Минуту он меряет временем события, а не часами сервера, поэтому опоздавший платёж попадает в своё окно, пока окно не закрыто. Exactly-once связывает выход, changelog и смещения одной транзакцией.</p>
+    </div>
+
+    <section class="step" id="why">
+      <h2>Антифрод должен заметить четыре платежа за минуту, а консьюмер с HashMap теряет счёт на деплое</h2>
+      <p>Правило антифрода: больше трёх платежей по одной карте за 60 секунд — тревога, карту на ручную проверку. Платежи идут в топик <code>payments</code>. Первая мысль — ночной job: <code>GROUP BY card_id</code> по таблице платежей за сутки. Он посчитает правильно, но в три часа ночи, когда деньги уже ушли. Антифроду нужен ответ через секунды после четвёртого платежа.</p>
+      <p>Вторая мысль — обычный консьюмер с <code>HashMap&lt;String, Deque&lt;Instant&gt;&gt;</code>: на каждый платёж добавить время, выкинуть старше минуты, проверить размер. Работает в демо и ломается в проде сразу в нескольких местах:</p>
+      <ul>
+        <li><b>Рестарт.</b> Деплой или OOM — и карта памяти пуста. Серия, начатая до деплоя, после него считается с нуля.</li>
+        <li><b>Rebalance.</b> Партицию с картой c-1 забрал другой экземпляр. Её счётчик остался в памяти старого, у нового его нет.</li>
+        <li><b>Повторы.</b> Консьюмер упал до коммита смещения и прочитал те же платежи снова. Для идемпотентной записи в базу это не страшно, а счётчик задвоится.</li>
+        <li><b>Чья минута.</b> Если сервис час лежал, он догоняет lag за десять секунд. По часам сервера весь час платежей влезет в одну минуту — тревоги посыплются по всем картам. Считать надо по времени платежа, а оно приходит не по порядку.</li>
+      </ul>
+      <p>Stream processing — непрерывное вычисление над бесконечным потоком событий: агрегаты, окна, join, где фреймворк сам хранит состояние, восстанавливает его после сбоя и ведёт время событий. Очередь доставляет отдельные сообщения отдельным обработчикам. Батч считает конечный набор данных целиком, но поздно. Поток считает по мере прихода и держит промежуточный результат между событиями.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 226" role="img" aria-label="Одна и та же серия платежей карты c-1 на оси времени с 10:00 до 10:01:30. Ночной батч узнаёт о серии в 03:00. Консьюмер с HashMap насчитал два платежа, после деплоя в 10:01:00 начал заново и серию не заметил. Kafka Streams восстановил счётчик из changelog, досчитал до четырёх и поднял тревогу в 10:01:20.">
+            <!-- ось времени и платежи -->
+            <text x="20" y="44" class="dg-t">платежи c-1</text>
+            <line x1="180" y1="40" x2="560" y2="40" class="dg-line"/>
+            <g text-anchor="middle">
+              <text x="180" y="28" class="dg-n">10:00:00</text><text x="307" y="28" class="dg-n">10:00:30</text>
+              <text x="433" y="28" class="dg-n">10:01:00</text><text x="560" y="28" class="dg-n">10:01:30</text>
+            </g>
+            <rect x="196" y="35" width="10" height="10" rx="2" class="dg-cell"/>
+            <rect x="344" y="35" width="10" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="386" y="35" width="10" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="449" y="35" width="10" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="513" y="35" width="10" height="10" rx="2" class="dg-cell hit"/>
+
+            <!-- дорожка: батч -->
+            <line x1="180" y1="80" x2="560" y2="80" class="dg-sep"/>
+            <!-- дорожка: консьюмер с HashMap -->
+            <rect x="336" y="118" width="26" height="24" rx="5" class="dg-cell"/>
+            <rect x="378" y="118" width="26" height="24" rx="5" class="dg-cell"/>
+            <rect x="441" y="118" width="26" height="24" rx="5" class="dg-cell miss"/>
+            <rect x="505" y="118" width="26" height="24" rx="5" class="dg-cell miss"/>
+            <!-- дорожка: Kafka Streams -->
+            <rect x="336" y="168" width="26" height="24" rx="5" class="dg-cell"/>
+            <rect x="378" y="168" width="26" height="24" rx="5" class="dg-cell"/>
+            <rect x="441" y="168" width="26" height="24" rx="5" class="dg-cell"/>
+            <rect x="505" y="168" width="26" height="24" rx="5" class="dg-cell hit"/>
+            <!-- деплой -->
+            <line x1="433" y1="102" x2="433" y2="204" class="dg-line bad"/>
+
+            <!-- подписи дорожек -->
+            <text x="20" y="80" class="dg-t">батч</text>
+            <text x="20" y="96" class="dg-s">раз в сутки</text>
+            <text x="20" y="130" class="dg-t">консьюмер</text>
+            <text x="20" y="146" class="dg-s">+ HashMap</text>
+            <text x="20" y="180" class="dg-t">Kafka Streams</text>
+            <text x="20" y="196" class="dg-s">store + changelog</text>
+            <text x="370" y="74" class="dg-s" text-anchor="middle">платежи ждут ночного запуска</text>
+            <g text-anchor="middle">
+              <text x="349" y="135" class="dg-in">1</text><text x="391" y="135" class="dg-in">2</text>
+              <text x="454" y="135" class="dg-in">1</text><text x="518" y="135" class="dg-in">2</text>
+              <text x="349" y="185" class="dg-in">1</text><text x="391" y="185" class="dg-in">2</text>
+              <text x="454" y="185" class="dg-in">3</text><text x="518" y="185" class="dg-in">4</text>
+              <text x="433" y="220" class="dg-bad">деплой 10:01:00</text>
+            </g>
+            <text x="580" y="84" class="dg-bad">узнал в 03:00</text>
+            <text x="580" y="134" class="dg-bad">серию не заметил</text>
+            <text x="580" y="184" class="dg-ok">ALERT 10:01:20</text>
+          </svg>
+        </div>
+        <figcaption>Платёж в 10:00:05 в серию не входит: от него до четвёртого платежа больше минуты. Консьюмер после деплоя начал счёт с нуля, Kafka Streams восстановил «2» из changelog и досчитал до «4».</figcaption>
+      </figure>
+      <div class="trap">
+        <p class="myth">Stream processing — это консьюмер Kafka в цикле.</p>
+        <p class="fact">Консьюмер даёт доставку и смещения. Состояние между событиями, его восстановление после сбоя, время событий и окна, join двух потоков и согласованность счётчика с выходом приходится строить поверх. Kafka Streams и Flink — это и есть такая готовая надстройка.</p>
+      </div>
+      <p>Дальше — Kafka Streams: это библиотека, которая живёт внутри обычного Java-сервиса и читает и пишет топики Kafka. Flink и чем он отличается — в последнем шаге. Устройство топиков, партиций и групп — в <a href="kafka-basics.html">Kafka Basics</a> и <a href="kafka-consumer.html">Consumer Groups</a>, транзакции на уровне брокера — в <a href="kafka-delivery.html">Delivery Semantics</a>. Все демо лежат в <a href="../examples/stream-processing/README.md">examples/stream-processing</a>: Kafka Streams 4.2.1, JDK 21, окна и join проверены на <code>TopologyTestDriver</code> без брокера, сбои — на встроенном брокере KRaft.</p>
+    </section>
+
+    <section class="step" id="topology">
+      <h2>Топология режется на задачи по партициям, а состояние задачи лежит рядом с ней и копируется в changelog</h2>
+      <p>Приложение Kafka Streams описывают как граф обработчиков — топологию. Часть операций <b>stateless</b>: <code>filter</code>, <code>mapValues</code>, <code>selectKey</code>, <code>split</code> смотрят на одну запись и ничего не помнят. Другие <b>stateful</b>: <code>count</code>, <code>aggregate</code>, <code>reduce</code>, окна и join хранят результат между записями в <b>state store</b>. Входящий топик <code>payments</code> имеет ключ — id платежа, а считать нужно по карте:</p>
+      <pre><code class="language-java">b.stream("payments", Consumed.with(Serdes.String(), Serdes.String()))
+    .filter((paymentId, v) -&gt; amount(v) &gt; 0)                     // stateless: смотрит на одну запись
+    .selectKey((paymentId, v) -&gt; card(v))                        // ключ теперь — карта
+    .groupByKey(Grouped.with(Serdes.String(), Serdes.String()))  // группировать по новому ключу
+    .windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1)))
+    .count(Materialized.as("card-counts"))                       // stateful: store с именем card-counts
+    .toStream()
+    .filter((window, count) -&gt; count &gt; 3)
+    .map((window, count) -&gt; KeyValue.pair(window.key(), "payments in 1m: " + count))
+    .to("fraud-alerts", Produced.with(Serdes.String(), Serdes.String()));
+
+System.out.println(b.build().describe());   // какой граф на самом деле построил Streams</code></pre>
+      <pre class="out">Topologies:
+   Sub-topology: 0
+    Source: KSTREAM-SOURCE-0000000000 (topics: [payments])
+      --&gt; KSTREAM-FILTER-0000000001
+    Processor: KSTREAM-FILTER-0000000001 (stores: [])
+      --&gt; KSTREAM-KEY-SELECT-0000000002
+      &lt;-- KSTREAM-SOURCE-0000000000
+    Processor: KSTREAM-KEY-SELECT-0000000002 (stores: [])
+      --&gt; card-counts-repartition-filter
+      &lt;-- KSTREAM-FILTER-0000000001
+    Processor: card-counts-repartition-filter (stores: [])
+      --&gt; card-counts-repartition-sink
+      &lt;-- KSTREAM-KEY-SELECT-0000000002
+    Sink: card-counts-repartition-sink (topic: card-counts-repartition)
+      &lt;-- card-counts-repartition-filter
+
+  Sub-topology: 1
+    Source: card-counts-repartition-source (topics: [card-counts-repartition])
+      --&gt; KSTREAM-AGGREGATE-0000000003
+    Processor: KSTREAM-AGGREGATE-0000000003 (stores: [card-counts])
+      --&gt; KTABLE-TOSTREAM-0000000007
+      &lt;-- card-counts-repartition-source
+    Processor: KTABLE-TOSTREAM-0000000007 (stores: [])
+      --&gt; KSTREAM-FILTER-0000000008
+      &lt;-- KSTREAM-AGGREGATE-0000000003
+    Processor: KSTREAM-FILTER-0000000008 (stores: [])
+      --&gt; KSTREAM-MAP-0000000009
+      &lt;-- KSTREAM-FILTER-0000000008
+    Processor: KSTREAM-MAP-0000000009 (stores: [])
+      --&gt; KSTREAM-SINK-0000000010
+      &lt;-- KSTREAM-FILTER-0000000008
+    Sink: KSTREAM-SINK-0000000010 (topic: fraud-alerts)
+      &lt;-- KSTREAM-MAP-0000000009</pre>
+      <p>Одна строка <code>selectKey</code> разрезала граф на две под-топологии. Счётчик карты c-1 должен жить в одном месте, а платежи c-1 с разными id лежат в разных партициях <code>payments</code>. Поэтому Streams сам перекладывает записи в служебный <b>repartition-топик</b>, где партицию выбирает уже ключ-карта, и вторая под-топология читает оттуда. Это лишняя запись и чтение каждого платежа через брокер — цена смены ключа.</p>
+      <p>Дальше Streams режет каждую под-топологию на <b>задачи</b>: одна задача на партицию входа. Задача — единица параллельности: её целиком обрабатывает один поток одного экземпляра. Экземпляры приложения с одинаковым <code>application.id</code> — это одна consumer group, и задачи распределяются между ними, как партиции между консьюмерами. Тот же код, запущенный на встроенном брокере с тремя партициями:</p>
+      <pre class="out">active tasks: [0_0, 0_1, 0_2, 1_0, 1_1, 1_2]
+antifraud-card-counts-changelog    cleanup.policy=compact,delete retention.ms=86460000
+antifraud-card-counts-repartition  cleanup.policy=delete         retention.ms=-1
+fraud-alerts                       cleanup.policy=delete         retention.ms=604800000
+payments                           cleanup.policy=delete         retention.ms=604800000</pre>
+      <p>Шесть задач: две под-топологии на три партиции, <code>1_2</code> — под-топология 1, партиция 2. Два топика Streams создал сам, с префиксом <code>application.id</code>. В <code>repartition</code> бесконечный retention: Streams сам удаляет прочитанные записи. <code>changelog</code> — копия store <code>card-counts</code>.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 246" role="img" aria-label="Три партиции payments читают задачи 0_0, 0_1 и 0_2. Они меняют ключ на карту и раскладывают записи по партициям repartition-топика, линии перекрещиваются. Каждую партицию repartition читает своя задача 1_0, 1_1, 1_2 с локальным store card-counts, и каждый store пишет изменения в свою партицию changelog.">
+            <defs>
+              <marker id="st-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="st-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- партиции payments -->
+            <rect x="14" y="44" width="70" height="40" rx="7" class="dg-cell"/>
+            <rect x="14" y="104" width="70" height="40" rx="7" class="dg-cell"/>
+            <rect x="14" y="164" width="70" height="40" rx="7" class="dg-cell"/>
+            <!-- задачи под-топологии 0 -->
+            <rect x="104" y="44" width="132" height="40" rx="7" class="dg-box"/>
+            <rect x="104" y="104" width="132" height="40" rx="7" class="dg-box"/>
+            <rect x="104" y="164" width="132" height="40" rx="7" class="dg-box"/>
+            <!-- repartition по ключу-карте -->
+            <rect x="290" y="44" width="70" height="40" rx="7" class="dg-cell"/>
+            <rect x="290" y="104" width="70" height="40" rx="7" class="dg-cell"/>
+            <rect x="290" y="164" width="70" height="40" rx="7" class="dg-cell"/>
+            <!-- задачи под-топологии 1 и их store -->
+            <rect x="400" y="44" width="190" height="40" rx="7" class="dg-box"/>
+            <rect x="400" y="104" width="190" height="40" rx="7" class="dg-box"/>
+            <rect x="400" y="164" width="190" height="40" rx="7" class="dg-box"/>
+            <rect x="462" y="50" width="118" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="462" y="110" width="118" height="28" rx="5" class="dg-cell hit"/>
+            <rect x="462" y="170" width="118" height="28" rx="5" class="dg-cell hit"/>
+            <!-- changelog -->
+            <rect x="620" y="44" width="86" height="40" rx="7" class="dg-cell"/>
+            <rect x="620" y="104" width="86" height="40" rx="7" class="dg-cell"/>
+            <rect x="620" y="164" width="86" height="40" rx="7" class="dg-cell"/>
+
+            <!-- стрелки: чтение партиций -->
+            <path d="M84 64 L 100 64" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M84 124 L 100 124" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M84 184 L 100 184" class="dg-line" marker-end="url(#st-n)"/>
+            <!-- стрелки: смена ключа перемешивает записи -->
+            <path d="M236 60 L 286 60" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M236 70 C 262 70, 262 186, 286 186" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M236 124 L 286 124" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M236 180 C 262 180, 262 70, 286 70" class="dg-line" marker-end="url(#st-n)"/>
+            <!-- стрелки: чтение repartition -->
+            <path d="M360 64 L 396 64" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M360 124 L 396 124" class="dg-line" marker-end="url(#st-n)"/>
+            <path d="M360 184 L 396 184" class="dg-line" marker-end="url(#st-n)"/>
+            <!-- стрелки: store пишет в changelog -->
+            <path d="M580 64 L 616 64" class="dg-line ok" marker-end="url(#st-ok)"/>
+            <path d="M580 124 L 616 124" class="dg-line ok" marker-end="url(#st-ok)"/>
+            <path d="M580 184 L 616 184" class="dg-line ok" marker-end="url(#st-ok)"/>
+
+            <!-- подписи -->
+            <text x="14" y="24" class="dg-cap">PAYMENTS</text>
+            <text x="104" y="24" class="dg-cap">SUB-TOPOLOGY 0</text>
+            <text x="325" y="24" class="dg-cap" text-anchor="middle">REPARTITION</text>
+            <text x="400" y="24" class="dg-cap">SUB-TOPOLOGY 1</text>
+            <text x="620" y="24" class="dg-cap">CHANGELOG</text>
+            <g text-anchor="middle">
+              <text x="49" y="69" class="dg-t">P0</text><text x="49" y="129" class="dg-t">P1</text><text x="49" y="189" class="dg-t">P2</text>
+              <text x="325" y="69" class="dg-t">P0</text><text x="325" y="129" class="dg-t">P1</text><text x="325" y="189" class="dg-t">P2</text>
+              <text x="663" y="69" class="dg-t">P0</text><text x="663" y="129" class="dg-t">P1</text><text x="663" y="189" class="dg-t">P2</text>
+              <text x="521" y="69" class="dg-in">card-counts</text><text x="521" y="129" class="dg-in">card-counts</text><text x="521" y="189" class="dg-in">card-counts</text>
+            </g>
+            <text x="114" y="60" class="dg-t">0_0</text><text x="114" y="76" class="dg-n">filter, selectKey</text>
+            <text x="114" y="120" class="dg-t">0_1</text><text x="114" y="136" class="dg-n">filter, selectKey</text>
+            <text x="114" y="180" class="dg-t">0_2</text><text x="114" y="196" class="dg-n">filter, selectKey</text>
+            <text x="410" y="60" class="dg-t">1_0</text><text x="410" y="76" class="dg-n">count</text>
+            <text x="410" y="120" class="dg-t">1_1</text><text x="410" y="136" class="dg-n">count</text>
+            <text x="410" y="180" class="dg-t">1_2</text><text x="410" y="196" class="dg-n">count</text>
+            <text x="14" y="230" class="dg-n">ключ = id платежа</text>
+            <text x="325" y="230" class="dg-n" text-anchor="middle">ключ = карта</text>
+            <text x="400" y="230" class="dg-n">RocksDB на диске задачи</text>
+            <text x="618" y="230" class="dg-n">compact,delete</text>
+          </svg>
+        </div>
+        <figcaption>Перекрёстные стрелки — смена ключа: платежи c-1 из разных партиций payments сходятся в одну партицию repartition и попадают к одной задаче, у которой и лежит счётчик c-1.</figcaption>
+      </figure>
+      <h3>Store и changelog</h3>
+      <p>Store по умолчанию — RocksDB на локальном диске в <code>state.dir</code>, своя копия у каждой задачи: <code>antifraud/1_2/rocksdb/card-counts</code>. Каждое изменение store Streams дополнительно пишет в <b>changelog-топик</b> <code>&lt;application.id&gt;-&lt;store&gt;-changelog</code>, с тем же числом партиций, что и у входа задачи. Changelog — источник истины, а RocksDB — быстрый локальный кеш над ним.</p>
+      <p>Для обычного store топик compacted: важно последнее значение ключа (<a href="kafka-ops.html">Operations</a>). Для оконного — <code>compact,delete</code>, и старые окна удаляются по retention: размер окна плюс grace плюс сутки запаса (<code>windowstore.changelog.additional.retention.ms</code>). В выводе это 60&nbsp;000 + 86&nbsp;400&nbsp;000 = 86&nbsp;460&nbsp;000 мс.</p>
+      <p>Когда задача переезжает на другой экземпляр после падения или rebalance, новый владелец сначала читает changelog её партиции и наполняет свой store, и только потом берёт новые записи. Если на диске уже есть store этой задачи, Streams читает только хвост changelog после смещения, записанного в файле <code>.checkpoint</code>. Поэтому в Kubernetes <code>state.dir</code> кладут на persistent volume: по умолчанию это <code>java.io.tmpdir/kafka-streams</code>, и после пересоздания пода store на сотни гигабайт восстанавливается из changelog с нуля, минутами.</p>
+      <p>Чтобы не ждать восстановления, включают <code>num.standby.replicas</code> (по умолчанию 0): другой экземпляр постоянно дочитывает changelog в теневую копию store и при падении получает задачу почти тёплой. Новый экземпляр без копии Streams не делает активным сразу: если его отставание больше <code>acceptable.recovery.lag</code> (10&nbsp;000 записей), задача остаётся у старого владельца, а на новом прогревается warmup-копия.</p>
+      <div class="trap">
+        <p class="myth">Store — это отдельная база, которую можно читать из любого экземпляра.</p>
+        <p class="fact">У каждого экземпляра в store только ключи его задач. Interactive queries (<code>streams.store(...)</code>) читают локальную часть, а за чужим ключом надо идти по сети к экземпляру-владельцу: его подсказывает <code>queryMetadataForKey</code>.</p>
+      </div>
+      <div class="note warn">
+        <p>Имена вроде <code>KSTREAM-AGGREGATE-0000000003</code> Streams генерирует по порядку операторов. Добавил <code>filter</code> перед агрегатом — номер сдвинулся, у store и changelog новое имя, и приложение после деплоя стартует с пустым состоянием. Store и repartition называют явно: <code>Materialized.as("card-counts")</code>, <code>Grouped.as(...)</code>. В 4.2 есть <code>ensure.explicit.internal.resource.naming=true</code>: с ним приложение не стартует, если хоть одно внутреннее имя сгенерировано.</p>
+      </div>
+      <details class="deep">
+        <summary>Почему в тесте видно каждое обновление, а в проде — меньше</summary>
+        <p>Перед store стоит кеш записей, <code>statestore.cache.max.bytes</code>, по умолчанию 10 МБ на все потоки. Он схлопывает несколько обновлений одного ключа и сбрасывает их дальше по графу и в changelog при коммите — по умолчанию раз в <code>commit.interval.ms</code> = 30 с — или при вытеснении. Поэтому в проде вниз по топологии уходит меньше промежуточных значений счётчика. <code>TopologyTestDriver</code> коммитит после каждой записи, и в тесте видно все обновления. Опираться на число промежуточных обновлений нельзя; нужен один итог окна — это <code>suppress</code> из шага про время.</p>
+      </details>
+    </section>
+
+    <section class="step" id="windows">
+      <h2>Окно делит бесконечный поток на конечные группы, и разные окна по-разному режут одну серию</h2>
+      <p>«Платежей за минуту» — это агрегат по окну. Поток бесконечен, и <code>count()</code> без окна считает за всё время. Окно задаёт, какие события сложить вместе. В Kafka Streams ключ оконного агрегата — <code>Windowed&lt;K&gt;</code>: карта плюс границы окна, и у каждой пары свой счётчик в store.</p>
+      <ul>
+        <li><b>Tumbling</b> — окна фиксированного размера встык: каждое событие ровно в одном окне. Отчёты «за минуту», «за час».</li>
+        <li><b>Hopping</b> — окна размера <i>size</i> с шагом <i>advance</i>, они перекрываются: событие попадает в size / advance окон.</li>
+        <li><b>Session</b> — окно на ключ, которое растёт, пока между событиями не больше <i>gap</i> тишины. Размер заранее неизвестен.</li>
+        <li><b>Sliding</b> — <code>SlidingWindows</code>: окна заданной длины, которые строятся по самим событиям, а не по сетке. Ровно «любые 60 секунд».</li>
+      </ul>
+      <p>Пять платежей одной карты, три вида окон. Порог антифрода — больше трёх в окне:</p>
+      <pre><code class="language-java">var byCard = b.&lt;String, String&gt;stream("payments").groupByKey();   // ключ — карта
+byCard.windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1)))
+      .count(Materialized.as("tumbling"));
+byCard.windowedBy(TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(1)).advanceBy(Duration.ofSeconds(30)))
+      .count(Materialized.as("hopping"));
+byCard.windowedBy(SessionWindows.ofInactivityGapWithNoGrace(Duration.ofSeconds(30)))
+      .count(Materialized.as("session"));
+
+// TopologyTestDriver: время события задаём явно, секунды от 10:00:00.
+for (int sec : new int[] {5, 40, 50, 65, 80}) {
+    in.pipeInput("c-1", "500", T0.plusSeconds(sec));
+}
+// Дальше печатаем содержимое трёх store: границы окна и счётчик.</code></pre>
+      <pre class="out">== tumbling
+  [10:00:00, 10:01:00)  count=3
+  [10:01:00, 10:02:00)  count=2
+== hopping
+  [09:59:30, 10:00:30)  count=1
+  [10:00:00, 10:01:00)  count=3
+  [10:00:30, 10:01:30)  count=4  ALERT
+  [10:01:00, 10:02:00)  count=2
+== session
+  [10:00:05, 10:00:05]  count=1
+  [10:00:40, 10:01:20]  count=4  ALERT</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 270" role="img" aria-label="Пять платежей на оси времени с 09:59:30 до 10:02:00. Tumbling-окна по минуте получают 3 и 2 платежа. Hopping-окна по минуте с шагом 30 секунд перекрываются, окно с 10:00:30 до 10:01:30 получает 4 платежа. Session-окна с gap 30 секунд: одиночный платёж в 10:00:05 и сессия с 10:00:40 до 10:01:20 из четырёх платежей.">
+            <!-- направляющие от платежей вниз -->
+            <g class="dg-sep">
+              <line x1="187" y1="46" x2="187" y2="244"/><line x1="334" y1="46" x2="334" y2="244"/>
+              <line x1="376" y1="46" x2="376" y2="244"/><line x1="439" y1="46" x2="439" y2="244"/>
+              <line x1="502" y1="46" x2="502" y2="244"/>
+            </g>
+            <!-- ось -->
+            <line x1="40" y1="40" x2="670" y2="40" class="dg-line"/>
+            <rect x="182" y="35" width="10" height="10" rx="2" class="dg-cell"/>
+            <rect x="329" y="35" width="10" height="10" rx="2" class="dg-cell"/>
+            <rect x="371" y="35" width="10" height="10" rx="2" class="dg-cell"/>
+            <rect x="434" y="35" width="10" height="10" rx="2" class="dg-cell"/>
+            <rect x="497" y="35" width="10" height="10" rx="2" class="dg-cell"/>
+            <!-- tumbling -->
+            <rect x="167" y="74" width="250" height="26" rx="5" class="dg-cell"/>
+            <rect x="419" y="74" width="250" height="26" rx="5" class="dg-cell"/>
+            <!-- hopping: окна от целой минуты и от половины -->
+            <rect x="167" y="130" width="250" height="24" rx="5" class="dg-cell"/>
+            <rect x="419" y="130" width="250" height="24" rx="5" class="dg-cell"/>
+            <rect x="41" y="160" width="250" height="24" rx="5" class="dg-cell"/>
+            <rect x="293" y="160" width="250" height="24" rx="5" class="dg-cell hit"/>
+            <!-- session -->
+            <rect x="181" y="216" width="12" height="26" rx="4" class="dg-cell"/>
+            <rect x="334" y="216" width="168" height="26" rx="5" class="dg-cell hit"/>
+
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="40" y="28" class="dg-n">09:59:30</text><text x="166" y="28" class="dg-n">10:00:00</text>
+              <text x="292" y="28" class="dg-n">10:00:30</text><text x="418" y="28" class="dg-n">10:01:00</text>
+              <text x="544" y="28" class="dg-n">10:01:30</text><text x="670" y="28" class="dg-n">10:02:00</text>
+              <text x="292" y="92" class="dg-in">count = 3</text><text x="544" y="92" class="dg-in">count = 2</text>
+              <text x="292" y="147" class="dg-in">count = 3</text><text x="544" y="147" class="dg-in">count = 2</text>
+              <text x="166" y="177" class="dg-in">count = 1</text><text x="418" y="177" class="dg-in">count = 4 ALERT</text>
+              <text x="418" y="234" class="dg-in">count = 4 ALERT</text>
+              <text x="262" y="260" class="dg-n">тишина 35 с &gt; gap 30 с</text>
+            </g>
+            <text x="198" y="234" class="dg-in">1</text>
+            <text x="40" y="66" class="dg-cap">TUMBLING 1 МИН</text>
+            <text x="40" y="122" class="dg-cap">HOPPING 1 МИН, ШАГ 30 С</text>
+            <text x="40" y="208" class="dg-cap">SESSION, GAP 30 С</text>
+          </svg>
+        </div>
+        <figcaption>Tumbling разрезал серию на 10:01:00 и насчитал 3 и 2 — тревоги нет. Hopping-окно, начатое на полминуты позже, накрыло все четыре платежа.</figcaption>
+      </figure>
+      <p>Границы tumbling и hopping выровнены по эпохе, а не по первому событию: окна начинаются в 10:00:00 и 10:00:30, потому что это кратно шагу. Начало включено, конец исключён. Отсюда первое hopping-окно <code>[09:59:30, 10:00:30)</code>: платёж в 10:00:05 попал и в него, и в <code>[10:00:00, 10:01:00)</code>. У session-окна обе границы — времена первого и последнего события, а одиночный платёж даёт окно нулевой длины.</p>
+      <p>Hopping ловит серию, которую tumbling разрезал, но платит за это: каждое событие обновляет size / advance окон. Окно в час с шагом в минуту — 60 записей в store и changelog на каждый платёж. Session-окна сливаются: если опоздавшее событие легло ближе чем gap и к одной сессии, и к другой, Streams удаляет обе и пишет одну общую — вниз по топологии уходит удаление старой сессии и новое значение.</p>
+      <div class="trap">
+        <p class="myth">Hopping-окно в минуту с шагом в секунду — это скользящее окно «за последние 60 секунд».</p>
+        <p class="fact">Это 60 перекрывающихся окон на каждое событие и всё равно сетка с шагом в секунду. Для правила «N событий за любые 60 секунд» есть <code>SlidingWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(1))</code>: окна создаются только по временам самих событий.</p>
+      </div>
+    </section>
+
+    <section class="step" id="time">
+      <h2>Окно выбирает время события, а закрывает его stream time: опоздавший платёж принимается только в пределах grace</h2>
+      <p>У платежа два времени. <b>Event time</b> — когда платёж случился: timestamp записи Kafka, который ставит продюсер (<code>CreateTime</code>), или поле внутри события, если написать свой <code>TimestampExtractor</code>. <b>Processing time</b> — когда Streams до него дошёл. Окна в Kafka Streams считаются по event time: платёж из 10:00:55 попадает в окно <code>[10:00, 10:01)</code>, даже если приложение дочитало его в 10:05 после рестарта. Так снимается проблема «час lag за десять секунд» из первого шага.</p>
+      <p>Но event time приходит не по порядку: мобильное приложение было офлайн, продюсер повторил отправку. Значит, нельзя закрыть окно в момент, когда пришло первое событие следующего окна. Kafka Streams ведёт <b>stream time</b> — максимальный timestamp, который задача уже видела. Он не идёт назад и не зависит от часов. Окно закрывается, когда stream time дошёл до конца окна плюс <b>grace</b>. Опоздавшее событие в ещё открытое окно принимается, в закрытое — отбрасывается.</p>
+      <pre><code class="language-java">KTable&lt;Windowed&lt;String&gt;, Long&gt; counts = b.&lt;String, String&gt;stream("payments")
+    .groupByKey()
+    .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofSeconds(10)))
+    .count(Materialized.with(Serdes.String(), Serdes.Long()));   // serde нужны буферу suppress
+counts.toStream().to("updates", ...);                            // каждое изменение счётчика
+counts.suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+      .toStream().to("final", ...);                              // один итог после закрытия окна
+
+// Секунды от 10:00:00 в порядке прихода: 55 и 58 опоздали.
+for (int sec : new int[] {5, 40, 65, 55, 90, 58}) in.pipeInput("c-1", "500", T0.plusSeconds(sec));
+driver.advanceWallClockTime(Duration.ofHours(1));                // настенное время сдвинули на час</code></pre>
+      <pre class="out">in 10:00:05:  update [10:00:00,10:01:00)=1
+in 10:00:40:  update [10:00:00,10:01:00)=2
+in 10:01:05:  update [10:01:00,10:02:00)=1
+in 10:00:55:  update [10:00:00,10:01:00)=3
+in 10:01:30:  update [10:01:00,10:02:00)=2  FINAL [10:00:00,10:01:00)=3
+in 10:00:58:  dropped
+after +1h wall clock: final=[]
+dropped-records-total=1.0</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Ось event time с 10:00 до 10:02, окна W1 и W2 по минуте, граница закрытия W1 в 10:01:10. Шесть платежей приходят по очереди, маркер stream time сдвигается к максимальному времени. Опоздавший на 10 секунд платёж 10:00:55 принят, итог W1 = 3 выходит, когда stream time доходит до 10:01:30, а платёж 10:00:58 после этого отброшен.">
+            <defs>
+              <marker id="lt-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- ось event time -->
+            <line x1="60" y1="50" x2="660" y2="50" class="dg-line"/>
+            <!-- окна -->
+            <rect x="61" y="60" width="298" height="30" rx="5" class="dg-cell"/>
+            <rect x="361" y="60" width="298" height="30" rx="5" class="dg-cell"/>
+            <rect data-s="5-" x="61" y="60" width="298" height="30" rx="5" class="dg-cell hit"/>
+            <!-- граница закрытия W1 -->
+            <line x1="410" y1="54" x2="410" y2="150" class="dg-line bad"/>
+            <!-- платежи по мере прихода -->
+            <rect data-s="1-" x="76" y="101" width="18" height="18" rx="4" class="dg-cell"/>
+            <rect data-s="2-" x="251" y="101" width="18" height="18" rx="4" class="dg-cell"/>
+            <rect data-s="3-" x="376" y="101" width="18" height="18" rx="4" class="dg-cell"/>
+            <rect data-s="4-" x="326" y="101" width="18" height="18" rx="4" class="dg-cell hit"/>
+            <rect data-s="5-" x="501" y="101" width="18" height="18" rx="4" class="dg-cell"/>
+            <rect data-s="6" x="341" y="125" width="18" height="18" rx="4" class="dg-cell miss"/>
+            <!-- stream time: свой слой на каждый шаг -->
+            <path data-s="1" d="M85 176 L 85 124" class="dg-line ok" marker-end="url(#lt-ok)"/>
+            <path data-s="2" d="M260 176 L 260 124" class="dg-line ok" marker-end="url(#lt-ok)"/>
+            <path data-s="3-4" d="M385 176 L 385 124" class="dg-line ok" marker-end="url(#lt-ok)"/>
+            <path data-s="5-" d="M510 176 L 510 124" class="dg-line ok" marker-end="url(#lt-ok)"/>
+
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="60" y="40" class="dg-n">10:00:00</text><text x="210" y="40" class="dg-n">10:00:30</text>
+              <text x="360" y="40" class="dg-n">10:01:00</text><text x="510" y="40" class="dg-n">10:01:30</text>
+              <text x="660" y="40" class="dg-n">10:02:00</text>
+              <text data-s="1-" x="85" y="114" class="dg-n">1</text><text data-s="2-" x="260" y="114" class="dg-n">2</text>
+              <text data-s="3-" x="385" y="114" class="dg-n">3</text><text data-s="4-" x="335" y="114" class="dg-n">4</text>
+              <text data-s="5-" x="510" y="114" class="dg-n">5</text><text data-s="6" x="350" y="138" class="dg-n">6</text>
+              <text x="410" y="166" class="dg-n">W1 закрыто с 10:01:10</text>
+            </g>
+            <text x="72" y="80" class="dg-t">W1 [10:00, 10:01)</text>
+            <text x="420" y="80" class="dg-t">W2 [10:01, 10:02)</text>
+            <text data-s="1" x="230" y="80" class="dg-in">count=1</text>
+            <text data-s="2-3" x="230" y="80" class="dg-in">count=2</text>
+            <text data-s="4" x="230" y="80" class="dg-in">count=3</text>
+            <text data-s="5-" x="230" y="80" class="dg-ok">FINAL 3</text>
+            <text data-s="3-4" x="596" y="80" class="dg-in">count=1</text>
+            <text data-s="5-" x="596" y="80" class="dg-in">count=2</text>
+            <!-- счётчик: stream time и что ушло на выход -->
+            <g data-s="1"><text x="20" y="206" class="dg-t">stream time = 10:00:05</text><text x="20" y="224" class="dg-s">update W1=1</text></g>
+            <g data-s="2"><text x="20" y="206" class="dg-t">stream time = 10:00:40</text><text x="20" y="224" class="dg-s">update W1=2</text></g>
+            <g data-s="3"><text x="20" y="206" class="dg-t">stream time = 10:01:05</text><text x="20" y="224" class="dg-s">update W2=1, W1 ещё открыто</text></g>
+            <g data-s="4"><text x="20" y="206" class="dg-t">stream time = 10:01:05</text><text x="20" y="224" class="dg-s">10:00:55 опоздал, но 10:01:05 &lt; 10:01:10: update W1=3</text></g>
+            <g data-s="5"><text x="20" y="206" class="dg-t">stream time = 10:01:30</text><text x="20" y="224" class="dg-ok">W1 закрыто: suppress выпускает FINAL W1=3</text></g>
+            <g data-s="6"><text x="20" y="206" class="dg-t">stream time = 10:01:30</text><text x="20" y="224" class="dg-bad">10:00:58 в закрытое окно: dropped-records-total=1</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Платёж 10:00:05 открыл окно W1. Stream time стал 10:00:05, на выход ушло обновление W1=1.</li>
+          <li>Платёж 10:00:40: W1=2. Stream time сдвинулся вперёд, к самому позднему увиденному времени.</li>
+          <li>Платёж 10:01:05 открыл W2. Конец W1 уже позади, но W1 ещё открыто: закроется, когда stream time дойдёт до 10:01:00 + grace 10 с = 10:01:10.</li>
+          <li>Пришёл платёж 10:00:55 — на 10 секунд позже, чем 10:01:05. Stream time не сдвинулся, W1 открыто, счётчик стал 3. Без grace (<code>ofSizeWithNoGrace</code>) этот платёж был бы отброшен.</li>
+          <li>Платёж 10:01:30 сдвинул stream time за 10:01:10. W1 закрыто, и только теперь <code>suppress</code> выпускает итог W1=3. Для W2 итога нет: ему нужен stream time 10:02:10.</li>
+          <li>Платёж 10:00:58 опоздал в закрытое окно. Streams его пропускает и увеличивает метрику <code>dropped-records-total</code>. В счётчик W1 он уже не попадёт.</li>
+        </ol>
+      </figure>
+      <p>Без <code>suppress</code> оконный count — это поток <b>обновлений</b>: каждый платёж выпускает новое значение счётчика для своего окна, и потребитель должен воспринимать его как upsert по ключу «карта + окно». Для дашборда это удобно. Для тревоги «отправить одно письмо на окно» нужен итог: <code>suppress(untilWindowCloses(...))</code> держит последнее значение в буфере до закрытия окна. Цена — задержка на размер окна плюс grace и память буфера.</p>
+      <p>Последние строки вывода — главная ловушка. Настенное время сдвинули на час, а итога W2 нет: окно закрывает только stream time, а его двигают только новые записи этой задачи. Если ночью платежей в партиции нет, последнее окно вечера закроется утром с первым платежом. Причём двигает его любая запись партиции, не только той же карты. Если итог нужен вовремя, в топик шлют служебные heartbeat-события или пишут закрытие через Processor API и punctuator по настенному времени.</p>
+      <div class="trap">
+        <p class="myth">Минутное окно закрывается, когда по часам сервера прошла минута после его конца.</p>
+        <p class="fact">Часы сервера Kafka Streams для окон не использует. Окно закрывает stream time — максимальный timestamp увиденных записей задачи. Нет новых записей — окно открыто сколько угодно, и <code>suppress</code> молчит.</p>
+      </div>
+      <h3>Watermarks во Flink</h3>
+      <p>Flink решает ту же задачу явным сигналом. Источник генерирует <b>watermark</b> — служебную метку «событий старше T больше не жду», обычно <code>WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(10))</code>: максимум увиденного времени минус 10 секунд. Watermark течёт по графу вместе с данными, оператор с несколькими входами берёт минимальный.</p>
+      <p>Окно срабатывает, когда watermark прошёл его конец. Опоздавшие события можно ещё принять через <code>allowedLateness</code> или отправить в side output вместо тихого отбрасывания. Для тихих партиций есть <code>withIdleness</code>: иначе минимальный watermark стоит, и окна не закрываются нигде. Stream time плюс grace в Kafka Streams — та же идея, только без отдельной метки: время ведёт каждая задача сама.</p>
+    </section>
+
+    <section class="step" id="joins">
+      <h2>Join со справочником берёт текущее значение таблицы, а не значение на момент платежа</h2>
+      <p>Обогащение: к каждому платежу приклеить статус карты — active или blocked, чтобы антифрод видел платежи по заблокированным картам. Статусы карт пишет другой сервис в compacted-топик <code>cards</code>. Тут нужны две абстракции. <b>KStream</b> — каждая запись отдельный факт: платёж p-1, платёж p-2. <b>KTable</b> — каждая запись заменяет прежнее значение ключа: статус карты c-1 сейчас blocked, а запись с value = null удаляет ключ. Один и тот же топик можно читать и так и так, смысл задаёт код.</p>
+      <p>Join <code>KStream</code> с <code>KTable</code> асимметричен. Платёж приходит — Streams смотрит в локальный store таблицы и берёт значение ключа, которое там лежит прямо сейчас. Обновление таблицы ничего не выпускает: прошлые платежи не пересчитываются. Тот же вход прогоним через обычную KTable и через версионированную, которая хранит историю значений:</p>
+      <pre><code class="language-java">KTable&lt;String, String&gt; cards = b.table("cards", Consumed.with(Serdes.String(), Serdes.String()), store);
+b.&lt;String, String&gt;stream("payments")                                   // ключ — карта, как и у cards
+ .leftJoin(cards, (payment, status) -&gt; payment + " card=" + status)    // поиск в таблице в момент платежа
+ .to("enriched");
+// store: Stores.persistentKeyValueStore("cards")
+//    или Stores.persistentVersionedKeyValueStore("cards", Duration.ofDays(1))
+
+cardsIn.pipeInput("c-1", "active", at(0));
+payIn.pipeInput("c-1", "p-1@10:00:10", at(10));
+cardsIn.pipeInput("c-1", "blocked", at(60));      // карту заблокировали в 10:01:00
+payIn.pipeInput("c-1", "p-2@10:01:10", at(70));
+payIn.pipeInput("c-1", "p-3@10:00:50", at(50));   // опоздал: совершён до блокировки
+payIn.pipeInput("c-2", "p-4@10:01:20", at(80));   // профиля c-2 ещё нет
+cardsIn.pipeInput("c-2", "active", at(85));       // профиль пришёл после платежа</code></pre>
+      <pre class="out">== plain KTable
+  p-1@10:00:10 card=active
+  p-2@10:01:10 card=blocked
+  p-3@10:00:50 card=blocked
+  p-4@10:01:20 card=null
+== versioned KTable
+  p-1@10:00:10 card=active
+  p-2@10:01:10 card=blocked
+  p-3@10:00:50 card=active
+  p-4@10:01:20 card=null</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 214" role="img" aria-label="Сверху статус карты c-1 на оси времени: active до 10:01:00, потом blocked. Снизу платежи p-1 в 10:00:10, p-3 в 10:00:50 и p-2 в 10:01:10. p-1 видит active, p-2 видит blocked. Опоздавший p-3 в обычной KTable видит текущий blocked, в версионированной — active, действовавший в 10:00:50.">
+            <defs>
+              <marker id="jn-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="jn-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- ось -->
+            <line x1="120" y1="40" x2="660" y2="40" class="dg-line"/>
+            <!-- статусы карты -->
+            <rect x="120" y="56" width="358" height="30" rx="5" class="dg-cell"/>
+            <rect x="482" y="56" width="178" height="30" rx="5" class="dg-cell miss"/>
+            <!-- платежи -->
+            <rect x="155" y="156" width="50" height="30" rx="5" class="dg-cell"/>
+            <rect x="395" y="156" width="50" height="30" rx="5" class="dg-cell"/>
+            <rect x="515" y="156" width="50" height="30" rx="5" class="dg-cell"/>
+            <!-- что видит каждый платёж -->
+            <path d="M180 154 L 180 90" class="dg-line ok" marker-end="url(#jn-ok)"/>
+            <path d="M540 154 L 540 90" class="dg-line ok" marker-end="url(#jn-ok)"/>
+            <path d="M410 154 C 410 124, 400 112, 400 90" class="dg-line ok" marker-end="url(#jn-ok)"/>
+            <path d="M432 154 C 432 120, 500 116, 506 90" class="dg-line bad" marker-end="url(#jn-bad)"/>
+
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="120" y="28" class="dg-n">10:00:00</text><text x="300" y="28" class="dg-n">10:00:30</text>
+              <text x="480" y="28" class="dg-n">10:01:00</text><text x="660" y="28" class="dg-n">10:01:30</text>
+              <text x="180" y="176" class="dg-in">p-1</text><text x="420" y="176" class="dg-in">p-3</text><text x="540" y="176" class="dg-in">p-2</text>
+              <text x="420" y="204" class="dg-n">пришёл последним</text>
+            </g>
+            <text x="14" y="76" class="dg-t">cards c-1</text>
+            <text x="14" y="176" class="dg-t">payments</text>
+            <text x="140" y="76" class="dg-in">active</text>
+            <text x="500" y="76" class="dg-in">blocked</text>
+            <text x="396" y="126" class="dg-ok" text-anchor="end">versioned: active</text>
+            <text x="560" y="126" class="dg-bad">обычная: blocked</text>
+          </svg>
+        </div>
+        <figcaption>p-3 совершён в 10:00:50, до блокировки, но обработан после неё. Обычная таблица знает только последнее значение, версионированная ищет значение на время платежа.</figcaption>
+      </figure>
+      <p>Какой ответ верный, решает бизнес. Для отчёта «сколько платежей прошло по заблокированным картам» нужен статус на момент платежа — versioned store (Kafka 3.5, KIP-914) с историей на заданный срок. Для решения «пропускать ли платёж сейчас» — текущий. p-4 пришёл раньше профиля c-2: <code>leftJoin</code> отдал <code>null</code>, внутренний <code>join</code> выкинул бы платёж совсем, а профиль, пришедший позже, p-4 уже не догонит. Если справочник может опаздывать, его заранее загружают, а платёж без профиля отправляют на повторную обработку.</p>
+      <p>В тесте порядок задаёт сам тест. В настоящем приложении задача, читающая и <code>payments</code>, и <code>cards</code>, выбирает следующую запись по наименьшему timestamp среди своих партиций. С <code>max.task.idle.ms=0</code> по умолчанию она ждёт данные, которые уже лежат на брокере, но не ждёт продюсеров. Поэтому на догоне lag join идёт почти по времени событий, а в реальном времени возможны перестановки — от них и спасает versioned store.</p>
+      <h3>Co-partitioning: ключи должны лежать в партициях с одинаковыми номерами</h3>
+      <p>Задача 0_1 видит только партицию 1 платежей и партицию 1 карт. Join найдёт статус карты, только если продюсеры обоих топиков положили ключ c-1 в партицию с одним номером: одинаковый ключ, одинаковый partitioner, <b>одинаковое число партиций</b>. Проверка на встроенном брокере: у <code>payments</code> 3 партиции, у <code>cards</code> сначала 3, потом 2, статус есть у всех шести карт.</p>
+      <pre><code class="language-bash">java -cp "$(cat target/classpath.txt)" CopartitionDemo.java 3   # cards: 3 партиции
+java -cp "$(cat target/classpath.txt)" CopartitionDemo.java 2   # cards: 2 партиции</code></pre>
+      <pre class="out">### 3
+state: RUNNING
+tasks: {0_0=[cards-0, payments-0], 0_1=[cards-1, payments-1], 0_2=[cards-2, payments-2]}
+enriched: [p-1 card=active, p-2 card=active, p-3 card=active, p-4 card=active, p-5 card=active, p-6 card=active]
+### 2
+state: RUNNING
+tasks: {0_0=[cards-0, payments-0], 0_1=[cards-1, payments-1], 0_2=[payments-2]}
+enriched: [p-1 card=null, p-2 card=null, p-3 card=active, p-4 card=null, p-5 card=active, p-6 card=null]</pre>
+      <p>С двумя партициями у <code>cards</code> приложение не упало и работает: у задачи 0_2 таблицы нет вовсе, а у остальных номер партиции ключа в двух топиках разный, потому что <code>hash(key) % 3</code> и <code>hash(key) % 2</code> совпадают не всегда. Четыре платежа из шести молча ушли без статуса. Так ломается join после того, как кто-то добавил партиции в один из топиков (<a href="kafka-ops.html">Operations</a>). Если ключи не совпадают по смыслу, Streams делает repartition сам, как при <code>selectKey</code>; совпадение числа партиций у входных топиков обеспечиваешь ты.</p>
+      <p>Если справочник небольшой, его читают как <b>GlobalKTable</b>: полная копия на каждом экземпляре, co-partitioning не нужен, а ключ для поиска можно вытащить из значения платежа. Цена — весь справочник на диске каждого экземпляра, и обновления global-таблицы не синхронизированы по времени с потоком. Join двух потоков, например авторизации и списания одного платежа, требует окна <code>JoinWindows.ofTimeDifferenceAndGrace(...)</code>: Streams держит обе стороны в оконных store и выпускает пару, когда записи с одним ключом встретились в пределах окна.</p>
+      <div class="trap">
+        <p class="myth">Когда профиль карты придёт, join допишет статус к уже обработанному платежу.</p>
+        <p class="fact">В join KStream–KTable запись выпускает только сторона потока. Обновление таблицы меняет store и ничего не отправляет: в демо p-4 так и остался с <code>card=null</code>. Пересчёт в обе стороны даёт join двух таблиц, KTable–KTable.</p>
+      </div>
+    </section>
+
+    <section class="step" id="eos">
+      <h2>Exactly-once коммитит выход, changelog и смещения одной транзакцией, иначе счётчик задваивается после падения</h2>
+      <p>При <code>at_least_once</code>, режиме по умолчанию, у задачи три независимые записи: результат в выходной топик, изменение store в changelog и смещение входа, которое коммитится раз в <code>commit.interval.ms</code> (30 с). Экземпляр, упавший между ними, оставляет changelog впереди смещения. Новый владелец восстановит store из changelog — уже с учётом платежей — и обработает те же платежи снова. Для идемпотентной записи в базу это повтор, для счётчика — неверное число.</p>
+      <p>Опыт: два платежа карты c-1, экземпляр A считает их и умирает через <code>Runtime.halt</code> до коммита, задачу забирает экземпляр B с пустым диском. A и B — отдельные JVM, брокер встроенный.</p>
+      <pre><code class="language-java">b.&lt;String, String&gt;stream("payments")
+ .groupByKey()
+ .count(Materialized.as("totals"))                       // store totals, changelog antifraud-totals-changelog
+ .toStream()
+ .peek((card, n) -&gt; System.out.println(me + ": " + card + " count=" + n))
+ .to("card-totals", Produced.with(Serdes.String(), Serdes.Long()));
+
+props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, guarantee);   // at_least_once или exactly_once_v2
+props.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 10_000);        // A упадёт раньше коммита
+props.put(StreamsConfig.STATESTORE_CACHE_MAX_BYTES_CONFIG, 0);     // каждое обновление сразу в changelog
+
+// Экземпляр A: обработал оба платежа, подождал секунду, пока записи уйдут на брокер, и
+Runtime.getRuntime().halt(1);                                      // kill -9: ни коммита, ни закрытия
+// Экземпляр B: тот же application.id, другой state.dir, StateRestoreListener печатает восстановление.</code></pre>
+      <pre class="out">### at_least_once
+A: restored 0 records of antifraud-totals-changelog
+A: c-1 count=1
+A: c-1 count=2
+A: crash before commit
+B: restored 2 records of antifraud-totals-changelog
+B: c-1 count=3
+B: c-1 count=4
+B: store totals[c-1]=4
+card-totals read_uncommitted: [1, 2, 3, 4]
+card-totals read_committed:   [1, 2, 3, 4]
+antifraud-totals-changelog cleanup.policy=compact
+### exactly_once_v2
+A: restored 0 records of antifraud-totals-changelog
+A: c-1 count=1
+A: c-1 count=2
+A: crash before commit
+B: restored 0 records of antifraud-totals-changelog
+B: c-1 count=1
+B: c-1 count=2
+B: store totals[c-1]=2
+card-totals read_uncommitted: [1, 2, 1, 2]
+card-totals read_committed:   [1, 2]
+antifraud-totals-changelog cleanup.policy=compact</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 246" role="img" aria-label="Две дорожки: at-least-once сверху, exactly-once снизу. Экземпляр A обрабатывает два платежа, пишет changelog и выход и падает до коммита. В at-least-once экземпляр B восстанавливает счётчик 2 из changelog, обрабатывает платежи снова и получает 4. В exactly-once транзакция A отменена, B восстанавливает 0, обрабатывает платежи и получает 2, а read_committed видит только 1 и 2.">
+            <defs>
+              <marker id="eo-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <line x1="14" y1="132" x2="706" y2="132" class="dg-sep"/>
+            <!-- входы -->
+            <rect x="20" y="68" width="46" height="28" rx="5" class="dg-cell"/><rect x="72" y="68" width="46" height="28" rx="5" class="dg-cell"/>
+            <rect x="20" y="178" width="46" height="28" rx="5" class="dg-cell"/><rect x="72" y="178" width="46" height="28" rx="5" class="dg-cell"/>
+            <!-- экземпляры: A жив, A упал, B -->
+            <g data-s="1"><rect x="150" y="56" width="120" height="52" rx="8" class="dg-box"/><rect x="150" y="166" width="120" height="52" rx="8" class="dg-box"/></g>
+            <g data-s="2"><rect x="150" y="56" width="120" height="52" rx="8" class="dg-cell miss"/><rect x="150" y="166" width="120" height="52" rx="8" class="dg-cell miss"/></g>
+            <g data-s="3-"><rect x="150" y="56" width="120" height="52" rx="8" class="dg-box"/><rect x="150" y="166" width="120" height="52" rx="8" class="dg-box"/></g>
+            <!-- at-least-once: changelog и выход -->
+            <g data-s="1-"><rect x="300" y="56" width="34" height="24" rx="4" class="dg-cell"/><rect x="338" y="56" width="34" height="24" rx="4" class="dg-cell"/>
+              <rect x="300" y="84" width="34" height="24" rx="4" class="dg-cell"/><rect x="338" y="84" width="34" height="24" rx="4" class="dg-cell"/></g>
+            <g data-s="4"><rect x="376" y="56" width="34" height="24" rx="4" class="dg-cell miss"/><rect x="414" y="56" width="34" height="24" rx="4" class="dg-cell miss"/>
+              <rect x="376" y="84" width="34" height="24" rx="4" class="dg-cell miss"/><rect x="414" y="84" width="34" height="24" rx="4" class="dg-cell miss"/></g>
+            <!-- exactly-once: записи A в транзакции, потом отменены -->
+            <g data-s="1-2"><rect x="300" y="166" width="34" height="24" rx="4" class="dg-cell"/><rect x="338" y="166" width="34" height="24" rx="4" class="dg-cell"/>
+              <rect x="300" y="194" width="34" height="24" rx="4" class="dg-cell"/><rect x="338" y="194" width="34" height="24" rx="4" class="dg-cell"/></g>
+            <g data-s="3-"><rect x="300" y="166" width="34" height="24" rx="4" class="dg-cell miss"/><rect x="338" y="166" width="34" height="24" rx="4" class="dg-cell miss"/>
+              <rect x="300" y="194" width="34" height="24" rx="4" class="dg-cell miss"/><rect x="338" y="194" width="34" height="24" rx="4" class="dg-cell miss"/></g>
+            <g data-s="4"><rect x="376" y="166" width="34" height="24" rx="4" class="dg-cell hit"/><rect x="414" y="166" width="34" height="24" rx="4" class="dg-cell hit"/>
+              <rect x="376" y="194" width="34" height="24" rx="4" class="dg-cell hit"/><rect x="414" y="194" width="34" height="24" rx="4" class="dg-cell hit"/></g>
+            <!-- стрелки -->
+            <path d="M118 82 L 146 82" class="dg-line" marker-end="url(#eo-n)"/>
+            <path d="M270 68 L 296 68" class="dg-line" marker-end="url(#eo-n)"/>
+            <path d="M270 96 L 296 96" class="dg-line" marker-end="url(#eo-n)"/>
+            <path d="M118 192 L 146 192" class="dg-line" marker-end="url(#eo-n)"/>
+            <path d="M270 178 L 296 178" class="dg-line" marker-end="url(#eo-n)"/>
+            <path d="M270 206 L 296 206" class="dg-line" marker-end="url(#eo-n)"/>
+
+            <!-- подписи -->
+            <text x="20" y="20" class="dg-cap">ВХОД</text>
+            <text x="150" y="20" class="dg-cap">ЭКЗЕМПЛЯР</text>
+            <text x="300" y="20" class="dg-cap">ЗАПИСИ В KAFKA</text>
+            <text x="20" y="46" class="dg-cap">AT_LEAST_ONCE</text>
+            <text x="20" y="156" class="dg-cap">EXACTLY_ONCE_V2</text>
+            <g text-anchor="middle">
+              <text x="43" y="87" class="dg-in">p-1</text><text x="95" y="87" class="dg-in">p-2</text>
+              <text x="43" y="197" class="dg-in">p-1</text><text x="95" y="197" class="dg-in">p-2</text>
+              <g data-s="1-"><text x="317" y="73" class="dg-in">1</text><text x="355" y="73" class="dg-in">2</text><text x="317" y="101" class="dg-in">1</text><text x="355" y="101" class="dg-in">2</text></g>
+              <g data-s="4"><text x="393" y="73" class="dg-in">3</text><text x="431" y="73" class="dg-in">4</text><text x="393" y="101" class="dg-in">3</text><text x="431" y="101" class="dg-in">4</text></g>
+              <g data-s="1-"><text x="317" y="183" class="dg-in">1</text><text x="355" y="183" class="dg-in">2</text><text x="317" y="211" class="dg-in">1</text><text x="355" y="211" class="dg-in">2</text></g>
+              <g data-s="4"><text x="393" y="183" class="dg-in">1</text><text x="431" y="183" class="dg-in">2</text><text x="393" y="211" class="dg-in">1</text><text x="431" y="211" class="dg-in">2</text></g>
+            </g>
+            <text x="456" y="73" class="dg-n">changelog</text>
+            <text x="456" y="101" class="dg-n">card-totals</text>
+            <text x="456" y="183" class="dg-n">changelog</text>
+            <text x="456" y="211" class="dg-n">card-totals</text>
+            <!-- содержимое экземпляров по шагам -->
+            <g data-s="1"><text x="162" y="76" class="dg-t">A</text><text x="162" y="96" class="dg-in">store c-1=2</text>
+              <text x="162" y="186" class="dg-t">A</text><text x="162" y="206" class="dg-in">store c-1=2</text></g>
+            <g data-s="2"><text x="162" y="76" class="dg-bad">A: halt</text><text x="162" y="186" class="dg-bad">A: halt</text></g>
+            <g data-s="3"><text x="162" y="76" class="dg-t">B</text><text x="162" y="96" class="dg-in">store c-1=2</text>
+              <text x="162" y="186" class="dg-t">B</text><text x="162" y="206" class="dg-in">store c-1=0</text></g>
+            <g data-s="4"><text x="162" y="76" class="dg-t">B</text><text x="162" y="96" class="dg-bad">store c-1=4</text>
+              <text x="162" y="186" class="dg-t">B</text><text x="162" y="206" class="dg-ok">store c-1=2</text></g>
+            <!-- статус по шагам -->
+            <g data-s="1"><text x="540" y="74" class="dg-s">смещение не закоммичено</text><text x="540" y="184" class="dg-s">транзакция открыта</text></g>
+            <g data-s="2"><text x="540" y="74" class="dg-bad">упал до коммита</text><text x="540" y="184" class="dg-bad">упал до коммита</text></g>
+            <g data-s="3"><text x="540" y="74" class="dg-s">B: restored 2</text><text x="540" y="94" class="dg-s">читает p-1 снова</text>
+              <text x="540" y="184" class="dg-s">транзакция A отменена</text><text x="540" y="204" class="dg-s">B: restored 0</text></g>
+            <g data-s="4"><text x="540" y="74" class="dg-bad">4 на 2 платежа</text><text x="540" y="94" class="dg-s">видно всем: [1,2,3,4]</text>
+              <text x="540" y="184" class="dg-ok">2 на 2 платежа</text><text x="540" y="204" class="dg-s">read_committed [1, 2]</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Экземпляр A обработал p-1 и p-2: в store 2, в changelog и в выходе записи 1 и 2. Смещение входа ещё не закоммичено. В exactly-once все четыре записи лежат в логе внутри открытой транзакции.</li>
+          <li>A умер через <code>halt</code>: ни коммита смещения, ни коммита транзакции.</li>
+          <li>Задачу получил B с пустым диском. В at-least-once changelog обычный, и B восстановил store = 2. В exactly-once транзакция A отменена, записи с маркером ABORT при восстановлении пропускаются: store = 0. В обоих случаях смещение входа не сдвинуто, и B читает p-1 снова.</li>
+          <li>B обработал оба платежа второй раз. At-least-once: 3 и 4 поверх восстановленных 2, итог 4 на два платежа, и read_committed это не спасает: транзакций нет. Exactly-once: 1 и 2 в новой транзакции, итог 2, read_committed видит [1, 2].</li>
+        </ol>
+      </figure>
+      <p>С <code>processing.guarantee=exactly_once_v2</code> каждый поток Streams держит один транзакционный продюсер. Коммит задачи — это транзакция: выходные записи, записи changelog и смещения входа через <code>sendOffsetsToTransaction</code> фиксируются вместе или отменяются вместе. Восстановление читает changelog с <code>read_committed</code>, поэтому store всегда соответствует закоммиченному смещению. Как устроены маркеры, LSO и фенсинг зомби — в <a href="kafka-delivery.html">Delivery Semantics</a>. Значения <code>exactly_once</code> и <code>exactly_once_beta</code> в 4.x больше нет: 4.2 принимает только <code>at_least_once</code> и <code>exactly_once_v2</code>.</p>
+      <p>Цена видна в цифрах. В EOS <code>commit.interval.ms</code> по умолчанию 100 мс, а не 30 с: результат виден <code>read_committed</code>-читателям только после коммита, и частые транзакции снижают пропускную способность. Интервал нельзя поднять выше <code>transaction.timeout.ms</code> продюсера, у Streams это 10 с: на 60 с конструктор <code>KafkaStreams</code> падает с <code>IllegalArgumentException</code>.</p>
+      <p>В опыте B начал обработку примерно на 9 секунд позже, чем в at-least-once. Это сходится с таймаутом транзакции в 10 с: пока брокер не отменил открытую транзакцию A, LSO changelog стоит на её начале, и read_committed-восстановление не может его пройти. Ещё одна цена — после аварийной остановки в EOS Streams не доверяет локальному store без чекпойнта и восстанавливает его из changelog заново.</p>
+      <div class="trap">
+        <p class="myth">С exactly_once_v2 каждый платёж обрабатывается ровно один раз.</p>
+        <p class="fact">Обработка повторяется: в опыте B второй раз прочитал p-1 и p-2. Ровно один раз фиксируется результат в Kafka — выход, changelog и смещения. HTTP-вызов банка, письмо или запись в базу из <code>peek</code> или <code>foreach</code> повторятся. Для них нужен идемпотентный обработчик (<a href="messaging.html">Brokers &amp; Guarantees</a>) или запись результата в топик и <a href="outbox.html">outbox</a>-подобная доставка дальше. И читатели <code>card-totals</code> должны читать с <code>isolation.level=read_committed</code>: по умолчанию они видят и отменённые [1, 2, 1, 2].</p>
+      </div>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Kafka Streams хорош для Kafka-в-Kafka внутри сервиса, Flink — для больших состояний и других источников</h2>
+      <p>Kafka Streams — библиотека. Его разворачивают как обычный Spring Boot-сервис, масштабируют числом подов до числа партиций и мониторят как обычное приложение. Зато он привязан к Kafka: вход и выход — топики, состояние — RocksDB плюс changelog в той же Kafka. Flink — отдельный кластер: JobManager планирует job, TaskManager-ы исполняют операторы, а состояние периодически сохраняется целиком в checkpoint на S3 или HDFS. Барьеры checkpoint идут по графу вместе с данными и дают согласованный снимок всех операторов сразу.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Kafka Streams</th><th>Flink</th><th>Обычный консьюмер</th></tr></thead>
+        <tbody>
+          <tr><td>Как развёрнут</td><td>библиотека в сервисе</td><td>свой кластер, job</td><td>библиотека в сервисе</td></tr>
+          <tr><td>Источники</td><td>только Kafka</td><td>Kafka, CDC, файлы, базы</td><td>Kafka</td></tr>
+          <tr><td>Состояние</td><td>RocksDB + changelog, восстановление перечитыванием</td><td>RocksDB + checkpoint в объектное хранилище</td><td>своё: база, кеш</td></tr>
+          <tr><td>Время</td><td>stream time задачи + grace</td><td>watermarks, allowed lateness, side output</td><td>своё</td></tr>
+          <tr><td>Exactly-once</td><td>транзакции Kafka</td><td>checkpoint + двухфазный коммит sink</td><td>идемпотентность обработчика</td></tr>
+          <tr><td>Когда брать</td><td>агрегаты, окна, обогащение между топиками</td><td>большие состояния, много источников, SQL над потоками</td><td>обработка записей по одной</td></tr>
+        </tbody>
+      </table>
+      <p>Признаки, что Kafka Streams мало: состояние в терабайты, которое после потери диска восстанавливается часами; нужно соединять Kafka с CDC из нескольких баз и файлами; аналитики хотят писать окна на SQL. Тогда смотрят на Flink, а если в компании уже есть Spark — на Structured Streaming с микробатчами и задержкой от сотен миллисекунд.</p>
+      <p>Признаки, что stream processing не нужен вовсе: каждое событие обрабатывается само по себе — отправить уведомление, записать в базу, переложить в другой топик. Это обычный консьюмер или <a href="spring-kafka.html">Spring Kafka</a> с идемпотентной обработкой. Агрегат нужен раз в сутки для отчёта — батч SQL по таблице проще и дешевле. Состояние маленькое и уже есть в базе — <code>UPDATE ... SET count = count + 1</code> с таблицей обработанных id даёт тот же счётчик без нового фреймворка. Если события — источник истины, а не поток для вычисления, это <a href="event-driven.html">Event Sourcing и CQRS</a>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Stream processing — это управляемое состояние поверх потока: Kafka Streams держит store рядом с задачей и копию в changelog, поэтому счётчик переживает рестарт и переезд задачи.</li>
+        <li>Задача = партиция входа под-топологии. Смена ключа перед агрегатом добавляет repartition-топик, а join требует одинакового числа партиций — иначе часть записей молча не найдёт пару.</li>
+        <li>Окна считаются по event time, а закрываются stream time + grace. Нет новых записей в партиции — окно открыто, и suppress молчит.</li>
+        <li>Join потока с таблицей берёт значение на момент обработки; значение на момент события даёт versioned store.</li>
+        <li>exactly_once_v2 коммитит выход, changelog и смещения одной транзакцией: без него счётчик после падения задвоился 4 на 2 платежа. Внешние эффекты он не покрывает.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="stream-vs-batch" data-freq="1">
+      <h3>Чем потоковая обработка отличается от очереди и от батча? Когда нужен Kafka Streams?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Очередь доставляет отдельные сообщения обработчикам, и каждое обрабатывается само по себе. Батч считает конечный набор данных целиком — точно, но поздно, раз в час или в сутки. Потоковая обработка считает по бесконечному потоку по мере прихода событий: агрегаты по окнам, join со справочником, и при этом фреймворк хранит промежуточное состояние, восстанавливает его после сбоя и ведёт время событий.</p>
+          <p>Например, антифрод «больше трёх платежей по карте за минуту». На обычном консьюмере с HashMap счётчик теряется на деплое и при rebalance, задваивается при повторах, а после простоя весь lag влезает в одну минуту по часам сервера. Kafka Streams решает это store с changelog, окнами по event time и exactly-once. Беру его, когда вход и выход — топики Kafka и нужна агрегация или обогащение; если события обрабатываются по одному — хватает Spring Kafka.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Kafka Streams — библиотека: масштаб — число экземпляров сервиса до числа партиций, отдельного кластера нет. Flink — кластер с JobManager и TaskManager, состояние в checkpoint на S3, любые источники, watermarks. Его беру для состояний в терабайты и источников кроме Kafka.</li>
+            <li>Параллельность ограничена партициями: задача на партицию под-топологии. Смена ключа добавляет repartition-топик — лишняя запись и чтение каждого события через брокер.</li>
+            <li>Слабое место Kafka Streams — восстановление большого store из changelog. Лечат persistent volume под <code>state.dir</code>, standby-репликами и warmup-копиями.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Что такое KStream и KTable и можно ли читать один топик и так и так?</summary>
+          <p>KStream — поток фактов: каждая запись отдельное событие, два платежа одной карты — два платежа. KTable — таблица: запись заменяет прежнее значение ключа, null удаляет ключ. Топик один и тот же, разница в интерпретации. Платежи читают как поток, статусы карт из compacted-топика — как таблицу. Агрегат потока по ключу — тоже KTable: счётчик карты меняется с каждым платежом.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stream-crash" data-freq="1">
+      <h3>Экземпляр Kafka Streams упал посреди обработки. Что будет с состоянием и с результатом?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Состояние задачи лежит в локальном RocksDB, а каждое его изменение Streams пишет в changelog-топик. После падения группа отдаёт задачу другому экземпляру, он перечитывает changelog в свой store и продолжает с последнего закоммиченного смещения входа. Состояние не теряется, но платежи после последнего коммита обработаются ещё раз.</p>
+          <p>В at-least-once это значит, что changelog уже содержит их вклад, и счётчик задвоится: я проверял — два платежа, падение до коммита, новый экземпляр восстановил 2 и досчитал до 4. С <code>exactly_once_v2</code> выход, changelog и смещения коммитятся одной транзакцией, записи упавшего отменяются, новый экземпляр восстанавливает 0 и получает правильные 2.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>EOS стоит задержки: коммит каждые 100 мс, результат виден read_committed только после коммита. При падении новый владелец ждёт отмены открытой транзакции по <code>transaction.timeout.ms</code> — в опыте на 9 секунд дольше.</li>
+            <li>Время восстановления — размер changelog. Persistent volume для <code>state.dir</code> и <code>.checkpoint</code> сокращают его до хвоста, <code>num.standby.replicas</code> держит тёплую копию на другом экземпляре.</li>
+            <li>Exactly-once покрывает только записи в Kafka. HTTP-вызов или запись в базу из <code>foreach</code> повторятся — их делают идемпотентными или выносят в отдельный консьюмер выходного топика.</li>
+            <li>Downstream-консьюмеры должны читать с <code>read_committed</code>, иначе увидят и отменённые записи.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди проблему: приложение с exactly_once_v2 списывает комиссию через API банка</summary>
+          <pre><code class="language-java">props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG, StreamsConfig.EXACTLY_ONCE_V2);
+b.&lt;String, Payment&gt;stream("payments")
+ .filter((card, p) -&gt; p.amount() &gt; 10_000)
+ .foreach((card, p) -&gt; bankClient.chargeFee(p.id(), 50));   // списать комиссию</code></pre>
+          <p>Транзакция Kafka не откатывает HTTP-вызов. Если экземпляр упадёт после <code>chargeFee</code>, но до коммита, новый владелец прочитает тот же платёж и спишет комиссию второй раз. EOS здесь ничего не даёт: в Kafka ничего не пишется. Решение — передавать в банк ключ идемпотентности <code>p.id()</code>, чтобы банк отбросил повтор, или писать «комиссию к списанию» в топик и списывать отдельным идемпотентным консьюмером.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stream-windows" data-freq="1">
+      <h3>Какие бывают окна и что делать с опоздавшими событиями?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Tumbling — окна фиксированного размера встык, событие ровно в одном. Hopping — окна размера size с шагом advance, перекрываются, событие попадает в несколько. Session — окно на ключ, которое растёт, пока между событиями не больше gap. Sliding — окна по самим событиям, для правил «N событий за любые 60 секунд». Hopping ловит серию на стыке минут, которую tumbling разрезает на две половины.</p>
+          <p>Окна считаются по времени события. Kafka Streams ведёт stream time — максимум увиденных timestamp задачи — и закрывает окно, когда stream time дошёл до конца окна плюс grace. Опоздавшее событие в открытое окно принимается и обновляет счётчик, в закрытое — отбрасывается, и растёт метрика <code>dropped-records-total</code>. Если нужен один итог на окно, а не поток обновлений, ставлю <code>suppress(untilWindowCloses(...))</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Stream time двигают только новые записи партиции, часы сервера на него не влияют. Тихой ночью последнее окно не закроется и suppress не выпустит итог до первого утреннего события — нужны heartbeat-события или punctuator по настенному времени.</li>
+            <li>Grace — компромисс полноты и задержки: больше grace — меньше потерь, но итог позже и дольше держится состояние. С 3.0 его задают явно (<code>ofSizeAndGrace</code>), старый <code>TimeWindows.of</code> с grace в сутки в 4.x удалён.</li>
+            <li>Во Flink вместо stream time — watermarks от источника с bounded out-of-orderness, плюс allowed lateness и side output для опоздавших вместо тихого отбрасывания.</li>
+            <li>Hopping с маленьким шагом дорог: событие обновляет size / advance окон в store и changelog.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Окно 1 минута, grace 10 секунд. Платежи приходят в порядке 10:00:20, 10:01:08, 10:00:50, 10:01:15, 10:00:59. Какие попадут в окно [10:00, 10:01)?</summary>
+          <p>10:00:20 — да. 10:01:08 открывает следующее окно, stream time 10:01:08, а [10:00, 10:01) закрывается в 10:01:10 — ещё открыто. 10:00:50 опоздал, но stream time 10:01:08 &lt; 10:01:10 — принят. 10:01:15 сдвигает stream time за 10:01:10, окно закрыто. 10:00:59 отброшен. В окне два платежа, итог через suppress выйдет на записи 10:01:15.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="stream-join" data-freq="1">
+      <h3>Как работает join потока с таблицей в Kafka Streams и что может пойти не так?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Таблица, например статусы карт, материализуется в локальный store задачи. Когда приходит платёж, Streams ищет в этом store значение по ключу и выпускает обогащённую запись. Обновление таблицы ничего не выпускает: прошлые платежи не пересчитываются. Если ключа ещё нет, <code>leftJoin</code> отдаст null, а <code>join</code> выкинет платёж.</p>
+          <p>Ключ и партиции должны совпадать: задача видит партицию N платежей и партицию N карт, поэтому у топиков должно быть одинаковое число партиций. Я проверял: платежи в трёх партициях, карты в двух — приложение работает, но четыре платежа из шести без статуса. Если справочник маленький, беру GlobalKTable — полная копия на каждом экземпляре, co-partitioning не нужен.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Join берёт значение на момент обработки. Опоздавший платёж увидит статус, установленный после него. Versioned store (3.5, KIP-914) ищет значение на timestamp платежа.</li>
+            <li>Порядок между топиками задача выбирает по наименьшему timestamp; <code>max.task.idle.ms=0</code> ждёт только данные, уже лежащие на брокере, поэтому в реальном времени перестановки возможны.</li>
+            <li>Join двух потоков требует <code>JoinWindows</code>: обе стороны буферизуются в оконных store, и состояние растёт с размером окна.</li>
+            <li>Добавить партиции в один топик из пары — тихо сломать join. Число партиций у пары меняют вместе и с перезаливкой справочника.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://kafka.apache.org/documentation/streams/">Документация Kafka Streams</a> — основа урока: «Core Concepts» (stream time, задачи, KStream и KTable), «Architecture» (store, changelog, standby), Developer Guide, разделы «Windowing», «Joining» и «Processing Guarantees».</li>
+      <li>Martin Kleppmann, «Designing Data-Intensive Applications», глава 11 «Stream Processing»: event time, окна, join потоков и таблиц, отказоустойчивость.</li>
+      <li>KIP-129 и KIP-447 (exactly-once в Streams и v2 с продюсером на поток), KIP-914 (versioned stores), KIP-450 (sliding windows).</li>
+      <li><a href="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/">Flink, «Timely Stream Processing»</a> — watermarks, lateness и сравнение с подходом Kafka Streams.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

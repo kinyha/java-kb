@@ -183,6 +183,8 @@ window.KB_TREE = [
           scope: 'двойная запись, таблица outbox, поллинг и CDC, Debezium, дубли и порядок' },
         { id: 'rabbitmq', freq: 2, status: 'draft', title: 'RabbitMQ',
           scope: 'exchange и очереди, routing key, ack, prefetch, DLX, отличия от Kafka' },
+        { id: 'stream-processing', freq: 1, status: 'draft', title: 'Stream Processing',
+          scope: 'поток против очереди и батча, stateless и stateful, задачи и repartition, state store и changelog, standby, окна tumbling, hopping, session, sliding, event time и stream time, grace и suppress, watermarks, KStream и KTable, join и co-partitioning, versioned store, exactly_once_v2, Kafka Streams или Flink' },
       ] },
       { id: 'design', title: 'Code Design', source: 'GoF; Clean Architecture (Martin); Learning Domain-Driven Design (Khononov)', items: [
         { id: 'design-principles', freq: 3, status: 'draft', title: 'SOLID & Principles',
