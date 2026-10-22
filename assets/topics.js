@@ -549,8 +549,16 @@ window.KB_TREE = [
           scope: 'Bean Validation и каскад @Valid, проверка в контроллере и HandlerMethodValidationException, @Validated на сервисе, @ExceptionHandler и @ControllerAdvice, ProblemDetail и RFC 9457, /error в Boot' },
         { id: 'spring-clients', freq: 2, status: 'draft', title: 'HTTP Clients',
           scope: 'RestClient, RestTemplate, WebClient и HTTP-интерфейсы, библиотеки под ними, таймауты, пул соединений, ошибки 4xx и 5xx, @Retryable и идемпотентность, @ConcurrencyLimit' },
+      ] },
+      { id: 'reactive', title: 'Reactive', source: 'Reactive Streams Specification 1.0.4, Reactor Reference Guide 3.8, Spring Framework Reference: WebFlux', items: [
+        { id: 'reactive-streams', freq: 2, status: 'empty', title: 'Reactive Philosophy',
+          scope: 'поток на запрос и медленный I/O, Publisher, Subscriber, Subscription, request(n), onNext, onError, onComplete, push и pull, backpressure, ничего не происходит до subscribe, cold и hot, java.util.concurrent.Flow, реактивность или virtual threads' },
+        { id: 'reactor-operators', freq: 2, status: 'empty', title: 'Reactor Operators',
+          scope: 'map и flatMap, concatMap, flatMapSequential и concurrency, zip и merge, switchIfEmpty, defer, onErrorResume, onErrorMap, retryWhen и Retry.backoff, timeout, cache, share, replay, Sinks, StepVerifier и virtual time' },
         { id: 'spring-reactive', freq: 1, status: 'draft', title: 'WebFlux',
           scope: 'event loop Netty, блокирующий вызов и boundedElastic, Mono и Flux, подписка, publishOn и subscribeOn, Reactor Context вместо ThreadLocal, backpressure, WebFlux или виртуальные потоки' },
+        { id: 'reactive-pitfalls', freq: 2, status: 'empty', title: 'Reactive Pitfalls',
+          scope: 'block() в event loop, блокирующий JDBC и HTTP без boundedElastic, subscribe() внутри flatMap, забытая подписка, потерянный Reactor Context, MDC и security, неограниченный flatMap, checkpoint, Hooks.onOperatorDebug, ReactorDebugAgent, BlockHound' },
       ] },
       { id: 'data', title: 'Data', source: 'Spring Framework Reference: Data Access; Spring Start Here, гл. 12–14; Hibernate ORM User Guide', items: [
         { id: 'jdbc', freq: 2, status: 'draft', title: 'JDBC & Connection Pools',
