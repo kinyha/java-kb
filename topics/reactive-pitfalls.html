@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reactive Pitfalls · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="reactive-pitfalls">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Reactive Pitfalls</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Платёжный сервис на WebFlux прошёл все тесты, а в проде под нагрузкой health-check отвечает через секунды, часть платежей не сохраняется, в логах нет traceId, а банк жалуется на шквал запросов. У этих багов общая черта: ни один не бросает понятное исключение в месте, где ошибся разработчик. Блокировка тормозит чужие запросы, неподписанный Mono молча ничего не делает, отдельная подписка теряет ошибку и контекст, flatMap без лимита запускает сотни вызовов. Ниже каждый баг воспроизведён и показано, каким инструментом его находят: BlockHound, PublisherProbe, checkpoint и Reactor Debug Agent.</p>
+    </div>
+
+    <section class="step" id="blocking">
+      <h2>Блокировку в event loop тесты не замечают, а BlockHound находит</h2>
+      <p>Почему блокирующий вызов в потоке event loop останавливает все соединения этого потока, показано в теме <a href="spring-reactive.html">WebFlux</a>: с <code>Thread.sleep</code> в обработчике шесть запросов прошли тремя волнами. Здесь — почему такие вызовы доходят до прода. В тестах цепочку обычно подписывают из потока JUnit, данные приходят из моков мгновенно, и ничего не блокирует event loop, потому что его в тесте просто нет.</p>
+      <p>Первая защита встроена в сам Reactor: <code>block()</code> в потоке, помеченном как неблокирующий (event loop Netty, <code>Schedulers.parallel()</code>), бросает исключение. Но только если ждать действительно придётся. <a href="../examples/reactive/PitfallsDemo.java">PitfallsDemo.java</a>, часть <code>block</code>; поток <code>event-loop-1</code> создан через <code>Schedulers.newParallel</code> и помечен так же, как поток Netty:</p>
+      <pre><code class="language-bash">cd examples/reactive
+./run.sh PitfallsDemo block</code></pre>
+      <pre><code class="language-java">Mono.delay(Duration.ofMillis(10), LOOP)            // дальше цепочка идёт в потоке event-loop-1
+        .map(x -&gt; Mono.just("paid").block())        // значение уже готово: ждать не нужно
+        .subscribe(...);
+Mono.delay(Duration.ofMillis(10), LOOP)
+        .map(x -&gt; bankSlow().block())               // bankSlow() отвечает через 100 мс
+        .subscribe(...);</code></pre>
+      <pre class="out">block: block() inside a non-blocking thread
+  ready Mono: block() returned paid
+  slow Mono: java.lang.IllegalStateException: block()/blockFirst()/blockLast() are blocking, which is not supported in thread event-loop-1</pre>
+      <p>Проверка срабатывает, когда <code>block()</code> собирается ждать. Мок банка в тесте возвращает <code>Mono.just</code>, значение готово, и ошибки нет. В проде настоящий WebClient отвечает через 100 мс, и тот же код падает. А JDBC, <code>RestClient</code>, синхронный SDK или <code>Thread.sleep</code> не проверяет никто: они просто блокируют поток.</p>
+      <p>BlockHound закрывает эту дыру. Это Java-агент от команды Reactor: он инструментирует блокирующие методы JDK (<code>Thread.sleep</code>, чтение сокета и файла, <code>Object.wait</code>, парковку потоков) и бросает ошибку, если их вызвали из неблокирующего потока. Подключают его в тестах вызовом <code>BlockHound.install()</code>. Часть <code>blockhound</code>: вместо JDBC — метод, который ждёт 20 мс, три способа его вызвать.</p>
+      <pre><code class="language-bash">JAVA_OPTS=-XX:+AllowRedefinitionToAddDeleteMethods ./run.sh PitfallsDemo blockhound  # флаг нужен на JDK 13+</code></pre>
+      <pre><code class="language-java">BlockHound.install();
+Mono.delay(Duration.ofMillis(10), LOOP)
+        .map(x -&gt; jdbcFindAccount());                // блокирует event loop
+
+Mono.delay(Duration.ofMillis(10), LOOP)
+        .flatMap(x -&gt; Mono.just(jdbcFindAccount())   // аргумент считается здесь, на event loop
+                .subscribeOn(Schedulers.boundedElastic()));
+
+Mono.delay(Duration.ofMillis(10), LOOP)
+        .flatMap(x -&gt; Mono.fromCallable(PitfallsDemo::jdbcFindAccount) // вызов внутри подписки
+                .subscribeOn(Schedulers.boundedElastic()));</code></pre>
+      <pre class="out">blockhound: blocking calls on non-blocking threads
+  map(x -&gt; jdbc()) -&gt; reactor.blockhound.BlockingOperationError: Blocking call! java.lang.Thread.sleep0
+  flatMap(x -&gt; Mono.just(jdbc()).subscribeOn(boundedElastic)) -&gt; reactor.blockhound.BlockingOperationError: Blocking call! java.lang.Thread.sleep0
+  flatMap(x -&gt; Mono.fromCallable(jdbc).subscribeOn(boundedElastic)) -&gt; ACC-1 on boundedElastic-1</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 255" role="img" aria-label="Три варианта вызова JDBC на двух дорожках потоков: event-loop-1 и boundedElastic-1. В первом варианте JDBC выполняется в event loop, BlockHound бросает ошибку. Во втором тоже: Mono.just вычисляет аргумент в event loop ещё до перехода в boundedElastic. В третьем event loop только подписывает, переходит в boundedElastic и освобождается, а JDBC ждёт в потоке boundedElastic.">
+            <defs>
+              <marker id="pb-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="pb-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- дорожки потоков -->
+            <line x1="150" y1="44" x2="706" y2="44" class="dg-sep"/>
+            <line x1="150" y1="70" x2="706" y2="70" class="dg-sep"/>
+            <line x1="150" y1="124" x2="706" y2="124" class="dg-sep"/>
+            <line x1="150" y1="150" x2="706" y2="150" class="dg-sep"/>
+            <line x1="150" y1="204" x2="706" y2="204" class="dg-sep"/>
+            <line x1="150" y1="230" x2="706" y2="230" class="dg-sep"/>
+            <!-- 1: map(x -> jdbc()) -->
+            <rect x="150" y="34" width="50" height="20" rx="3" class="dg-cell"/>
+            <rect x="204" y="34" width="180" height="20" rx="3" class="dg-cell miss"/>
+            <!-- 2: Mono.just(jdbc()).subscribeOn -->
+            <rect x="150" y="114" width="50" height="20" rx="3" class="dg-cell"/>
+            <rect x="204" y="114" width="180" height="20" rx="3" class="dg-cell miss"/>
+            <!-- 3: fromCallable(jdbc).subscribeOn -->
+            <rect x="150" y="194" width="50" height="20" rx="3" class="dg-cell"/>
+            <rect x="204" y="194" width="180" height="20" rx="3" class="dg-sep" fill="none"/>
+            <rect x="214" y="220" width="180" height="20" rx="3" class="dg-cell hit"/>
+            <path d="M200 208 C 206 208, 206 224, 210 228" class="dg-line ok" marker-end="url(#pb-ok)"/>
+            <!-- заголовки -->
+            <text x="14" y="20" class="dg-cap bad">MAP(X -&gt; JDBC())</text>
+            <text x="14" y="100" class="dg-cap bad">MONO.JUST(JDBC()).SUBSCRIBEON(BOUNDEDELASTIC)</text>
+            <text x="14" y="180" class="dg-cap">MONO.FROMCALLABLE(JDBC).SUBSCRIBEON(BOUNDEDELASTIC)</text>
+            <!-- подписи дорожек -->
+            <text x="14" y="48" class="dg-n">event-loop-1</text>
+            <text x="14" y="74" class="dg-n">boundedElastic-1</text>
+            <text x="14" y="128" class="dg-n">event-loop-1</text>
+            <text x="14" y="154" class="dg-n">boundedElastic-1</text>
+            <text x="14" y="208" class="dg-n">event-loop-1</text>
+            <text x="14" y="234" class="dg-n">boundedElastic-1</text>
+            <!-- подписи блоков -->
+            <g text-anchor="middle">
+              <text x="175" y="48" class="dg-n">delay</text>
+              <text x="294" y="48" class="dg-in">jdbc() ждёт</text>
+              <text x="175" y="128" class="dg-n">delay</text>
+              <text x="294" y="128" class="dg-in">jdbc() ждёт</text>
+              <text x="175" y="208" class="dg-n">delay</text>
+              <text x="294" y="208" class="dg-s">свободен</text>
+              <text x="304" y="234" class="dg-in">jdbc() ждёт</text>
+            </g>
+            <text x="396" y="48" class="dg-bad">BlockingOperationError</text>
+            <text x="396" y="128" class="dg-bad">BlockingOperationError</text>
+            <text x="396" y="154" class="dg-s">сюда дошло бы готовое значение</text>
+            <text x="406" y="234" class="dg-ok">ACC-1, event loop обслуживал других</text>
+          </svg>
+        </div>
+        <figcaption>Во втором варианте subscribeOn стоит правильно, но опаздывает: Java вычисляет аргумент Mono.just до того, как Reactor получит управление.</figcaption>
+      </figure>
+      <p>Второй вариант — самый коварный: на ревью видно <code>subscribeOn(boundedElastic())</code>, и кажется, что всё вынесено. Но <code>Mono.just</code> принимает готовое значение, и JDBC выполняется в event loop при сборке внутреннего Mono. Правильно — <code>fromCallable</code>: тогда вызов произойдёт при подписке, а подписка уже переехала в boundedElastic. Сообщение BlockHound называет метод JDK, а стектрейс под ним ведёт к твоему коду: здесь <code>PitfallsDemo.jdbcFindAccount</code>.</p>
+      <div class="note tip">
+        <p>BlockHound ставят в тесты, а не в прод: инструментирование стоит времени, а исключение в проде ломает запрос. BlockHound смотрит на сам факт блокирующего метода, а не на то, сколько он ждал: интеграционный тест с быстрой базой в Testcontainers поймает JDBC в event loop. Мок, который вообще не вызывает блокирующих методов JDK, он не поймает, поэтому такие тесты гоняют на настоящих драйверах. Разрешённые места, например логирование с блокировкой внутри аппендера, добавляют через <code>BlockHound.builder().allowBlockingCallsInside(класс, метод)</code>.</p>
+      </div>
+    </section>
+
+    <section class="step" id="forgotten">
+      <h2>Mono, на который никто не подписался, ничего не делает и не падает</h2>
+      <p>Реактивный репозиторий возвращает <code>Mono&lt;Void&gt;</code>: сохранение произойдёт при подписке. Если результат вызова не встроен в цепочку, подписки не будет, а значит, и сохранения. Явная форма этой ошибки — <code>repository.save(p);</code> отдельной строкой — разобрана в теме <a href="spring-reactive.html#mono-flux">WebFlux</a>. В реальном коде она чаще прячется. Часть <code>forgotten</code>:</p>
+      <pre><code class="language-java">Mono.just("p1").doOnNext(p -&gt; save(p)).block();                          // Mono из save выброшен
+Mono.just("p1").flatMap(p -&gt; { save(p); return notifyClient(p); }).block(); // тоже выброшен
+Mono.just("p1").flatMap(p -&gt; save(p).then(notifyClient(p))).block();      // встроен в цепочку</code></pre>
+      <pre class="out">forgotten: Mono that nobody subscribed to
+  doOnNext(p -&gt; save(p)):            saved = 0
+  flatMap { save(p); return notify }: saved = 0
+  flatMap(p -&gt; save(p).then(notify)): saved = 1</pre>
+      <p><code>doOnNext</code> предназначен для побочных эффектов вроде логирования: он вызывает лямбду и выбрасывает её результат. Мысль «сохранить — это побочный эффект» приводит к самому частому варианту бага. Во втором случае save стоит отдельной строкой внутри лямбды flatMap: возвращается только Mono уведомления. В обоих случаях клиент получает 200, а в базе ничего. Исправление одно: каждый Mono должен стать частью возвращаемой цепочки — через <code>flatMap</code>, <code>then</code>, <code>Mono.when</code> или <code>zip</code>.</p>
+      <p>Найти такое место по логам нельзя: ошибки нет. Его ловят тестом, который проверяет эффект, а не ответ. Когда реальной базы в тесте нет, подходит <code>PublisherProbe</code> из reactor-test: мок репозитория возвращает <code>probe.mono()</code>, и тест проверяет, была ли на него подписка.</p>
+      <pre><code class="language-java">PublisherProbe&lt;Void&gt; probe = PublisherProbe.empty();  // мок save вернёт probe.mono()
+Mono.just("p1").doOnNext(p -&gt; probe.mono()).block();
+probe.assertWasSubscribed();</code></pre>
+      <pre class="out">  test with PublisherProbe: PublisherProbe should have been subscribed but it wasn't</pre>
+      <div class="trap">
+        <p class="myth">Если метод вызван, а исключения нет, значит, он отработал.</p>
+        <p class="fact">Метод, который возвращает Mono, только собирает описание работы. Без подписки работа не начнётся, и ни Reactor, ни BlockHound об этом не сообщат. Признак в коде — вызов, чей Mono или Flux не используется дальше: не возвращается, не передаётся в flatMap или then.</p>
+      </div>
+    </section>
+
+    <section class="step" id="nested">
+      <h2>subscribe() внутри flatMap отрывает работу от запроса: ошибка, контекст и отмена до неё не доходят</h2>
+      <p>Обратная крайность: разработчик знает, что без подписки ничего не произойдёт, и подписывается сам. Платёжный сервис пишет аудит, и чтобы «не задерживать ответ», аудит запускают отдельно: <code>audit(p).subscribe()</code> внутри flatMap. Часть <code>nested</code> на виртуальном времени: банк отвечает за 50 мс, аудит пишет 200 мс и в первом сценарии падает; запрос несёт в Context пользователя alice, как это делает Spring Security.</p>
+      <pre><code class="language-java">Mono.just("p1")
+        .flatMap(p -&gt; {
+            audit(p, 200, true).subscribe();         // отдельная подписка, без обработчика ошибок
+            return bank(p);
+        })
+        .contextWrite(Context.of("user", "alice"))   // контекст запроса
+        .subscribe(v -&gt; vlog("response: " + v), e -&gt; vlog("response error: " + e.getMessage()));
+
+Mono.just("p1")
+        .flatMap(p -&gt; audit(p, 200, true).then(bank(p))) // аудит в цепочке запроса
+        .contextWrite(Context.of("user", "alice"))
+        .subscribe(...);</code></pre>
+      <pre class="out">nested: subscribe() inside flatMap
+ fire-and-forget, audit fails after 200 ms:
+  t=50   response: p1 paid
+[main           ] traceId=none  Operators ERROR Operator called default onErrorDropped
+reactor.core.Exceptions$ErrorCallbackNotImplemented: java.lang.IllegalStateException: audit DB down
+ fire-and-forget, audit ok, user from context:
+  t=50   response: p1 paid
+  t=200  audit saved p1 for user anonymous
+ fire-and-forget, client disconnects at 20 ms:
+  t=20   bank call cancelled
+  t=20   client gone
+  t=200  audit saved p1 for user anonymous
+ in the chain: audit(p).then(bank(p)):
+  t=200  response error: audit DB down
+ in the chain: audit ok:
+  t=200  audit saved p1 for user alice
+  t=250  response: p1 paid</pre>
+      <p>Строка с ошибкой аудита напечатана в 200 мс виртуального времени из лога Reactor; стектрейс под ней обрезан. Четыре последствия одной отдельной подписки:</p>
+      <ul>
+        <li><b>Ошибка теряется.</b> Клиент получил «paid» в 50 мс, а падение аудита ушло в лог ERROR без связи с запросом. У <code>subscribe()</code> без обработчика ошибок Reactor отдаёт ошибку в <code>onErrorDropped</code>, и её видно только в логах.</li>
+        <li><b>Контекст теряется.</b> Аудит записан от имени anonymous: Context пишет <code>contextWrite</code> снизу, а у отдельной подписки своя цепочка без него. Так же пропадают SecurityContext, traceId и реактивная транзакция.</li>
+        <li><b>Отмена не доходит.</b> Клиент ушёл в 20 мс, вызов банка отменён, а аудит продолжил жить и записал платёж, которого клиент не дождался.</li>
+        <li><b>Нет backpressure и предела.</b> Под нагрузкой каждый запрос порождает фоновую задачу, и их число никто не ограничивает.</li>
+      </ul>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 222" role="img" aria-label="Две шкалы времени от 0 до 250 мс. Сверху аудит запущен отдельной подпиской: ответ клиенту уходит в 50 мс после банка, а аудит продолжается до 200 мс от имени anonymous и падает в лог. Снизу аудит в цепочке: сначала аудит до 200 мс от имени alice, потом банк до 250 мс, ответ или ошибка аудита приходят клиенту.">
+            <!-- шкала: x = 150 + 2 * t -->
+            <line x1="150" y1="196" x2="660" y2="196" class="dg-sep"/>
+            <!-- subscribe() внутри flatMap -->
+            <rect x="150" y="30" width="100" height="16" rx="3" class="dg-cell hit"/>
+            <line x1="250" y1="52" x2="250" y2="68" class="dg-line ok"/>
+            <rect x="150" y="74" width="400" height="16" rx="3" class="dg-cell miss"/>
+            <!-- в цепочке -->
+            <rect x="150" y="128" width="400" height="16" rx="3" class="dg-cell hit"/>
+            <rect x="550" y="150" width="100" height="16" rx="3" class="dg-cell hit"/>
+            <line x1="650" y1="170" x2="650" y2="182" class="dg-line ok"/>
+            <!-- заголовки и подписи дорожек -->
+            <text x="14" y="20" class="dg-cap bad">AUDIT(P).SUBSCRIBE() ВНУТРИ FLATMAP</text>
+            <text x="14" y="118" class="dg-cap">AUDIT(P).THEN(BANK(P))</text>
+            <text x="14" y="42" class="dg-n">банк</text>
+            <text x="14" y="64" class="dg-n">ответ клиенту</text>
+            <text x="14" y="86" class="dg-n">аудит, отдельно</text>
+            <text x="14" y="140" class="dg-n">аудит, alice</text>
+            <text x="14" y="162" class="dg-n">банк</text>
+            <text x="14" y="184" class="dg-n">ответ клиенту</text>
+            <text x="258" y="64" class="dg-ok">paid в 50 мс</text>
+            <text x="160" y="86" class="dg-n">user=anonymous, ошибка → лог onErrorDropped</text>
+            <text x="560" y="184" class="dg-s">в 250 мс</text>
+            <g text-anchor="middle">
+              <text x="150" y="211" class="dg-n">0</text><text x="250" y="211" class="dg-n">50</text><text x="350" y="211" class="dg-n">100</text>
+              <text x="450" y="211" class="dg-n">150</text><text x="550" y="211" class="dg-n">200</text><text x="650" y="211" class="dg-n">250 мс</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>Отдельная подписка выглядит быстрее на 200 мс. Цена — ответ «paid» при упавшем аудите и аудит от имени anonymous.</figcaption>
+      </figure>
+      <p>Правило: в прикладном коде <code>subscribe()</code> не вызывают, его вызывает фреймворк на то, что вернул обработчик. Работу встраивают в цепочку: последовательно через <code>then</code>, параллельно через <code>Mono.when(audit(p), notify(p)).then(bank(p))</code>. Если аудит и правда не должен задерживать ответ и может упасть, это требование надёжной фоновой доставки: событие кладут в outbox в той же транзакции или в Kafka, и его обработают с повторами. Отдельная подписка не даёт ни повторов, ни гарантии, что работа переживёт рестарт сервиса.</p>
+    </section>
+
+    <section class="step" id="context">
+      <h2>Context едет снизу вверх: операторы ниже contextWrite и чужие подписки его не видят</h2>
+      <p>Reactor Context заменяет ThreadLocal в реактивном коде (основы — в теме <a href="spring-reactive.html#context">WebFlux</a>). Его пишет <code>contextWrite</code>, а читает <code>deferContextual</code> или код фреймворка, например <code>ReactiveSecurityContextHolder.getContext()</code>. Ошибки начинаются, когда забывают, куда он течёт. Context привязан к подписке, а подписка идёт от подписчика к источнику, снизу вверх по коду. Значит, <code>contextWrite</code> видят только операторы, стоящие выше него. Часть <code>context</code>, <code>currentUser()</code> читает пользователя так же, как ReactiveSecurityContextHolder:</p>
+      <pre><code class="language-java">static Mono&lt;String&gt; currentUser() {
+    return Mono.deferContextual(ctx -&gt; Mono.just(ctx.getOrDefault("user", "anonymous")));
+}
+
+currentUser()
+        .contextWrite(Context.of("user", "alice"))   // ниже чтения: видно
+        .block();
+Mono.just("p1")
+        .contextWrite(Context.of("user", "alice"))   // выше чтения: не видно
+        .flatMap(p -&gt; currentUser())
+        .block();</code></pre>
+      <pre class="out">context: Context flows from subscriber up to source
+  contextWrite below the read: alice
+  contextWrite above the read: anonymous</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Две цепочки операторов слева направо, подписка идёт справа налево. В первой currentUser стоит левее contextWrite, Context с user alice доходит до него, результат alice. Во второй contextWrite стоит левее flatMap с currentUser, Context с alice доходит только до Mono.just, а flatMap и block получают пустой Context, результат anonymous.">
+            <defs>
+              <marker id="pc-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <path d="M700 18 L 18 18" class="dg-line" marker-end="url(#pc-n)"/>
+            <!-- ряд 1 -->
+            <rect x="150" y="52" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="350" y="52" width="190" height="34" rx="7" class="dg-box"/>
+            <rect x="570" y="52" width="130" height="34" rx="7" class="dg-box"/>
+            <rect x="150" y="92" width="390" height="18" rx="4" class="dg-cell hit"/>
+            <rect x="544" y="92" width="156" height="18" rx="4" class="dg-sep" fill="none"/>
+            <!-- ряд 2 -->
+            <rect x="14" y="160" width="110" height="34" rx="7" class="dg-box"/>
+            <rect x="150" y="160" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="350" y="160" width="190" height="34" rx="7" class="dg-box"/>
+            <rect x="570" y="160" width="130" height="34" rx="7" class="dg-box"/>
+            <rect x="14" y="200" width="306" height="18" rx="4" class="dg-cell hit"/>
+            <rect x="324" y="200" width="376" height="18" rx="4" class="dg-sep" fill="none"/>
+            <!-- подписи -->
+            <text x="360" y="12" class="dg-n" text-anchor="middle">подписка поднимается к источнику и несёт Context</text>
+            <text x="14" y="44" class="dg-cap">CONTEXTWRITE НИЖЕ ЧТЕНИЯ</text>
+            <text x="14" y="152" class="dg-cap bad">CONTEXTWRITE ВЫШЕ ЧТЕНИЯ</text>
+            <g text-anchor="middle">
+              <text x="235" y="74" class="dg-in">currentUser()</text>
+              <text x="445" y="74" class="dg-in">contextWrite(alice)</text>
+              <text x="635" y="74" class="dg-in">block()</text>
+              <text x="345" y="105" class="dg-n">Context {user=alice}</text>
+              <text x="622" y="105" class="dg-n">Context {}</text>
+              <text x="69" y="182" class="dg-in">Mono.just</text>
+              <text x="235" y="182" class="dg-in">contextWrite(alice)</text>
+              <text x="445" y="182" class="dg-in">flatMap(currentUser)</text>
+              <text x="635" y="182" class="dg-in">block()</text>
+              <text x="167" y="213" class="dg-n">Context {user=alice}</text>
+              <text x="512" y="213" class="dg-n">Context {}</text>
+            </g>
+            <text x="14" y="74" class="dg-ok">→ alice</text>
+            <text x="350" y="234" class="dg-bad">currentUser() видит {} → anonymous</text>
+          </svg>
+        </div>
+        <figcaption>contextWrite добавляет данные в подписку, которая уже идёт мимо него к источнику. Всё, что правее, подписалось раньше и получило Context без этих данных.</figcaption>
+      </figure>
+      <p>Поэтому в WebFlux контекст кладут как можно ниже: в WebFilter, вокруг всей цепочки обработчика, — так делает Spring Security. А читать его можно где угодно выше. Ошибку из второго ряда обычно делают в сервисе: кладут Context в середине цепочки, а читают в коде, который подставили ниже через flatMap. Отдельная подписка из прошлого шага — крайний случай того же правила: у неё вообще нет ни одного contextWrite.</p>
+      <h3>MDC и traceId в логах</h3>
+      <p>Логгеры читают MDC, а это ThreadLocal. Фильтр положил traceId в MDC потока, который принял запрос, но следующий оператор выполнился в другом потоке, и в логе пусто. Reactor умеет копировать значения из Context в ThreadLocal на каждом переходе через библиотеку Micrometer Context Propagation: нужно зарегистрировать, какое значение какому ThreadLocal соответствует, и включить хук.</p>
+      <pre><code class="language-java">ContextRegistry.getInstance().registerThreadLocalAccessor("traceId",   // ключ в Context
+        () -&gt; MDC.get("traceId"), v -&gt; MDC.put("traceId", v), () -&gt; MDC.remove("traceId"));
+Hooks.enableAutomaticContextPropagation();          // в Boot: spring.reactor.context-propagation=auto
+
+Mono.just("p1")
+        .publishOn(LOOP)
+        .doOnNext(p -&gt; log.info("charging " + p))   // значение из Context вернулось в MDC
+        .contextWrite(Context.of("traceId", "t-42"))
+        .block();</code></pre>
+      <pre class="out"> MDC without propagation:
+[main           ] traceId=t-42  payments INFO request accepted
+[event-loop-1   ] traceId=none  payments INFO charging p1
+ MDC with Hooks.enableAutomaticContextPropagation():
+[event-loop-1   ] traceId=t-42  payments INFO charging p1</pre>
+      <p>Без хука строка из event-loop-1 потеряла traceId, хотя это тот же запрос. С хуком Reactor перед каждым оператором восстанавливает MDC из Context подписки и очищает после. В Spring Boot 4 этим управляет <code>spring.reactor.context-propagation</code>: по умолчанию <code>limited</code>, значение <code>auto</code> включает тот же хук; Micrometer Tracing регистрирует свои ключи сам. Цена — работа на каждом операторе, поэтому включают осознанно.</p>
+      <p>С безопасностью и транзакциями механизм тот же. <code>ReactiveSecurityContextHolder</code> хранит SecurityContext в Reactor Context, и код в отдельной подписке видит анонимного пользователя. Реактивная транзакция (<code>@Transactional</code> над методом, который возвращает Mono, или <code>TransactionalOperator</code>) привязана к Context подписки: запись через R2DBC в отдельной подписке пройдёт вне транзакции и не откатится вместе с ней.</p>
+    </section>
+
+    <section class="step" id="flatmap">
+      <h2>flatMap без лимита превращает пачку платежей в шквал запросов к соседу</h2>
+      <p>Ночной job проводит 1000 платежей через банк: <code>Flux.fromIterable(ids).flatMap(bank::charge)</code>. flatMap по умолчанию держит 256 одновременных вызовов (тема <a href="reactor-operators.html#order">Reactor Operators</a>). Банк обслуживает 20 запросов одновременно, каждый 100 мс, а сверх этого отвечает 429. Часть <code>flatmap</code> на виртуальном времени:</p>
+      <pre><code class="language-java">Flux.range(1, 1000)
+        .flatMap(i -&gt; bank.charge("p" + i)
+                .onErrorResume(e -&gt; Mono.just("rejected")), concurrency) // 256 или 16
+        .subscribe();</code></pre>
+      <pre class="out">flatmap: 1000 payments, bank accepts 20 concurrent requests, 100 ms each
+  flatMap(charge)         peak at bank = 20, rejected with 429 = 980, served = 20, took 100 ms
+  flatMap(charge, 16)     peak at bank = 16, rejected with 429 = 0, served = 1000, took 6300 ms</pre>
+      <p>Без лимита job закончился за 100 мс — и провёл 20 платежей из тысячи. Отказы приходят мгновенно, flatMap тут же освобождает слот и запускает следующий вызов, так что 980 отказов случились в первую же миллисекунду. С <code>concurrency = 16</code> все платежи прошли за 6,3 секунды, и банк ни разу не отказал. Медленнее, но это скорость, которую банк реально выдерживает.</p>
+      <p>В проде хуже, чем в демо. Если на 429 стоит retry с backoff, отказы вернутся волнами, и вместе с ними запросы других клиентов банка. Если банк не отказывает, а замедляется, 256 запросов упрутся в пул соединений WebClient. В Reactor Netty по умолчанию в пуле 2 × max(число ядер, 8) соединений на хост (на 18-ядерной машине автора — 36), очередь ожидания по документации вдвое больше пула, а ждать соединение запрос может 45 секунд. Остальные запросы того же сервиса к этому хосту, в том числе от пользователей, встанут в ту же очередь.</p>
+      <div class="trap">
+        <p class="myth">Reactive Streams даёт backpressure, значит, flatMap сам не перегрузит соседа.</p>
+        <p class="fact">Backpressure защищает подписчика от источника внутри процесса. Банк не участвует в контракте request(n): он не может попросить «меньше». flatMap запросит у источника столько элементов, сколько разрешает concurrency, и запустит столько же вызовов. Ограничение нагрузки на внешнюю систему — это явный параметр concurrency или limitRate, а для общего лимита на весь сервис — rate limiter вроде Resilience4j.</p>
+      </div>
+      <p>Найти такое место помогают метрики, а не тесты: число активных и ожидающих соединений пула (Reactor Netty публикует их в Micrometer, если включить <code>metrics(true)</code> у ConnectionProvider), количество 429 и 503 от партнёра, время получения соединения. Всплеск ожидающих соединений одновременно с запуском job — почти всегда flatMap без лимита.</p>
+    </section>
+
+    <section class="step" id="debugging">
+      <h2>Стектрейс реактивной ошибки показывает Reactor, а не твой код: место сборки возвращают checkpoint и Debug Agent</h2>
+      <p>Поиск платежа для возврата ожидает одну строку, а запрос из-за дубля вернул две. Оператор <code>single()</code> падает с <code>IndexOutOfBoundsException</code>. Проблема в том, что ошибка случается при выполнении, в потоке планировщика, а вызов <code>single()</code> был при сборке, совсем в другом стеке. Обычный стектрейс показывает только первое. Часть <code>plain</code>:</p>
+      <pre><code class="language-java">static Mono&lt;String&gt; findPayment(String id) {
+    return Flux.just(id, id + "-duplicate")          // баг: запрос вернул две строки
+            .single();                               // ждём ровно одну
+}
+
+Mono&lt;String&gt; chain = Mono.delay(Duration.ofMillis(10))
+        .flatMap(x -&gt; findPayment("p1"))
+        .map(String::toUpperCase);</code></pre>
+      <pre class="out">plain: the same failing chain
+  java.lang.IndexOutOfBoundsException: Source emitted more than one item
+  	at reactor.core.publisher.MonoSingle$SingleSubscriber.onNext(MonoSingle.java:135)
+  	at reactor.core.publisher.FluxArray$ArraySubscription.fastPath(FluxArray.java:171)
+  	at reactor.core.publisher.FluxArray$ArraySubscription.request(FluxArray.java:96)
+  	at reactor.core.publisher.MonoSingle$SingleSubscriber.doOnRequest(MonoSingle.java:104)
+  	at reactor.core.publisher.Operators$MonoInnerProducerBase.request(Operators.java:2925)
+  	at reactor.core.publisher.MonoFlatMap$FlatMapInner.onSubscribe(MonoFlatMap.java:292)
+  	at reactor.core.publisher.MonoSingle$SingleSubscriber.onSubscribe(MonoSingle.java:116)
+  ... 13 more lines</pre>
+      <p>В оставшихся строках — MonoDelay, планировщик и Thread.run. Ни одной строки PitfallsDemo: понятно, что какой-то <code>single()</code> получил два элемента, но не какой из десятков в сервисе. Reactor даёт три способа вернуть место сборки:</p>
+      <pre><code class="language-bash">./run.sh PitfallsDemo checkpoint    # chain.checkpoint("load payment for refund")
+./run.sh PitfallsDemo debug-agent   # ReactorDebugAgent.init() до сборки цепочек</code></pre>
+      <pre class="out">checkpoint: the same failing chain
+  java.lang.IndexOutOfBoundsException: Source emitted more than one item
+  	at reactor.core.publisher.MonoSingle$SingleSubscriber.onNext(MonoSingle.java:135)
+  	Suppressed: The stacktrace has been enhanced by Reactor, refer to additional information below:
+  Error has been observed at the following site(s):
+  	*__checkpoint ⇢ load payment for refund
+  Original Stack Trace:
+  ...
+
+debug-agent: the same failing chain
+  java.lang.IndexOutOfBoundsException: Source emitted more than one item
+  	at reactor.core.publisher.MonoSingle$SingleSubscriber.onNext(MonoSingle.java:135)
+  	Suppressed: The stacktrace has been enhanced by Reactor, refer to additional information below:
+  Assembly trace from producer [reactor.core.publisher.MonoSingle] :
+  	reactor.core.publisher.Flux.single
+  	PitfallsDemo.findPayment(PitfallsDemo.java:285)
+  Error has been observed at the following site(s):
+  	*__Flux.single ⇢ at PitfallsDemo.findPayment(PitfallsDemo.java:285)
+  	|_             ⇢ at PitfallsDemo.lambda$stackTraces$42(PitfallsDemo.java:297)
+  Original Stack Trace:
+  ...</pre>
+      <p>Номера строк — из файла демо. Reactor добавляет к исключению suppressed-запись: путь ошибки через отмеченные места цепочки, а исходный стектрейс переносит под «Original Stack Trace». Строка с <code>*__</code> — место, где ошибка возникла, <code>|_</code> — места, через которые она прошла.</p>
+      <table class="mx">
+        <thead><tr><th>Способ</th><th>Что покажет</th><th>Цена</th><th>Где включать</th></tr></thead>
+        <tbody>
+          <tr><td><code>checkpoint("описание")</code></td><td>твою метку в пути ошибки; с <code>checkpoint("…", true)</code> — ещё и стек сборки этого места</td><td>почти ноль, стек не собирается</td><td>в проде, на границах: вызов банка, загрузка платежа</td></tr>
+          <tr><td><code>Hooks.onOperatorDebug()</code></td><td>стек сборки каждого оператора с номером строки</td><td>стектрейс на каждый оператор при сборке — дорого</td><td>только локально, при разборе бага</td></tr>
+          <tr><td><code>ReactorDebugAgent</code> из reactor-tools</td><td>то же место сборки, что и хук</td><td>правит байткод при загрузке классов, на выполнение почти не влияет</td><td>можно в проде; Boot включает его сам, если reactor-tools в classpath</td></tr>
+        </tbody>
+      </table>
+      <p>Debug Agent подменяет вызовы операторов в твоих классах на версии с отметкой места: строку и метод он берёт из байткода, а не из стектрейса, поэтому дёшев. В Spring Boot 4 его включает свойство <code>spring.reactor.debug-agent.enabled</code>, по умолчанию true, достаточно добавить зависимость <code>io.projectreactor:reactor-tools</code>. Без Boot агент запускают <code>ReactorDebugAgent.init()</code> в начале main, до сборки цепочек. Хук <code>onOperatorDebug</code> даёт то же самое, но собирает настоящий стектрейс на каждый оператор, поэтому годится только для локального разбора.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>block() в event loop падает, только когда надо ждать, а JDBC и синхронные клиенты не проверяет никто. BlockHound в тестах ловит любую блокировку, включая Mono.just(jdbc()) внутри subscribeOn.</li>
+        <li>Mono, который не встроен в возвращаемую цепочку, не выполняется и не падает: doOnNext(repo::save) — частый вариант. Ловят тестом эффекта или PublisherProbe.</li>
+        <li>subscribe() внутри flatMap теряет ошибку, Context, отмену и предел нагрузки. Работу встраивают через then и Mono.when, гарантированную фоновую — через outbox или брокер.</li>
+        <li>Context видят только операторы выше contextWrite. MDC переносят Hooks.enableAutomaticContextPropagation и Micrometer Context Propagation.</li>
+        <li>flatMap без concurrency шлёт соседу до 256 запросов сразу: backpressure не защищает внешние системы.</li>
+        <li>Место сборки в стектрейс возвращают checkpoint (дёшево, точечно) и ReactorDebugAgent (дёшево, везде); onOperatorDebug — только локально.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="pit-find-blocking" data-freq="2">
+      <h3>Как найти блокирующий вызов в реактивном коде?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Подключаю BlockHound в тестах: это Java-агент, который инструментирует блокирующие методы JDK и бросает BlockingOperationError, если их вызвали из неблокирующего потока — event loop Netty или parallel. Он ловит сам факт вызова, а не задержку, поэтому срабатывает и с быстрой тестовой базой; мок, который не вызывает блокирующих методов, он не поймает. Встроенная проверка Reactor на block() срабатывает, только когда значение надо ждать, а JDBC и синхронные клиенты не проверяет вовсе.</p>
+          <p>В проде симптом — растущая задержка у всех запросов при свободном CPU и health-check, который отвечает секундами. Снимаю дамп потоков: если в стеке потока reactor-http-nio видны JDBC-драйвер, Thread.sleep или синхронный HTTP-клиент, кто-то блокирует event loop.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Частая ложная починка: Mono.just(jdbc()).subscribeOn(boundedElastic()). Аргумент вычисляется в event loop до перехода; нужен fromCallable.</li>
+            <li>На JDK 13+ BlockHound требует -XX:+AllowRedefinitionToAddDeleteMethods; разрешённые блокировки добавляют через builder().allowBlockingCallsInside.</li>
+            <li>boundedElastic — ограниченный пул: если в нём всё, это тот же MVC, только сложнее. Тогда честнее MVC на виртуальных потоках.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Тест с block() внутри обработчика зелёный, а в проде IllegalStateException. Почему?</summary>
+          <p>Reactor бросает «block() … not supported in thread …» только если в неблокирующем потоке приходится ждать значения. В тесте мок вернул Mono.just, значение готово, ожидания нет. В проде настоящий клиент отвечает через сеть, block() начинает ждать в потоке Netty и падает. Лечится не тестом, а заменой block() на flatMap.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pit-nested-subscribe" data-freq="2">
+      <h3>Почему нельзя вызывать subscribe() внутри flatMap или в сервисе?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>subscribe() создаёт отдельную цепочку, оторванную от запроса. Её ошибка не дойдёт до клиента: без обработчика Reactor просто напишет её в лог через onErrorDropped. Context туда не попадёт, поэтому пропадут SecurityContext, traceId и транзакция. Отмена запроса её не остановит, и под нагрузкой таких фоновых задач станет сколько угодно.</p>
+          <p>Правильно встроить работу в цепочку: then для последовательной, Mono.when или zip для параллельной. Подписывается фреймворк — на то, что вернул контроллер.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Если работа правда фоновая и должна пережить сбой, нужна надёжная доставка: outbox в той же транзакции или брокер с повторами, а не отдельная подписка.</li>
+            <li>Обратная ошибка — забыть подписку: doOnNext(p -&gt; repo.save(p)) выбрасывает Mono из save. Ловится тестом эффекта или PublisherProbe.assertWasSubscribed.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди три ошибки</summary>
+          <pre><code class="language-java">public Mono&lt;Receipt&gt; pay(Payment p) {
+    return bank.charge(p)
+            .doOnNext(r -&gt; paymentRepository.save(p.paid(r)))   // R2DBC, возвращает Mono
+            .doOnNext(r -&gt; audit.write(p).subscribe())
+            .contextWrite(ctx -&gt; ctx.put("tenant", p.tenant()));
+}</code></pre>
+          <p>Первая: save внутри doOnNext не подписан — платёж не сохранится. Вторая: audit подписан отдельно — его ошибка не дойдёт до клиента, а tenant и SecurityContext он не увидит, потому что у отдельной подписки свой Context. Третья: contextWrite стоит в сервисе, а не на входе запроса; если tenant читают операторы, которые вызывающий код добавит ниже pay(), они его не увидят. Исправление: <code>bank.charge(p).flatMap(r -&gt; paymentRepository.save(p.paid(r)).then(audit.write(p)).thenReturn(r))</code>, а tenant класть в WebFilter.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="pit-context-lost" data-freq="2">
+      <h3>В WebFlux пропал traceId в логах и пустой SecurityContext. Почему?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>MDC и классический SecurityContextHolder — ThreadLocal, а реактивная цепочка переходит между потоками, и в другом потоке значения нет. В Reactor данные запроса хранят в Context, который привязан к подписке. Spring Security кладёт туда SecurityContext, а читать его надо через ReactiveSecurityContextHolder.</p>
+          <p>Для логов включаю автоматический перенос: Micrometer Context Propagation и Hooks.enableAutomaticContextPropagation, в Boot — spring.reactor.context-propagation=auto. Тогда Reactor восстанавливает MDC из Context перед каждым оператором.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Context течёт от подписчика к источнику: contextWrite видят только операторы выше него. Кладут его как можно ниже — в WebFilter.</li>
+            <li>Отдельная подписка через subscribe() получает пустой Context: там анонимный пользователь и нет транзакции.</li>
+            <li>Автоматический перенос стоит работы на каждом операторе; Micrometer Tracing регистрирует свои ключи сам.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="pit-debugging" data-freq="2">
+      <h3>Как отлаживать реактивный код, если стектрейс состоит из операторов Reactor?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Ошибка случается при выполнении в потоке планировщика, а оператор был создан при сборке в другом стеке, поэтому обычный стектрейс не показывает мой код. Место сборки возвращают три способа. checkpoint("описание") ставлю на важных границах — он почти бесплатный и даёт метку в пути ошибки. ReactorDebugAgent из reactor-tools добавляет место сборки ко всем операторам через байткод, его можно держать в проде, а Spring Boot включает его сам, если reactor-tools в classpath.</p>
+          <p>Hooks.onOperatorDebug() даёт то же, но собирает стектрейс на каждый оператор, поэтому только локально.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В suppressed-записи «Error has been observed at the following site(s)»: *__ — где ошибка возникла, |_ — через какие места прошла.</li>
+            <li>checkpoint("…", true) добавляет стек сборки, но ценой стектрейса при сборке.</li>
+            <li>Для «тихих» багов вроде неподписанного Mono стектрейса нет вовсе: тут помогают log() на подозрительном участке, doOnSubscribe и тест с PublisherProbe.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://projectreactor.io/docs/core/release/reference/">Reactor Reference Guide</a> — основа урока: Debugging Reactor (checkpoint, onOperatorDebug, ReactorDebugAgent), Adding a Context to a Reactive Sequence, Context-Propagation Support, Testing (PublisherProbe).</li>
+      <li><a href="https://github.com/reactor/BlockHound">BlockHound</a> — как устроен агент, флаг для JDK 13+, allowBlockingCallsInside и интеграции.</li>
+      <li><a href="https://docs.spring.io/spring-boot/reference/features/spring-application.html">Spring Boot Reference</a> и метаданные свойств — spring.reactor.debug-agent.enabled и spring.reactor.context-propagation.</li>
+      <li><a href="https://projectreactor.io/docs/netty/release/reference/">Reactor Netty Reference</a> — Connection Pool: размер пула по умолчанию, очередь ожидания и метрики.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
