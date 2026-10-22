@@ -553,7 +553,7 @@ window.KB_TREE = [
       { id: 'reactive', title: 'Reactive', source: 'Reactive Streams Specification 1.0.4, Reactor Reference Guide 3.8, Spring Framework Reference: WebFlux', items: [
         { id: 'reactive-streams', freq: 2, status: 'draft', title: 'Reactive Philosophy',
           scope: 'поток на запрос и медленный I/O, Publisher, Subscriber, Subscription, request(n), onNext, onError, onComplete, push и pull, backpressure, ничего не происходит до subscribe, cold и hot, java.util.concurrent.Flow, реактивность или virtual threads' },
-        { id: 'reactor-operators', freq: 2, status: 'empty', title: 'Reactor Operators',
+        { id: 'reactor-operators', freq: 2, status: 'draft', title: 'Reactor Operators',
           scope: 'map и flatMap, concatMap, flatMapSequential и concurrency, zip и merge, switchIfEmpty, defer, onErrorResume, onErrorMap, retryWhen и Retry.backoff, timeout, cache, share, replay, Sinks, StepVerifier и virtual time' },
         { id: 'spring-reactive', freq: 1, status: 'draft', title: 'WebFlux',
           scope: 'event loop Netty, блокирующий вызов и boundedElastic, Mono и Flux, подписка, publishOn и subscribeOn, Reactor Context вместо ThreadLocal, backpressure, WebFlux или виртуальные потоки' },

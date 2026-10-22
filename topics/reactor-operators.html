@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reactor Operators · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="reactor-operators">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Reactor Operators</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Платёжный сервис проводит пачку платежей через банк, собирает карточку платежа из трёх сервисов и переживает ответы 503. В Reactor каждая такая задача — несколько операторов, и почти все ошибки возникают на стыке между ними. Оператор, который вызывает другой сервис, должен на него подписаться: это делает flatMap и его родственники, и они различаются тем, сколько вызовов идёт сразу и в каком порядке приходят ответы. Ошибка завершает поток, а повтор — это новая подписка, поэтому повторится только то, что создаётся при подписке. Всё время в этой теме виртуальное: демо проверяют сценарии с секундами и минутами ожидания за миллисекунды, тем же способом, каким их тестируют.</p>
+    </div>
+
+    <section class="step" id="flatmap">
+      <h2>map меняет значение, а flatMap подписывается на то, что вернула функция</h2>
+      <p>Сервис получает пачку идентификаторов платежей и для каждого вызывает банк. Вызов банка в реактивном клиенте возвращает <code>Mono&lt;String&gt;</code>. Первая попытка обычно выглядит как <code>ids.map(bank::charge)</code>: компилируется, запускается, ошибок нет. <a href="../examples/reactive/OperatorsDemo.java">OperatorsDemo.java</a>, часть 1:</p>
+      <pre><code class="language-bash">cd examples/reactive
+./run.sh OperatorsDemo 1</code></pre>
+      <pre><code class="language-java">Function&lt;String, Mono&lt;String&gt;&gt; charge = id -&gt; Mono.fromCallable(() -&gt; {
+    calls.incrementAndGet();                         // считаем реальные вызовы банка
+    return id + " paid";
+});
+Flux.just("p1", "p2")
+        .map(charge)                                 // Flux&lt;Mono&lt;String&gt;&gt;: на Mono никто не подписан
+        .subscribe(v -&gt; System.out.println("map emitted: " + v.getClass().getSimpleName()));
+Flux.just("p1", "p2")
+        .flatMap(charge)                             // подписывается на каждый Mono и отдаёт его значение
+        .subscribe(v -&gt; System.out.println("flatMap emitted: " + v));</code></pre>
+      <pre class="out">1. map vs flatMap
+  map emitted: MonoCallable
+  map emitted: MonoCallable
+  bank calls after map: 0
+  flatMap emitted: p1 paid
+  flatMap emitted: p2 paid
+  bank calls after flatMap: 2</pre>
+      <p><code>map</code> применил функцию и отдал дальше её результат — два объекта Mono, то есть два рецепта вызова. Банк не вызван ни разу: на эти Mono никто не подписался (почему подписка решает всё, разобрано в теме <a href="reactive-streams.html">Reactive Philosophy</a>). <code>flatMap</code> делает три вещи: применяет функцию, подписывается на каждый полученный издатель и сливает их элементы в один выходной поток. Правило выбора простое: функция возвращает обычное значение — <code>map</code>; возвращает Mono или Flux — <code>flatMap</code> или его варианты.</p>
+      <p>У Mono тот же набор: <code>Mono.flatMap</code> для функции, которая вернёт Mono, <code>flatMapMany</code>, если вернёт Flux. Когда результат предыдущего шага не нужен, а нужно только дождаться его конца, пишут <code>then(next)</code>: «сохрани платёж, потом отправь уведомление». <code>thenReturn(value)</code> дожидается конца и отдаёт готовое значение.</p>
+      <div class="trap">
+        <p class="myth">Если код с map скомпилировался, вызов выполнится.</p>
+        <p class="fact">Компилятор видит только тип: <code>Flux&lt;Mono&lt;String&gt;&gt;</code> так же законен, как <code>Flux&lt;String&gt;</code>. Подсказка — вложенный издатель в типе результата. Если в сигнатуре появился <code>Flux&lt;Mono&lt;…&gt;&gt;</code> или <code>Mono&lt;Mono&lt;…&gt;&gt;</code>, почти наверняка вместо map нужен flatMap.</p>
+      </div>
+    </section>
+
+    <section class="step" id="order">
+      <h2>flatMap, concatMap и flatMapSequential отличаются тем, сколько вызовов идёт сразу и в каком порядке приходят ответы</h2>
+      <p>Теперь банк отвечает с разной задержкой: на p1 — 300 мс, p2 — 100, p3 — 200, p4 — 50. Часть 2 демо проводит пачку четырьмя способами и печатает, когда начался каждый вызов и когда пришёл его результат. Время виртуальное: <code>VirtualTimeScheduler</code> подменяет планировщики Reactor, и <code>Mono.delay</code> срабатывает ровно в нужную миллисекунду, без настоящего ожидания.</p>
+      <pre><code class="language-java">static Mono&lt;String&gt; bank(String id) {               // задержка по id: 300, 100, 200, 50 мс
+    return Mono.delay(Duration.ofMillis(latency(id))).map(x -&gt; id)
+            .doOnSubscribe(s -&gt; log("call " + id));
+}
+
+ids.flatMap(OperatorsDemo::bank)                     // все сразу, ответы по мере прихода
+ids.flatMap(OperatorsDemo::bank, 2)                  // не больше двух вызовов одновременно
+ids.concatMap(OperatorsDemo::bank)                   // по одному, следующий после ответа
+ids.flatMapSequential(OperatorsDemo::bank)           // все сразу, ответы в исходном порядке</code></pre>
+      <pre class="out"> flatMap:
+  t=0    call p1
+  t=0    call p2
+  t=0    call p3
+  t=0    call p4
+  t=50      got p4
+  t=100     got p2
+  t=200     got p3
+  t=300     got p1
+ flatMap(concurrency = 2):
+  t=0    call p1
+  t=0    call p2
+  t=100     got p2
+  t=100  call p3
+  t=300     got p1
+  t=300  call p4
+  t=300     got p3
+  t=350     got p4
+ concatMap:
+  t=0    call p1
+  t=300     got p1
+  t=300  call p2
+  t=400     got p2
+  t=400  call p3
+  t=600     got p3
+  t=600  call p4
+  t=650     got p4
+ flatMapSequential:
+  t=0    call p1
+  t=0    call p2
+  t=0    call p3
+  t=0    call p4
+  t=300     got p1
+  t=300     got p2
+  t=300     got p3
+  t=300     got p4</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 345" role="img" aria-label="Четыре шкалы времени от 0 до 650 мс, на каждой по четыре вызова банка p1–p4. flatMap: все вызовы стартуют в 0, ответы приходят в порядке p4, p2, p3, p1, всё готово к 300 мс. flatMap с concurrency 2: сначала p1 и p2, p3 стартует в 100 после ответа p2, p4 в 300, конец в 350. concatMap: вызовы идут друг за другом, конец в 650. flatMapSequential: все стартуют в 0, готовые p2, p3 и p4 ждут в буфере до 300, когда придёт p1, и отдаются по порядку.">
+            <!-- шкала времени: x = 60 + 0.96 * t -->
+            <line x1="60" y1="322" x2="690" y2="322" class="dg-sep"/>
+            <!-- flatMap -->
+            <rect x="60" y="30" width="288" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="43" width="96" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="56" width="192" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="69" width="48" height="10" rx="2" class="dg-cell hit"/>
+            <!-- flatMap, concurrency 2 -->
+            <rect x="60" y="106" width="288" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="119" width="96" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="156" y="132" width="192" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="348" y="145" width="48" height="10" rx="2" class="dg-cell hit"/>
+            <!-- concatMap -->
+            <rect x="60" y="182" width="288" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="348" y="195" width="96" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="444" y="208" width="192" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="636" y="221" width="48" height="10" rx="2" class="dg-cell hit"/>
+            <!-- flatMapSequential: вызовы и ожидание в буфере -->
+            <rect x="60" y="258" width="288" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="271" width="96" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="284" width="192" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="60" y="297" width="48" height="10" rx="2" class="dg-cell hit"/>
+            <rect x="156" y="271" width="192" height="10" rx="2" class="dg-sep" fill="none"/>
+            <rect x="252" y="284" width="96" height="10" rx="2" class="dg-sep" fill="none"/>
+            <rect x="108" y="297" width="240" height="10" rx="2" class="dg-sep" fill="none"/>
+            <line x1="348" y1="254" x2="348" y2="311" class="dg-line ok"/>
+            <!-- заголовки -->
+            <text x="14" y="22" class="dg-cap">FLATMAP · ОТВЕТЫ P4 P2 P3 P1 · 300 МС</text>
+            <text x="14" y="98" class="dg-cap">FLATMAP(F, 2) · P2 P1 P3 P4 · 350 МС</text>
+            <text x="14" y="174" class="dg-cap">CONCATMAP · P1 P2 P3 P4 · 650 МС</text>
+            <text x="14" y="250" class="dg-cap">FLATMAPSEQUENTIAL · P1 P2 P3 P4 · 300 МС</text>
+            <text x="356" y="282" class="dg-s">готовы, ждут p1 в буфере</text>
+            <!-- подписи дорожек -->
+            <g text-anchor="middle">
+              <text x="34" y="39" class="dg-n">p1</text><text x="34" y="52" class="dg-n">p2</text><text x="34" y="65" class="dg-n">p3</text><text x="34" y="78" class="dg-n">p4</text>
+              <text x="34" y="115" class="dg-n">p1</text><text x="34" y="128" class="dg-n">p2</text><text x="34" y="141" class="dg-n">p3</text><text x="34" y="154" class="dg-n">p4</text>
+              <text x="34" y="191" class="dg-n">p1</text><text x="34" y="204" class="dg-n">p2</text><text x="34" y="217" class="dg-n">p3</text><text x="34" y="230" class="dg-n">p4</text>
+              <text x="34" y="267" class="dg-n">p1</text><text x="34" y="280" class="dg-n">p2</text><text x="34" y="293" class="dg-n">p3</text><text x="34" y="306" class="dg-n">p4</text>
+              <text x="60" y="337" class="dg-n">0</text><text x="156" y="337" class="dg-n">100</text><text x="252" y="337" class="dg-n">200</text>
+              <text x="348" y="337" class="dg-n">300</text><text x="444" y="337" class="dg-n">400</text><text x="540" y="337" class="dg-n">500</text>
+              <text x="636" y="337" class="dg-n">600 мс</text>
+            </g>
+          </svg>
+        </div>
+        <figcaption>Зелёная полоса — вызов банка от подписки до ответа, пунктир — готовый ответ, который flatMapSequential держит в памяти, пока не придёт предыдущий по порядку.</figcaption>
+      </figure>
+      <p>Все различия видны по тому, когда стартует вызов и когда отдаётся результат:</p>
+      <table class="mx">
+        <thead><tr><th>Оператор</th><th>Сколько вызовов сразу</th><th>Порядок результатов</th><th>Когда брать</th></tr></thead>
+        <tbody>
+          <tr><td><code>flatMap</code></td><td>до 256 по умолчанию, второй аргумент меняет</td><td>по мере прихода</td><td>независимые вызовы, порядок не важен</td></tr>
+          <tr><td><code>concatMap</code></td><td>один</td><td>исходный</td><td>порядок важен и вызовы зависят друг от друга: списания с одного счёта</td></tr>
+          <tr><td><code>flatMapSequential</code></td><td>как у flatMap</td><td>исходный, за счёт буфера</td><td>нужны и параллельность, и порядок, например ответ клиенту списком</td></tr>
+        </tbody>
+      </table>
+      <p>Параметр <code>concurrency</code> — главный рычаг на flatMap. По умолчанию это 256: пачка из десяти тысяч платежей превратится в 256 одновременных запросов к банку, и пул соединений WebClient или лимит банка закончатся раньше. Его ставят по возможностям того, кого вызывают: <code>flatMap(bank::charge, 8)</code>. Как неограниченный flatMap кладёт соседний сервис, разобрано в теме <a href="reactive-pitfalls.html">Reactive Pitfalls</a>. У flatMapSequential цена порядка — память: если p1 отвечает минуту, все остальные ответы копятся в буфере эту минуту.</p>
+      <details class="deep">
+        <summary>Под капотом: как flatMap держит 256 подписок</summary>
+        <p>flatMap — это оператор с двумя уровнями спроса. Вверх, к исходному Flux, он запрашивает <code>concurrency</code> элементов, по умолчанию <code>Queues.SMALL_BUFFER_SIZE</code> = 256, и дозапрашивает по одному, когда очередная внутренняя подписка завершилась. У каждой внутренней подписки своя очередь с prefetch 32 (<code>Queues.XS_BUFFER_SIZE</code>), дозапрос по 24. Элементы всех внутренних подписок отдаёт вниз один цикл drain, так что подписчик получает их последовательно, без гонок, хотя внутренние издатели работают в разных потоках. Если подписчик не успевает, очереди внутренних подписок заполняются, и они перестают запрашивать — backpressure работает и здесь (механизм спроса — в теме <a href="reactive-streams.html#push-pull">Reactive Philosophy</a>).</p>
+      </details>
+    </section>
+
+    <section class="step" id="combine">
+      <h2>zip ждёт всех, merge отдаёт по мере прихода, а пустой Mono молча обрывает zip</h2>
+      <p>Чтобы показать карточку платежа, сервис параллельно спрашивает счёт в базе, лимиты в сервисе лимитов и вердикт антифрода. <code>Mono.zip</code> подписывается на всех сразу и отдаёт кортеж, когда пришли все значения. Часть 3 демо, ответы через 100, 300 и 200 мс:</p>
+      <pre><code class="language-java">Mono.zip(after(100, "accounts", "ACC-1"),
+         after(300, "limits", 1000),
+         after(200, "antifraud", "OK"))
+    .doOnNext(t -&gt; log("got " + t.getT1() + " limit=" + t.getT2() + " fraud=" + t.getT3()));
+
+Mono.zip(after(100, "accounts", "ACC-1").filter(a -&gt; false), // счёт не найден: пустой Mono
+         after(300, "limits", 1000),
+         after(200, "antifraud", "OK"))</code></pre>
+      <pre class="out"> zip, all present:
+  t=0    call accounts
+  t=0    call limits
+  t=0    call antifraud
+  t=300     got ACC-1 limit=1000 fraud=OK
+ zip, account not found (empty):
+  t=0    call accounts
+  t=0    call limits
+  t=0    call antifraud
+  t=100  cancel limits
+  t=100  cancel antifraud
+  t=100     completed empty</pre>
+      <p>Первый zip занял 300 мс — время самого медленного, а не сумму. Второй показывает ловушку: счёт не найден, Mono завершился без значения, и zip сразу отменил два других вызова и завершился пустым. Ни ошибки, ни значения: контроллер вернёт 200 с пустым телом, а в логах тишина. Так же zip реагирует на ошибку любого источника: отменяет остальных и передаёт ошибку дальше.</p>
+      <p>Пустоту делают явной оператором <code>switchIfEmpty</code>: <code>accounts.find(id).switchIfEmpty(Mono.error(new AccountNotFound(id)))</code>, и тогда zip получит ошибку, а обработчик ошибок вернёт 404. Альтернатива — <code>defaultIfEmpty(value)</code>, если есть разумное значение по умолчанию. Запасная ветка в switchIfEmpty должна быть ленивой: <code>switchIfEmpty(Mono.just(loadFromDb()))</code> ходит в базу при сборке, даже когда значение нашлось, поэтому пишут <code>switchIfEmpty(Mono.defer(() -&gt; loadFromDb()))</code>. <code>Mono.defer</code> откладывает создание издателя до подписки и создаёт его заново для каждой — ниже это понадобится для повторов.</p>
+      <p><code>merge</code> решает другую задачу: слить несколько однотипных потоков в один, отдавая элементы по мере прихода. <code>concat</code> подписывается на следующий источник только после конца предыдущего. Статусы карточных платежей приходят каждые 100 мс, платежей СБП — каждые 150:</p>
+      <pre><code class="language-java">Flux.merge(cardStatuses(), sbpStatuses())            // оба источника сразу
+Flux.concat(cardStatuses(), sbpStatuses())           // СБП только после конца карт</code></pre>
+      <pre class="out">  t=100     merge card-0
+  t=150     merge sbp-0
+  t=200     merge card-1
+  t=300     merge sbp-1
+  t=300     merge card-2
+  t=100     concat card-0
+  t=200     concat card-1
+  t=300     concat card-2
+  t=450     concat sbp-0
+  t=600     concat sbp-1</pre>
+      <p>В concat часы СБП начали тикать только в 300 мс, когда закончились карты, поэтому его события сдвинулись на 300 мс. Для бесконечного первого источника concat не дойдёт до второго никогда. flatMap — это map плюс merge внутренних издателей, concatMap — map плюс concat, отсюда и их поведение во втором шаге.</p>
+    </section>
+
+    <section class="step" id="errors">
+      <h2>Ошибка завершает поток: её заменяют, переводят на язык сервиса или повторяют новой подпиской</h2>
+      <p>По контракту Reactive Streams <code>onError</code> — финальный сигнал. Если банк ответил 503 на втором платеже из трёх, третий уже не будет обработан. Часть 4 демо:</p>
+      <pre><code class="language-java">Flux.just("p1", "p2", "p3")
+        .map(id -&gt; { if (id.equals("p2")) throw new BankUnavailable(); return id + " paid"; })
+        .subscribe(v -&gt; System.out.println("got " + v),
+                   e -&gt; System.out.println("onError " + e.getMessage() + ", p3 never processed"));
+
+Flux.just("p1", "p2", "p3")
+        .concatMap(id -&gt; charge(id)
+                .onErrorResume(BankUnavailable.class, e -&gt; Mono.just(id + " PENDING"))) // внутри, на один платёж
+        .subscribe(v -&gt; System.out.println("per item: " + v));
+
+charge("p2")
+        .onErrorMap(BankUnavailable.class, e -&gt; new PaymentFailed("payment p2 failed", e)) // перевод
+        .subscribe(v -&gt; { }, e -&gt; System.out.println("onErrorMap: " + e + " cause=" + e.getCause().getMessage()));</code></pre>
+      <pre class="out">4. Errors are terminal: resume, map, and what retry re-runs
+  got p1 paid
+  onError 503 from bank, p3 never processed
+  per item: p1 paid
+  per item: p2 PENDING
+  per item: p3 paid
+  onErrorMap: OperatorsDemo$PaymentFailed: payment p2 failed cause=503 from bank</pre>
+      <p>Чтобы ошибка одного платежа не убивала пачку, её ловят внутри flatMap или concatMap, на уровне одного элемента. Там <code>onErrorResume</code> заменяет ошибку запасным издателем: платёж p2 получил статус PENDING, сверка разберётся с ним позже, а p3 прошёл. Если поставить onErrorResume снаружи, после concatMap, он заменит ошибку, но поток всё равно закончится на p2. <code>onErrorReturn(value)</code> — то же с готовым значением. <code>onErrorMap</code> не спасает поток, а переводит ошибку: наружу уходит доменное PaymentFailed с исходной причиной внутри, и обработчик в контроллере не знает про HTTP-клиент банка. Для логирования без изменений есть <code>doOnError</code>.</p>
+      <div class="note warn">
+        <p>Существует ещё <code>onErrorContinue</code>: он пропускает упавший элемент и продолжает поток. Он работает только с операторами, которые его поддерживают, передаётся вверх по цепочке через Context и меняет поведение операторов, которых ты не видишь в этом месте кода. Javadoc называет его оператором для специалистов с запутанным поведением и советует onErrorResume внутри flatMap — как выше.</p>
+      </div>
+      <h3>Повтор — это новая подписка</h3>
+      <p><code>retry(n)</code> при ошибке подписывается на источник заново. Повторится ровно то, что выполняется при подписке. Сравни два способа обернуть асинхронный клиент банка, который возвращает CompletableFuture:</p>
+      <pre><code class="language-java">Mono.fromFuture(bankAsync(futureCalls))             // CompletableFuture создан один раз, при сборке
+        .retry(2)
+Mono.fromFuture(() -&gt; bankAsync(supplierCalls))     // новый вызов на каждую подписку
+        .retry(2)</code></pre>
+      <pre class="out">  fromFuture(cf).retry(2): bank calls = 1
+  fromFuture(() -&gt; cf).retry(2): bank calls = 3</pre>
+      <p>В первом варианте вызов банка сделан при сборке, и обе повторные подписки получили тот же упавший future. В логах будут три ошибки, но банк видел один запрос. Во втором Reactor вызывает поставщика на каждую подписку, и повторы настоящие. Это то же правило ленивости, что с <code>Mono.just</code>: повторяемый вызов создают внутри <code>Mono.defer</code>, <code>fromCallable</code>, <code>fromFuture(Supplier)</code> или он сам возвращает ленивый Mono, как WebClient.</p>
+    </section>
+
+    <section class="step" id="retry">
+      <h2>retryWhen с backoff повторяет только временные ошибки, а место timeout решает, что он ограничивает</h2>
+      <p>Голый <code>retry(3)</code> повторяет сразу и на любую ошибку: банк, который лёг под нагрузкой, получит тройную волну запросов без паузы, а ошибка «недостаточно средств» будет повторена трижды. Для сетевых вызовов берут <code>retryWhen</code> со стратегией <code>Retry.backoff</code>: пауза растёт вдвое после каждой попытки, и повторяются только ошибки из фильтра. Часть 5 демо:</p>
+      <pre><code class="language-java">Retry retry = Retry.backoff(3, Duration.ofMillis(100)) // до 3 повторов, первая пауза 100 мс
+        .jitter(0)                                       // только для воспроизводимости демо
+        .filter(e -&gt; e instanceof BankUnavailable || e instanceof TimeoutException);
+
+flakyBank(attempts, 2, 0).retryWhen(retry)            // банк дважды отвечает 503
+flakyBank(attempts, 99, 0).retryWhen(retry)           // банк лежит
+flakyBank(attempts, 0, 5_000)                         // банк висит 5 с
+        .timeout(Duration.ofSeconds(1)).retryWhen(retry) // timeout на каждую попытку
+flakyBank(attempts, 0, 5_000)
+        .retryWhen(retry).timeout(Duration.ofSeconds(1)) // timeout на всю операцию</code></pre>
+      <pre class="out">5. retryWhen(Retry.backoff(3, 100ms).jitter(0)) and timeout
+ bank fails twice:
+  t=0    attempt 1
+  t=100  attempt 2
+  t=300  attempt 3
+  t=300     got paid
+ bank always fails:
+  t=0    attempt 1
+  t=100  attempt 2
+  t=300  attempt 3
+  t=700  attempt 4
+  t=700  onError reactor.core.Exceptions$RetryExhaustedException: Retries exhausted: 3/3
+ bank hangs 5 s, timeout(1 s) BEFORE retryWhen: per attempt
+  t=0    attempt 1
+  t=1100 attempt 2
+  t=2300 attempt 3
+  t=3700 attempt 4
+  t=4700 onError reactor.core.Exceptions$RetryExhaustedException: Retries exhausted: 3/3
+ bank hangs 5 s, timeout(1 s) AFTER retryWhen: whole operation
+  t=0    attempt 1
+  t=1000 onError java.util.concurrent.TimeoutException: Did not observe any item or terminal signal within 1000ms in 'retryWhen' (and no fallback has been configured)</pre>
+      <p>Паузы 100, 200, 400 мс: каждая вдвое длиннее предыдущей. <code>backoff(3, …)</code> — это три повтора, то есть четыре попытки, после чего приходит <code>RetryExhaustedException</code> с исходной ошибкой в cause; проверяют её через <code>Exceptions.isRetryExhausted(e)</code>, а свою ошибку вместо неё задают <code>onRetryExhaustedThrow</code>. В проде jitter оставляют по умолчанию, 0,5: каждая пауза случайно отклоняется до половины своей длины, и тысяча клиентов, упавших одновременно, не придут к банку одной волной. Верхнюю границу паузы задаёт <code>maxBackoff</code>.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Две шкалы времени от 0 до 5 секунд, банк висит 5 секунд. Сверху timeout стоит до retryWhen: четыре попытки по одной секунде, между ними паузы 100, 200 и 400 мс, в 4,7 секунды — RetryExhaustedException. Снизу timeout стоит после retryWhen: одна попытка, через секунду TimeoutException, повторов нет, а банк ещё обрабатывает отменённый запрос.">
+            <!-- шкала: x = 110 + 0.115 * t, t в мс -->
+            <line x1="110" y1="200" x2="685" y2="200" class="dg-sep"/>
+            <!-- timeout до retryWhen: 4 попытки -->
+            <rect x="110" y="42" width="115" height="26" rx="4" class="dg-cell miss"/>
+            <rect x="236.5" y="42" width="115" height="26" rx="4" class="dg-cell miss"/>
+            <rect x="374.5" y="42" width="115" height="26" rx="4" class="dg-cell miss"/>
+            <rect x="535.5" y="42" width="115" height="26" rx="4" class="dg-cell miss"/>
+            <!-- timeout после retryWhen: одна попытка и брошенный запрос -->
+            <rect x="110" y="142" width="115" height="26" rx="4" class="dg-cell miss"/>
+            <rect x="225" y="142" width="460" height="26" rx="4" class="dg-sep" fill="none"/>
+            <!-- подписи -->
+            <text x="14" y="30" class="dg-cap">TIMEOUT ДО RETRYWHEN: 1 С НА ПОПЫТКУ</text>
+            <text x="14" y="130" class="dg-cap">TIMEOUT ПОСЛЕ RETRYWHEN: 1 С НА ВСЁ</text>
+            <g text-anchor="middle">
+              <text x="167" y="60" class="dg-in">№1</text><text x="294" y="60" class="dg-in">№2</text>
+              <text x="432" y="60" class="dg-in">№3</text><text x="593" y="60" class="dg-in">№4</text>
+              <text x="231" y="86" class="dg-n">100</text><text x="363" y="86" class="dg-n">200</text><text x="512" y="86" class="dg-n">400</text>
+              <text x="167" y="160" class="dg-in">№1</text>
+              <text x="110" y="215" class="dg-n">0</text><text x="225" y="215" class="dg-n">1</text><text x="340" y="215" class="dg-n">2</text>
+              <text x="455" y="215" class="dg-n">3</text><text x="570" y="215" class="dg-n">4</text><text x="685" y="215" class="dg-n">5 с</text>
+            </g>
+            <text x="14" y="60" class="dg-s">банк висит</text>
+            <text x="14" y="86" class="dg-n">паузы, мс</text>
+            <text x="650" y="104" class="dg-bad" text-anchor="end">RetryExhausted в 4,7 с</text>
+            <text x="14" y="160" class="dg-s">банк висит</text>
+            <text x="240" y="160" class="dg-s">запрос отменён, но банк ещё может провести платёж</text>
+            <text x="110" y="186" class="dg-bad">TimeoutException в 1 с</text>
+          </svg>
+        </div>
+        <figcaption>Красная рамка — попытка, которую оборвал timeout. Один и тот же оператор с тем же аргументом даёт четыре попытки за 4,7 с или одну за секунду: всё решает место в цепочке.</figcaption>
+      </figure>
+      <p><code>timeout</code> ограничивает время от подписки до первого элемента и между элементами того участка цепочки, который стоит выше него. Поставленный до retryWhen, он ограничивает одну попытку, и его TimeoutException попадает в фильтр повторов. Поставленный после, он ограничивает всю операцию вместе с паузами, и повторов не будет вовсе, если первая попытка висит дольше. На практике ставят оба: короткий на попытку и общий на весь вызов, меньше таймаута клиента, который ждёт ответа сервиса.</p>
+      <p>Когда timeout срабатывает, он отменяет подписку выше себя: WebClient закрывает соединение. Банк при этом мог уже принять запрос и провести списание. Повтор такого запроса без ключа идемпотентности — двойное списание. Это не особенность Reactor, а свойство любого повтора; как его делают безопасным, разобрано в теме <a href="spring-clients.html">HTTP Clients</a>.</p>
+    </section>
+
+    <section class="step" id="sharing">
+      <h2>cache, share и replay решают, сколько раз выполнится источник, а Sinks кладут в поток события извне</h2>
+      <p>Каждая подписка на cold-издатель выполняет его заново (тема <a href="reactive-streams.html#lazy">Reactive Philosophy</a>). Иногда это нужно, как в retry, а иногда нет: токен от сервера авторизации банка живёт пять минут, и запрашивать его на каждый платёж незачем. Часть 6 демо: первый вызов сервера авторизации падает, следующие успешны.</p>
+      <pre><code class="language-java">Mono&lt;String&gt; cachedForever = token.cache();         // запоминает первый результат навсегда
+Mono&lt;String&gt; cachedValuesOnly = token.cache(
+        v -&gt; Duration.ofMinutes(5),                  // значение живёт 5 минут
+        e -&gt; Duration.ZERO,                          // ошибку не кешируем
+        () -&gt; Duration.ZERO);                        // пустой результат тоже</code></pre>
+      <pre class="out">6. cache, share, replay, Sinks
+  cache(): first  -&gt; auth server 503
+  cache(): second -&gt; auth server 503, auth calls = 1
+  cache(ttl): first  -&gt; auth server 503
+  cache(ttl): second -&gt; token-2
+  cache(ttl): third  -&gt; token-2, auth calls = 2</pre>
+      <p><code>cache()</code> без аргументов запоминает первый сигнал любого вида — и значение, и ошибку — навсегда. Временный сбой сервера авторизации при старте превратился в вечную ошибку: все платежи получают 503, хотя сервер давно поднялся, и помогает только перезапуск. Версия с TTL на каждый вид сигнала кеширует только успех и только на время жизни токена.</p>
+      <p><code>share()</code> решает другую задачу: несколько подписчиков одновременно читают один и тот же бесконечный источник. Например, один цикл опроса статусов у банка на всех клиентов, подписанных на обновления. Это сокращение для <code>publish().refCount()</code>: первый подписчик запускает источник, остальные подключаются к идущему потоку, последний отписавшийся его останавливает.</p>
+      <pre><code class="language-java">Flux&lt;String&gt; statuses = Flux.interval(Duration.ofMillis(100)).map(i -&gt; "status-" + i)
+        .doOnSubscribe(s -&gt; log("polling started"))
+        .doOnCancel(() -&gt; log("polling stopped"))
+        .share();
+statuses.take(3).subscribe(...);                     // A в t=0
+statuses.take(1).subscribe(...);                     // B в t=150
+statuses.take(1).subscribe(...);                     // C в t=650, когда A и B уже ушли</code></pre>
+      <pre class="out"> share(): one polling loop for all subscribers
+  t=0    polling started
+  t=100     A got status-0
+  t=200     A got status-1
+  t=200     B got status-1
+  t=300     A got status-2
+  t=300  polling stopped
+  t=650  polling started
+  t=750     C got status-0
+  t=750  polling stopped
+ replay(1).autoConnect(): late subscriber gets the last value
+  t=1650    late got status-2</pre>
+      <p>B подключился к идущему опросу и получил status-1, а status-0 пропустил: share делает поток hot. Когда A и B забрали своё и отписались, опрос остановился, а C запустил его заново с нуля. Если опоздавшему нужно последнее известное значение, берут <code>replay(n)</code>: он хранит n последних элементов и отдаёт их каждому новому подписчику, а <code>autoConnect()</code> запускает источник при первом подписчике и не останавливает при уходе последнего.</p>
+      <table class="mx">
+        <thead><tr><th>Оператор</th><th>Сколько раз выполняется источник</th><th>Что получит поздний подписчик</th><th>Типичный случай</th></tr></thead>
+        <tbody>
+          <tr><td><code>cache()</code></td><td>один раз навсегда</td><td>все элементы и финальный сигнал, включая ошибку</td><td>справочник, который не меняется</td></tr>
+          <tr><td><code>cache(ttl…)</code></td><td>раз в TTL</td><td>сохранённое значение, пока оно живо</td><td>токен авторизации</td></tr>
+          <tr><td><code>share()</code></td><td>один на всех, пока есть подписчики</td><td>только новые элементы</td><td>общий опрос, поток событий</td></tr>
+          <tr><td><code>replay(n).autoConnect()</code></td><td>один, с первого подписчика</td><td>последние n и всё новое</td><td>последний известный статус</td></tr>
+        </tbody>
+      </table>
+      <h3>Sinks: события снаружи</h3>
+      <p>Все издатели выше берут данные из источника, на который подписываются. Бывает наоборот: события рождаются в обычном коде — в обработчике сообщения Kafka, в колбэке старой библиотеки, — и их нужно отдать в реактивный поток. Для этого есть <code>Sinks</code>: объект, в который пишут <code>tryEmitNext</code>, а читают через <code>asFlux()</code> или <code>asMono()</code>. Вариант выбирается при создании, и от него зависит, что будет с событием, если подписчиков нет или они не успевают:</p>
+      <pre class="out">  multicast().directBestEffort(), no subscribers: FAIL_ZERO_SUBSCRIBER
+  multicast().onBackpressureBuffer(), no subscribers: OK
+  buffered first subscriber got e1
+  unicast, second subscriber: Sinks.many().unicast() sinks only allow a single Subscriber</pre>
+      <table class="mx">
+        <thead><tr><th>Вариант</th><th>Подписчиков</th><th>Если подписчика нет или он не успевает</th></tr></thead>
+        <tbody>
+          <tr><td><code>Sinks.one()</code>, <code>Sinks.empty()</code></td><td>сколько угодно</td><td>одно значение или только завершение, запоминается для поздних</td></tr>
+          <tr><td><code>many().unicast().onBackpressureBuffer()</code></td><td>один</td><td>копит в буфере, пока подписчик не заберёт</td></tr>
+          <tr><td><code>many().multicast().onBackpressureBuffer()</code></td><td>много</td><td>до первого подписчика копит до 256 событий; потом медленный подписчик тормозит всех</td></tr>
+          <tr><td><code>many().multicast().directBestEffort()</code></td><td>много</td><td>событие без подписчиков теряется, медленному подписчику не достаётся</td></tr>
+          <tr><td><code>many().replay().limit(n)</code></td><td>много</td><td>хранит n последних для новых подписчиков</td></tr>
+        </tbody>
+      </table>
+      <p><code>tryEmitNext</code> не бросает исключений, а возвращает <code>EmitResult</code>, и его надо проверять: FAIL_ZERO_SUBSCRIBER, FAIL_OVERFLOW, FAIL_TERMINATED или FAIL_NON_SERIALIZED. Последний означает, что два потока пишут в Sink одновременно: Sink, как любой издатель, обязан отдавать сигналы последовательно (правило 1.3), поэтому второй вызов не ждёт, а сразу проваливается. Если писателей несколько, вызывают <code>emitNext(value, EmitFailureHandler.busyLooping(Duration.ofMillis(100)))</code>: он повторяет попытку, пока другой поток не закончит.</p>
+    </section>
+
+    <section class="step" id="testing">
+      <h2>StepVerifier проверяет сигналы по порядку, а виртуальное время прокручивает минуты ожидания мгновенно</h2>
+      <p>Проверять реактивный код через <code>block()</code> в тесте неудобно: видно только последнее значение, а не сигналы, и любая задержка становится настоящим ожиданием. Для тестов есть <code>StepVerifier</code> из модуля <code>reactor-test</code>: он подписывается на издатель и сверяет каждый сигнал со сценарием. Часть 7 демо:</p>
+      <pre><code class="language-java">StepVerifier.create(Flux.just("p1", "p3").flatMap(OperatorsDemo::charge))
+        .expectNext("p1 paid", "p3 paid")
+        .verifyComplete();                           // подписаться, проверить и дождаться onComplete
+
+StepVerifier.create(Flux.just("p1", "p2", "p3").flatMap(OperatorsDemo::charge)) // p2 падает
+        .expectNext("p1 paid", "p3 paid")
+        .verifyComplete();</code></pre>
+      <pre class="out">7. StepVerifier
+  plain test passed
+  failed test: expectation "expectNext(p3 paid)" failed (expected: onNext(p3 paid); actual: onError(OperatorsDemo$BankUnavailable: 503 from bank))</pre>
+      <p>Сообщение называет сигнал, который пришёл вместо ожидаемого: не «тест упал», а «ждал onNext(p3 paid), получил onError». Ошибку проверяют так же явно: <code>expectErrorMatches(e -&gt; e instanceof PaymentFailed)</code> или <code>verifyError(PaymentFailed.class)</code>. <code>verify…()</code> возвращает Duration — сколько шла проверка.</p>
+      <p>Retry из прошлого шага с паузами в минуты тестировать честным временем нельзя. <code>StepVerifier.withVirtualTime</code> устанавливает <code>VirtualTimeScheduler</code> вместо всех планировщиков Reactor на время теста: <code>Mono.delay</code>, <code>timeout</code>, паузы backoff встают в очередь виртуальных часов, а <code>thenAwait</code> их прокручивает.</p>
+      <pre><code class="language-java">static Mono&lt;String&gt; chargeWithRetry(AtomicInteger attempts) {
+    return flakyBank(attempts, 2, 0)                // две ошибки, потом успех
+            .retryWhen(Retry.backoff(3, Duration.ofMinutes(1)).jitter(0)); // паузы 1 и 2 минуты
+}
+
+StepVerifier.withVirtualTime(() -&gt; chargeWithRetry(attempts)) // Mono создаётся внутри поставщика
+        .expectSubscription()
+        .expectNoEvent(Duration.ofMinutes(1))        // первая пауза: ни одного сигнала
+        .thenAwait(Duration.ofMinutes(2))            // вторая пауза
+        .expectNext("paid")
+        .verifyComplete();
+
+Mono&lt;Long&gt; assembledOutside = Mono.delay(Duration.ofMinutes(1)); // собран ДО withVirtualTime
+StepVerifier.withVirtualTime(() -&gt; assembledOutside)
+        .expectSubscription()
+        .thenAwait(Duration.ofMinutes(2))
+        .expectNext(0L)
+        .expectComplete()
+        .verify(Duration.ofSeconds(2));              // без лимита ждал бы настоящую минуту</code></pre>
+      <pre class="out">  t=0    attempt 1
+  t=60000 attempt 2
+  t=180000 attempt 3
+  virtual-time test passed: 3 min of backoff, attempts = 3, real time &lt; 1 s: true
+  assembled outside supplier: VerifySubscriber timed out on reactor.core.publisher.MonoDelay$MonoDelayRunnable</pre>
+      <p>Три минуты пауз прошли за доли секунды, а попытки легли ровно на 0, 60 000 и 180 000 мс виртуального времени. Второй тест показывает главную ловушку: <code>Mono.delay(Duration)</code> берёт планировщик <code>Schedulers.parallel()</code> в момент сборки. Собранный до <code>withVirtualTime</code>, он уже держит настоящий планировщик, и виртуальные часы его не касаются. Поэтому издатель создают внутри лямбды-поставщика, а <code>verify(Duration)</code> ставят, чтобы зависший тест падал, а не висел.</p>
+      <p>Ещё два инструмента из того же модуля. <code>TestPublisher</code> — управляемый источник: тест сам решает, когда отдать элемент или ошибку, и может нарушить спецификацию, чтобы проверить свой оператор. <code>PublisherProbe</code> отвечает на вопрос «была ли подписка на эту ветку»: например, что при найденном в кеше платеже запасной поход в базу через switchIfEmpty не случился.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Функция вернула Mono или Flux — нужен flatMap: map отдаст рецепт вызова, на который никто не подпишется.</li>
+        <li>flatMap запускает до 256 вызовов и отдаёт ответы по мере прихода; concatMap — по одному, по порядку; flatMapSequential — параллельно, но держит готовые ответы в буфере ради порядка. concurrency ставят по возможностям вызываемого.</li>
+        <li>zip ждёт самого медленного, отменяет остальных при ошибке и молча завершается пустым, если пуст любой источник; switchIfEmpty делает пустоту явной.</li>
+        <li>Ошибка завершает поток. Ошибку одного элемента ловят внутри flatMap; retry — это новая подписка, поэтому повторяемый вызов должен создаваться при подписке.</li>
+        <li>Retry.backoff с фильтром временных ошибок и jitter; timeout до retryWhen ограничивает попытку, после — всю операцию. Повтор списания безопасен только с идемпотентностью.</li>
+        <li>cache() запоминает и ошибку навсегда; share раздаёт один идущий поток, replay — ещё и последние значения; Sinks превращают события из обычного кода в поток. Тесты — StepVerifier, задержки — withVirtualTime с издателем внутри поставщика.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ops-map-flatmap" data-freq="2">
+      <h3>Чем map отличается от flatMap? А flatMap от concatMap?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>map синхронно превращает элемент в другое значение. flatMap принимает функцию, которая возвращает издатель, подписывается на каждый такой издатель и сливает их элементы в один поток. Если вызвать через map метод, который возвращает Mono, получится поток из Mono, и вызов не выполнится — на него никто не подписан.</p>
+          <p>flatMap запускает внутренние подписки параллельно, до 256 по умолчанию, и отдаёт результаты по мере прихода, поэтому порядок не сохраняется. concatMap подписывается по одному и сохраняет порядок, но медленнее. Если нужны и параллельность, и порядок, беру flatMapSequential: он держит готовые результаты в буфере, пока не придёт предыдущий.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Параметр concurrency у flatMap — ограничение нагрузки на вызываемый сервис; 256 по умолчанию обычно больше, чем пул соединений WebClient или лимит партнёра.</li>
+            <li>flatMap = map + merge, concatMap = map + concat. Внутренний prefetch у flatMap — 32 элемента на подписку.</li>
+            <li>У flatMapSequential цена порядка — память: один медленный элемент держит в буфере все готовые после него.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Как ограничить число одновременных вызовов банка до 8?</summary>
+          <p>Вторым аргументом flatMap: <code>ids.flatMap(bank::charge, 8)</code>. Тогда flatMap запросит у источника 8 элементов и будет брать следующий, только когда закончится один из вызовов. Если порядок важен — <code>flatMapSequential(bank::charge, 8)</code>. Ограничение пулом соединений WebClient тоже сработает, но тогда лишние запросы будут ждать в очереди пула и упираться в её таймаут, а не в понятный лимит в коде.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ops-retry" data-freq="2">
+      <h3>Как сделать повтор с backoff и timeout в Reactor?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Через <code>retryWhen(Retry.backoff(3, Duration.ofMillis(100)))</code>: три повтора с паузой, которая растёт вдвое, плюс случайный jitter, чтобы клиенты не пришли к сервису одной волной. Обязательно filter: повторяю только временные ошибки — 503, таймауты, обрыв соединения, — а не 400 или «недостаточно средств». После исчерпания приходит RetryExhaustedException с исходной ошибкой в cause.</p>
+          <p>timeout ставлю до retryWhen, чтобы ограничить одну попытку, и ещё один после — на всю операцию. Повтор — это новая подписка, поэтому вызов должен создаваться при подписке: Mono из WebClient или Mono.defer, а не готовый CompletableFuture.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Повтор неидемпотентного запроса опасен: timeout отменил ожидание, но банк мог провести платёж. Нужен ключ идемпотентности.</li>
+            <li>maxBackoff ограничивает рост паузы; onRetryExhaustedThrow заменяет RetryExhaustedException своей ошибкой; Exceptions.isRetryExhausted проверяет её тип.</li>
+            <li>Сумма пауз и таймаутов попыток должна укладываться в таймаут того, кто ждёт сервис, иначе повторы идут для клиента, который уже ушёл.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим повтором?</summary>
+          <pre><code class="language-java">Mono&lt;Receipt&gt; charge(Payment p) {
+    return Mono.fromFuture(bankClient.chargeAsync(p))
+            .retryWhen(Retry.backoff(5, Duration.ofSeconds(1)))
+            .timeout(Duration.ofSeconds(2));
+}</code></pre>
+          <p>Три проблемы. CompletableFuture создан при сборке, поэтому повторы переподписываются на тот же упавший future, и банк видит один запрос. Фильтра нет, и ошибки вроде 400 тоже повторяются. timeout стоит после retryWhen и ограничивает всё двумя секундами, а первая же пауза — секунда, так что до третьей попытки дело не дойдёт. Исправление: <code>Mono.fromFuture(() -&gt; bankClient.chargeAsync(p, idempotencyKey))</code>, <code>.timeout(…)</code> на попытку до retryWhen, <code>filter</code> для временных ошибок и общий timeout после, длиннее суммы попыток и пауз.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ops-cache-share" data-freq="2">
+      <h3>Чем cache отличается от share? Когда нужен Sinks?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Обычный Mono или Flux холодный: каждая подписка выполняет его заново. cache() выполняет источник один раз и отдаёт сохранённый результат всем следующим подписчикам, как бы поздно они ни пришли. share() делает один общий горячий поток: первый подписчик его запускает, остальные подключаются к идущему и получают только новые элементы, а когда все отписались, источник останавливается.</p>
+          <p>Sinks нужен, когда события рождаются не в реактивном источнике, а в обычном коде — колбэк, слушатель сообщений, — и их надо отдать подписчикам Flux. Я пишу в Sink через tryEmitNext и проверяю EmitResult.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>cache() запоминает и ошибку, навсегда. Для токенов и справочников беру cache с TTL отдельно для значения, ошибки и пустоты.</li>
+            <li>share() = publish().refCount(); replay(n).autoConnect() хранит последние n значений для поздних подписчиков и не останавливается.</li>
+            <li>Sink, как любой издатель, отдаёт сигналы последовательно: конкурентная запись даёт FAIL_NON_SERIALIZED, для нескольких писателей нужен emitNext с EmitFailureHandler.busyLooping.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="ops-testing" data-freq="2">
+      <h3>Как тестировать реактивный код, особенно с задержками и повторами?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>StepVerifier из reactor-test: он подписывается и проверяет сигналы по порядку — expectNext, expectError, verifyComplete. Если пришёл не тот сигнал, сообщение говорит, что ожидалось и что пришло. block() в тестах не люблю: он показывает только последнее значение и прячет порядок.</p>
+          <p>Для задержек, таймаутов и backoff — StepVerifier.withVirtualTime: он подменяет планировщики Reactor виртуальными часами, и thenAwait прокручивает минуты мгновенно. Тест на retry с паузами в минуты идёт доли секунды.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Издатель создаётся внутри поставщика withVirtualTime: Mono.delay и interval берут планировщик при сборке, и собранный снаружи будет ждать настоящее время.</li>
+            <li>verify(Duration) — страховка от зависшего теста; expectNoEvent проверяет, что во время паузы не было сигналов.</li>
+            <li>TestPublisher — управляемый источник, PublisherProbe — проверка, что ветка switchIfEmpty или fallback была (или не была) подписана.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://projectreactor.io/docs/core/release/reference/">Reactor Reference Guide</a> — основа урока: Which operator do I need?, Handling Errors (retry, retryWhen, onErrorContinue), Testing (StepVerifier, virtual time, PublisherProbe), Sinks.</li>
+      <li><a href="https://projectreactor.io/docs/core/release/api/">Reactor Core javadoc</a> — мраморные диаграммы операторов flatMap, concatMap, flatMapSequential, zip, cache, share, а также Retry.backoff и RetryBackoffSpec.</li>
+      <li><a href="https://github.com/reactor/reactor-core/tree/main/reactor-core/src/main/java/reactor/core/publisher">Исходники reactor-core</a> — FluxFlatMap (concurrency и prefetch), MonoCacheTime, SinkManyMulticast.</li>
+      <li><a href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/">Amazon Builders' Library: Timeouts, retries and backoff with jitter</a> — зачем jitter и как согласовывать таймауты с повторами.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
