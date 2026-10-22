@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Valhalla: Value Objects · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="value-objects">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Valhalla: Value Objects</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Дата валютирования 2026-10-22 — значение, как число 4. Но в Java каждый <code>LocalDate</code> — объект со своей identity: отдельный адрес в heap, заголовок, право на <code>synchronized</code>. Value-класс от identity отказывается: два объекта с одинаковыми полями становятся неразличимы даже для <code>==</code>. Взамен JVM может не выделять их в heap, а держать поля прямо в массиве, в поле другого объекта или в регистрах. В JDK 28 это preview-возможность, она включается флагом <code>--enable-preview</code>.</p>
+    </div>
+
+    <section class="step" id="identity-cost">
+      <h2>Дата платежа платит за identity, которая ей не нужна</h2>
+      <p>Платёжный сервис держит в памяти пачку платежей. У каждого есть id пользователя типа <code>Long</code> и дата валютирования <code>LocalDate</code>. Оба поля — неизменяемые значения: две даты 2026-10-22 ничем не отличаются. Но для JVM каждая дата — отдельный объект. У него свой адрес, заголовок в heap, его можно использовать как монитор в <code>synchronized</code>. Это и есть identity: свойство «этот объект, а не другой, даже если поля совпадают».</p>
+      <p>Identity видна в двух местах. Первое — оператор <code>==</code>: он сравнивает адреса, поэтому два одинаковых <code>Long</code> больше 127 не равны (разбор этой ошибки — в теме <a href="java-types.html#long-equals">Types &amp; Wrappers</a>). Второе — память: массив дат хранит не даты, а ссылки на миллион разбросанных по heap объектов. Один и тот же исходник на JDK 28 показывает разницу, если запустить его с preview и без:</p>
+      <pre><code class="language-java">public class SameCode {
+    record Payment(Long userId, LocalDate valueDate) { }        // обычный record: identity-класс
+
+    public static void main(String[] args) throws Exception {
+        Payment a = new Payment(100_500L, LocalDate.of(2026, 10, 22));
+        Payment b = new Payment(100_500L, LocalDate.of(2026, 10, 21).plusDays(1));
+
+        System.out.println("userId ==    " + (a.userId() == b.userId()));        // Long вне кеша -128..127
+        System.out.println("valueDate == " + (a.valueDate() == b.valueDate()));  // одна дата, создана двумя путями
+        System.out.println("payment ==   " + (a == b));                          // сам Payment остаётся identity
+
+        // Миллион дат валютирования в массиве: что лежит в heap
+        LocalDate[] dates = new LocalDate[1_000_000];
+        LocalDate start = LocalDate.of(2020, 1, 1);
+        for (int i = 0; i &lt; dates.length; i++) dates[i] = start.plusDays(1 + i % 3650);
+        histogram("java.time.LocalDate ", "[Ljava.time.LocalDate;");           // строки из GC.class_histogram
+        System.out.println(dates[dates.length - 1]);                            // массив жив до замера
+    }
+}</code></pre>
+      <p>Первый запуск — JDK 28 без preview, команда <code>java SameCode.java</code>:</p>
+      <pre class="out">userId ==    false
+valueDate == false
+payment ==   false
+java.time.LocalDate       1,000,003 шт.   16,000,048 байт
+[Ljava.time.LocalDate;            1 шт.    4,000,016 байт
+2029-09-20</pre>
+      <p>Второй — тот же исходник, <code>java --enable-preview SameCode.java</code>:</p>
+      <pre class="out">userId ==    true
+valueDate == true
+payment ==   false
+[Ljava.time.LocalDate;            1 шт.    8,000,016 байт
+java.time.LocalDate               4 шт.           64 байт
+2029-09-20</pre>
+      <p>Без preview всё привычно: равные значения не <code>==</code>, а миллион дат стоит 20 МБ — 4 байта ссылки в массиве и 16 байт объекта на каждую (из чего складывается размер объекта — тема <a href="object-layout.html#header">Object Layout &amp; Allocation</a>). С preview <code>Long</code> и <code>LocalDate</code> становятся value-классами. <code>==</code> сравнивает их по полям, массив весит 8 МБ, а отдельных объектов <code>LocalDate</code> почти нет. <code>Payment</code> по-прежнему сравнивается по адресу: это обычный record, и от identity он не отказывался. Метод <code>histogram</code> печатает строки из <code>GC.class_histogram</code> — то же, что <code>jcmd &lt;pid&gt; GC.class_histogram</code>. Полный файл — <code>examples/value-objects/SameCode.java</code>.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Слева массив LocalDate без preview: ячейки хранят ссылки, каждая ведёт на отдельный объект LocalDate в heap, 4 байта ссылки плюс 16 байт объекта на дату. Справа массив с preview: в каждой ячейке 8 байт — флаг null, год, месяц и день, отдельных объектов нет.">
+            <defs>
+              <marker id="ic-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+
+            <!-- слева: массив ссылок и объекты в heap -->
+            <text x="20" y="22" class="dg-cap">IDENTITY: МАССИВ ССЫЛОК</text>
+            <rect x="30" y="52" width="96" height="30" rx="5" class="dg-cell"/>
+            <rect x="30" y="88" width="96" height="30" rx="5" class="dg-cell"/>
+            <rect x="30" y="124" width="96" height="30" rx="5" class="dg-cell"/>
+            <rect x="30" y="160" width="96" height="30" rx="5" class="dg-cell"/>
+            <rect x="180" y="40" width="150" height="40" rx="6" class="dg-box"/>
+            <rect x="196" y="104" width="134" height="40" rx="6" class="dg-box"/>
+            <rect x="176" y="176" width="154" height="40" rx="6" class="dg-box"/>
+            <path d="M126 67 C 150 67, 150 60, 176 60" class="dg-line" marker-end="url(#ic-n)"/>
+            <path d="M126 103 C 160 103, 164 124, 192 124" class="dg-line" marker-end="url(#ic-n)"/>
+            <path d="M126 139 C 150 139, 148 196, 172 196" class="dg-line" marker-end="url(#ic-n)"/>
+            <text x="30" y="44" class="dg-n">LocalDate[]</text>
+            <g text-anchor="middle">
+              <text x="78" y="72" class="dg-in">ref</text>
+              <text x="78" y="108" class="dg-in">ref</text>
+              <text x="78" y="144" class="dg-in">ref</text>
+              <text x="78" y="180" class="dg-in">null</text>
+            </g>
+            <text x="190" y="57" class="dg-t">LocalDate</text>
+            <text x="190" y="73" class="dg-in">2026-10-22</text>
+            <text x="206" y="121" class="dg-t">LocalDate</text>
+            <text x="206" y="137" class="dg-in">2026-10-23</text>
+            <text x="186" y="193" class="dg-t">LocalDate</text>
+            <text x="186" y="209" class="dg-in">2027-01-09</text>
+            <text x="20" y="234" class="dg-s">объект: заголовок 8 + поля 6 + добивка 2</text>
+            <text x="20" y="252" class="dg-bad">4 Б ссылка + 16 Б объект = 20 Б на дату</text>
+
+            <line x1="356" y1="10" x2="356" y2="252" class="dg-sep"/>
+
+            <!-- справа: поля прямо в ячейках массива -->
+            <text x="376" y="22" class="dg-cap">VALUE: ПОЛЯ ПРЯМО В МАССИВЕ</text>
+            <rect x="376" y="52" width="290" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="376" y="88" width="290" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="376" y="124" width="290" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="376" y="160" width="290" height="30" rx="5" class="dg-cell"/>
+            <g class="dg-sep">
+              <line x1="416" y1="52" x2="416" y2="190"/>
+              <line x1="526" y1="52" x2="526" y2="190"/>
+              <line x1="596" y1="52" x2="596" y2="190"/>
+            </g>
+            <g text-anchor="middle">
+              <text x="396" y="44" class="dg-n">null</text>
+              <text x="471" y="44" class="dg-n">year: int</text>
+              <text x="561" y="44" class="dg-n">month</text>
+              <text x="631" y="44" class="dg-n">day</text>
+              <text x="396" y="72" class="dg-in">1</text><text x="471" y="72" class="dg-in">2026</text><text x="561" y="72" class="dg-in">10</text><text x="631" y="72" class="dg-in">22</text>
+              <text x="396" y="108" class="dg-in">1</text><text x="471" y="108" class="dg-in">2026</text><text x="561" y="108" class="dg-in">10</text><text x="631" y="108" class="dg-in">23</text>
+              <text x="396" y="144" class="dg-in">1</text><text x="471" y="144" class="dg-in">2027</text><text x="561" y="144" class="dg-in">01</text><text x="631" y="144" class="dg-in">09</text>
+              <text x="396" y="180" class="dg-in">0</text><text x="471" y="180" class="dg-in">0</text><text x="561" y="180" class="dg-in">0</text><text x="631" y="180" class="dg-in">0</text>
+            </g>
+            <text x="674" y="72" class="dg-n">8 Б</text>
+            <text x="376" y="234" class="dg-s">объектов LocalDate в heap нет</text>
+            <text x="376" y="252" class="dg-ok">8 Б на дату: флаг null + 48 бит</text>
+          </svg>
+        </div>
+        <figcaption>Справа нет ссылок, поэтому нет и адресов: две ячейки с 2026-10-22 нельзя отличить друг от друга. Именно это и позволяет JVM так хранить даты.</figcaption>
+      </figure>
+      <p>Почему JVM не делала так раньше? Язык позволяет identity наблюдать. <code>==</code> сравнивает адреса, <code>synchronized</code> захватывает монитор конкретного объекта, <code>System.identityHashCode</code> возвращает хеш, привязанный к объекту, <code>WeakReference</code> следит за смертью именно этого экземпляра. Если хоть один такой вызов возможен, JVM обязана хранить объект отдельно и отдавать на него ссылку. Убрать объект она может, только если доказала, что ссылка не выходит из метода. Это escape analysis (тема <a href="object-layout.html#escape">Object Layout &amp; Allocation</a>), а элемент массива из метода как раз выходит.</p>
+      <p>Project Valhalla предлагает другой путь. Автор класса сам обещает, что identity его объектам не нужна. Язык после этого запрещает операции, которые её наблюдают, а JVM получает свободу хранить значение как удобнее. Весь урок — про то, что именно меняется после такого обещания.</p>
+    </section>
+
+    <section class="step" id="declare">
+      <h2>Модификатор value — обещание: identity не нужна, поля не меняются</h2>
+      <p>Value-класс объявляется модификатором <code>value</code> перед <code>class</code> или <code>record</code>. Остальные классы теперь называются identity-классами, и их поведение не меняется.</p>
+      <pre><code class="language-java">value record Money(long kopecks, String currency) { }   // value record: компоненты, equals, toString как у record
+
+value class Iban {                                       // value class: своё представление, свои методы
+    private final String digits;                         // final можно не писать: поля value-класса неявно final
+    Iban(String digits) { this.digits = digits; }
+    @Override public boolean equals(Object o) { return o instanceof Iban i &amp;&amp; digits.equals(i.digits); }
+    @Override public int hashCode() { return digits.hashCode(); }
+}</code></pre>
+      <p>Обещание «identity не нужна» имеет смысл только для неизменяемых и взаимозаменяемых объектов. Поэтому компилятор добавляет ограничения:</p>
+      <ul>
+        <li><b>Все поля неявно final.</b> Если бы поле можно было поменять, два «одинаковых» объекта разошлись бы после изменения одного из них, а отличить их без identity нельзя.</li>
+        <li><b>Класс неявно final.</b> Наследование разрешено только от абстрактного value-класса, помеченного <code>abstract value class</code>.</li>
+        <li><b>Родитель — <code>Object</code> или абстрактный value-класс.</b> Identity-родитель мог бы хранить в себе изменяемые поля и опираться на <code>this</code> как на монитор.</li>
+        <li><b>Типы полей любые.</b> Поле может ссылаться на identity-объект, например на <code>String</code> или <code>List</code>. Ссылка на value-объект может быть <code>null</code>, как любая ссылка.</li>
+      </ul>
+      <pre><code class="language-java">static abstract class Account { }                          // identity-класс
+static value class Card extends Account { }                // value не может наследовать identity
+
+static abstract value class Amount { abstract long kopecks(); }
+static value class Fee extends Amount { … }                // можно: родитель — abstract value
+static class Balance extends Amount { … }                  // можно: identity-наследник abstract value
+static value class Bonus extends Fee { … }                 // value class неявно final
+
+static value class Counter {
+    long n;                                                // неявно final
+    void inc() { n++; }                                    // запись после конструктора
+}</code></pre>
+      <pre><code class="language-text">javac --release 28 --enable-preview negative/Rules.java
+Rules.java:16: error: cannot inherit from final Fee
+Rules.java:4: error: The identity type Account cannot be a supertype of the value type Card
+Rules.java:21: error: cannot assign a value to final variable n
+3 errors</code></pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 236" role="img" aria-label="Иерархия: Object — корень. От него наследуют абстрактные value-классы Number и Record и identity-класс Account. От Number наследуют value-класс Integer и identity-класс BigInteger. От Record — value record Money и обычный record Payment. Value-класс Card от identity-класса Account наследовать не может.">
+            <defs>
+              <marker id="vh-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="vh-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+
+            <!-- корень -->
+            <rect x="300" y="14" width="120" height="34" rx="7" class="dg-box"/>
+
+            <!-- родители -->
+            <rect x="56" y="86" width="170" height="42" rx="7" class="dg-cell hit"/>
+            <rect x="312" y="86" width="170" height="42" rx="7" class="dg-cell hit"/>
+            <rect x="545" y="86" width="160" height="42" rx="7" class="dg-box"/>
+
+            <!-- наследники -->
+            <rect x="20" y="166" width="116" height="42" rx="7" class="dg-cell hit"/>
+            <rect x="146" y="166" width="116" height="42" rx="7" class="dg-cell"/>
+            <rect x="276" y="166" width="116" height="42" rx="7" class="dg-cell hit"/>
+            <rect x="402" y="166" width="116" height="42" rx="7" class="dg-cell"/>
+            <rect x="560" y="166" width="130" height="42" rx="7" class="dg-cell miss"/>
+
+            <!-- extends: от наследника к родителю -->
+            <path d="M141 86 C 141 66, 330 66, 336 52" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M397 86 L 380 52" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M625 86 C 625 66, 420 66, 404 52" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M78 166 L 120 132" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M204 166 L 162 132" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M334 166 L 376 132" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M460 166 L 418 132" class="dg-line" marker-end="url(#vh-n)"/>
+            <path d="M625 166 L 625 132" class="dg-line bad" marker-end="url(#vh-bad)"/>
+
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="360" y="36" class="dg-t">Object</text>
+              <text x="141" y="104" class="dg-t">Number</text>
+              <text x="141" y="120" class="dg-s">abstract value</text>
+              <text x="397" y="104" class="dg-t">Record</text>
+              <text x="397" y="120" class="dg-s">abstract value</text>
+              <text x="625" y="104" class="dg-t">Account</text>
+              <text x="625" y="120" class="dg-s">identity</text>
+              <text x="78" y="184" class="dg-t">Integer</text>
+              <text x="78" y="200" class="dg-s">value</text>
+              <text x="204" y="184" class="dg-t">BigInteger</text>
+              <text x="204" y="200" class="dg-s">identity</text>
+              <text x="334" y="184" class="dg-t">Money</text>
+              <text x="334" y="200" class="dg-s">value record</text>
+              <text x="460" y="184" class="dg-t">Payment</text>
+              <text x="460" y="200" class="dg-s">record</text>
+              <text x="625" y="184" class="dg-t">Card</text>
+              <text x="625" y="200" class="dg-s">value class</text>
+            </g>
+            <text x="634" y="152" class="dg-bad">нельзя</text>
+            <text x="20" y="228" class="dg-s">Зелёные классы без identity. Стрелка — extends.</text>
+          </svg>
+        </div>
+        <figcaption><code>Object</code> — исключение: он не абстрактный и не value-класс, <code>new Object()</code> имеет identity, но value-классы от него наследуют. Общего супертипа <code>java.lang.Value</code> нет.</figcaption>
+      </figure>
+      <p><code>Number</code> и <code>Record</code> в JDK 28 стали абстрактными value-классами: у них нет полей и кода, завязанного на identity. Поэтому от <code>Number</code> наследуют и value-класс <code>Integer</code>, и identity-класс <code>BigInteger</code>, а от <code>Record</code> — и value record, и обычный record. Абстрактный value-класс можно сделать sealed и перечислить в <code>permits</code> его value-наследников: так моделируют закрытый набор значений вроде видов идентификатора пользователя (тема <a href="sealed-patterns.html">Sealed &amp; Pattern Matching</a>).</p>
+      <table class="mx">
+        <thead><tr><th></th><th>class</th><th>record</th><th>value class</th><th>value record</th></tr></thead>
+        <tbody>
+          <tr><td>Identity</td><td>есть</td><td>есть</td><td>нет</td><td>нет</td></tr>
+          <tr><td>Поля</td><td>любые</td><td>final, из компонентов</td><td>неявно final, любые</td><td>final, из компонентов</td></tr>
+          <tr><td><code>==</code></td><td>адрес</td><td>адрес</td><td>поля</td><td>поля</td></tr>
+          <tr><td>equals по умолчанию</td><td>адрес</td><td>компоненты</td><td><code>==</code>, то есть поля</td><td>компоненты</td></tr>
+          <tr><td>Когда брать</td><td>сущность, состояние</td><td>DTO, данные с identity</td><td>значение со скрытым представлением</td><td>прозрачное значение</td></tr>
+        </tbody>
+      </table>
+      <p>Value record подходит, когда поля и есть публичный контракт: <code>Money(kopecks, currency)</code>. Value class нужен, когда внутреннее представление отличается от внешнего. Например, сумма хранится одним <code>long</code> в копейках, а наружу отдаются рубли и копейки по отдельности. Record так не умеет: его поля совпадают с компонентами (тема <a href="records.html#contract">Records</a>).</p>
+      <h3>Какие классы JDK стали value-классами</h3>
+      <p>С <code>--enable-preview</code> value-классами становятся 30 классов JDK: восемь обёрток примитивов, <code>Number</code> и <code>Record</code>, четыре <code>Optional*</code>, большинство типов <code>java.time</code> (<code>LocalDate</code>, <code>LocalTime</code>, <code>LocalDateTime</code>, <code>ZonedDateTime</code>, <code>OffsetDateTime</code>, <code>Instant</code>, <code>Duration</code>, <code>Period</code>, <code>Year</code> и другие) и четыре даты из <code>java.time.chrono</code>. Новый метод <code>Objects.hasIdentity</code> показывает, какой объект перед тобой:</p>
+      <pre><code class="language-java">Object[] samples = { 42, 42L, 4.2, true, Optional.of("x"), LocalDate.now(), Instant.now(), Duration.ZERO,
+        "RUB", new BigDecimal("4.20"), UUID.randomUUID(), ZoneOffset.UTC, List.of(1) };
+for (Object x : samples)
+    System.out.printf("%-14s %s%n", x.getClass().getSimpleName(), Objects.hasIdentity(x) ? "identity" : "value");</code></pre>
+      <pre class="out">Integer        value
+Long           value
+Double         value
+Boolean        value
+Optional       value
+LocalDate      value
+Instant        value
+Duration       value
+String         identity
+BigDecimal     identity
+UUID           identity
+ZoneOffset     identity
+List12         identity</pre>
+      <p><code>String</code> остался identity-классом: его API и реализация опираются на identity, например <code>intern()</code>. <code>BigDecimal</code>, <code>UUID</code>, <code>ZoneOffset</code> и неизменяемые коллекции в JDK 28 тоже не перевели. Перевод — решение авторов класса, автоматически он не происходит. Классы, которые перевели, давно были описаны в javadoc как value-based: «не полагайтесь на identity, не создавайте конструктором, не синхронизируйтесь». Поэтому в JDK 9 конструкторы обёрток объявили deprecated, а в JDK 16 добавили предупреждения о <code>synchronized</code> на таких объектах (JEP 390).</p>
+      <div class="trap">
+        <p class="myth">Value class — это struct, как в C#: копируется при присваивании и лежит на стеке.</p>
+        <p class="fact">В Java нет новой семантики копирования. Value-объект по-прежнему передаётся по ссылке и может быть <code>null</code>. Меняются только правила наблюдения: identity нет, поэтому JVM вправе хранить его как угодно — указателем, в поле, в регистрах. Struct в C# изменяем, поэтому семантику копий там приходится явно описывать. Value-объект неизменяем, и копия от оригинала не отличается.</p>
+      </div>
+    </section>
+
+    <section class="step" id="equality">
+      <h2>== сравнивает поля рекурсивно, но equals всё равно нужен</h2>
+      <p>Раньше <code>==</code> отвечал на вопрос «тот же ли это объект». Теперь он отвечает на вопрос «можно ли отличить эти объекты». Для identity-объектов ответ прежний: сравниваются адреса. Два value-объекта неразличимы, если:</p>
+      <ol>
+        <li>они одного класса;</li>
+        <li>их примитивные поля совпадают <b>побитово</b>;</li>
+        <li>их ссылочные поля равны по <code>==</code> — то же правило применяется рекурсивно.</li>
+      </ol>
+      <p>Это не <code>equals</code>. Правило не знает, что две строки с одинаковыми буквами — одно и то же значение, и не знает, что <code>0.0</code> и <code>-0.0</code> равны как числа:</p>
+      <pre><code class="language-java">value record Money(long kopecks, String currency) { }
+
+static value class Iban {                              // value class без equals и hashCode
+    private final String digits;
+    Iban(String digits) { this.digits = digits; }
+}
+
+value record Rate(double percent) { }
+
+String rub = "RUB";
+String rubCopy = new String("RUB");                    // та же строка, другой объект
+Money a = new Money(100, rub);
+Money b = new Money(100, rub);
+Money c = new Money(100, rubCopy);
+System.out.println("a == b        " + (a == b));
+System.out.println("a == c        " + (a == c));
+System.out.println("a.equals(c)   " + a.equals(c));
+
+Iban i1 = new Iban("DE89370400440532013000");
+Iban i2 = new Iban(new String("DE89370400440532013000"));
+System.out.println("iban equals   " + i1.equals(i2));            // унаследованный Object.equals
+System.out.println("iban hash ==  " + (i1.hashCode() == i2.hashCode()));
+
+System.out.println("0.0 == -0.0   " + (0.0 == -0.0));
+System.out.println("Rate(0.0) == Rate(-0.0)  " + (new Rate(0.0) == new Rate(-0.0)));
+double nan = Double.NaN;
+System.out.println("nan == nan    " + (nan == nan));
+System.out.println("Rate(nan) == Rate(nan)   " + (new Rate(nan) == new Rate(nan)));</code></pre>
+      <pre class="out">a == b        true
+a == c        false
+a.equals(c)   true
+iban equals   false
+iban hash ==  false
+0.0 == -0.0   true
+Rate(0.0) == Rate(-0.0)  false
+nan == nan    false
+Rate(nan) == Rate(nan)   true</pre>
+      <p><code>a == c</code> ложно, потому что поле <code>currency</code> ссылается на два разных объекта <code>String</code>, а строки сравниваются по адресу. <code>Iban</code> без своего <code>equals</code> ломается так же: унаследованный <code>Object.equals</code> для value-объекта — это <code>==</code>, а <code>hashCode</code> считается по битам полей, то есть по адресу строки. Два одинаковых IBAN попадут в разные корзины <code>HashSet</code>. С <code>double</code> всё упирается в биты: <code>-0.0</code> отличается от <code>0.0</code> знаковым битом, а два одинаковых NaN совпадают побитово, хотя <code>nan == nan</code> для примитива ложно.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 256" role="img" aria-label="Два объекта Money: a и c. JVM сравнивает класс, затем биты поля kopecks, затем поле currency. Строки в currency — разные identity-объекты String, поэтому a == c ложно. equals record сравнивает currency через String.equals и возвращает true.">
+            <defs>
+              <marker id="eq-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+
+            <!-- два объекта Money -->
+            <rect x="40" y="38" width="230" height="108" rx="8" class="dg-box"/>
+            <rect x="450" y="38" width="230" height="108" rx="8" class="dg-box"/>
+            <rect x="52" y="48" width="206" height="26" rx="5" class="dg-cell"/>
+            <rect x="52" y="80" width="206" height="26" rx="5" class="dg-cell"/>
+            <rect x="52" y="112" width="206" height="26" rx="5" class="dg-cell"/>
+            <rect x="462" y="48" width="206" height="26" rx="5" class="dg-cell"/>
+            <rect x="462" y="80" width="206" height="26" rx="5" class="dg-cell"/>
+            <rect x="462" y="112" width="206" height="26" rx="5" class="dg-cell"/>
+
+            <!-- строки в heap -->
+            <rect x="80" y="176" width="160" height="40" rx="6" class="dg-cell"/>
+            <rect x="490" y="176" width="160" height="40" rx="6" class="dg-cell"/>
+
+            <!-- состояния сравнения -->
+            <g data-s="1-"><rect x="52" y="48" width="206" height="26" rx="5" class="dg-cell hit"/><rect x="462" y="48" width="206" height="26" rx="5" class="dg-cell hit"/></g>
+            <g data-s="2-"><rect x="52" y="80" width="206" height="26" rx="5" class="dg-cell hit"/><rect x="462" y="80" width="206" height="26" rx="5" class="dg-cell hit"/></g>
+            <g data-s="3"><rect x="52" y="112" width="206" height="26" rx="5" class="dg-cell miss"/><rect x="462" y="112" width="206" height="26" rx="5" class="dg-cell miss"/>
+              <rect x="80" y="176" width="160" height="40" rx="6" class="dg-cell miss"/><rect x="490" y="176" width="160" height="40" rx="6" class="dg-cell miss"/></g>
+            <g data-s="4"><rect x="52" y="112" width="206" height="26" rx="5" class="dg-cell hit"/><rect x="462" y="112" width="206" height="26" rx="5" class="dg-cell hit"/>
+              <rect x="80" y="176" width="160" height="40" rx="6" class="dg-cell hit"/><rect x="490" y="176" width="160" height="40" rx="6" class="dg-cell hit"/></g>
+
+            <!-- ссылки на строки -->
+            <path d="M200 138 C 200 160, 160 154, 160 172" class="dg-line" marker-end="url(#eq-n)"/>
+            <path d="M610 138 C 610 160, 570 154, 570 172" class="dg-line" marker-end="url(#eq-n)"/>
+
+            <!-- подписи -->
+            <text x="40" y="30" class="dg-n">a</text>
+            <text x="450" y="30" class="dg-n">c</text>
+            <text x="62" y="66" class="dg-in">class    Money</text>
+            <text x="62" y="98" class="dg-in">kopecks  100</text>
+            <text x="62" y="130" class="dg-in">currency ref</text>
+            <text x="472" y="66" class="dg-in">class    Money</text>
+            <text x="472" y="98" class="dg-in">kopecks  100</text>
+            <text x="472" y="130" class="dg-in">currency ref</text>
+            <text x="92" y="193" class="dg-in">"RUB"</text>
+            <text x="92" y="209" class="dg-n">String, объект @1</text>
+            <text x="502" y="193" class="dg-in">"RUB"</text>
+            <text x="502" y="209" class="dg-n">String, объект @2</text>
+            <g text-anchor="middle">
+              <text data-s="1-" x="360" y="66" class="dg-ok">Money = Money</text>
+              <text data-s="2-" x="360" y="98" class="dg-ok">биты 100 = 100</text>
+              <text data-s="3" x="360" y="130" class="dg-bad">адрес @1 ≠ @2</text>
+              <text data-s="4" x="360" y="130" class="dg-ok">equals: да</text>
+              <text data-s="4" x="365" y="200" class="dg-ok">R-U-B = R-U-B</text>
+            </g>
+
+            <!-- результат: отдельный слой на шаг -->
+            <text data-s="1" x="20" y="244" class="dg-t">a == c: классы совпали, дальше поля</text>
+            <text data-s="2" x="20" y="244" class="dg-t">a == c: long сравнивается побитово</text>
+            <text data-s="3" x="20" y="244" class="dg-bad">a == c → false: String — identity-класс</text>
+            <text data-s="4" x="20" y="244" class="dg-ok">a.equals(c) → true: record вызывает String.equals</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>JVM сначала сравнивает классы. Объекты разных value-классов неразличимы быть не могут, даже с одинаковыми полями.</li>
+          <li>Примитивное поле <code>kopecks</code> сравнивается побитово: 100 и 100 совпали.</li>
+          <li>Поле <code>currency</code> — ссылка. К ней рекурсивно применяется <code>==</code>, а <code>String</code> — identity-класс, поэтому сравниваются адреса @1 и @2. Они разные, и <code>a == c</code> ложно.</li>
+          <li><code>equals</code> у record вызывает <code>equals</code> у каждого компонента. <code>String.equals</code> сравнивает буквы, поэтому <code>a.equals(c)</code> истинно.</li>
+        </ol>
+      </figure>
+      <p>Отсюда главное правило: <code>==</code> отвечает «неразличимы ли объекты», а <code>equals</code> — «одно ли это значение». Для <code>Integer</code> и <code>LocalDate</code> ответы совпадают. Для класса, у которого внутри строка, коллекция или <code>double</code>, — нет. Поэтому value-классу со ссылочными полями нужен свой <code>equals</code> и <code>hashCode</code> с тем же контрактом, что у обычного класса (тема <a href="object.html#contract">equals &amp; hashCode</a>). Value record генерирует их сам, как любой record.</p>
+      <div class="trap">
+        <p class="myth">С Valhalla обёртки можно сравнивать через <code>==</code>, а equals больше не нужен.</p>
+        <p class="fact">Только когда код запущен с <code>--enable-preview</code> на JDK 28 и новее. На JDK 21 и без preview тот же код снова сравнивает адреса и ломается на значениях больше 127. А для value-класса со строковым полем <code>==</code> ошибается и с preview. JEP 401 прямо говорит: менять <code>==</code> на замену <code>equals</code> не цель.</p>
+      </div>
+      <p>У нового <code>==</code> есть цена. Сравнение идёт по всему графу value-объектов: глубоко вложенные значения сравниваются долго и в пределе могут дать <code>StackOverflowError</code>. Зациклиться оно не может: правила конструирования (следующий шаг) не дают value-объекту сослаться на себя. И ещё деталь для безопасности: по <code>==</code> и <code>System.identityHashCode</code> можно косвенно узнать значения приватных полей. Value-класс не годится для данных, которые надо защищать от такого подбора.</p>
+      <details class="deep">
+        <summary>Под капотом: во что превращается if_acmpeq</summary>
+        <p>Байткод не изменился: <code>==</code> над ссылками — по-прежнему <code>if_acmpeq</code>. Раньше это одно сравнение указателей. Теперь JVM сначала проверяет быстрый путь: указатели равны — значит, объекты неразличимы; один из объектов identity — значит, достаточно сравнить указатели. Только если оба объекта value и одного класса, она сравнивает содержимое. Для этого у каждого value-класса есть карта: какие байты сравнивать побитово, а какие поля — ссылки, которые нужно сравнить рекурсивно.</p>
+        <p>Эту карту видно в <code>-XX:+PrintFieldLayout</code> (шаг 6): у <code>Transfer</code> строка <code>Non-oop acmp map &lt;offset,size&gt;: &lt;8,25&gt;</code> — 25 байт с восьмого сравниваются как обычные данные. JEP 401 отдельно отмечает, что дополнительная проверка в <code>if_acmpeq</code> стоит немного и для identity-объектов, но её оптимизировали как быстрый путь.</p>
+      </details>
+    </section>
+
+    <section class="step" id="breaks">
+      <h2>Операции, которым нужна identity, перестают работать</h2>
+      <p>Identity использовали не только через <code>==</code>. Монитор <code>synchronized</code> живёт в заголовке конкретного объекта. <code>WeakReference</code> сообщает о смерти конкретного экземпляра (тема <a href="gc-references.html#reachability">References</a>). <code>IdentityHashMap</code> различает ключи по адресу. Сериализация и рефлексия умеют создавать объект в обход конструктора и записывать в его поля. У value-объекта нет ни адреса, ни заголовка, на который можно опереться, поэтому все эти операции для него запрещены или меняют смысл:</p>
+      <pre><code class="language-java">value record Money(long kopecks, String currency) { }
+
+static value class Ticket implements java.io.Serializable {   // value class, не record
+    private final long id;
+    Ticket(long id) { this.id = id; }
+}
+
+Money fee = new Money(150, "RUB");
+Object lock = fee;                                  // статический тип Object: javac не видит value-класс
+
+try { synchronized (lock) { } }
+catch (IdentityException e) { System.out.println("synchronized: " + e.getMessage()); }
+
+try { lock.wait(10); }
+catch (IllegalMonitorStateException e) { System.out.println("wait:         " + e.getClass().getSimpleName()); }
+
+try { new WeakReference&lt;&gt;(fee); }
+catch (IdentityException e) { System.out.println("WeakReference:" + " " + e.getMessage()); }
+
+Map&lt;Object, String&gt; seen = new IdentityHashMap&lt;&gt;();
+seen.put(new Money(150, "RUB"), "first");
+seen.put(new Money(150, "RUB"), "second");          // == и identityHashCode совпадают
+System.out.println("IdentityHashMap: " + seen);
+
+Integer x = new Integer(1996), y = new Integer(1996);   // deprecated, но компилируется
+System.out.println("new Integer == new Integer: " + (x == y));
+
+System.out.println("hasIdentity(fee)   = " + Objects.hasIdentity(fee));
+System.out.println("hasIdentity(\"RUB\") = " + Objects.hasIdentity("RUB"));
+
+var field = Money.class.getDeclaredField("kopecks");
+field.setAccessible(true);
+try { field.set(fee, 0L); }
+catch (IllegalAccessException e) { System.out.println("Field.set:    " + e.getMessage()); }
+
+try { new java.io.ObjectOutputStream(new java.io.ByteArrayOutputStream()).writeObject(new Ticket(7)); }
+catch (java.io.InvalidClassException e) { System.out.println("serialize:    " + e.getMessage()); }</code></pre>
+      <pre class="out">synchronized: Cannot synchronize on an instance of value class Identity$Money
+wait:         IllegalMonitorStateException
+WeakReference: Identity$Money is not an identity class
+IdentityHashMap: {Money[kopecks=150, currency=RUB]=second}
+new Integer == new Integer: true
+hasIdentity(fee)   = false
+hasIdentity("RUB") = true
+Field.set:    Can not set final long field Identity$Money.kopecks to java.lang.Long
+serialize:    Identity$Ticket; cannot serialize due to final value class or strictly-initialized instance fields</pre>
+      <p>Самое неожиданное здесь — <code>new Integer(1996) == new Integer(1996)</code>. Классический ответ на собеседовании «<code>new</code> всегда создаёт новый объект» для value-классов неверен. <code>new</code> может вернуть уже существующее значение или вообще не выделять память, и отличить одно от другого нельзя. Кеш <code>Integer</code> от −128 до 127 при этом теряет смысл для <code>==</code>: равные значения равны всегда. <code>IdentityHashMap</code> тоже не ошибся: два <code>Money(150, "RUB")</code> неразличимы, поэтому это один ключ.</p>
+      <table class="mx">
+        <thead><tr><th>Операция</th><th>Identity-объект</th><th>Value-объект</th></tr></thead>
+        <tbody>
+          <tr><td><code>synchronized</code></td><td>захват монитора</td><td>ошибка javac, если тип value-класс; иначе <code>IdentityException</code></td></tr>
+          <tr><td><code>wait</code>, <code>notify</code></td><td>работают под монитором</td><td>всегда <code>IllegalMonitorStateException</code>: монитор не захватить</td></tr>
+          <tr><td><code>WeakReference</code>, <code>WeakHashMap</code></td><td>GC сообщает о смерти</td><td><code>IdentityException</code>; javac предупреждает <code>[identity]</code></td></tr>
+          <tr><td><code>IdentityHashMap</code>, <code>identityHashCode</code></td><td>по адресу</td><td>по полям: равные значения — один ключ</td></tr>
+          <tr><td><code>new</code></td><td>новый объект, <code>!=</code> всем</td><td>значение, <code>==</code> такому же</td></tr>
+          <tr><td>Запись final-поля рефлексией</td><td>с JDK 26 с предупреждением</td><td><code>IllegalAccessException</code> всегда</td></tr>
+          <tr><td>Сериализация</td><td>работает</td><td>value record — да; value class — только через <code>writeReplace</code> и <code>readResolve</code></td></tr>
+          <tr><td><code>finalize</code></td><td>устарел</td><td>не вызывается никогда</td></tr>
+        </tbody>
+      </table>
+      <p>Если тип выражения сам value-класс, ошибку ловит компилятор. Если он спрятан за <code>Object</code>, интерфейсом или <code>T</code>, ошибка случится только при выполнении. Похожие проверки javac давно делает и без preview, просто как предупреждения:</p>
+      <pre><code class="language-text">javac negative/SyncDate.java                                   # JDK 28 без preview
+SyncDate.java:7: warning: [identity] attempt to synchronize on an instance of a value-based class
+        synchronized (valueDate) {
+
+javac --release 28 --enable-preview negative/SyncDate.java     # с preview
+SyncDate.java:7: error: unexpected type
+  required: identity class
+  found:    LocalDate</code></pre>
+      <h3>Старый JAR ломается от одного флага</h3>
+      <p>Value-версии <code>Integer</code> и <code>LocalDate</code> включаются флагом запуска, а не версией class-файла твоего кода. Класс, собранный без preview, но запущенный с <code>--enable-preview</code>, уже работает с value-<code>Integer</code>:</p>
+      <pre><code class="language-java">// JDK 21 без preview. Код, который сломается, когда LocalDate и Integer станут value-классами.
+public class Prepare {
+    static final Map&lt;LocalDate, String&gt; holidays = new WeakHashMap&lt;&gt;();   // слабые ключи-даты
+
+    public static void main(String[] args) {
+        Object lock = Integer.valueOf(1996);              // статический тип Object: javac не предупредит
+        synchronized (lock) {
+            var ref = new WeakReference&lt;&gt;(LocalDate.of(2026, 10, 22));
+            System.out.println("locked, ref alive: " + (ref.get() != null) + ", holidays: " + holidays.size());
+        }
+    }
+}</code></pre>
+      <pre><code class="language-text">$ javac -Xlint:all Prepare.java                     # JDK 21: ни одного предупреждения
+$ java -XX:+UnlockDiagnosticVMOptions -XX:DiagnoseSyncOnValueBasedClasses=2 Prepare
+[0.018s][info][valuebasedclasses] Synchronizing on object 0x0000007030015400 of klass java.lang.Integer
+[0.018s][info][valuebasedclasses] 	at Prepare.main(Prepare.java:12)
+locked, ref alive: true, holidays: 0
+
+$ javac Prepare.java                                # JDK 28: 4 предупреждения, первые строки двух из них
+Prepare.java:8: warning: [identity] use of a value-based class with an operation that expects reliable identity
+Prepare.java:13: warning: [identity] use of a value-based class with an operation that expects reliable identity
+$ java --enable-preview Prepare                     # класс собран без preview
+Exception in thread "main" java.lang.IdentityException: Cannot synchronize on an instance of value class java.lang.Integer
+	at Prepare.main(Prepare.java:12)</code></pre>
+      <p>JDK 21 молчит о <code>WeakHashMap&lt;LocalDate, …&gt;</code>: предупреждения <code>[identity]</code> для <code>java.lang.ref</code> и <code>WeakHashMap</code> javac выдаёт начиная с JDK 25. Синхронизацию через <code>Object</code> компилятор не видит ни в одной версии, а флаг <code>-XX:DiagnoseSyncOnValueBasedClasses=2</code> пишет её в лог при выполнении. Он есть с JDK 16 и подходит, чтобы прогнать тесты и найти такие места заранее.</p>
+      <div class="note warn">
+        <p>Частый прод-паттерн — блокировка по id: <code>synchronized (accountId) { … }</code>, где <code>accountId</code> — <code>Long</code>. Он сломан уже сегодня: для id до 127 все потоки делят один закешированный объект с любым другим кодом, а для больших id два потока с равными id получают разные объекты и вообще не исключают друг друга. С value-классами такой код падает с <code>IdentityException</code>. Блокировку по ключу делают через <code>ConcurrentHashMap&lt;Long, Lock&gt;</code> с <code>computeIfAbsent</code> или блокировкой строки в базе.</p>
+      </div>
+    </section>
+
+    <section class="step" id="construction">
+      <h2>Value-объект заполняет поля до super(), и verifier это проверяет</h2>
+      <p>У identity-объекта есть период, когда он уже создан, но ещё не готов: конструктор родителя выполнился, а поля наследника пока ноль и <code>null</code>. Если в этот момент объект утечёт наружу, чужой код увидит недостроенное состояние, а потом то же поле изменится. Для identity-объекта это неприятная ошибка. Для value-объекта это нарушение самой модели: без identity объект и есть его поля. «Тот же» объект с <code>kopecks = 0</code> и потом с <code>kopecks = 150</code> — это два разных значения под одной ссылкой.</p>
+      <p>Проблема реальная и для обычных record. Compact constructor выполняется до присваивания полей, и <code>this</code> в нём видит значения по умолчанию:</p>
+      <pre><code class="language-java">record Payment(String id, long amount) {
+    Payment {
+        if (amount &lt; 0)
+            throw new IllegalArgumentException("bad " + this);   // this до присваивания полей
+    }
+}
+
+new Payment("p-1", -500);</code></pre>
+      <pre class="out">bad Payment[id=null, amount=0]</pre>
+      <p>Так печатают JDK 21 и JDK 28 без preview: в сообщении не id платежа и не сумма, а <code>null</code> и <code>0</code>. Value-классы закрывают эту дыру правилом: весь конструктор value-класса выполняется <b>до</b> вызова <code>super()</code>. Компилятор ставит <code>super()</code> в конец тела, а не в начало. До него можно присваивать поля и читать уже присвоенные, но нельзя вызывать методы экземпляра и передавать <code>this</code> куда-либо:</p>
+      <pre><code class="language-java">public value class EarlyThis {
+    private final long kopecks;
+    private final String currency;
+
+    public EarlyThis(long kopecks, String currency) {
+        this.kopecks = kopecks;
+        this.currency = normalize(currency);    // метод экземпляра: нужен this
+    }
+
+    private String normalize(String c) { return c.toUpperCase(); }
+}</code></pre>
+      <pre><code class="language-text">javac --release 28 --enable-preview negative/EarlyThis.java
+EarlyThis.java:8: error: reference to normalize(String) may only appear after an explicit constructor invocation
+        this.currency = normalize(currency);    // метод экземпляра: нужен this
+                        ^</code></pre>
+      <p>Исправление — сделать вспомогательный метод static. Если после заполнения полей нужен <code>this</code>, например для лога, явный <code>super()</code> отмечает границу: всё до него — ранняя фаза, после — поздняя, где <code>this</code> доступен. Этот синтаксис пришёл из flexible constructor bodies (JDK 25):</p>
+      <pre><code class="language-java">static value class Money {
+    private final long kopecks;
+    private final String currency;
+
+    Money(long kopecks, String currency) {
+        if (kopecks &lt; 0) throw new IllegalArgumentException("negative");
+        this.kopecks = kopecks;
+        this.currency = normalize(currency);    // static-метод: this не нужен
+        super();                                // к этой строке все поля обязаны быть заданы
+        System.out.println("создан " + this);   // после super() this уже можно использовать
+    }
+
+    private static String normalize(String c) { return c.toUpperCase(); }
+
+    @Override public String toString() { return kopecks + " " + currency; }
+}
+
+new Money(150, "rub");</code></pre>
+      <pre class="out">создан 150 RUB</pre>
+      <p>Инициализаторы полей (<code>long kopecks = 0;</code>) выполняются в начале ранней фазы. Блоки инициализации экземпляра <code>{ … }</code> выполняются после <code>super()</code>, поэтому поля value-класса в них присваивать нельзя.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Слева код конструктора Money, текущая строка подсвечена. Справа состояние объекта: сначала поля не заданы и this использовать нельзя, затем по очереди заполняются kopecks и currency, список незаданных полей пустеет, вызов super() разрешён только при пустом списке, после него this доступен, а поля больше не меняются.">
+
+            <!-- текущая строка кода: отдельный слой на шаг -->
+            <rect data-s="1" x="14" y="28" width="330" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="2" x="14" y="54" width="330" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="3" x="14" y="80" width="330" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="4" x="14" y="106" width="330" height="22" rx="4" class="dg-cell hit"/>
+            <rect data-s="5" x="14" y="132" width="330" height="48" rx="4" class="dg-cell hit"/>
+
+            <!-- объект -->
+            <rect x="404" y="28" width="300" height="118" rx="8" class="dg-box"/>
+            <rect data-s="1" x="416" y="62" width="276" height="30" rx="5" class="dg-cell miss"/>
+            <rect data-s="2-" x="416" y="62" width="276" height="30" rx="5" class="dg-cell hit"/>
+            <rect data-s="1-2" x="416" y="102" width="276" height="30" rx="5" class="dg-cell miss"/>
+            <rect data-s="3-" x="416" y="102" width="276" height="30" rx="5" class="dg-cell hit"/>
+
+            <!-- код конструктора -->
+            <text x="20" y="44" class="dg-in">Money(long kopecks, String cur) {</text>
+            <text x="36" y="70" class="dg-in">this.kopecks = kopecks;</text>
+            <text x="36" y="96" class="dg-in">this.currency = normalize(cur);</text>
+            <text x="36" y="122" class="dg-in">super();</text>
+            <text x="36" y="148" class="dg-in">println("создан " + this);</text>
+            <text x="20" y="174" class="dg-in">}</text>
+
+            <!-- состояние объекта -->
+            <text data-s="1-3" x="416" y="50" class="dg-t">early larval: ранняя фаза</text>
+            <text data-s="4" x="416" y="50" class="dg-t">late larval: поздняя фаза</text>
+            <text data-s="5" x="416" y="50" class="dg-ok">готов: значение</text>
+            <text data-s="1" x="426" y="82" class="dg-in">kopecks:  не задано</text>
+            <text data-s="2-" x="426" y="82" class="dg-in">kopecks:  150</text>
+            <text data-s="1-2" x="426" y="122" class="dg-in">currency: не задано</text>
+            <text data-s="3-" x="426" y="122" class="dg-in">currency: "RUB"</text>
+
+            <!-- список незаданных полей: отдельный слой на шаг -->
+            <text data-s="1" x="404" y="170" class="dg-in">unset = {kopecks, currency}</text>
+            <text data-s="2" x="404" y="170" class="dg-in">unset = {currency}</text>
+            <text data-s="3-" x="404" y="170" class="dg-in">unset = {}</text>
+            <text data-s="1-3" x="404" y="194" class="dg-bad">this: нельзя, объект не готов</text>
+            <text data-s="4-" x="404" y="194" class="dg-ok">this: можно</text>
+
+            <!-- что проверяет JVM -->
+            <text data-s="1" x="20" y="232" class="dg-s">new выделил место, но читать поля и передавать this нельзя</text>
+            <text data-s="3" x="20" y="232" class="dg-s">normalize — static: ему не нужен this</text>
+            <text data-s="4" x="20" y="232" class="dg-s">verifier: вызов super() разрешён, только если unset пуст</text>
+            <text data-s="5" x="20" y="232" class="dg-s">putfield в эти поля после super() verifier отклоняет</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li><code>new</code> создал объект в ранней фазе (early larval). Оба поля не заданы, и verifier не пропустит ни чтение полей, ни передачу <code>this</code>.</li>
+          <li>Присвоен <code>kopecks</code>. Verifier вычёркивает поле из списка незаданных.</li>
+          <li>Присвоен <code>currency</code>: <code>normalize</code> вызван как static-метод, без <code>this</code>. Список пуст.</li>
+          <li><code>super()</code> разрешён только сейчас, когда список пуст. После него объект в поздней фазе (late larval): <code>this</code> можно передавать, а поля уже не изменятся.</li>
+          <li>После <code>super()</code> код может использовать <code>this</code>, затем конструктор возвращает объект. Никто не видел его с нулями в полях, поэтому JVM может свободно копировать его и раскладывать по полям других объектов.</li>
+        </ol>
+      </figure>
+      <p>С <code>--enable-preview</code> это же правило распространяется на <b>все</b> record, включая обычные identity-record. Пример с <code>Payment</code> выше перестаёт компилироваться:</p>
+      <pre><code class="language-text">java --enable-preview RecordThis.java
+RecordThis.java:6: error: reference to this may only appear after an explicit constructor invocation
+                throw new IllegalArgumentException("bad " + this);   // this до присваивания полей
+                                                            ^</code></pre>
+      <p>Это редкий случай несовместимости по исходникам. Авторы JEP проверили большой корпус кода: record, которые обращаются к <code>this</code> до заполнения полей, встречаются редко и почти всегда содержат ту же ошибку, что <code>Payment</code>.</p>
+      <h3>Strict-поля: гарантия на уровне JVM</h3>
+      <p>Правила javac можно обойти другим компилятором или генератором байткода. Поэтому вместе с JEP 401 в JDK 28 вошёл JEP 539 «Strict Field Initialization in the JVM». javac помечает поля value-класса флагом <code>ACC_STRICT_INIT</code> (0x0800). Verifier отслеживает, какие из них ещё не заданы, пропускает вызов конструктора родителя только при пустом списке и запрещает <code>putfield</code> в такое final-поле после этого вызова. Нарушение ловит проверка байткода (verification) ещё до первого выполнения конструктора.</p>
+      <pre><code class="language-text">javap -v -p 'Construction$Money'
+  minor version: 65535                       # preview class-файл: 72.65535
+  major version: 72
+  flags: (0x0010) ACC_FINAL                  # ACC_IDENTITY (0x0020) нет — значит, value-класс
+  private final long kopecks;
+    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+  private final java.lang.String currency;
+    flags: (0x0812) ACC_PRIVATE, ACC_FINAL, ACC_STRICT_INIT
+  Construction$Money(long, java.lang.String);
+        18: putfield      #9                  // Field kopecks:J
+        23: invokestatic  #15                 // Method normalize:(Ljava/lang/String;)Ljava/lang/String;
+        26: putfield      #19                 // Field currency:Ljava/lang/String;
+        30: invokespecial #23                 // Method java/lang/Object."&lt;init&gt;":()V   ← super() после полей
+        33: getstatic     #28                 // Field java/lang/System.out:Ljava/io/PrintStream;</code></pre>
+      <p>Из strict-полей следуют и ограничения прошлого шага. Рефлексия не может записать такое поле: <code>setAccessible</code> считает его неизменяемым, как <code>static final</code>, и <code>--enable-final-field-mutation</code> не помогает. Стандартная сериализация создаёт объект без конструктора и пишет поля рефлексией, поэтому для value class она отказывает с <code>InvalidClassException</code>. Value record сериализуется, потому что record и раньше восстанавливался через канонический конструктор. Есть и выигрыш: JIT считает strict final-поля по-настоящему неизменяемыми и может не перечитывать их из памяти.</p>
+      <details class="deep">
+        <summary>Под капотом: early_larval frame в StackMapTable</summary>
+        <p>Verifier проверяет метод без выполнения, по кадрам <code>StackMapTable</code> в точках ветвления. Раньше незаконченный объект там обозначался одним типом <code>uninitializedThis</code>. Теперь кадр должен ещё сказать, какие strict-поля не заданы. Для этого есть новый тип кадра 246. Он появляется, если ветвление случилось между присваиваниями полей:</p>
+        <pre><code class="language-java">value class Larval {
+    private final long kopecks;
+    private final String currency;
+    Larval(long kopecks, String currency) {
+        this.kopecks = kopecks;
+        this.currency = currency == null ? "RUB" : currency;   // ветвление после первого putfield
+    }
+}</code></pre>
+        <pre><code class="language-text">javap -v -p Larval            # JDK 28-ea+20
+         2: putfield      #1                  // Field kopecks:J
+         7: ifnonnull     15
+        16: putfield      #9                  // Field currency:Ljava/lang/String;
+        20: invokespecial #13                 // Method java/lang/Object."&lt;init&gt;":()V
+      StackMapTable: number_of_entries = 2
+        frame_type = 246 /* early_larval */
+          number of unset_fields = 1
+            unset_field = #NameAndType currency:Ljava/lang/String;</code></pre>
+        <p>В точке ветвления <code>kopecks</code> уже задан, а <code>currency</code> ещё нет — ровно это и записано в кадре. На этом кадре javap из EA-билда 28-ea+20 дальше печатает <code>Error: Bad CP index: -2</code>: инструмент ещё не до конца поддерживает новый формат. Класс при этом загружается и работает.</p>
+        <p>JEP 539 описывает strict-поля шире, чем их использует javac в JDK 28. JVM умеет то же для static-полей: читать поле до присваивания при инициализации класса нельзя, и нарушение даёт исключение при выполнении. Это задел на будущие возможности языка, например на поля, которые не могут быть <code>null</code>.</p>
+      </details>
+    </section>
+
+    <section class="step" id="flattening">
+      <h2>Без identity JVM кладёт поля объекта в массив, в поле и в регистры</h2>
+      <p>Value-объект неотличим от своей копии, поэтому JVM может хранить не ссылку, а сами поля. JEP 401 называет два способа. <b>Flattening</b> — поля value-объекта записываются прямо в ячейку массива или в поле другого объекта. <b>Scalarization</b> — JIT раскладывает value-объект на отдельные локальные переменные и регистры, в том числе при передаче в метод и возврате из него. Это оптимизации, а не правила языка: управлять ими напрямую нельзя, и JVM применяет их по своему решению.</p>
+      <h3>Flattening: поле должно читаться атомарно</h3>
+      <p>Ячейку массива или поле identity-объекта можно перезаписать из другого потока. Если JVM хранит там дату как 48 бит данных, запись должна быть атомарной: иначе другой поток прочитает год от одной даты и день от другой — значение, которого никто не создавал. Распространённые процессоры атомарно пишут до 64 бит. Кроме данных нужен ещё флаг <code>null</code>: ссылка на value-объект может быть <code>null</code>, и это состояние надо отличать от «все поля нулевые». Поэтому правило JDK 28 такое: значение плюс флаг <code>null</code> должны уложиться в 64 бита.</p>
+      <pre><code class="language-java">int n = 1_000_000;
+Integer[] fees = new Integer[n];                  // 32 бита + флаг null
+Long[] amounts = new Long[n];                     // 64 бита + флаг null
+LocalDate[] dates = new LocalDate[n];             // 48 бит + флаг null
+Object[] mixed = new Object[n];                   // тип элемента Object: сюда можно положить что угодно
+LocalDate start = LocalDate.of(2020, 1, 1);
+for (int i = 0; i &lt; n; i++) {
+    fees[i] = 1_000 + i;
+    amounts[i] = 1_000L + i;
+    dates[i] = start.plusDays(1 + i % 3650);
+    mixed[i] = 1_000 + i;                         // те же Integer, что в fees
+}
+histogram("[Ljava.lang.Integer;", "[Ljava.lang.Long;", "[Ljava.time.LocalDate;",
+          "java.lang.Integer ", "java.lang.Long ", "java.time.LocalDate ");   // строки меньше 1 МБ пропущены</code></pre>
+      <pre class="out">[Ljava.lang.Integer;              1 шт.    8,000,016 байт
+[Ljava.lang.Long;                 2 шт.    4,001,056 байт
+[Ljava.time.LocalDate;            1 шт.    8,000,016 байт
+java.lang.Integer         1,000,280 шт.   16,004,480 байт
+java.lang.Long            1,000,256 шт.   16,004,096 байт
+5041</pre>
+      <p><code>Integer[]</code> и <code>LocalDate[]</code> весят по 8 байт на элемент, значения лежат в самих массивах. <code>Long[]</code> весит 4 байта на элемент — это сжатые ссылки, а рядом миллион отдельных объектов <code>Long</code>: 64 бита данных и флаг <code>null</code> в атомарные 64 бита не помещаются. Миллион объектов <code>Integer</code> пришёл из <code>Object[]</code>: в массив, куда можно положить что угодно, JVM пишет только обычные ссылки на объекты в heap. Строка <code>[Ljava.lang.Long;</code> показывает два массива, потому что к нашему добавился кеш <code>Long</code> на 256 элементов.</p>
+      <p>Поля объекта подчиняются тому же правилу. Раскладку показывает диагностический флаг <code>-XX:+PrintFieldLayout</code>:</p>
+      <pre><code class="language-java">value record Fee(int kopecks) { }                     // 32 бита данных
+value record Money(long kopecks) { }                  // 64 бита данных
+value record Rate(int bps, short currency) { }        // 48 бит данных
+
+static class Payment {                                // identity-класс: поля можно перезаписать
+    Fee fee;
+    Money amount;
+    Rate rate;
+    LocalDate valueDate;                              // int + byte + byte = 48 бит
+}
+
+value record Transfer(Money amount, LocalDateTime at) { }   // value-класс: поля final</code></pre>
+      <pre><code class="language-text">java --enable-preview -XX:+UnlockDiagnosticVMOptions -XX:+PrintFieldLayout Layout.java
+Layout of class Layout$Payment
+ @0 RESERVED 8/-                                    # компактный заголовок: 8 байт (по умолчанию с JDK 27)
+ @8 FLAT 8/8 "fee" LLayout$Fee; NULLABLE_ATOMIC_FLAT
+ @16 FLAT 8/8 "rate" LLayout$Rate; NULLABLE_ATOMIC_FLAT
+ @24 FLAT 8/8 "valueDate" Ljava/time/LocalDate; NULLABLE_ATOMIC_FLAT
+ @32 REGULAR 4/4 "amount" LLayout$Money;            # обычная ссылка: 64 бита + null не влезают
+Instance size = 40 bytes
+
+Layout of class Layout$Transfer
+ @8 FLAT 16/4 "at" Ljava/time/LocalDateTime; NULLABLE_NON_ATOMIC_FLAT
+ @24 FLAT 9/8 "amount" LLayout$Money; NULLABLE_NON_ATOMIC_FLAT
+ @33 NULL_MARKER 1/1                                # флаг null самого Transfer
+
+Layout of class Layout$Money
+ @8 REGULAR 8/8 "kopecks" J
+ @16 NULL_MARKER 1/1
+Instance size = 24 bytes                            # отдельный объект Money в heap</code></pre>
+      <p>Адреса классов и служебные строки из вывода убраны, остальное — строки из настоящего запуска на JDK 28-ea+20. <code>Money</code> в поле <code>Payment</code> не уложился и остался ссылкой. А в <code>Transfer</code> тот же <code>Money</code> лежит внутри объекта, рядом с 16-байтовым <code>LocalDateTime</code>: поля value-объекта не меняются после конструктора, никто не может записать их из другого потока, и атомарность не нужна (<code>NON_ATOMIC</code>). Сам <code>Transfer</code> со своими 26 байтами в изменяемое поле уже не поместится и будет храниться ссылкой.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 282" role="img" aria-label="Раскладка Payment по байтам: заголовок 8, затем fee, rate и valueDate лежат внутри объекта по 8 байт, а amount — 4-байтовая ссылка на отдельный объект Money размером 24 байта, потому что long и флаг null не помещаются в атомарные 64 бита. Раскладка Transfer: заголовок, LocalDateTime на 16 байт и Money на 9 байт внутри объекта, затем флаг null самого Transfer.">
+            <defs>
+              <marker id="fl-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+
+            <!-- Payment: 14 px на байт от x=120 -->
+            <rect x="120" y="50" width="112" height="44" rx="4" class="dg-box"/>
+            <rect x="232" y="50" width="112" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="344" y="50" width="112" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="456" y="50" width="112" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="568" y="50" width="56" height="44" rx="4" class="dg-cell"/>
+            <rect x="624" y="50" width="56" height="44" rx="4" class="dg-sep" fill="none"/>
+            <rect x="516" y="124" width="190" height="40" rx="6" class="dg-box"/>
+            <path d="M596 94 L 596 120" class="dg-line" marker-end="url(#fl-n)"/>
+
+            <!-- Transfer -->
+            <rect x="120" y="196" width="112" height="44" rx="4" class="dg-box"/>
+            <rect x="232" y="196" width="224" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="456" y="196" width="126" height="44" rx="4" class="dg-cell hit"/>
+            <rect x="582" y="196" width="14" height="44" rx="2" class="dg-cell"/>
+            <rect x="596" y="196" width="84" height="44" rx="4" class="dg-sep" fill="none"/>
+
+            <!-- подписи строк -->
+            <text x="14" y="68" class="dg-t">Payment</text>
+            <text x="14" y="84" class="dg-s">identity</text>
+            <text x="14" y="214" class="dg-t">Transfer</text>
+            <text x="14" y="230" class="dg-s">value record</text>
+
+            <!-- смещения в байтах -->
+            <g text-anchor="middle" class="dg-n">
+              <text x="120" y="42" class="dg-n">0</text><text x="232" y="42" class="dg-n">8</text><text x="344" y="42" class="dg-n">16</text>
+              <text x="456" y="42" class="dg-n">24</text><text x="568" y="42" class="dg-n">32</text><text x="680" y="42" class="dg-n">40</text>
+              <text x="120" y="188" class="dg-n">0</text><text x="232" y="188" class="dg-n">8</text><text x="456" y="188" class="dg-n">24</text>
+              <text x="582" y="188" class="dg-n">33</text><text x="680" y="188" class="dg-n">40</text>
+            </g>
+
+            <!-- содержимое ячеек -->
+            <g text-anchor="middle">
+              <text x="176" y="77" class="dg-s">заголовок</text>
+              <text x="288" y="68" class="dg-in">fee</text><text x="288" y="86" class="dg-n">FLAT 8 Б</text>
+              <text x="400" y="68" class="dg-in">rate</text><text x="400" y="86" class="dg-n">FLAT 8 Б</text>
+              <text x="512" y="68" class="dg-in">valueDate</text><text x="512" y="86" class="dg-n">FLAT 8 Б</text>
+              <text x="596" y="68" class="dg-in">amount</text><text x="596" y="86" class="dg-n">ref 4</text>
+              <text x="652" y="77" class="dg-n">+4</text>
+              <text x="176" y="223" class="dg-s">заголовок</text>
+              <text x="344" y="214" class="dg-in">at: LocalDateTime</text><text x="344" y="232" class="dg-n">FLAT 16 Б, неатомарно</text>
+              <text x="519" y="214" class="dg-in">amount: Money</text><text x="519" y="232" class="dg-n">FLAT 9 Б</text>
+              <text x="638" y="223" class="dg-n">+6</text>
+              <text x="589" y="254" class="dg-n">null</text>
+            </g>
+            <text x="528" y="141" class="dg-t">объект Money, 24 Б</text>
+            <text x="528" y="157" class="dg-s">8 + long 8 + null 1 + 7</text>
+            <text x="120" y="150" class="dg-bad">long + флаг null = 65 бит: не атомарно</text>
+            <text x="120" y="274" class="dg-s">поля value-объекта не меняются после конструктора, атомарность не нужна</text>
+          </svg>
+        </div>
+        <figcaption>Один и тот же <code>Money</code> лежит внутри <code>Transfer</code>, но не внутри <code>Payment</code>. Решает не тип поля, а то, можно ли поле перезаписать.</figcaption>
+      </figure>
+      <h3>Scalarization работает и через границы методов</h3>
+      <p>В регистрах и локальных переменных гонок нет, поэтому там размер не ограничен. Сравним два одинаковых сумматора — на обычном record и на value record:</p>
+      <pre><code class="language-java">record IdMoney(long kopecks) {                       // обычный record: identity
+    IdMoney plus(IdMoney o) { return new IdMoney(kopecks + o.kopecks); }
+}
+
+value record Money(long kopecks) {                   // тот же код, но без identity
+    Money plus(Money o) { return new Money(kopecks + o.kopecks); }
+}
+
+static long sumIdentity(int n) {
+    IdMoney total = new IdMoney(0);
+    for (int i = 0; i &lt; n; i++) total = total.plus(new IdMoney(i));   // total переходит в следующую итерацию
+    return total.kopecks();
+}
+
+static long sumValue(int n) {
+    Money total = new Money(0);
+    for (int i = 0; i &lt; n; i++) total = total.plus(new Money(i));
+    return total.kopecks();
+}
+
+// в main — четыре раунда по миллиону сложений; счётчик байтов, выделенных потоком
+var threads = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+long start = threads.getCurrentThreadAllocatedBytes();
+sink += sumIdentity(1_000_000);
+long identity = threads.getCurrentThreadAllocatedBytes() - start;
+// то же для sumValue</code></pre>
+      <p>Сколько выделится, зависит от того, когда отработает JIT, поэтому ниже — реальные запуски, а не точный прогноз:</p>
+      <pre><code class="language-text">$ java --enable-preview Scalarization.java
+раунд 1: identity 18,256 КБ, value  9,431 КБ      # интерпретатор и C1: value-объекты ещё в heap
+раунд 2: identity 17,545 КБ, value  8,831 КБ
+раунд 3: identity 15,625 КБ, value      0 КБ      # C2: Money не выделяется вовсе
+раунд 4: identity 15,625 КБ, value      0 КБ
+
+$ java --enable-preview -XX:CompileCommand=quiet -XX:CompileCommand=dontinline,*::plus Scalarization.java
+раунд 1: identity 31,250 КБ, value  8,275 КБ      # plus не инлайнится
+раунд 2: identity 31,250 КБ, value  4,991 КБ
+раунд 3: identity 31,250 КБ, value      0 КБ      # value: поля Money идут через регистры
+раунд 4: identity 31,250 КБ, value      0 КБ</code></pre>
+      <p>15 625 КБ — это ровно миллион объектов по 16 байт. Escape analysis в identity-версии убрала временный <code>new IdMoney(i)</code>, но не <code>total</code>: он переходит из итерации в итерацию, и C2 его не убирает. Когда <code>plus</code> не инлайнится, ссылки уходят в другой метод, escape analysis сдаётся, и выделений становится два на итерацию. Value-версия после прогрева не выделяет ничего в обоих случаях. JIT передаёт <code>Money</code> в метод как его поля и возвращает так же, потому что identity нет и никто не заметит, что объекта не было.</p>
+      <p>Первые раунды показывают и обратную сторону: в интерпретаторе и C1 value-объекты выделяются в heap как обычно. JVM называет такой экземпляр буферизованным. Он может весить больше identity-аналога: в выводе <code>PrintFieldLayout</code> выше буферизованный <code>Money</code> занимает 24 байта против 16 у <code>IdMoney</code> — у него есть флаг <code>null</code>.</p>
+      <h3>Когда оптимизаций не будет</h3>
+      <ul>
+        <li><b>Тип переменной не точный.</b> <code>Object</code>, интерфейс (<code>Comparable&lt;LocalDate&gt;</code>) или параметр <code>T</code> могут хранить объекты разных классов. Такое поле — обычная ссылка, как <code>mixed</code> выше.</li>
+        <li><b>Generics стираются.</b> <code>List&lt;Money&gt;</code>, <code>Map&lt;Long, Money&gt;</code>, поле <code>T value</code> в <code>Optional&lt;T&gt;</code> — всё это <code>Object</code> после стирания. В коллекциях JDK 28 хранит value-объекты по ссылкам.</li>
+        <li><b>Значение больше 64 бит в изменяемом поле или массиве.</b> <code>Long</code>, <code>Double</code>, <code>Instant</code>, <code>LocalDateTime</code>, сумма из <code>long</code> и валюты — ссылками.</li>
+        <li><b>Код не прогрет.</b> Scalarization делает только C2. До неё value-объекты выделяются в heap, и чтение из flat-поля может даже создавать лишние объекты.</li>
+        <li><b>Класс собран против старой версии.</b> javac записывает имена value-классов из сигнатур в атрибут <code>LoadableDescriptors</code>, чтобы JVM загрузила их заранее и разложила поля. Класс, собранный, пока <code>Money</code> был identity-классом, оптимизируется хуже. После перевода класса в value его клиентов стоит пересобрать.</li>
+      </ul>
+      <div class="trap">
+        <p class="myth">Value class гарантирует, что объект не попадёт в heap и сэкономит память.</p>
+        <p class="fact">Гарантирована только семантика: нет identity, <code>==</code> по полям. Раскладку JVM выбирает сама. Миллион <code>Long</code> в массиве, <code>List&lt;Money&gt;</code> или объект в непрогретом коде лежат в heap, причём буферизованный value-объект бывает больше обычного. Выигрыш надо измерять на своей нагрузке: JMH, JFR, гистограмма heap.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: соглашение о вызовах для value-объектов</summary>
+        <p>Почему value-объект проходит через неинлайненный вызов без выделения? У C2 для методов с value-параметрами есть второй вход: аргумент <code>Money</code> передаётся как его поля, по регистру на поле, плюс флаг <code>null</code>. Возврат устроен так же. JEP 401 записывает это псевдокодом: <code>plusYears</code> у <code>LocalDate</code> принимает <code>this_null, this_year, this_month, this_day</code> и возвращает четвёрку значений. Поведение управляется диагностическими флагами <code>ValueTypePassFieldsAsArgs</code> и <code>ValueTypeReturnedAsFields</code>, оба включены по умолчанию. Если отключить первый, value-версия снова выделяет объекты:</p>
+        <pre><code class="language-text">$ java --enable-preview -XX:+UnlockDiagnosticVMOptions -XX:-ValueTypePassFieldsAsArgs \
+       -XX:CompileCommand=quiet -XX:CompileCommand=dontinline,*::plus Scalarization.java
+раунд 4: identity 31,250 КБ, value 46,875 КБ      # 2 буфера по 24 Б на итерацию</code></pre>
+        <p>46 875 КБ на миллион итераций — два буферизованных <code>Money</code> по 24 байта. Это хуже identity-версии: без соглашения о вызовах value-объект теряет главное преимущество и платит за флаг <code>null</code>. Флаги диагностические, в проде их не трогают. Здесь они нужны, чтобы увидеть, какой механизм дал ноль.</p>
+        <p>Escape analysis для identity-объектов работает в похожем направлении, но она обязана доказать, что identity не наблюдается: объект не уходит в поле, в другой поток, в неинлайненный метод. Для value-объекта доказывать нечего: identity нет по определению. Поэтому JEP называет scalarization value-объектов более предсказуемой и работающей через границы методов.</p>
+      </details>
+    </section>
+
+    <section class="step" id="status">
+      <h2>В JDK 28 это preview, а null-restricted типы и специализация generics — следующие шаги</h2>
+      <p>Valhalla выходит частями. В JDK 28 попала модель объектов без identity и первые оптимизации. То, что даст производительность уровня примитивов в любых местах, ещё в разработке. Статус на 22.10.2026:</p>
+      <table class="mx">
+        <thead><tr><th>Что</th><th>JEP</th><th>Статус</th></tr></thead>
+        <tbody>
+          <tr><td>Предупреждения для value-based классов: <code>synchronized</code>, deprecated конструкторы обёрток</td><td>390</td><td>финально, JDK 16</td></tr>
+          <tr><td>Компактные заголовки объектов по умолчанию: 8 байт вместо 12</td><td>534</td><td>финально, JDK 27 (вышла 15.09.2026). Не часть Valhalla, но удешевляет identity-объекты</td></tr>
+          <tr><td><code>value class</code>, <code>value record</code>, <code>==</code> по полям, 30 классов JDK, <code>Objects.hasIdentity</code></td><td>401</td><td>preview в JDK 28</td></tr>
+          <tr><td>Strict-поля в JVM: <code>ACC_STRICT_INIT</code>, проверка verifier</td><td>539</td><td>preview в JDK 28</td></tr>
+          <tr><td>Flattening до 64 бит и scalarization</td><td>401</td><td>в HotSpot JDK 28, но это оптимизация, а не гарантия спецификации</td></tr>
+          <tr><td>Null-restricted типы <code>Money!</code>, implicit-конструктор, неатомарные значения</td><td>черновик 8316779</td><td>draft, не в JDK 28</td></tr>
+          <tr><td>Enhanced Primitive Boxing: <code>int</code> и <code>Integer</code> ближе друг к другу</td><td>402</td><td>draft</td></tr>
+          <tr><td>Специализация generics: <code>List&lt;Money&gt;</code> без ссылок</td><td>218 в пересмотре, Parametric JVM</td><td>будущая работа, прототипы в репозитории Valhalla</td></tr>
+        </tbody>
+      </table>
+      <p>Код JEP 401 и 539 влит в основную ветку OpenJDK в августе 2026. EA-билды JDK 28 лежат на jdk.java.net/28. Билд, на котором запускались примеры урока, сообщает о себе <code>openjdk version "28-ea" 2027-03-23</code>: дата — плановый выпуск JDK 28.</p>
+      <h3>Как попробовать</h3>
+      <pre><code class="language-text">javac --release 28 --enable-preview Main.java    # class-файл версии 72.65535
+java --enable-preview Main                       # без флага JVM откажется загружать такой класс
+java --enable-preview Main.java                  # source launcher: компиляция и запуск сразу
+jshell --enable-preview</code></pre>
+      <p>Preview-класс запускается только на той же версии JDK и только с флагом. В Maven и Gradle флаг нужен в трёх местах: компилятору, запуску тестов и запуску приложения. С флагом в JVM существует только value-версия <code>LocalDate</code>: identity-версию уже не получить, даже если твой код собран без preview. Поэтому включение preview на существующем сервисе — проверка всех библиотек в classpath, как показал <code>Prepare</code> в шаге 4.</p>
+      <h3>Null-restricted типы: следующий шаг</h3>
+      <p>Главные ограничения flattening в JDK 28 — флаг <code>null</code> и атомарность. Из-за флага <code>Long</code> и <code>Money(long)</code> не укладываются в 64 бита. Черновик JEP «Null-Restricted Value Class Types» убирает оба ограничения для тех классов, которые на это согласились. Синтаксис черновой, в JDK 28 он не компилируется: javac отвечает на <code>Money!</code> ошибкой <code>&lt;identifier&gt; expected</code>.</p>
+      <pre><code class="language-java">// Черновик JEP, НЕ JDK 28: синтаксис может измениться
+value record Range(int start, int end) {
+    public implicit Range();                  // разрешает «нулевой» экземпляр Range(0, 0) без вызова конструктора
+}
+
+Range![] ranges = new Range![100];            // элементы не null: флаг не нужен, по умолчанию Range(0, 0)
+void printAll(Range! r) { … }                 // printAll(null) — ошибка компиляции
+
+value class Point implements LooselyConsistentValue {   // разрешает неатомарную запись, как у long и double
+    double x;
+    double y;
+    public implicit Point();
+}</code></pre>
+      <ul>
+        <li><b><code>Money!</code></b> — ссылка, которая не может быть <code>null</code>. Флаг <code>null</code> не нужен, поэтому <code>Long!</code> помещается в 64 бита.</li>
+        <li><b>Implicit-конструктор.</b> Поле или массив, где <code>null</code> запрещён, надо чем-то заполнить при создании. Класс явно разрешает JVM создавать «нулевой» экземпляр без кода конструктора. Не всякому классу это подходит: у <code>Name(String first, String last)</code> нулевой экземпляр — имя из двух <code>null</code>.</li>
+        <li><b><code>LooselyConsistentValue</code></b> — класс соглашается, что при гонке можно прочитать смесь полей двух значений. Это то же, что JLS разрешает для неvolatile <code>long</code> и <code>double</code>. Взамен большой <code>Point!</code> на два <code>double</code> занимает в массиве ровно 128 бит без ссылок.</li>
+      </ul>
+      <h3>Когда value class не нужен</h3>
+      <ul>
+        <li><b>Сущность с жизненным циклом.</b> JPA-entity меняет состояние, Hibernate отслеживает её по identity в persistence context и создаёт прокси-наследников. Value class неизменяем и final.</li>
+        <li><b>Объект — монитор, ключ слабого кеша или элемент <code>IdentityHashMap</code>.</b> Всё это требует identity.</li>
+        <li><b>Защищаемые данные.</b> Ключи, токены, пароли: <code>==</code> и <code>identityHashCode</code> раскрывают содержимое.</li>
+        <li><b>Value class с ручной сериализацией.</b> Без <code>writeReplace</code> и <code>readResolve</code> стандартная сериализация не работает. Value record сериализуется сам.</li>
+        <li><b>Прод на JDK 28.</b> Preview может измениться в следующей версии, а class-файлы привязаны к конкретному JDK. Сейчас value-классы — для экспериментов и замеров.</li>
+      </ul>
+      <p>Подготовиться можно уже на JDK 21: не синхронизироваться на обёртках и датах, не сравнивать их через <code>==</code>, создавать их фабриками (<code>valueOf</code>, <code>of</code>), моделировать значения через record и прогнать тесты с <code>-XX:DiagnoseSyncOnValueBasedClasses=2</code>.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Identity — свойство «этот объект, а не такой же». Её наблюдают <code>==</code>, <code>synchronized</code>, <code>identityHashCode</code> и слабые ссылки, и из-за неё каждый объект — отдельный адрес в heap.</li>
+        <li>Value class отказывается от identity: поля и класс неявно final, <code>==</code> сравнивает класс и поля рекурсивно, побитово для примитивов. Для значения со строками и <code>double</code> всё равно нужен <code>equals</code>.</li>
+        <li>Операции, требующие identity, падают: ошибка javac или <code>IdentityException</code>. С <code>--enable-preview</code> это касается и <code>Integer</code> с <code>LocalDate</code> в старом коде.</li>
+        <li>Конструктор value-класса заполняет все поля до <code>super()</code>. Поля помечены <code>ACC_STRICT_INIT</code>, и verifier не даёт увидеть их незаданными или изменить потом.</li>
+        <li>Без identity JVM может хранить поля в массиве и в поле другого объекта, если значение с флагом <code>null</code> влезает в 64 бита, и раскладывать объект по регистрам через вызовы. Это оптимизация, а не гарантия.</li>
+        <li>В JDK 28 всё это preview. Null-restricted типы и специализация generics — следующие шаги Valhalla.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="what-is" data-freq="2">
+      <h3>Что такое value-объекты в Project Valhalla?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это объекты без identity. Обычный объект отличается от такого же по адресу: два <code>LocalDate</code> с одной датой — разные объекты, <code>==</code> между ними ложно, на каждом можно сделать <code>synchronized</code>. Value-класс, объявленный через <code>value class</code> или <code>value record</code>, от этого отказывается. Его поля неявно final, класс final, а <code>==</code> сравнивает класс и значения полей.</p>
+          <p>Зачем: identity стоит памяти и обращений к ней. Массив дат — это массив ссылок на отдельные объекты с заголовками. Без identity JVM может хранить поля прямо в массиве или в поле другого объекта и не выделять объект вовсе в JIT-коде. В JDK 28 это preview по JEP 401: <code>Integer</code>, <code>Long</code>, <code>Optional</code>, большая часть <code>java.time</code> становятся value-классами при <code>--enable-preview</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Это не struct из C#: семантика ссылок сохраняется, ссылка может быть <code>null</code>, копирования при присваивании нет. Раскладку выбирает JVM, гарантирована только семантика.</li>
+            <li>Наследовать value-класс может от <code>Object</code> или абстрактного value-класса. <code>Number</code> и <code>Record</code> стали abstract value, поэтому от них наследуют и value-классы, и identity-классы.</li>
+            <li>В class-файле value-класс — это отсутствие флага <code>ACC_IDENTITY</code>. Добавить <code>value</code> к final-классу с final-полями — бинарно совместимое изменение, но поведение <code>==</code>, <code>synchronized</code> и слабых ссылок для клиентов меняется.</li>
+            <li>Поля value-класса — strict (JEP 539): заполняются до <code>super()</code>, verifier это проверяет, поэтому недостроенный value-объект никто не видит.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Чем value record отличается от обычного record?</summary>
+          <p>Оба неизменяемы на уровне полей и генерируют <code>equals</code>, <code>hashCode</code> и <code>toString</code> по компонентам. Обычный record — identity-класс: <code>==</code> сравнивает адреса, на нём работает <code>synchronized</code> и <code>WeakReference</code>, JVM хранит его отдельным объектом. У value record identity нет: <code>==</code> сравнивает поля, identity-операции падают, и JVM может разложить его в поле, массив или регистры. С <code>--enable-preview</code> обычные record тоже получают строгие правила конструктора: <code>this</code> в compact constructor до заполнения полей — ошибка компиляции.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему String не стал value-классом?</summary>
+          <p>Его API и реализация завязаны на identity. Пул строк и <code>intern()</code> гарантируют, что равные литералы — один и тот же объект, и на этом построен существующий код со сравнением строк через <code>==</code>. Сам JEP объясняет решение именно зависимостью API и реализации от identity. Поэтому value-класс со строковым полем сравнивается по адресу строки, и ему нужен свой <code>equals</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="value-equality" data-freq="1">
+      <h3>Как работает == для value-объектов? Можно ли теперь сравнивать Integer через ==?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Для value-объектов <code>==</code> проверяет, неразличимы ли они: тот же класс, примитивные поля совпадают побитово, ссылочные поля равны по <code>==</code> рекурсивно. Для identity-объектов ничего не изменилось — сравниваются адреса. Поэтому с <code>--enable-preview</code> два <code>Integer</code> 1996 равны по <code>==</code>, и кеш −128..127 для сравнения больше не важен.</p>
+          <p>Но писать так в обычном коде я не буду. Без preview и на JDK 21 тот же код снова сравнивает адреса и ломается после 127. И даже с preview <code>==</code> не заменяет <code>equals</code>: если внутри value-объекта строка, сравнятся адреса строк, а <code>-0.0</code> и <code>0.0</code> различаются битами.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Унаследованный <code>Object.equals</code> у value-класса — это <code>==</code>, а <code>hashCode</code> и <code>identityHashCode</code> считаются по полям. Value class со строковым полем без своего <code>equals</code> ломает <code>HashSet</code>.</li>
+            <li>Сравнение рекурсивное и может быть долгим на глубоком графе, вплоть до <code>StackOverflowError</code>. Цикла быть не может: поля задаются до <code>super()</code>, и value-объект не может сослаться на себя.</li>
+            <li>По <code>==</code> и <code>identityHashCode</code> можно подбирать значения приватных полей. JEP прямо предупреждает, что value-классы не защищают чувствительные данные.</li>
+            <li>Байткод тот же <code>if_acmpeq</code>. Для identity-объектов JVM оставляет быстрый путь сравнения указателей, медленный путь — только для двух value-объектов одного класса.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код с --enable-preview?</summary>
+          <pre><code class="language-java">value record Fee(Integer kopecks, String currency) { }
+
+Fee f1 = new Fee(1996, "RUB");
+Fee f2 = new Fee(1996, "RUB");
+Fee f3 = new Fee(1996, "rub".toUpperCase());
+System.out.println(f1 == f2);
+System.out.println(f1 == f3);
+System.out.println(f1.equals(f3));</code></pre>
+          <pre class="out">true
+false
+true</pre>
+          <p><code>Integer</code> — value-класс, поэтому два 1996 равны по <code>==</code> рекурсивно, хотя оба больше 127. Литералы <code>"RUB"</code> — один объект из пула строк, поэтому <code>f1 == f2</code>. <code>toUpperCase</code> создаёт новую строку, и <code>f1 == f3</code> сравнивает два разных identity-объекта <code>String</code>. <code>equals</code> у record вызывает <code>String.equals</code> и видит одинаковые буквы.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="migration" data-freq="1">
+      <h3>Что сломается, если класс станет value-классом или сервис запустят с --enable-preview?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сломается всё, что опирается на identity. <code>synchronized</code> на value-объекте — ошибка компиляции, если тип известен, или <code>IdentityException</code> при выполнении. <code>wait</code> и <code>notify</code> бросают <code>IllegalMonitorStateException</code>. <code>WeakReference</code> и <code>WeakHashMap</code> — <code>IdentityException</code>. <code>IdentityHashMap</code> склеивает равные значения в один ключ. Код, который рассчитывал, что <code>new</code> даёт уникальный объект, тоже ошибётся.</p>
+          <p>Неприятно, что с <code>--enable-preview</code> это касается не только моих классов: <code>Integer</code>, <code>Long</code>, <code>LocalDate</code> становятся value-классами для всего classpath. Старый JAR с <code>synchronized</code> на <code>Long</code> упадёт, хотя его никто не пересобирал. Готовлюсь заранее: включаю предупреждения javac и прогоняю тесты с <code>-XX:DiagnoseSyncOnValueBasedClasses=2</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Рефлексия больше не пишет в поля value-объекта: <code>Field.set</code> бросает <code>IllegalAccessException</code> даже с <code>--enable-final-field-mutation</code>. Библиотеки, которые создают объект без конструктора и заполняют поля, должны вызывать конструктор.</li>
+            <li>Сериализация value class требует <code>writeReplace</code> и <code>readResolve</code>, иначе <code>InvalidClassException</code>. Value record сериализуется сам через канонический конструктор.</li>
+            <li>Перевод своего класса в value бинарно совместим, если класс final или abstract и поля final. Но клиентов стоит пересобрать: javac записывает value-классы в <code>LoadableDescriptors</code>, и без этого JVM хуже раскладывает поля.</li>
+            <li>Публичные конструкторы — риск: клиенты могли создавать через них «уникальные» объекты для блокировок. JDK по той же причине в Java 9 объявил deprecated конструкторы обёрток.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой блокировкой по счёту?</summary>
+          <pre><code class="language-java">@Service
+public class TransferService {
+    public void transfer(Long fromAccountId, Long toAccountId, long kopecks) {
+        synchronized (fromAccountId) {                 // «блокируем счёт»
+            long balance = accounts.balance(fromAccountId);
+            if (balance &lt; kopecks) throw new InsufficientFundsException();
+            accounts.debit(fromAccountId, kopecks);
+            accounts.credit(toAccountId, kopecks);
+        }
+    }
+}</code></pre>
+          <ul>
+            <li>Сегодня это не блокировка счёта. Для id больше 127 два запроса к одному счёту получают разные объекты <code>Long</code> и не исключают друг друга — двойное списание при гонке. Для id до 127 все такие запросы делят один закешированный объект с любым другим кодом, который синхронизируется на <code>Long</code>.</li>
+            <li>С <code>--enable-preview</code> на JDK 28 <code>Long</code> — value-класс: javac выдаст ошибку <code>required: identity class</code>, а через <code>Object</code> будет <code>IdentityException</code>.</li>
+            <li>Блокировка в памяти одного процесса не защищает от второго экземпляра сервиса. Для денег нужна блокировка в базе: <code>SELECT … FOR UPDATE</code> по счёту или условное обновление <code>UPDATE … SET balance = balance - ? WHERE id = ? AND balance &gt;= ?</code>. Если блокировка в памяти всё же нужна — <code>ConcurrentHashMap&lt;Long, ReentrantLock&gt;</code> и <code>computeIfAbsent</code>.</li>
+          </ul>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="heap-guarantee" data-freq="1">
+      <h3>Гарантирует ли value class, что объект не попадёт в heap? Чем это отличается от escape analysis?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Нет, гарантирована только семантика. JVM получает право не выделять объект: класть его поля в массив или в поле другого объекта (flattening) и раскладывать по регистрам в JIT-коде (scalarization). Но в JDK 28 flattening в изменяемых полях и массивах работает, только если значение вместе с флагом <code>null</code> влезает в 64 бита. <code>Integer</code> и <code>LocalDate</code> влезают, <code>Long</code> и <code>LocalDateTime</code> — нет. В <code>List&lt;Money&gt;</code> и полях типа <code>Object</code> из-за стирания generics лежат обычные ссылки.</p>
+          <p>Escape analysis работает и для обычных объектов, но должна доказать, что identity никто не видит: объект не уходит в поле, в другой поток или в неинлайненный метод. Value-объекту доказывать нечего, поэтому scalarization работает и через границы методов: JIT передаёт поля аргументами и возвращает их тоже в регистрах.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Атомарность нужна из-за гонок: при неатомарной записи другой поток прочитал бы смесь двух значений. Поля самого value-объекта не меняются после конструктора, поэтому внутри него JVM кладёт и большие значения неатомарно.</li>
+            <li>До прогрева C2 value-объекты буферизуются в heap и могут весить больше identity-аналога из-за флага <code>null</code>: <code>Money(long)</code> занимает 24 байта против 16.</li>
+            <li>Проверяю раскладку через <code>-XX:+PrintFieldLayout</code>, а выигрыш — через JMH, JFR и гистограмму heap, а не по ожиданиям.</li>
+            <li>Ограничение 64 бит снимают null-restricted типы: в <code>Long!</code> нет флага <code>null</code>, а <code>LooselyConsistentValue</code> разрешает неатомарную запись. Пока это draft JEP, не JDK 28.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Какие поля Order JVM положит внутрь объекта, а какие оставит ссылками?</summary>
+          <pre><code class="language-java">// java --enable-preview -XX:+UnlockDiagnosticVMOptions -XX:+PrintFieldLayout OrderLayout.java
+static class Order {
+    Integer quantity;
+    Long total;
+    LocalDate deliveryDate;
+    LocalDateTime createdAt;
+    Comparable&lt;LocalDate&gt; due;
+}</code></pre>
+          <pre class="out">Layout of class OrderLayout$Order
+ @0 RESERVED 8/-
+ @8 FLAT 8/8 "quantity" Ljava/lang/Integer; NULLABLE_ATOMIC_FLAT
+ @16 FLAT 8/8 "deliveryDate" Ljava/time/LocalDate; NULLABLE_ATOMIC_FLAT
+ @24 REGULAR 4/4 "total" Ljava/lang/Long;
+ @28 REGULAR 4/4 "createdAt" Ljava/time/LocalDateTime;
+ @32 REGULAR 4/4 "due" Ljava/lang/Comparable;
+Instance size = 40 bytes</pre>
+          <p>Из вывода убраны адреса классов и строки про static-поля. <code>Integer</code> (32 бита) и <code>LocalDate</code> (48 бит) с флагом <code>null</code> укладываются в 64 бита. <code>Long</code> — ровно 64 бита, и флаг уже не помещается. <code>LocalDateTime</code> — дата и время, больше 64 бит. <code>due</code> объявлено интерфейсом: туда можно положить объект любого класса, поэтому это обычная ссылка, даже если на практике там всегда <code>LocalDate</code>.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Что дадут null-restricted типы?</summary>
+          <p>Тип <code>Money!</code> запрещает <code>null</code>, поэтому флаг <code>null</code> не нужен, и <code>Long!</code> помещается в 64 бита. Поле или массив такого типа надо чем-то заполнить при создании, поэтому класс объявляет implicit-конструктор, и JVM получает право создавать «нулевой» экземпляр. Классы, которые терпят чтение смеси полей при гонке, реализуют <code>LooselyConsistentValue</code> — тогда и значения больше 64 бит хранятся без ссылок. Это draft JEP, в JDK 28 синтаксиса <code>!</code> нет.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://openjdk.org/jeps/401">JEP 401: Value Objects (Preview)</a> — основа урока: разделы Comparing value objects, Safe construction, Migrating to value classes, Run-time optimizations. Порядок урока и пример с датами взяты оттуда, демо на платежах и все выводы получены на JDK 28-ea+20.</li>
+      <li><a href="https://openjdk.org/jeps/539">JEP 539: Strict Field Initialization in the JVM (Preview)</a> — правила verifier для strict-полей, early_larval frame, запрет записи рефлексией и сериализации.</li>
+      <li><a href="https://openjdk.org/projects/valhalla/value-objects">Valhalla: Value Objects</a> — короткие заметки о производительности в JDK 28: 64 бита, C2, полиморфные переменные, пересборка клиентов.</li>
+      <li><a href="https://openjdk.org/jeps/8316779">JEP draft: Null-Restricted Value Class Types (Preview)</a> — <code>!</code>, implicit-конструктор, <code>LooselyConsistentValue</code> и модель производительности.</li>
+      <li><a href="https://openjdk.org/jeps/390">JEP 390: Warnings for Value-Based Classes</a> — что можно сделать на JDK 16–21: deprecated конструкторы обёрток и <code>DiagnoseSyncOnValueBasedClasses</code>.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

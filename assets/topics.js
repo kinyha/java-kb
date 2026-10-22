@@ -413,6 +413,8 @@ window.KB_TREE = [
           scope: 'семантика record, compact constructor, ограничения, record как DTO и value object' },
         { id: 'sealed-patterns', freq: 2, status: 'draft', title: 'Sealed & Pattern Matching',
           scope: 'sealed-иерархии, pattern matching для instanceof, record patterns, исчерпывающий switch' },
+        { id: 'value-objects', freq: 1, status: 'draft', title: 'Value Objects',
+          scope: 'Project Valhalla, JEP 401: identity и value-семантика, value class и value record, == по полям и equals, обёртки, Optional и java.time как value-классы в preview, что ломается: synchronized, WeakReference, IdentityHashMap, кеш Integer, flattening и scalarization, strict field init (JEP 539), null-restricted типы как следующий шаг, статус в JDK 28 и как попробовать' },
       ] },
       { id: 'concurrency', title: 'Concurrency', source: 'Java Concurrency in Practice; enhorse/java-interview: Многопоточность', items: [
         { id: 'basics', title: 'Basics', items: [
