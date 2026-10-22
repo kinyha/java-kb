@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kotlin Coroutines · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kotlin-coroutines">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Kotlin Coroutines</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Сервис платежей почти всё время ждёт сеть. Корутина позволяет написать ожидание как обычный последовательный код, но во время ожидания не держать поток. Компилятор превращает suspend-функцию в колбэк с сохранённым состоянием, а библиотека kotlinx.coroutines решает, на каком потоке продолжить и кого отменить, если что-то упало. Дальше — как это устроено в байткоде и что из этого следует для отмены, блокирующих вызовов, ошибок и выбора между корутинами, виртуальными потоками и Reactor.</p>
+    </div>
+
+    <section class="step" id="problem">
+      <h2>Авторизация ждёт сеть, а поток простаивает</h2>
+      <p>Перед списанием платёжный сервис спрашивает антифрод (≈100 мс) и сервис лимитов (≈80 мс). Считает он мало — в основном ждёт ответы. В модели «поток на запрос» каждый ждущий запрос держит платформенный поток со своим стеком. Пул Tomcat в 200 потоков — это 200 одновременных авторизаций, остальные стоят в очереди, хотя CPU свободен.</p>
+      <p>Java-ответ до виртуальных потоков — <a href="completable-future.html">CompletableFuture</a>. Поток не держится, но логика переезжает в колбэки, а отмену и контекст нужно протаскивать руками:</p>
+      <pre><code class="language-java">CompletableFuture&lt;Boolean&gt; authorize(String id, long amount) {
+    return fraudScore(id).thenCombine(limitLeft(id),
+            (score, limit) -&gt; score &lt; 9 &amp;&amp; amount &lt;= limit);   // бизнес-правило внутри колбэка
+}</code></pre>
+      <p>В Kotlin тот же код пишется последовательно, а работает как колбэки. Оба вызова идут параллельно, и ни один поток не ждёт:</p>
+      <pre><code class="language-kotlin">suspend fun fraudScore(id: String): Int { delay(100); return id.length % 10 }   // сетевой вызов, 100 мс
+suspend fun limitLeft(id: String): Long { delay(80); return 50_000 }           // ещё один, 80 мс
+
+suspend fun authorize(id: String, amount: Long): Boolean = coroutineScope {
+    val score = async { fraudScore(id) }                  // запустить и не ждать
+    val limit = async { limitLeft(id) }
+    score.await() &lt; 9 &amp;&amp; amount &lt;= limit.await()          // ждать здесь, без блокировки потока
+}
+
+fun main() = runBlocking {                                // один поток: main
+    val threads = ConcurrentHashMap.newKeySet&lt;String&gt;()
+    val start = System.nanoTime()
+    val results = (1..10_000).map { i -&gt;
+        async {
+            threads += Thread.currentThread().name
+            authorize("p-$i", 1_000)
+        }
+    }.awaitAll()
+    val ms = (System.nanoTime() - start) / 1_000_000
+    println("authorizations=${results.size} threads=$threads elapsed=${ms} ms")
+}</code></pre>
+      <pre class="out">authorizations=10000 threads=[main] elapsed=176 ms</pre>
+      <p>10 000 авторизаций, каждая ждёт около 100 мс, завершились за 176 мс на одном потоке <code>main</code>. Точное время зависит от машины, порядок — нет: последовательно это заняло бы 10 000 × 100 мс ≈ 17 минут, а параллельно на платформенных потоках потребовало бы 10 000 потоков. <code>delay</code> не спит: он приостанавливает корутину и отдаёт поток другим. Как функция может «остановиться на середине» и продолжить потом — следующий шаг.</p>
+    </section>
+
+    <section class="step" id="suspend">
+      <h2>suspend-функция — это колбэк, который написал компилятор</h2>
+      <p>Слово <code>suspend</code> меняет сигнатуру метода. Компилятор добавляет последний параметр <code>Continuation</code> — объект «что делать дальше», а тип результата делает <code>Object</code>: функция возвращает либо значение, либо маркер <code>COROUTINE_SUSPENDED</code>. Это continuation-passing style, тот же колбэк, что в CompletableFuture, только его пишет компилятор.</p>
+      <pre><code class="language-text">$ javap -p pay.mechanism.MechanismKt 'pay.mechanism.MechanismKt$authorize$1'
+public static final java.lang.Object authorize(java.lang.String, long, kotlin.coroutines.Continuation&lt;? super java.lang.String&gt;);
+
+final class MechanismKt$authorize$1 extends kotlin.coroutines.jvm.internal.ContinuationImpl {
+  java.lang.Object L$0;        # сохранённая ссылочная переменная (id)
+  long J$0;                    # сохранённый long (amount)
+  java.lang.Object result;     # значение, с которым функцию возобновили
+  int label;                   # на какой точке приостановки остановились
+  public final java.lang.Object invokeSuspend(java.lang.Object);   # повторный вход в authorize
+}</code></pre>
+      <p>Тело функции становится state machine. Каждая точка приостановки — вызов другой suspend-функции — получает номер <code>label</code>. Перед вызовом функция сохраняет живые локальные переменные в поля continuation и записывает следующий label. Если вызванная функция вернула <code>COROUTINE_SUSPENDED</code>, authorize возвращает его же, и так по всей цепочке до самого низа: стек раскручивается, поток свободен. Когда результат готов, кто-то вызывает <code>continuation.resume(value)</code>. Это снова входит в authorize, та по label прыгает в нужное место и восстанавливает переменные из полей:</p>
+      <pre><code class="language-text">$ javap -c -p pay.mechanism.MechanismKt          # метод authorize, фрагмент
+  63: getfield      label
+  66: tableswitch   { 0: 88                       # первый вход: начало тела
+                      1: 138 }                    # возобновление после fraudScore
+ 111: putfield      L$0                           # id → поле: кадр стека сейчас исчезнет
+ 117: putfield      J$0                           # amount → поле
+ 123: putfield      label                         # label = 1
+ 126: invokestatic  fraudScore
+ 132: if_acmpne     160                           # результат уже готов — продолжаем без паузы
+ 137: areturn                                     # иначе вернуть COROUTINE_SUSPENDED наверх</code></pre>
+      <p>Механизм работает без библиотеки kotlinx.coroutines, на одной stdlib. Функция <code>suspendCoroutine</code> отдаёт continuation «сетевому клиенту», а suspend-функцию можно вызвать как обычный JVM-метод, передав continuation руками:</p>
+      <pre><code class="language-kotlin">var pending: Continuation&lt;Int&gt;? = null           // «сетевой клиент» держит continuation до ответа
+
+suspend fun fraudScore(id: String): Int = suspendCoroutine { cont -&gt;
+    pending = cont                               // запомнили, куда вернуть результат
+    println("  fraud request sent for $id")
+}                                                // лямбда вернулась — функция приостановлена
+
+suspend fun authorize(id: String, amount: Long): String {
+    println("  authorize: start, label 0")
+    val score = fraudScore(id)                   // точка приостановки
+    println("  authorize: resumed with score=$score on ${Thread.currentThread().name}")
+    return if (score &lt; 10 &amp;&amp; amount &lt;= 50_000) "APPROVED" else "DECLINED"
+}
+
+fun main() {
+    val done = Continuation&lt;String&gt;(EmptyCoroutineContext) { println("  completion: $it") }
+    val raw = ::authorize as (String, Long, Continuation&lt;String&gt;) -&gt; Any?   // так метод видит JVM
+    val result = raw("p-1", 1_000, done)
+    println("1. authorize returned: $result")    // не String, а маркер приостановки
+    println("2. thread is free, doing other work")
+    val responder = Thread({ pending!!.resume(3) }, "fraud-response")   // ответ пришёл в другом потоке
+    responder.start(); responder.join()
+    println("3. main: end")
+}</code></pre>
+      <pre class="out">  authorize: start, label 0
+  fraud request sent for p-1
+1. authorize returned: COROUTINE_SUSPENDED
+2. thread is free, doing other work
+  authorize: resumed with score=3 on fraud-response
+  completion: Success(APPROVED)
+3. main: end</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Слева стек потока main, в центре объект continuation authorize$1 в heap с полями label, L$0, J$0 и result, справа клиент антифрода с полем pending и поток fraud-response. Сначала authorize выполняется на стеке main. Перед приостановкой переменные переезжают в поля, label становится 1, кадр authorize снимается со стека main. Потом поток fraud-response вызывает resume(3), и authorize продолжается уже на его стеке до результата APPROVED.">
+            <defs>
+              <marker id="cs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">СТЕК ПОТОКА main</text>
+            <text x="250" y="22" class="dg-cap">HEAP</text>
+            <text x="520" y="22" class="dg-cap">КЛИЕНТ И ОТВЕТ</text>
+
+            <!-- стек main -->
+            <rect x="14" y="34" width="200" height="140" rx="8" class="dg-box"/>
+            <rect data-s="1" x="26" y="60" width="176" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="26" y="104" width="176" height="34" rx="6" class="dg-cell"/>
+            <rect data-s="2-" x="26" y="60" width="176" height="34" rx="6" class="dg-sep" fill="none"/>
+
+            <!-- continuation в heap -->
+            <rect x="250" y="34" width="230" height="170" rx="8" class="dg-box"/>
+            <rect x="262" y="80" width="206" height="24" rx="5" class="dg-cell"/>
+            <rect x="262" y="110" width="206" height="24" rx="5" class="dg-cell"/>
+            <rect x="262" y="140" width="206" height="24" rx="5" class="dg-cell"/>
+            <rect x="262" y="170" width="206" height="24" rx="5" class="dg-cell"/>
+            <rect data-s="2" x="262" y="80" width="206" height="84" rx="5" class="dg-cell hit"/>
+            <rect data-s="3-" x="262" y="170" width="206" height="24" rx="5" class="dg-cell hit"/>
+
+            <!-- клиент антифрода -->
+            <rect x="520" y="34" width="186" height="80" rx="8" class="dg-box"/>
+            <rect x="532" y="80" width="162" height="26" rx="5" class="dg-cell"/>
+
+            <!-- поток fraud-response появляется с ответом -->
+            <g data-s="3-">
+              <rect x="520" y="126" width="186" height="110" rx="8" class="dg-box"/>
+              <rect x="532" y="188" width="162" height="28" rx="6" class="dg-cell"/>
+            </g>
+            <rect data-s="3" x="532" y="152" width="162" height="28" rx="6" class="dg-cell hit"/>
+            <rect data-s="4" x="532" y="152" width="162" height="28" rx="6" class="dg-cell hit"/>
+
+            <!-- стрелки -->
+            <path data-s="1" d="M202 77 C 226 77, 226 92, 246 92" class="dg-line" marker-end="url(#cs-n)"/>
+            <path data-s="2-" d="M532 93 L 484 93" class="dg-line" marker-end="url(#cs-n)"/>
+            <path data-s="2" d="M262 196 C 230 214, 120 214, 114 180" class="dg-line" stroke-dasharray="5 4" marker-end="url(#cs-n)"/>
+            <path data-s="3" d="M532 166 L 484 166" class="dg-line ok" marker-end="url(#cs-ok)"/>
+
+            <!-- текст: стек main -->
+            <text x="26" y="52" class="dg-s">кадры сверху вниз</text>
+            <text data-s="1" x="38" y="82" class="dg-in">authorize(), label 0</text>
+            <text data-s="2-" x="38" y="82" class="dg-s">кадр снят</text>
+            <text x="38" y="126" class="dg-in">main()</text>
+            <text data-s="1" x="26" y="162" class="dg-bad">занят authorize</text>
+            <text data-s="2-" x="26" y="162" class="dg-ok">свободен</text>
+
+            <!-- текст: continuation -->
+            <text x="262" y="54" class="dg-t">authorize$1</text>
+            <text x="262" y="70" class="dg-s">continuation, живёт в heap</text>
+            <text x="272" y="97" class="dg-in">label</text>
+            <text x="272" y="127" class="dg-in">L$0</text>
+            <text x="272" y="157" class="dg-in">J$0</text>
+            <text x="272" y="187" class="dg-in">result</text>
+            <g data-s="1"><text x="360" y="97" class="dg-in">0</text><text x="360" y="127" class="dg-in">—</text><text x="360" y="157" class="dg-in">—</text><text x="360" y="187" class="dg-in">—</text></g>
+            <g data-s="2"><text x="360" y="97" class="dg-in">1</text><text x="360" y="127" class="dg-in">"p-1"</text><text x="360" y="157" class="dg-in">1000</text><text x="360" y="187" class="dg-in">—</text></g>
+            <g data-s="3-"><text x="360" y="97" class="dg-in">1</text><text x="360" y="127" class="dg-in">"p-1"</text><text x="360" y="157" class="dg-in">1000</text><text x="360" y="187" class="dg-in">3</text></g>
+
+            <!-- текст: клиент -->
+            <text x="532" y="54" class="dg-t">pending</text>
+            <text x="532" y="70" class="dg-s">клиент антифрода</text>
+            <text data-s="1" x="544" y="98" class="dg-in">null</text>
+            <text data-s="2-" x="544" y="98" class="dg-in">ссылка на cont</text>
+            <g data-s="3-"><text x="532" y="146" class="dg-t">стек fraud-response</text><text x="544" y="207" class="dg-in">resume(3)</text></g>
+            <text data-s="3" x="544" y="171" class="dg-in">authorize(), label 1</text>
+            <text data-s="4" x="544" y="171" class="dg-in">completion</text>
+
+            <!-- строка состояния -->
+            <text data-s="1" x="14" y="254" class="dg-s">main вызвал authorize("p-1", 1000, done): создан объект authorize$1</text>
+            <text data-s="2" x="14" y="254" class="dg-in">authorize вернул COROUTINE_SUSPENDED</text>
+            <text data-s="3" x="14" y="254" class="dg-s">resume(3) → invokeSuspend → authorize прыгает на label 1</text>
+            <text data-s="4" x="14" y="254" class="dg-ok">authorize вернул "APPROVED" → done.resumeWith(Success)</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>main вызывает authorize и передаёт continuation <code>done</code>. authorize создаёт свой объект authorize$1 с <code>label = 0</code> и выполняется на стеке main, как обычный метод.</li>
+          <li>Перед вызовом fraudScore функция сохраняет <code>id</code> и <code>amount</code> в поля, ставит <code>label = 1</code>. fraudScore кладёт continuation в <code>pending</code> и возвращает маркер. authorize возвращает его же, кадр снимается со стека: main свободен, а состояние корутины целиком в heap.</li>
+          <li>Ответ приходит в потоке fraud-response: <code>pending.resume(3)</code> записывает 3 в <code>result</code> и снова входит в authorize. По <code>label = 1</code> выполнение прыгает сразу за точку вызова fraudScore, переменные восстанавливаются из полей.</li>
+          <li>authorize дорабатывает до конца уже на стеке fraud-response и передаёт результат в <code>done</code>. Корутина начала работу в одном потоке, а закончила в другом.</li>
+        </ol>
+      </figure>
+      <p>Корутина — не поток, а этот объект-continuation плюс цепочка таких же объектов вызывающих функций. Пока она ждёт, она занимает несколько сотен байт в heap, а не стек потока. Возобновить её может любой поток — здесь это fraud-response. В kotlinx.coroutines на каком потоке продолжить решает dispatcher (шаг 4).</p>
+      <div class="trap">
+        <p class="myth">Корутина — лёгкий поток со своим маленьким стеком.</p>
+        <p class="fact">Своего стека у корутины нет. Пока она выполняется, она использует стек текущего потока. При приостановке её переменные переезжают в поля continuation, а кадры снимаются со стека. Поэтому приостановиться можно только внутри suspend-функции: обычная функция не умеет сохранить себя и вернуть маркер.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: «окрашенные» функции и повторное использование continuation</summary>
+        <p>Вызвать suspend-функцию из обычной нельзя: нечего передать в параметр <code>Continuation</code>. Функции делятся на два «цвета», и переход между ними — явный мост: <code>runBlocking</code> блокирует текущий поток до результата, <code>launch</code> и <code>async</code> запускают корутину в scope, <code>future { }</code> отдаёт её Java-коду как CompletableFuture. Виртуальные потоки этой проблемы не имеют: там приостанавливается сама JVM.</p>
+        <p>Первые строки байткода authorize проверяют, не пришёл ли в параметре уже свой объект authorize$1 с выставленным старшим битом <code>label</code>. Так функция отличает повторный вход через <code>invokeSuspend</code> от нового вызова и не создаёт второй объект. Новый объект выделяется на каждый вызов, который может приостановиться; если приостановки не случилось, он быстро становится мусором и убирается при minor GC.</p>
+      </details>
+    </section>
+
+    <section class="step" id="structure">
+      <h2>Structured concurrency: корутины живут в дереве, ошибки и отмена идут по нему</h2>
+      <p>С колбэками легко потерять задачу. CompletableFuture, запущенный и забытый, работает дальше, даже если запрос уже отменён, а его исключение никто не увидит. kotlinx.coroutines так не даёт: <code>launch</code> и <code>async</code> — функции на <code>CoroutineScope</code>, и новая корутина становится ребёнком <code>Job</code> этого scope.</p>
+      <p>У дерева три правила. Родитель не завершается, пока не завершились все дети. Ошибка ребёнка отменяет родителя, а родитель отменяет остальных детей. Отмена родителя отменяет всех детей. <code>coroutineScope { }</code> создаёт такой scope внутри suspend-функции и возвращает результат только после всех детей.</p>
+      <pre><code class="language-kotlin">suspend fun authorize(id: String): Long = coroutineScope {
+    val fraud = async {
+        try { delay(200); log("fraud done"); 3L }
+        catch (e: CancellationException) { log("fraud cancelled"); throw e }   // отмену пробрасываем дальше
+    }
+    val limits = async&lt;Long&gt; {
+        delay(50)
+        throw IllegalStateException("limits service 503")
+    }
+    launch {
+        try { delay(300); log("fx rate cached") }
+        finally { log("fx finally, active=$isActive") }                         // finally выполняется и при отмене
+    }
+    fraud.await() + limits.await()
+}
+
+try { authorize("p-1") }
+catch (e: IllegalStateException) { log("caller got: ${e.message}") }</code></pre>
+      <pre class="out">  50 ms  fraud cancelled
+  60 ms  fx finally, active=false
+  60 ms  caller got: limits service 503</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 252" role="img" aria-label="Дерево Job: вызывающий runBlocking, под ним coroutineScope функции authorize, под ним три ребёнка: fraud, limits и fx. limits падает через 50 мс, ошибка идёт к родителю, родитель отменяет fraud и fx, они выполняют catch и finally, и исключение limits выходит из coroutineScope к вызывающему.">
+            <defs>
+              <marker id="ct-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ct-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- связи дерева -->
+            <line x1="360" y1="48" x2="360" y2="78" class="dg-line"/>
+            <line x1="360" y1="112" x2="130" y2="166" class="dg-line"/>
+            <line x1="360" y1="112" x2="360" y2="166" class="dg-line"/>
+            <line x1="360" y1="112" x2="590" y2="166" class="dg-line"/>
+
+            <!-- узлы -->
+            <rect x="260" y="14" width="200" height="34" rx="7" class="dg-box"/>
+            <rect x="240" y="78" width="240" height="34" rx="7" class="dg-box"/>
+            <rect x="40" y="166" width="180" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="270" y="166" width="180" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="500" y="166" width="180" height="34" rx="6" class="dg-cell hit"/>
+
+            <!-- состояния -->
+            <rect data-s="2-" x="270" y="166" width="180" height="34" rx="6" class="dg-cell miss"/>
+            <rect data-s="3-" x="240" y="78" width="240" height="34" rx="7" class="dg-cell miss"/>
+            <g data-s="3-"><rect x="40" y="166" width="180" height="34" rx="6" class="dg-cell miss"/><rect x="500" y="166" width="180" height="34" rx="6" class="dg-cell miss"/></g>
+
+            <!-- движение ошибки и отмены -->
+            <path data-s="3" d="M376 164 L 376 116" class="dg-line bad" marker-end="url(#ct-bad)"/>
+            <g data-s="3"><path d="M336 114 L 136 163" class="dg-line bad" stroke-dasharray="5 4" marker-end="url(#ct-bad)"/><path d="M384 114 L 584 163" class="dg-line bad" stroke-dasharray="5 4" marker-end="url(#ct-bad)"/></g>
+            <path data-s="4" d="M376 76 L 376 52" class="dg-line bad" marker-end="url(#ct-bad)"/>
+
+            <!-- подписи узлов -->
+            <g text-anchor="middle">
+              <text x="360" y="36" class="dg-t">runBlocking: caller</text>
+              <text x="360" y="100" class="dg-t">coroutineScope (authorize)</text>
+              <text x="130" y="188" class="dg-in">fraud: async, 200 ms</text>
+              <text x="360" y="188" class="dg-in">limits: async, 50 ms</text>
+              <text x="590" y="188" class="dg-in">fx: launch, 300 ms</text>
+            </g>
+            <text data-s="2-" x="360" y="220" class="dg-bad" text-anchor="middle">IllegalStateException</text>
+            <g data-s="3" text-anchor="middle"><text x="200" y="134" class="dg-s">cancel</text><text x="520" y="134" class="dg-s">cancel</text></g>
+            <g data-s="4" text-anchor="middle"><text x="130" y="220" class="dg-s">catch: rethrow</text><text x="590" y="220" class="dg-s">finally выполнен</text></g>
+            <text data-s="4" x="386" y="66" class="dg-bad">throw</text>
+
+            <!-- счётчик времени -->
+            <text data-s="1" x="14" y="244" class="dg-s">0 ms: три ребёнка запущены, scope ждёт их</text>
+            <text data-s="2" x="14" y="244" class="dg-s">50 ms: limits бросил исключение</text>
+            <text data-s="3" x="14" y="244" class="dg-s">сразу: ошибка у родителя, родитель отменяет fraud и fx</text>
+            <text data-s="4" x="14" y="244" class="dg-s">≈60 ms: все дети завершились, исключение уходит вызывающему</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>coroutineScope запускает трёх детей. Вызывающий ждёт, пока scope не завершится целиком.</li>
+          <li>Через 50 мс limits бросает IllegalStateException. Ребёнок завершается с ошибкой.</li>
+          <li>Ошибка идёт вверх, к Job родителя. Родитель переходит в состояние «отменяется» и отменяет остальных детей: в их <code>delay</code> прилетает CancellationException.</li>
+          <li>fraud ловит отмену и пробрасывает её, fx выполняет finally. Когда завершились все дети, coroutineScope бросает исходное IllegalStateException вызывающему. Никто не остался работать в фоне.</li>
+        </ol>
+      </figure>
+      <p>fraud не дождался своих 200 мс, а fx выполнил finally с <code>active=false</code>. Отмена приходит как CancellationException в точке приостановки, поэтому <code>finally</code> и <code>use</code> закрывают ресурсы как обычно. Вызывающий получил исходную ошибку limits, а не CancellationException. Времена в выводе усечены до 10 мс и плавают на 10–20 мс от запуска к запуску.</p>
+      <h3>Отмена кооперативная</h3>
+      <p>Отмена — это флаг в Job. Корутина узнаёт о нём только в точке приостановки (<code>delay</code>, <code>await</code>, <code>withContext</code>, <code>yield</code>) или при явной проверке: <code>ensureActive()</code>, <code>isActive</code>. Код без приостановок — CPU-цикл или блокирующий вызов — отмену не замечает:</p>
+      <pre><code class="language-kotlin">fun processBatch() = Thread.sleep(40)                         // блокирующая пачка сверки
+
+suspend fun reconcile(cooperative: Boolean, done: AtomicInteger) {
+    repeat(10) {
+        if (cooperative) currentCoroutineContext().ensureActive()   // точка проверки отмены
+        processBatch()
+        done.incrementAndGet()
+    }
+}
+
+for (cooperative in listOf(false, true)) {
+    val done = AtomicInteger()
+    val result = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(100) { reconcile(cooperative, done); "finished" }
+    }
+    println("cooperative=$cooperative result=$result batches=${done.get()}")
+}</code></pre>
+      <pre class="out">cooperative=false result=finished batches=10
+cooperative=true result=null batches=3</pre>
+      <p>Без проверок таймаут в 100 мс ничего не прервал: все 10 пачек по 40 мс выполнились, и вернулся даже результат <code>finished</code>. С <code>ensureActive()</code> перед каждой пачкой работа остановилась после третьей: проверка на 80 мс прошла, на 120 мс — нет. Для блокирующих вызовов, которые реагируют на interrupt, есть <code>runInterruptible { }</code>: он превращает отмену в <code>Thread.interrupt()</code>.</p>
+      <div class="trap">
+        <p class="myth"><code>catch (e: Exception)</code> вокруг suspend-вызова — безопасная защита от падений.</p>
+        <p class="fact">Отмена — это исключение CancellationException, и такой catch её проглатывает: корутина продолжает работать после отмены. Её надо пробрасывать: ловить конкретные исключения или ставить <code>catch (e: CancellationException) { throw e }</code> выше общего. Та же ловушка у <code>runCatching</code>.</p>
+      </div>
+      <pre><code class="language-kotlin">suspend fun pollStatuses() {
+    repeat(5) { i -&gt;
+        try { delay(50); log("poll $i") }
+        catch (e: Exception) { log("poll $i: swallowed ${e::class.simpleName}") }   // глотает и отмену
+    }
+}
+
+val job = launch { pollStatuses(); log("pollStatuses returned normally") }
+delay(120)
+log("cancel"); job.cancelAndJoin()</code></pre>
+      <pre class="out">  50 ms  poll 0
+ 110 ms  poll 1
+ 120 ms  cancel
+ 130 ms  poll 2: swallowed JobCancellationException
+ 140 ms  poll 3: swallowed JobCancellationException
+ 140 ms  poll 4: swallowed JobCancellationException
+ 140 ms  pollStatuses returned normally</pre>
+      <p>После отмены каждый <code>delay</code> сразу бросает исключение, catch его съедает, и цикл крутится дальше. Здесь он короткий; бесконечный цикл опроса после такой «отмены» не остановится никогда и будет жечь CPU. Учти ещё одну деталь: CancellationException в JVM наследует IllegalStateException, поэтому <code>catch (e: IllegalStateException)</code> тоже ловит отмену.</p>
+    </section>
+
+    <section class="step" id="dispatchers">
+      <h2>Dispatcher выбирает поток для продолжения, а блокирующий вызов занимает его целиком</h2>
+      <p>Continuation можно возобновить на любом потоке. Какой выбрать, решает <code>CoroutineDispatcher</code> из контекста корутины: при каждом старте и resume он ставит продолжение в свою очередь, и его подхватывает один из потоков.</p>
+      <table class="mx">
+        <thead><tr><th>Dispatcher</th><th>Потоки</th><th>Для чего</th></tr></thead>
+        <tbody>
+          <tr><td><code>Dispatchers.Default</code></td><td>По числу CPU, минимум 2</td><td>Вычисления: сериализация, криптография, расчёты</td></tr>
+          <tr><td><code>Dispatchers.IO</code></td><td>До 64 или по числу CPU, если их больше; потоки общие с Default</td><td>Блокирующий ввод-вывод: JDBC, файлы, старые HTTP-клиенты</td></tr>
+          <tr><td><code>executor.asCoroutineDispatcher()</code></td><td>Потоки своего Executor</td><td>Свой пул или виртуальные потоки</td></tr>
+          <tr><td><code>Dispatchers.Unconfined</code></td><td>Тот, что вызвал resume</td><td>Тесты и редкие случаи; в сервисе не нужен</td></tr>
+        </tbody>
+      </table>
+      <p><code>withContext(Dispatchers.IO) { repo.findById(id) }</code> переносит блок на другой dispatcher и возвращает результат обратно. Опыт показывает, зачем. Ночная сверка обрабатывает 100 платежей, каждый — один вызов на 100 мс. После сотни задач запускается быстрая health-check-корутина, и мы меряем, сколько она ждала старта:</p>
+      <pre><code class="language-kotlin">fun jdbcCall() = Thread.sleep(100)                 // блокирующий вызов: JDBC, старый HTTP-клиент
+suspend fun httpCall() = delay(100)                // неблокирующий: поток отпускается
+
+suspend fun batch(name: String, ctx: CoroutineContext, call: suspend () -&gt; Unit) = coroutineScope {
+    repeat(100) { launch(ctx) { threads += Thread.currentThread().threadId(); call() } }
+    val h = System.nanoTime()
+    launch(ctx) { healthLatency = (System.nanoTime() - h) / 1_000_000 }.join()   // встаёт в ту же очередь
+    …                                                                             // ждём всех и печатаем
+}
+
+batch("Default + Thread.sleep", Dispatchers.Default) { jdbcCall() }
+batch("IO + Thread.sleep", Dispatchers.IO) { jdbcCall() }
+batch("Default + delay", Dispatchers.Default) { httpCall() }
+Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher().use { vt -&gt;
+    batch("virtual threads + sleep", vt) { jdbcCall() }
+}</code></pre>
+      <pre class="out">cpus=18
+Default + Thread.sleep   elapsed= 640 ms  threads= 18  health-check waited 530 ms
+IO + Thread.sleep        elapsed= 221 ms  threads= 64  health-check waited 106 ms
+Default + delay          elapsed= 105 ms  threads= 14  health-check waited   0 ms
+virtual threads + sleep  elapsed= 115 ms  threads=100  health-check waited   0 ms</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 222" role="img" aria-label="Слева Dispatchers.Default с Thread.sleep: все 18 потоков заблокированы сном, в очереди 82 корутины и health-check в самом конце, он ждёт около 530 мс. Справа Default с delay: потоки свободны, 100 continuation лежат в heap и ждут таймер, health-check стартует сразу.">
+            <text x="20" y="22" class="dg-cap bad">DEFAULT + Thread.sleep</text>
+            <text x="390" y="22" class="dg-cap">DEFAULT + delay</text>
+            <line x1="360" y1="10" x2="360" y2="216" class="dg-sep"/>
+
+            <!-- слева: пул, все заблокированы -->
+            <rect x="14" y="34" width="316" height="112" rx="8" class="dg-box"/>
+            <g>
+              <rect x="24" y="62" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="74" y="62" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="124" y="62" width="44" height="22" rx="4" class="dg-cell miss"/>
+              <rect x="174" y="62" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="224" y="62" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="274" y="62" width="44" height="22" rx="4" class="dg-cell miss"/>
+              <rect x="24" y="88" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="74" y="88" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="124" y="88" width="44" height="22" rx="4" class="dg-cell miss"/>
+              <rect x="174" y="88" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="224" y="88" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="274" y="88" width="44" height="22" rx="4" class="dg-cell miss"/>
+              <rect x="24" y="114" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="74" y="114" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="124" y="114" width="44" height="22" rx="4" class="dg-cell miss"/>
+              <rect x="174" y="114" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="224" y="114" width="44" height="22" rx="4" class="dg-cell miss"/><rect x="274" y="114" width="44" height="22" rx="4" class="dg-cell miss"/>
+            </g>
+            <rect x="14" y="158" width="316" height="34" rx="8" class="dg-box"/>
+            <rect x="214" y="163" width="110" height="24" rx="5" class="dg-cell hit"/>
+
+            <!-- справа: пул свободен, continuation ждут таймер -->
+            <rect x="390" y="34" width="316" height="112" rx="8" class="dg-box"/>
+            <g>
+              <rect x="400" y="62" width="44" height="22" rx="4" class="dg-cell"/><rect x="450" y="62" width="44" height="22" rx="4" class="dg-cell"/><rect x="500" y="62" width="44" height="22" rx="4" class="dg-cell"/>
+              <rect x="550" y="62" width="44" height="22" rx="4" class="dg-cell"/><rect x="600" y="62" width="44" height="22" rx="4" class="dg-cell"/><rect x="650" y="62" width="44" height="22" rx="4" class="dg-cell"/>
+              <rect x="400" y="88" width="44" height="22" rx="4" class="dg-cell"/><rect x="450" y="88" width="44" height="22" rx="4" class="dg-cell"/><rect x="500" y="88" width="44" height="22" rx="4" class="dg-cell"/>
+              <rect x="550" y="88" width="44" height="22" rx="4" class="dg-cell"/><rect x="600" y="88" width="44" height="22" rx="4" class="dg-cell"/><rect x="650" y="88" width="44" height="22" rx="4" class="dg-cell"/>
+              <rect x="400" y="114" width="44" height="22" rx="4" class="dg-cell hit"/><rect x="450" y="114" width="44" height="22" rx="4" class="dg-cell"/><rect x="500" y="114" width="44" height="22" rx="4" class="dg-cell"/>
+              <rect x="550" y="114" width="44" height="22" rx="4" class="dg-cell"/><rect x="600" y="114" width="44" height="22" rx="4" class="dg-cell"/><rect x="650" y="114" width="44" height="22" rx="4" class="dg-cell"/>
+            </g>
+            <rect x="390" y="158" width="316" height="34" rx="8" class="dg-sep" fill="none"/>
+
+            <!-- текст -->
+            <text x="24" y="52" class="dg-t">18 потоков: все в sleep</text>
+            <text x="24" y="180" class="dg-in">очередь: 82 корутины</text>
+            <text x="269" y="180" class="dg-in" text-anchor="middle">health</text>
+            <text x="14" y="212" class="dg-bad">health-check ждал ≈530 ms</text>
+
+            <text x="400" y="52" class="dg-t">18 потоков: свободны</text>
+            <text x="422" y="129" class="dg-n" text-anchor="middle">health</text>
+            <text x="400" y="180" class="dg-in">таймер: 100 continuation в heap</text>
+            <text x="390" y="212" class="dg-ok">health-check: 0 ms</text>
+          </svg>
+        </div>
+        <figcaption>Блокирующий вызов держит не корутину, а поток пула. Пока все 18 спят, очередь не двигается, какой бы короткой ни была следующая задача.</figcaption>
+      </figure>
+      <p>18 потоков Default и 100 задач по 100 мс сна — это 6 волн, около 640 мс. Хуже всего health-check: он встал в очередь за 82 спящими задачами и ждал 530 мс. В сервисе на месте health-check окажется обработка HTTP-запросов, и сервис «зависнет» при свободном CPU. На IO 64 потока, две волны, 220 мс. С <code>delay</code> потоки не заняты, и всё заняло около 100 мс. Числа сняты на машине с 18 CPU: волн будет <code>ceil(100 / CPU)</code>, а соотношение останется тем же.</p>
+      <ul>
+        <li>Блокирующий код — в <code>withContext(Dispatchers.IO)</code>, а лучше заменить неблокирующим клиентом.</li>
+        <li>IO общий на всё приложение. Медленному клиенту дают свой лимит: <code>Dispatchers.IO.limitedParallelism(10)</code>, тогда он не съест 64 потока.</li>
+        <li>Dispatcher на виртуальных потоках выдержал 100 блокирующих вызовов за 115 мс без пула: каждый вызов получил свой виртуальный поток. Это мост к шагу 7.</li>
+      </ul>
+      <div class="trap">
+        <p class="myth">suspend-функция не блокирует поток.</p>
+        <p class="fact"><code>suspend</code> только разрешает приостановку. Если внутри <code>Thread.sleep</code>, JDBC или <code>synchronized</code> с долгим ожиданием, поток заблокирован так же, как в Java. Неблокирующей функцию делают точки приостановки внутри: <code>delay</code>, <code>await</code>, вызовы неблокирующего клиента.</p>
+      </div>
+      <div class="note warn">
+        <p><code>runBlocking</code> блокирует поток, пока корутина не завершится. Он нужен в <code>main</code> и как мост в старом коде; в тестах — <code>runTest</code> с виртуальным временем. <code>runBlocking</code> в обработчике запроса или внутри корутины на Default держит поток пула и при нагрузке приводит к тому же голоданию, что на схеме, а иногда к взаимной блокировке.</p>
+      </div>
+    </section>
+
+    <section class="step" id="errors">
+      <h2>async, SupervisorJob и обработчик: исключение уходит родителю, а не в await</h2>
+      <p><code>async</code> возвращает <code>Deferred</code>, аналог Future. Ошибка хранится в нём до <code>await</code>, но внутри обычного scope она ещё и сразу отменяет родителя. Поэтому забытый <code>await</code> ошибку не спрячет:</p>
+      <pre><code class="language-kotlin">suspend fun send(channel: String): String {
+    delay(if (channel == "sms") 20L else 50L)
+    if (channel == "sms") throw IllegalStateException("sms gateway down")
+    return "$channel sent"
+}
+
+try {
+    coroutineScope {
+        val email = async { send("email") }
+        val sms = async { send("sms") }        // await для sms не вызываем
+        println("1. email: ${email.await()}")
+    }
+} catch (e: IllegalStateException) { println("1. scope failed: ${e.message}") }</code></pre>
+      <pre class="out">1. scope failed: sms gateway down</pre>
+      <p>Email так и не отправился: SMS упал через 20 мс и отменил весь scope. Для одной авторизации это правильно — без лимитов нет смысла ждать антифрод. Но уведомления независимы, и падение SMS не должно отменять email. Для этого есть <code>supervisorScope</code> и <code>SupervisorJob</code>: ошибка ребёнка не идёт вверх, родитель и соседи живут, а ошибку async-ребёнка ты получишь в его <code>await</code>:</p>
+      <pre><code class="language-kotlin">supervisorScope {
+    val jobs = listOf("email", "sms", "push").associateWith { async { send(it) } }
+    for ((channel, d) in jobs) {
+        try { println("2. ${d.await()}") }
+        catch (e: IllegalStateException) { println("2. $channel failed: ${e.message}") }
+    }
+}</code></pre>
+      <pre class="out">2. email sent
+2. sms failed: sms gateway down
+2. push sent</pre>
+      <p>Третий случай — долгоживущий scope сервиса, из которого запускают фоновую работу: отправку чеков, прогрев кеша. У <code>launch</code> нет <code>await</code>, ошибку некому вернуть. Её получает <code>CoroutineExceptionHandler</code> из контекста, а без него — обработчик потока, то есть лог. Важнее другое — какой Job у самого scope:</p>
+      <pre><code class="language-kotlin">val handler = CoroutineExceptionHandler { _, e -&gt; println("   handler: ${e.message}") }
+for ((name, job) in listOf("Job()" to Job(), "SupervisorJob()" to SupervisorJob())) {
+    val scope = CoroutineScope(job + Dispatchers.Default + handler)
+    scope.launch { send("sms") }.join()                      // первая задача падает
+    val second = scope.launch { println("   second receipt: ${send("email")}") }
+    second.join()
+    println("3. $name: scope active=${scope.isActive}, second cancelled=${second.isCancelled}")
+}</code></pre>
+      <pre class="out">   handler: sms gateway down
+3. Job(): scope active=false, second cancelled=true
+   handler: sms gateway down
+   second receipt: email sent
+3. SupervisorJob(): scope active=true, second cancelled=false</pre>
+      <p>С обычным <code>Job()</code> первая упавшая задача отменила весь scope. Второй чек не отправился, и ошибки об этом нет: <code>launch</code> в отменённом scope просто создаёт уже отменённую корутину. С <code>SupervisorJob()</code> scope пережил ошибку. Поэтому scope компонента, который живёт всё время работы сервиса, строят на SupervisorJob и отменяют при остановке компонента.</p>
+      <table class="mx">
+        <thead><tr><th>Где упало</th><th>Что происходит</th></tr></thead>
+        <tbody>
+          <tr><td><code>async</code> или <code>launch</code> в <code>coroutineScope</code></td><td>Отменяет scope и соседей, исключение бросает <code>coroutineScope</code></td></tr>
+          <tr><td><code>async</code> в <code>supervisorScope</code></td><td>Соседи живут, исключение — в <code>await</code></td></tr>
+          <tr><td><code>launch</code> в scope с <code>SupervisorJob</code></td><td>Соседи живут, исключение — в CoroutineExceptionHandler или в лог</td></tr>
+          <tr><td><code>launch</code> в scope с <code>Job()</code></td><td>Scope отменён насовсем, новые задачи молча не стартуют</td></tr>
+        </tbody>
+      </table>
+      <p>Handler вызывается только для корневой корутины scope или прямого ребёнка supervisor. У вложенных <code>launch</code> ошибка идёт родителю, и handler в их контексте не срабатывает. <code>GlobalScope</code> — scope без родителя и без отмены: запущенное в нём живёт, пока не закончится само, поэтому в сервисе он не нужен.</p>
+    </section>
+
+    <section class="step" id="flow">
+      <h2>Flow — холодный поток значений, где backpressure — это приостановка</h2>
+      <p>suspend-функция возвращает одно значение. Для последовательности — выгрузка платежей, статусы, события — есть <code>Flow</code>. <code>flow { }</code> — рецепт: код внутри не выполняется, пока кто-то не вызовет <code>collect</code>, и выполняется заново на каждый <code>collect</code>. Это холодный поток, как Flux без подписки в Reactor.</p>
+      <pre><code class="language-kotlin">fun paymentsFromDb(): Flow&lt;String&gt; = flow {
+    println("   SELECT * FROM payments")
+    emit("p-1"); emit("p-2")
+}
+
+val payments = paymentsFromDb()
+println("1. flow created, nothing executed")
+payments.collect { println("   a: $it") }
+payments.collect { println("   b: $it") }</code></pre>
+      <pre class="out">1. flow created, nothing executed
+   SELECT * FROM payments
+   a: p-1
+   a: p-2
+   SELECT * FROM payments
+   b: p-1
+   b: p-2</pre>
+      <p>Запрос выполнился дважды — по разу на подписчика. <code>emit</code> — suspend-функция. Без буфера она приостанавливается, пока collector обрабатывает значение, и источник с потребителем идут по очереди в одной корутине. Это и есть backpressure: быстрый источник не завалит медленного потребителя, ему просто не дадут продолжить. <code>buffer()</code>, <code>conflate()</code> и <code>collectLatest</code> меняют это поведение явно.</p>
+      <pre><code class="language-kotlin">flow { for (i in 1..3) { println("   emit $i"); emit(i) } }
+    .collect { println("   process $it"); delay(10) }</code></pre>
+      <pre class="out">   emit 1
+   process 1
+   emit 2
+   process 2
+   emit 3
+   process 3</pre>
+      <h3>Горячие потоки: StateFlow и SharedFlow</h3>
+      <p>Горячий поток живёт независимо от подписчиков. <code>StateFlow</code> хранит одно текущее значение: новый подписчик сразу получает его, одинаковые значения не рассылаются, а быстрые обновления сливаются — подписчик видит последнее, а не историю. <code>SharedFlow</code> — поток событий: без <code>replay</code> событие, отправленное без подписчиков, теряется.</p>
+      <pre><code class="language-kotlin">val status = MutableStateFlow("NEW")
+val ui = launch { status.collect { println("2. ui sees $it") } }
+yield()                                       // дать подписчику стартовать
+status.value = "AUTHORIZED"                   // без приостановки между присваиваниями
+status.value = "CAPTURED"
+status.value = "CAPTURED"                     // то же значение — не событие
+yield()
+ui.cancel()
+
+val events = MutableSharedFlow&lt;String&gt;()
+events.emit("refund r-1")                     // подписчиков нет: emit вернулся сразу
+val audit = launch { events.collect { println("3. audit got $it") } }
+yield()
+events.emit("refund r-2")
+yield()
+audit.cancel()</code></pre>
+      <pre class="out">2. ui sees NEW
+2. ui sees CAPTURED
+3. audit got refund r-2</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 232" role="img" aria-label="Слева холодный flow: один рецепт paymentsFromDb, каждый collect запускает свой SELECT и получает p-1 и p-2. Справа горячий StateFlow: значения NEW, AUTHORIZED, CAPTURED и снова CAPTURED. Подписчик ui получает NEW и CAPTURED; AUTHORIZED перезаписан до того, как подписчик успел его прочитать, повторное CAPTURED не рассылается.">
+            <defs>
+              <marker id="cf-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cf-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">COLD: flow { }</text>
+            <text x="390" y="22" class="dg-cap">HOT: StateFlow</text>
+            <line x1="360" y1="10" x2="360" y2="226" class="dg-sep"/>
+
+            <!-- cold -->
+            <rect x="110" y="34" width="220" height="40" rx="8" class="dg-sep" fill="none"/>
+            <rect x="20" y="104" width="120" height="34" rx="6" class="dg-cell"/>
+            <rect x="20" y="164" width="120" height="34" rx="6" class="dg-cell"/>
+            <rect x="200" y="104" width="130" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="200" y="164" width="130" height="34" rx="6" class="dg-cell hit"/>
+            <path d="M240 74 L 240 100" class="dg-line" stroke-dasharray="4 4" marker-end="url(#cf-n)"/>
+            <path d="M330 54 C 354 54, 354 181, 334 181" class="dg-line" stroke-dasharray="4 4" marker-end="url(#cf-n)"/>
+            <path d="M200 121 L 144 121" class="dg-line ok" marker-end="url(#cf-ok)"/>
+            <path d="M200 181 L 144 181" class="dg-line ok" marker-end="url(#cf-ok)"/>
+
+            <!-- hot -->
+            <rect x="390" y="50" width="76" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="469" y="50" width="76" height="34" rx="6" class="dg-cell miss"/>
+            <rect x="548" y="50" width="76" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="627" y="50" width="76" height="34" rx="6" class="dg-sep" fill="none"/>
+            <rect x="390" y="150" width="313" height="34" rx="6" class="dg-box"/>
+            <path d="M428 84 L 428 146" class="dg-line ok" marker-end="url(#cf-ok)"/>
+            <path d="M586 84 L 586 146" class="dg-line ok" marker-end="url(#cf-ok)"/>
+
+            <!-- текст -->
+            <text x="120" y="58" class="dg-in">flow { SELECT … }</text>
+            <text x="32" y="126" class="dg-in">collect a</text>
+            <text x="32" y="186" class="dg-in">collect b</text>
+            <text x="212" y="126" class="dg-in">запуск №1</text>
+            <text x="212" y="186" class="dg-in">запуск №2</text>
+            <text x="146" y="113" class="dg-n">p-1, p-2</text>
+            <text x="146" y="173" class="dg-n">p-1, p-2</text>
+            <text x="20" y="222" class="dg-s">рецепт выполняется на каждый collect</text>
+
+            <text x="390" y="42" class="dg-n">value во времени →</text>
+            <g text-anchor="middle">
+              <text x="428" y="71" class="dg-n">NEW</text>
+              <text x="507" y="71" class="dg-n">AUTHORIZED</text>
+              <text x="586" y="71" class="dg-n">CAPTURED</text>
+              <text x="665" y="71" class="dg-n">CAPTURED</text>
+            </g>
+            <text x="507" y="102" class="dg-bad" text-anchor="middle">перезаписан</text>
+            <text x="665" y="102" class="dg-s" text-anchor="middle">не событие</text>
+            <text x="402" y="172" class="dg-in">ui sees: NEW, CAPTURED</text>
+            <text x="390" y="222" class="dg-s">подписчик видит текущее значение, а не историю</text>
+          </svg>
+        </div>
+        <figcaption>Холодный поток повторяет работу для каждого подписчика. Горячий делает её один раз, но подписчик получает только то, что застал.</figcaption>
+      </figure>
+      <p>AUTHORIZED подписчик не увидел: два присваивания прошли без приостановки, и к моменту, когда collector получил поток, значение уже было CAPTURED. Для состояния так и надо: экрану или health-индикатору нужен текущий статус. Для событий «деньги списаны» — нет. Такие события идут через SharedFlow с буфером, а если их нельзя терять при падении процесса — через брокер и <a href="outbox.html">outbox</a>: Flow живёт в памяти одного процесса.</p>
+      <p>В backend Flow встречается на краях сервиса. Spring WebFlux принимает его как тело ответа для стрима JSON и SSE, а Spring Data отдаёт из корутинных репозиториев. Подробнее про Spring — в теме <a href="kotlin-spring.html">Kotlin with Spring &amp; JPA</a>.</p>
+    </section>
+
+    <section class="step" id="choose">
+      <h2>Корутины, virtual threads или Reactor: выбор зависит от стека сервиса</h2>
+      <p>Все три решают одну задачу: не держать поток, пока запрос ждёт сеть. Различаются тем, кто приостанавливает выполнение и как выглядит код.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Virtual threads</th><th>Корутины</th><th>Reactor</th></tr></thead>
+        <tbody>
+          <tr><td>Как выглядит код</td><td>Обычный блокирующий Java</td><td>Последовательный, функции помечены suspend</td><td>Цепочки операторов Mono и Flux</td></tr>
+          <tr><td>Кто приостанавливает</td><td>JVM: блокирующий вызов отпускает carrier-поток</td><td>Компилятор и библиотека, только в точках suspend</td><td>Библиотека: колбэк на каждом операторе</td></tr>
+          <tr><td>Блокирующие библиотеки</td><td>Работают как есть</td><td>Нужен <code>withContext(IO)</code></td><td>Нужен отдельный пул <code>boundedElastic</code></td></tr>
+          <tr><td>Отмена и время жизни</td><td>Interrupt; StructuredTaskScope пока в превью</td><td>Structured concurrency из коробки</td><td>Отмена подписки идёт по цепочке</td></tr>
+          <tr><td>Поток значений</td><td>Нет своего, только очереди</td><td>Flow с backpressure через приостановку</td><td>Flux с backpressure через <code>request(n)</code></td></tr>
+          <tr><td>Где в Spring</td><td>MVC и <code>spring.threads.virtual.enabled</code> с Boot 3.2</td><td>suspend-контроллеры и Flow в WebFlux и MVC</td><td>WebFlux</td></tr>
+        </tbody>
+      </table>
+      <ul>
+        <li><b>Spring MVC, JDBC, Java-команда</b> — <a href="virtual-threads.html">virtual threads</a>: переписывать ничего не нужно. На JDK 21 помни про pinning при блокировке внутри <code>synchronized</code>; в JDK 24 его убрал JEP 491.</li>
+        <li><b>Kotlin-команда, несколько параллельных вызовов в одном запросе, таймауты и отмены</b> — корутины. <code>coroutineScope</code> и <code>async</code> дают то, что в Java пока только в превью StructuredTaskScope.</li>
+        <li><b>Потоки данных, сложная композиция, уже WebFlux</b> — <a href="spring-reactive.html">Reactor</a>, а Kotlin-код поверх него пишут suspend-функциями и Flow через <code>kotlinx-coroutines-reactor</code> (<code>awaitSingle</code>, <code>asFlow</code>, <code>mono { }</code>).</li>
+      </ul>
+      <p>Мосты между мирами есть в обе стороны. CompletableFuture из Java-клиента приостанавливает корутину через <code>await()</code>, и отмена корутины отменяет future. Обратно <code>future { }</code> отдаёт корутину Java-коду. Оба моста входят в kotlinx-coroutines-core:</p>
+      <pre><code class="language-kotlin">fun bankApi(id: String, latencyMs: Long): CompletableFuture&lt;String&gt; =      // Java-клиент банка
+    CompletableFuture.supplyAsync { Thread.sleep(latencyMs); "bank-ok:$id" }
+
+suspend fun charge(id: String, latencyMs: Long = 50): String =
+    bankApi(id, latencyMs).await()                 // приостановка без блокировки потока
+
+val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+fun chargeForJava(id: String): CompletableFuture&lt;String&gt; = appScope.future { charge(id) }   // для Java-кода
+
+println(charge("p-1"))
+println(chargeForJava("p-2").get())
+val slow = bankApi("p-3", 500)
+val r = withTimeoutOrNull(50) { slow.await() }     // отмена корутины отменяет и future
+println("timeout result=$r future cancelled=${slow.isCancelled}")</code></pre>
+      <pre class="out">bank-ok:p-1
+bank-ok:p-2
+timeout result=null future cancelled=true</pre>
+      <p>Отменённая future не прерывает поток внутри <code>supplyAsync</code>: <code>CompletableFuture.cancel</code> не делает interrupt, и сон продолжится. Отменяется ожидание, а не работа. Корутины можно запускать и на виртуальных потоках через <code>asCoroutineDispatcher()</code>, как в шаге 4: блокирующий вызов внутри тогда не держит пул. Это удобный переходный вариант для Kotlin-сервиса со старыми JDBC-репозиториями.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>suspend-функция получает параметр Continuation и превращается в state machine: переменные переезжают в поля, label запоминает точку, <code>COROUTINE_SUSPENDED</code> освобождает поток.</li>
+        <li>Корутина — объект в heap, а не поток. Продолжить её может любой поток; какой — выбирает dispatcher.</li>
+        <li>Structured concurrency: дети живут внутри scope, ошибка ребёнка отменяет соседей и уходит родителю. SupervisorJob делает детей независимыми.</li>
+        <li>Отмена кооперативна: без точек приостановки или <code>ensureActive()</code> код её не заметит, а <code>catch (e: Exception)</code> её проглотит.</li>
+        <li>Блокирующий вызов в корутине блокирует поток пула. Его место — <code>Dispatchers.IO</code> с лимитом или виртуальные потоки.</li>
+        <li>Flow холодный и выполняется на каждый collect; StateFlow хранит текущее значение, SharedFlow раздаёт события тем, кто подписан.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="suspend-vs-thread" data-freq="2">
+      <h3>Как работает suspend-функция и чем корутина отличается от потока?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Компилятор добавляет suspend-функции параметр Continuation и превращает её тело в state machine. Перед каждой точкой приостановки живые переменные сохраняются в поля continuation, а в <code>label</code> записывается номер точки. Если вызванная функция вернула <code>COROUTINE_SUSPENDED</code>, функция возвращает его же, стек раскручивается, и поток свободен. Когда результат готов, <code>resume</code> снова входит в функцию, и она продолжает с нужного label.</p>
+          <p>Поэтому корутина — не поток, а объект в heap с цепочкой continuation. Тысячи ожидающих корутин занимают мегабайты heap, а не тысячи стеков. Пока корутина выполняется, она занимает поток, и на каком потоке её продолжить, решает dispatcher.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Корутины stackless: приостановиться можно только в suspend-функции, функции «окрашены». Виртуальные потоки stackful: JVM сохраняет весь стек, и приостанавливается любой блокирующий вызов.</li>
+            <li>Механизм — часть языка и stdlib (<code>suspendCoroutine</code>, <code>startCoroutine</code>); kotlinx.coroutines добавляет поверх него Job, dispatcher, scope и Flow.</li>
+            <li>Continuation можно возобновить из любого потока, поэтому ThreadLocal и MDC не переезжают сами: для них есть <code>ThreadContextElement</code> и <code>MDCContext</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Можно ли вызвать suspend-функцию из Java?</summary>
+          <p>Технически да: это обычный метод с последним параметром <code>Continuation</code>, и он может вернуть <code>COROUTINE_SUSPENDED</code>. Но реализовать continuation руками неудобно и легко ошибиться. На практике Kotlin-модуль отдаёт Java-коду обёртку: <code>scope.future { charge(id) }</code> возвращает CompletableFuture, а <code>runBlocking</code> подходит только там, где блокировка потока допустима.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="structured-concurrency" data-freq="2">
+      <h3>Что такое structured concurrency и как отменяются корутины?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждая корутина запускается в scope и становится ребёнком его Job. Родитель не завершается, пока не завершены дети. Ошибка ребёнка отменяет родителя и всех соседей, отмена родителя отменяет детей. Поэтому корутина не может «утечь»: если запрос упал или отменён, всё, что он запустил, остановится, а ошибка дойдёт до вызывающего.</p>
+          <p>Отмена кооперативная. Это флаг в Job, и корутина узнаёт о нём в точке приостановки — там прилетает CancellationException — или при проверке <code>ensureActive()</code>. Блокирующий вызов или CPU-цикл без проверок отмену не заметит. CancellationException нельзя глотать общим <code>catch (e: Exception)</code>, иначе корутина продолжит работать.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>coroutineScope</code> отменяет всех при первой ошибке, <code>supervisorScope</code> и <code>SupervisorJob</code> — нет: ошибка async-ребёнка приходит в <code>await</code>, ошибка launch — в CoroutineExceptionHandler.</li>
+            <li>Долгоживущий scope сервиса строят на SupervisorJob: с обычным Job первая ошибка отменит scope насовсем, и новые <code>launch</code> молча не стартуют.</li>
+            <li>Для очистки после отмены, где нужна приостановка, используют <code>withContext(NonCancellable)</code> в finally. Блокирующий вызов, реагирующий на interrupt, оборачивают в <code>runInterruptible</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код?</summary>
+          <pre><code class="language-kotlin">fun processBatch() = Thread.sleep(40)
+
+suspend fun reconcile(done: AtomicInteger) {
+    repeat(10) { processBatch(); done.incrementAndGet() }
+}
+
+fun main() = runBlocking {
+    val done = AtomicInteger()
+    val result = withContext(Dispatchers.Default) {
+        withTimeoutOrNull(100) { reconcile(done); "finished" }
+    }
+    println("result=$result batches=${done.get()}")
+}</code></pre>
+          <pre class="out">result=finished batches=10</pre>
+          <p>Таймаут выставил флаг отмены на 100 мс, но внутри нет ни одной точки приостановки, и код его не проверял. Все 10 пачек выполнились, и блок вернул результат. С <code>currentCoroutineContext().ensureActive()</code> перед каждой пачкой результат был бы <code>null</code> после трёх пачек.</p>
+        </details>
+        <details data-kind="ревью">
+          <summary>Что не так с этим фоновым обработчиком?</summary>
+          <pre><code class="language-kotlin">@Component
+class ReceiptSender(private val client: ReceiptClient) {
+    private val scope = CoroutineScope(Job() + Dispatchers.IO)
+
+    fun onPaid(paymentId: String) {
+        scope.launch {
+            while (true) {
+                try {
+                    client.send(paymentId)          // suspend
+                    break
+                } catch (e: Exception) {
+                    delay(1_000)                    // повторяем через секунду
+                }
+            }
+        }
+    }
+}</code></pre>
+          <ul>
+            <li><code>catch (e: Exception)</code> глотает CancellationException. Когда scope отменят — а при остановке бина его нужно отменять, — цикл не выйдет: <code>delay</code> сразу бросит отмену, catch её съест, и так по кругу, нагружая CPU.</li>
+            <li>Scope на <code>Job()</code>: если исключение вылетит из <code>launch</code>, scope отменится насовсем, и следующие чеки молча не уйдут. Нужен <code>SupervisorJob()</code>.</li>
+            <li>Scope никто не отменяет при остановке бина. Нужен <code>@PreDestroy fun stop() = scope.cancel()</code>, а повторы — с лимитом попыток. Чек, который нельзя потерять при рестарте, лучше отправлять через outbox, а не из памяти.</li>
+          </ul>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="blocking-in-coroutine" data-freq="2">
+      <h3>Что будет, если вызвать JDBC внутри корутины?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>JDBC блокирует поток, и пометка suspend этого не меняет. Если корутина выполняется на Dispatchers.Default, поток пула спит, а там их всего по числу CPU. При десятке одновременных запросов все потоки Default уснут, и встанет любая другая работа на нём, даже короткая. В опыте с 18 потоками health-check ждал 530 мс.</p>
+          <p>Поэтому блокирующий вызов оборачиваю в <code>withContext(Dispatchers.IO)</code>: там до 64 потоков, и они общие с Default. Для тяжёлого клиента задаю отдельный лимит через <code>limitedParallelism</code>, а если можно — беру неблокирующий драйвер (R2DBC) или запускаю корутины на виртуальных потоках.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>IO ограничен 64 потоками на всё приложение. Пул соединений к базе обычно меньше, так что реальный лимит параллельности задаёт он: лишние корутины ждут соединение, держа поток IO.</li>
+            <li><code>runBlocking</code> в обработчике запроса или внутри корутины даёт то же голодание пула, а в худшем случае взаимную блокировку.</li>
+            <li>В WebFlux блокирующий вызов на потоке event loop останавливает обработку всех соединений этого потока; BlockHound ловит такие вызовы в тестах.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="coroutines-vt-reactor" data-freq="2">
+      <h3>Корутины, virtual threads или Reactor — что выберешь для нового сервиса?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Все три не держат поток, пока запрос ждёт сеть. Virtual threads делают это в JVM: код остаётся блокирующим, JDBC и старые клиенты работают как есть. Корутины делают это в компиляторе: код последовательный, но приостанавливается только в suspend-точках, зато есть structured concurrency с отменой и таймаутами. Reactor — библиотека операторов над потоками данных с backpressure.</p>
+          <p>Для Spring MVC с JDBC и Java-командой выберу виртуальные потоки: это одна настройка. Для Kotlin-сервиса с параллельными вызовами внутри запроса — корутины. Для потоковой обработки и уже существующего WebFlux — Reactor, а Kotlin-код поверх него — на suspend-функциях и Flow.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Корутины и виртуальные потоки совместимы: <code>Executors.newVirtualThreadPerTaskExecutor().asCoroutineDispatcher()</code> делает блокирующие вызовы внутри корутин дешёвыми.</li>
+            <li>У виртуальных потоков на JDK 21 есть pinning при блокировке в <code>synchronized</code>, исправленный в JDK 24 (JEP 491); у корутин аналог — блокирующий вызов на Default.</li>
+            <li>Мосты: <code>CompletableFuture.await()</code> и <code>future { }</code> в kotlinx-coroutines-core, <code>awaitSingle</code>, <code>mono { }</code> и <code>asFlow</code> в kotlinx-coroutines-reactor. Отмена корутины отменяет future, но не прерывает поток внутри него.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://kotlinlang.org/docs/coroutines-guide.html">Kotlin docs: Coroutines guide</a> — основа урока: разделы Cancellation and timeouts, Coroutine context and dispatchers, Coroutine exceptions handling, Asynchronous Flow.</li>
+      <li><a href="https://github.com/Kotlin/KEEP/blob/master/proposals/coroutines.md">KEEP: Kotlin Coroutines</a> — дизайн-документ: continuation-passing style, state machine, <code>COROUTINE_SUSPENDED</code>, почему корутины stackless.</li>
+      <li><a href="https://kotlinlang.org/api/kotlinx.coroutines/kotlinx-coroutines-core/kotlinx.coroutines/-dispatchers/">kotlinx.coroutines API: Dispatchers</a> — размеры Default и IO, <code>limitedParallelism</code>.</li>
+      <li>Roman Elizarov, «Structured concurrency» (2018) и «Blocking threads, suspending coroutines» — почему у корутин есть родитель и чем suspend отличается от блокировки.</li>
+      <li><a href="https://openjdk.org/jeps/444">JEP 444: Virtual Threads</a> и <a href="https://openjdk.org/jeps/491">JEP 491</a> — с чем сравнивать корутины в Java 21+.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
