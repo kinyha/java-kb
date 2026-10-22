@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reactive Philosophy · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="reactive-streams">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Reactive Philosophy</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Платёжный сервис отдаёт клиенту выписку из миллиона платежей. Если читать базу быстрее, чем клиент принимает, строки копятся в памяти, сколько бы потоков ни было. Reactive Streams договаривается иначе: клиент сам говорит, сколько строк готов принять, вызовом <code>request(n)</code>, и источник читает из базы ровно столько. Пока никто не подписался и ничего не запросил, ничего не происходит вообще. Реактивные библиотеки — Reactor, RxJava, драйверы R2DBC — реализуют этот контракт, а в JDK он лежит как <code>java.util.concurrent.Flow</code>.</p>
+    </div>
+
+    <section class="step" id="pain">
+      <h2>Медленный банк съедает потоки, а асинхронная выгрузка — память</h2>
+      <p>Сервис платежей принимает 400 запросов в секунду. Каждый ходит в банк за 500 мс и в базу за 50 мс. По закону Литтла одновременно в работе 400 × 0,55 = 220 запросов, и в модели «поток на запрос» каждый держит поток, хотя почти всё время ждёт сеть. У Tomcat по умолчанию 200 потоков, так что очередь растёт, а если банк замедлится до двух секунд, потоков понадобится 800. Как это выглядит в Tomcat и что меняют виртуальные потоки, разобрано в темах <a href="servlet.html">Servlet & Tomcat</a> и <a href="virtual-threads.html">Virtual Threads</a>.</p>
+      <p>Первое, что приходит в голову, — не ждать в потоке: отдать вызов в пул и продолжить по готовности. Так работает <a href="completable-future.html">CompletableFuture</a>, и для одного ответа от банка этого хватает. Но сервис ещё и выгружает выписку: миллион строк из базы в HTTP-ответ клиенту на медленном мобильном интернете. Асинхронно это пишут так: курсор читает строки и каждую отправляет задачей в исполнитель, который пишет в сокет.</p>
+      <pre><code class="language-java">var client = new ThreadPoolExecutor(1, 1, 0, SECONDS,
+        new LinkedBlockingQueue&lt;&gt;());               // очередь без границы, как у newFixedThreadPool
+client.execute(() -&gt; await(clientBusy));          // клиент медленный: пока занят
+for (int row = 1; row &lt;= 100_000; row++) {        // курсор БД отдаёт строки
+    client.execute(() -&gt; sent.incrementAndGet()); // «отправить клиенту» — задача в очередь
+}
+System.out.println("rows read from DB: 100000, sent to client: " + sent.get()
+        + ", waiting in memory: " + client.getQueue().size());</code></pre>
+      <pre class="out">1. Push without demand: async callback into a slow client
+  rows read from DB: 100000, sent to client: 0, waiting in memory: 100000</pre>
+      <p>Ни один поток не ждал, а все сто тысяч строк уже в памяти. Чтение из базы ничего не знает о скорости клиента: у асинхронного вызова нет обратного канала «притормози». С миллионом строк по килобайту это гигабайт heap на одного медленного клиента, а десять таких клиентов кладут сервис с <code>OutOfMemoryError</code>. Ограничить очередь не помогает: <code>execute</code> на полной очереди бросит <code>RejectedExecutionException</code>, и строки придётся либо терять, либо снова блокировать поток курсора.</p>
+      <p>Нужны сразу три свойства: асинхронность (поток не ждёт сеть), неблокирующая передача (никто не спит на полной очереди) и обратная связь от потребителя к источнику. Третье называют backpressure. Именно для этого инженеры Netflix, Pivotal, Lightbend (тогда Typesafe) и других компаний написали спецификацию Reactive Streams, версия 1.0 вышла в 2015 году. Слово «реактивный» в Java означает прежде всего её: код реагирует на сигналы о готовых данных, а источник подстраивается под спрос.</p>
+      <div class="trap">
+        <p class="myth">Реактивный — значит асинхронный: CompletableFuture и колбэки уже реактивны.</p>
+        <p class="fact">Асинхронность убирает ожидание из потока, но не защищает от быстрого источника. Реактивные потоки добавляют к ней спрос: источник отдаёт не больше, чем подписчик запросил. Демо выше полностью асинхронное и всё равно складывает сто тысяч строк в память.</p>
+      </div>
+    </section>
+
+    <section class="step" id="contract">
+      <h2>Подписчик сам говорит, сколько готов принять, а источник отдаёт не больше</h2>
+      <p>Спецификация — это четыре интерфейса и около сорока правил к ним. Интерфейсы почти пустые, вся суть в том, кто кого и когда вызывает:</p>
+      <pre><code class="language-java">public final class Flow {                       // java.util.concurrent, с Java 9
+    interface Publisher&lt;T&gt; {
+        void subscribe(Subscriber&lt;? super T&gt; s); // «хочу получать данные»
+    }
+    interface Subscriber&lt;T&gt; {
+        void onSubscribe(Subscription s);         // первым сигналом: вот твой пульт
+        void onNext(T item);                      // очередной элемент
+        void onError(Throwable t);                // конец с ошибкой
+        void onComplete();                        // конец без ошибки
+    }
+    interface Subscription {                      // пульт, который держит подписчик
+        void request(long n);                     // «готов принять ещё n»
+        void cancel();                            // «больше не нужно»
+    }
+    interface Processor&lt;T, R&gt; extends Subscriber&lt;T&gt;, Publisher&lt;R&gt; { }
+}</code></pre>
+      <p>Порядок сигналов фиксирован: сначала <code>onSubscribe</code>, потом сколько угодно <code>onNext</code>, потом не больше одного финального сигнала, <code>onError</code> или <code>onComplete</code>. После финального сигнала нет ничего. Главное правило 1.1: число <code>onNext</code> не превышает суммы всех <code>request(n)</code>. Если подписчик ничего не запросил, издатель обязан молчать, даже если данные готовы.</p>
+      <p>Напишем издатель выписки на интерфейсах Flow. Он держит счётчик спроса и читает из курсора только тогда, когда спрос больше нуля. Подписчик-клиент просит две строки, после второй — ещё три, а после пятой отключается. <a href="../examples/reactive/PhilosophyDemo.java">PhilosophyDemo.java</a>, часть 2, фрагмент:</p>
+      <pre><code class="language-bash">cd examples/reactive
+./run.sh PhilosophyDemo 2</code></pre>
+      <pre><code class="language-java">public void request(long n) {
+    demand.getAndAccumulate(n, (a, b) -&gt; a + b &lt; 0 ? Long.MAX_VALUE : a + b); // спрос копится, правило 3.17
+    drain();
+}
+
+void drain() {
+    if (wip.getAndIncrement() != 0) return;          // цикл уже крутится выше по стеку — он и отдаст
+    do {
+        while (demand.get() &gt; 0 &amp;&amp; !cancelled &amp;&amp; cursor.hasNext()) {
+            demand.decrementAndGet();
+            subscriber.onNext(cursor.next());        // строку читаем, только когда её запросили
+        }
+        if (!cursor.hasNext() &amp;&amp; !cancelled &amp;&amp; !done) { done = true; subscriber.onComplete(); }
+    } while (wip.decrementAndGet() != 0);            // пока крутились, пришёл новый request — ещё круг
+}
+
+// подписчик
+public void onSubscribe(Flow.Subscription s) { subscription = s; s.request(2); }
+public void onNext(String row) {
+    received++;
+    if (received == 2) subscription.request(3);      // отправил две — прошу ещё три
+    if (received == 5) subscription.cancel();        // клиент отключился
+}</code></pre>
+      <pre class="out">2. Own Flow.Publisher: rows are read only on demand
+  onSubscribe, rows read: 0
+  onNext(payment-1), rows read: 1
+  onNext(payment-2), rows read: 2
+  onNext(payment-3), rows read: 3
+  onNext(payment-4), rows read: 4
+  onNext(payment-5), rows read: 5
+  client disconnected -&gt; cancel()
+  rows read from DB: 5 of 1000000</pre>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Три участника: курсор БД, издатель PaymentsPublisher со счётчиком спроса и медленный HTTP-клиент. Клиент получает onSubscribe, запрашивает две строки, издатель читает из курсора строки 1 и 2 и отдаёт их. Клиент запрашивает ещё три, издатель читает строки 3–5. Клиент отменяет подписку, строки с шестой и дальше так и не прочитаны.">
+            <defs>
+              <marker id="rs-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="rs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="rs-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- участники -->
+            <rect x="14" y="34" width="170" height="88" rx="8" class="dg-box"/>
+            <rect x="275" y="34" width="170" height="88" rx="8" class="dg-box"/>
+            <rect x="536" y="34" width="170" height="88" rx="8" class="dg-box"/>
+            <!-- строки в БД -->
+            <rect x="14" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="58" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="102" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="146" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="190" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="234" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="278" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <rect x="322" y="150" width="40" height="30" rx="5" class="dg-cell"/>
+            <g data-s="3-"><rect x="14" y="150" width="40" height="30" rx="5" class="dg-cell hit"/><rect x="58" y="150" width="40" height="30" rx="5" class="dg-cell hit"/></g>
+            <g data-s="4-"><rect x="102" y="150" width="40" height="30" rx="5" class="dg-cell hit"/><rect x="146" y="150" width="40" height="30" rx="5" class="dg-cell hit"/><rect x="190" y="150" width="40" height="30" rx="5" class="dg-cell hit"/></g>
+            <g data-s="5"><rect x="234" y="150" width="40" height="30" rx="5" class="dg-sep" fill="none"/><rect x="278" y="150" width="40" height="30" rx="5" class="dg-sep" fill="none"/><rect x="322" y="150" width="40" height="30" rx="5" class="dg-sep" fill="none"/></g>
+            <!-- сигналы между издателем и клиентом -->
+            <g data-s="1"><path d="M449 100 L 532 100" class="dg-line" marker-end="url(#rs-n)"/><text x="490" y="94" class="dg-n" text-anchor="middle">onSubscribe</text></g>
+            <g data-s="2"><path d="M536 56 L 449 56" class="dg-line" marker-end="url(#rs-n)"/><text x="490" y="50" class="dg-n" text-anchor="middle">request(2)</text></g>
+            <g data-s="3"><path d="M449 100 L 532 100" class="dg-line ok" marker-end="url(#rs-ok)"/><text x="490" y="94" class="dg-n" text-anchor="middle">onNext ×2</text>
+              <path d="M275 56 L 188 56" class="dg-line" marker-end="url(#rs-n)"/><text x="230" y="50" class="dg-n" text-anchor="middle">next() ×2</text>
+              <path d="M184 100 L 271 100" class="dg-line ok" marker-end="url(#rs-ok)"/><text x="230" y="94" class="dg-n" text-anchor="middle">строки 1–2</text></g>
+            <g data-s="4"><path d="M536 56 L 449 56" class="dg-line" marker-end="url(#rs-n)"/><text x="490" y="50" class="dg-n" text-anchor="middle">request(3)</text>
+              <path d="M449 100 L 532 100" class="dg-line ok" marker-end="url(#rs-ok)"/><text x="490" y="94" class="dg-n" text-anchor="middle">onNext ×3</text>
+              <path d="M275 56 L 188 56" class="dg-line" marker-end="url(#rs-n)"/><text x="230" y="50" class="dg-n" text-anchor="middle">next() ×3</text>
+              <path d="M184 100 L 271 100" class="dg-line ok" marker-end="url(#rs-ok)"/><text x="230" y="94" class="dg-n" text-anchor="middle">строки 3–5</text></g>
+            <g data-s="5"><path d="M536 56 L 449 56" class="dg-line bad" marker-end="url(#rs-bad)"/><text x="490" y="50" class="dg-n" text-anchor="middle">cancel()</text></g>
+            <!-- подписи участников -->
+            <g text-anchor="middle">
+              <text x="99" y="56" class="dg-t">курсор БД</text>
+              <text x="360" y="56" class="dg-t">PaymentsPublisher</text>
+              <text x="621" y="56" class="dg-t">HTTP-клиент</text>
+              <text x="99" y="110" class="dg-s">строк из БД</text>
+              <text x="360" y="110" class="dg-s">счётчик спроса</text>
+              <text x="621" y="110" class="dg-s">медленный</text>
+              <text x="34" y="170" class="dg-n">1</text><text x="78" y="170" class="dg-n">2</text><text x="122" y="170" class="dg-n">3</text><text x="166" y="170" class="dg-n">4</text>
+              <text x="210" y="170" class="dg-n">5</text><text x="254" y="170" class="dg-n">6</text><text x="298" y="170" class="dg-n">7</text><text x="342" y="170" class="dg-n">8</text>
+            </g>
+            <text x="372" y="170" class="dg-s">… и так до 1 000 000</text>
+            <!-- состояние по шагам -->
+            <g text-anchor="middle">
+              <g data-s="1-2"><text x="99" y="84" class="dg-in">прочитано: 0</text></g>
+              <g data-s="3"><text x="99" y="84" class="dg-in">прочитано: 2</text></g>
+              <g data-s="4-"><text x="99" y="84" class="dg-in">прочитано: 5</text></g>
+              <g data-s="1"><text x="360" y="84" class="dg-in">demand = 0</text></g>
+              <g data-s="2"><text x="360" y="84" class="dg-in">demand = 2</text></g>
+              <g data-s="3-4"><text x="360" y="84" class="dg-in">demand = 0</text></g>
+              <g data-s="5"><text x="360" y="84" class="dg-bad">отменено</text></g>
+              <g data-s="1-2"><text x="621" y="84" class="dg-in">получено: 0</text></g>
+              <g data-s="3"><text x="621" y="84" class="dg-in">получено: 2</text></g>
+              <g data-s="4-"><text x="621" y="84" class="dg-in">получено: 5</text></g>
+            </g>
+            <g data-s="1"><text x="14" y="212" class="dg-s">подписка есть, спроса нет: издатель не читает ни одной строки</text></g>
+            <g data-s="2"><text x="14" y="212" class="dg-s">спрос пришёл, но данные ещё в БД</text></g>
+            <g data-s="3"><text x="14" y="212" class="dg-ok">прочитано ровно столько, сколько запросили: 2</text></g>
+            <g data-s="4"><text x="14" y="212" class="dg-ok">request(3) из onNext: ещё три строки, спрос снова 0</text></g>
+            <g data-s="5"><text x="14" y="212" class="dg-bad">строки с 6-й не прочитаны: 5 из 1 000 000</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент подписался и получил Subscription. Спрос равен нулю, поэтому издатель не трогает курсор, хотя строки в базе есть.</li>
+          <li>Клиент вызвал request(2). Спрос стал 2, но это пока только обещание: ни одна строка не прочитана.</li>
+          <li>Цикл drain читает из курсора ровно две строки и отдаёт их через onNext. Спрос снова ноль, издатель останавливается.</li>
+          <li>Отправив вторую строку, клиент прямо из onNext просит ещё три. Издатель читает строки 3–5, и спрос опять обнуляется.</li>
+          <li>Клиент отключился и вызвал cancel(). Строки с шестой по миллионную не прочитаны: память не тратится на то, что никто не заберёт.</li>
+        </ol>
+      </figure>
+      <p>Сравни с первым шагом: там курсор прочитал сто тысяч строк, здесь — пять. Отмена так же важна, как спрос: оборванное соединение в WebFlux превращается в <code>cancel()</code>, и он доходит до драйвера базы, который закрывает курсор.</p>
+      <h3>Правила, на которых ломаются самописные издатели</h3>
+      <p>Сложный в этом коде только <code>drain</code>, и он нужен из-за правила 3.3: <code>request</code> обязан ограничивать рекурсию между издателем и подписчиком. Подписчик почти всегда вызывает <code>request(1)</code> прямо из <code>onNext</code>. Если издатель отдаёт элемент внутри <code>request</code>, получается цепочка request → onNext → request → onNext, и каждый элемент углубляет стек. Часть 3 демо сравнивает наивный издатель с циклом drain на ста тысячах элементов:</p>
+      <pre><code class="language-java">public void request(long n) {                       // наивный издатель
+    for (long i = 0; i &lt; n &amp;&amp; next &lt; size; i++) {
+        subscriber.onNext(++next);                   // а onNext вызовет request(1)
+    }
+    if (next == size) subscriber.onComplete();
+}</code></pre>
+      <pre class="out">3. request(1) from onNext: naive publisher vs drain loop
+  naive: StackOverflowError after 8356 items
+  drain loop: onComplete after 100000</pre>
+      <p>Наивный падает через несколько тысяч элементов. Точное число зависит от размера стека и от того, какие методы JIT уже успел скомпилировать: в пяти запусках части 3 от 8131 до 8362, при запуске всех частей подряд 6–7 тысяч, с <code>-Xss512k</code> около 1200. Цикл drain отдаёт все сто тысяч: вложенный <code>request</code> только увеличивает счётчик и выходит, а элемент отдаёт тот виток, который уже крутится выше по стеку. Счётчик <code>wip</code> (work in progress) заодно не даёт двум потокам одновременно вызывать <code>onNext</code>: правило 1.3 требует, чтобы сигналы шли подписчику последовательно.</p>
+      <table class="mx">
+        <thead><tr><th>Правило</th><th>Что требует</th><th>Что ломается без него</th></tr></thead>
+        <tbody>
+          <tr><td>1.1</td><td><code>onNext</code> не больше суммы <code>request(n)</code></td><td>нет backpressure, данные копятся у подписчика</td></tr>
+          <tr><td>1.3</td><td>сигналы подписчику строго по одному, не параллельно</td><td>гонки в подписчике, который обычно не потокобезопасен</td></tr>
+          <tr><td>1.7</td><td>после <code>onError</code> или <code>onComplete</code> — тишина</td><td>двойное завершение, лишние элементы после конца</td></tr>
+          <tr><td>2.13</td><td><code>null</code> вместо элемента запрещён</td><td>подписчик не отличит пустое значение от ошибки</td></tr>
+          <tr><td>3.3</td><td>ограничить рекурсию request ↔ onNext</td><td><code>StackOverflowError</code>, как в демо</td></tr>
+          <tr><td>3.9</td><td><code>request(n)</code> с n ≤ 0 — <code>onError(IllegalArgumentException)</code></td><td>ошибка в подсчёте спроса тихо подвешивает поток</td></tr>
+          <tr><td>3.17</td><td>спрос копится до <code>Long.MAX_VALUE</code>; столько и больше значит «без ограничений»</td><td>переполнение long, отрицательный спрос</td></tr>
+        </tbody>
+      </table>
+      <p>Поэтому свой Publisher в прикладном коде не пишут. Источник собирают из готовых: <code>Flux.generate</code> для синхронного состояния вроде курсора, <code>Flux.create</code> для колбэков, <code>Flux.using</code> или <code>Flux.usingWhen</code>, чтобы закрыть ресурс при отмене. Корректность проверяет Reactive Streams TCK: набор тестов, через который проходят Reactor, RxJava и драйверы. Reactor сам ловит нарушения правил у «чужих» подписчиков, часть 4 демо:</p>
+      <pre class="out">4. Rule violations: Reactor turns them into onError
+  request(0), plain Subscriber: java.lang.IllegalArgumentException: §3.9 violated: positive request amount required but it was 0
+  BaseSubscriber: no signal at all
+  got a
+  null: java.lang.NullPointerException: The mapper [PhilosophyDemo$$Lambda/…] returned a null value.</pre>
+      <p>Адрес лямбды в последней строке заменён на многоточие: он меняется от запуска к запуску. <code>null</code> из <code>map</code> Reactor превращает в <code>onError</code>, а не пропускает дальше: элемент <code>a</code> прошёл, на <code>b</code> поток завершился ошибкой.</p>
+      <details class="deep">
+        <summary>Под капотом: почему BaseSubscriber не получил ошибку</summary>
+        <p>Если подписать на Flux обычный <code>org.reactivestreams.Subscriber</code>, Reactor оборачивает его в <code>StrictSubscriber</code>. Обёртка проверяет правила спецификации строго, и <code>request(0)</code> превращается в <code>onError</code> со ссылкой на §3.9 — это видно в стектрейсе: <code>StrictSubscriber.request(StrictSubscriber.java:134)</code>.</p>
+        <p>Собственные подписчики Reactor, <code>CoreSubscriber</code>, к которым относится и <code>BaseSubscriber</code>, живут по ослабленным правилам ради скорости: операторы доверяют друг другу и не перепроверяют каждый сигнал. Некорректный запрос там проверяет <code>Operators.validate(n)</code>: она пишет его в лог на уровне DEBUG и игнорирует. Поэтому подписка из демо просто висит без единого сигнала. В проде это выглядит как запрос, который не отвечает и не падает.</p>
+      </details>
+      <h3>Flow в JDK и org.reactivestreams</h3>
+      <p>Спецификация появилась как отдельная библиотека <code>org.reactivestreams</code>, и Reactor, RxJava, R2DBC построены на её интерфейсах. В Java 9 те же четыре интерфейса добавили в JDK как вложенные в <code>java.util.concurrent.Flow</code> (JEP 266). Методы и правила совпадают один в один, отличается только пакет, поэтому типы не совместимы напрямую: нужен адаптер. В самой библиотеке спецификации это <code>FlowAdapters</code>, в Reactor — <code>JdkFlowAdapter.flowPublisherToFlux</code> и <code>publisherToFlowPublisher</code>.</p>
+      <p>В JDK нет ни одного оператора: ни map, ни flatMap. Flow — это стандарт для обмена, чтобы библиотеки могли соединяться без общей зависимости. Им пользуется <code>java.net.http.HttpClient</code>: тело запроса — <code>HttpRequest.BodyPublisher</code>, то есть <code>Flow.Publisher&lt;ByteBuffer&gt;</code>, а тело ответа читает <code>HttpResponse.BodySubscriber</code>. Единственная готовая реализация издателя в JDK — <code>SubmissionPublisher</code>, к нему вернёмся в последнем шаге.</p>
+    </section>
+
+    <section class="step" id="push-pull">
+      <h2>Спрос идёт вверх по цепочке, данные — вниз, и режим сам переключается между push и pull</h2>
+      <p>В чистом push источник отдаёт данные, как только они есть, и потребитель обязан успевать: так работает колбэк из первого шага. В чистом pull потребитель забирает по одному элементу, как <code>Iterator.next()</code>, и ждёт каждый — это блокировка. Reactive Streams смешивает оба: спрос идёт от подписчика к источнику (pull), а данные в пределах спроса источник отдаёт сам, когда они готовы (push). Если подписчик успевает, он запрашивает много, и поток идёт как push без пауз. Если не успевает, запрашивает мало, и источник ждёт его, как при pull. Этот режим называют dynamic push-pull.</p>
+      <p>В цепочке операторов каждый оператор одновременно подписчик для того, кто выше, и издатель для того, кто ниже. Спрос он не обязан передавать как есть: может пересчитать. Часть 5 демо печатает, какой <code>request</code> доходит до источника в трёх цепочках:</p>
+      <pre><code class="language-java">Flux.range(1, 3)
+        .doOnRequest(n -&gt; System.out.println("source got request(" + n + ")"))
+        .subscribe(i -&gt; { });                         // подписка лямбдой
+
+Flux.range(1, 20)
+        .doOnRequest(n -&gt; System.out.println("source got request(" + n + ")"))
+        .publishOn(Schedulers.single(), 8)            // очередь на 8 элементов между потоками
+        .subscribe(i -&gt; { }, e -&gt; { }, done::countDown);
+
+Flux.range(1, 25)
+        .doOnRequest(n -&gt; System.out.println("source got request(" + n + ")"))
+        .limitRate(10)                                // дробит спрос на пачки
+        .subscribe(i -&gt; { });</code></pre>
+      <pre class="out">5. Demand travels up the chain
+  subscribe(lambda):
+    source got request(9223372036854775807)
+  publishOn, prefetch 8, subscriber takes 20:
+    source got request(8)
+    source got request(6)
+    source got request(6)
+    source got request(6)
+  limitRate(10) under unbounded subscriber, 25 items:
+    source got request(10)
+    source got request(8)
+    source got request(8)
+    source got request(8)</pre>
+      <p>Подписка лямбдой запрашивает <code>Long.MAX_VALUE</code>, то есть «сколько угодно»: это чистый push, и так подписывается большинство кода. Backpressure при этом не исчезает, но работает только до ближайшего оператора с собственной очередью. <code>publishOn</code> переносит элементы в другой поток через очередь. Он запросил у источника размер очереди, 8, а потом дозапрашивал по 6, когда три четверти очереди освобождались. По умолчанию очередь 256 элементов, и тогда в логе будут <code>request(256)</code> и потом <code>request(192)</code>. Так же устроены <code>flatMap</code> (по 32 элемента от каждого внутреннего издателя) и <code>limitRate(n)</code>, который вставляют специально, чтобы источник не получил неограниченный спрос.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 220" role="img" aria-label="Цепочка из трёх участников: Flux.range, publishOn с очередью на 8 элементов и подписчик-лямбда. Подписчик запрашивает у publishOn неограниченно, request MAX. publishOn запрашивает у range только 8, а затем по 6. Данные идут слева направо: range отдаёт элементы в потоке main в очередь, а из очереди их забирает поток single-1 и передаёт подписчику.">
+            <defs>
+              <marker id="pp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="pp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- участники -->
+            <rect x="14" y="60" width="120" height="80" rx="8" class="dg-box"/>
+            <rect x="250" y="60" width="220" height="80" rx="8" class="dg-box"/>
+            <rect x="586" y="60" width="120" height="80" rx="8" class="dg-box"/>
+            <!-- очередь publishOn: 8 ячеек, 5 заняты -->
+            <rect x="266" y="96" width="22" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="291" y="96" width="22" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="316" y="96" width="22" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="341" y="96" width="22" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="366" y="96" width="22" height="26" rx="4" class="dg-cell hit"/>
+            <rect x="391" y="96" width="22" height="26" rx="4" class="dg-cell"/>
+            <rect x="416" y="96" width="22" height="26" rx="4" class="dg-cell"/>
+            <rect x="441" y="96" width="22" height="26" rx="4" class="dg-cell"/>
+            <!-- граница потоков -->
+            <line x1="14" y1="172" x2="354" y2="172" class="dg-sep"/>
+            <line x1="366" y1="172" x2="706" y2="172" class="dg-line ok"/>
+            <!-- спрос: справа налево, сверху -->
+            <path d="M586 76 L 474 76" class="dg-line" marker-end="url(#pp-n)"/>
+            <path d="M250 76 L 138 76" class="dg-line" marker-end="url(#pp-n)"/>
+            <!-- данные: слева направо, снизу -->
+            <path d="M134 124 L 262 110" class="dg-line ok" marker-end="url(#pp-ok)"/>
+            <path d="M466 110 L 582 124" class="dg-line ok" marker-end="url(#pp-ok)"/>
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="74" y="86" class="dg-in">range</text>
+              <text x="74" y="104" class="dg-s">источник</text>
+              <text x="360" y="84" class="dg-in">publishOn(single, 8)</text>
+              <text x="646" y="86" class="dg-in">i -&gt; { }</text>
+              <text x="646" y="104" class="dg-s">подписчик</text>
+              <text x="530" y="66" class="dg-n">request(MAX)</text>
+              <text x="194" y="52" class="dg-n">request(8),</text>
+              <text x="194" y="66" class="dg-n">потом по 6</text>
+              <text x="194" y="138" class="dg-n">onNext</text>
+              <text x="526" y="138" class="dg-n">onNext</text>
+              <text x="360" y="134" class="dg-n">очередь: 5 из 8</text>
+            </g>
+            <text x="14" y="190" class="dg-s">поток main: подписка и отдача из range</text>
+            <text x="366" y="190" class="dg-ok">поток single-1: из очереди к подписчику</text>
+            <text x="14" y="210" class="dg-n">спрос идёт сверху справа налево, данные снизу слева направо</text>
+          </svg>
+        </div>
+        <figcaption>request(MAX) — это Long.MAX_VALUE. Неограниченный спрос подписчика не доходит до range: publishOn отвечает за свою очередь и просит у источника столько, сколько в неё поместится.</figcaption>
+      </figure>
+      <h3>Источник, который не умеет ждать</h3>
+      <p>Pull работает, только если источник умеет подождать: курсор базы, файл, сокет с TCP-окном. Таймер, клики пользователя, котировки с биржи, события из чужой системы приходят, когда приходят. Такой источник при нулевом спросе может только выбросить элемент, сложить его в буфер или упасть. <code>Flux.interval</code> по умолчанию падает, часть 6 демо:</p>
+      <pre><code class="language-java">Flux.interval(Duration.ofMillis(1))                 // тикает по таймеру, ждать не умеет
+        .publishOn(Schedulers.single(), 16)          // очередь на 16 тиков
+        .subscribe(tick -&gt; sleep(5_000),             // потребитель завис на первом тике
+                   e -&gt; System.out.println("onError: " + e));</code></pre>
+      <pre class="out">6. A source that cannot wait: Flux.interval and a stuck consumer
+  onError: reactor.core.Exceptions$OverflowException: Could not emit tick 16 due to lack of requests (interval doesn't support small downstream requests that replenish slower than the ticks)</pre>
+      <p>Тики 0–15 легли в очередь <code>publishOn</code>, спрос кончился, и тик 16 стал ошибкой. Номер тика равен размеру очереди, а не времени: это прямое следствие правила 1.1. Для таких источников выбирают стратегию явно: <code>onBackpressureBuffer(n)</code> копит до лимита, <code>onBackpressureDrop</code> выбрасывает лишнее, <code>onBackpressureLatest</code> держит только последнее значение. Для котировок разумно Latest, для платёжных событий ни Drop, ни Latest не подходят: их не теряют, а читают из брокера, который сам хранит хвост и отдаёт по запросу.</p>
+      <div class="trap">
+        <p class="myth">Reactive Streams — это push: источник шлёт данные подписчику.</p>
+        <p class="fact">Данные действительно идут push-ом, но только в пределах спроса, который подписчик выдал через request(n). Спрос — это pull. Подписчик с request(Long.MAX_VALUE) превращает поток в чистый push, с request(1) — в чистый pull.</p>
+      </div>
+    </section>
+
+    <section class="step" id="lazy">
+      <h2>До subscribe ничего не происходит: cold издатель повторяет работу для каждого, hot раздаёт общую</h2>
+      <p>У реактивного кода два момента времени. Сборка (assembly) — когда вызываются <code>Flux.range</code>, <code>map</code>, <code>flatMap</code>: они только создают объекты-описания и связывают их в цепочку. Подписка (subscription) — когда кто-то вызвал <code>subscribe</code>: тогда подписка поднимается к источнику, спрос идёт вверх, и только после этого источник начинает работу. В WebFlux подписывается фреймворк на Mono, который вернул контроллер, — основы разобраны в теме <a href="spring-reactive.html">WebFlux</a>.</p>
+      <p>Ловушка в том, что Java вычисляет аргументы метода до его вызова, и реактивная библиотека на это повлиять не может. Часть 7 демо:</p>
+      <pre><code class="language-java">Mono&lt;String&gt; eager = Mono.just(charge("just"));           // charge() выполняется прямо здесь
+Mono&lt;String&gt; lazy = Mono.fromCallable(() -&gt; charge("fromCallable")); // здесь только лямбда
+// никто не подписан; теперь по две подписки на каждый
+eager.subscribe(); eager.subscribe();
+lazy.subscribe(); lazy.subscribe();</code></pre>
+      <pre class="out">7. Assembly vs subscription
+  assemble Mono.just(charge()):
+    bank.charge() called by just
+  assemble Mono.fromCallable(charge):
+  nobody subscribed. Now subscribe twice to each:
+    bank.charge() called by fromCallable
+    bank.charge() called by fromCallable</pre>
+      <p>Деньги через <code>Mono.just</code> списались один раз — при сборке, до подписки, даже если подписки не будет никогда. Две подписки получили одно и то же готовое значение. <code>fromCallable</code> не списал ничего при сборке и списал дважды при двух подписках. Правило простое: <code>just</code> — для уже готовых значений, работу заворачивают в <code>fromCallable</code>, <code>defer</code> или вызов, который сам возвращает Mono, как WebClient или R2DBC.</p>
+      <p>Второе следствие ленивости — каждая подписка запускает источник заново. Такой издатель называют cold: у каждого подписчика свой прогон. Запрос в базу, HTTP-вызов, чтение файла — cold. Hot-издатель работает независимо от подписчиков: события идут, даже если никто не слушает, а новый подписчик получает только то, что случилось после подписки. Часть 8 демо: выписка из базы и поток статусов платежей.</p>
+      <pre><code class="language-java">Flux&lt;String&gt; cold = Flux.defer(() -&gt; {
+    queries.incrementAndGet();                       // каждый подписчик — свой запрос в БД
+    return Flux.just("p1", "p2", "p3");
+});
+cold.subscribe(p -&gt; System.out.println("cold A got " + p));
+cold.subscribe(p -&gt; System.out.println("cold B got " + p));
+
+Sinks.Many&lt;String&gt; statuses = Sinks.many().multicast().directBestEffort();
+Flux&lt;String&gt; hot = statuses.asFlux();               // события идут независимо от подписчиков
+statuses.tryEmitNext("p1 NEW");                      // никого нет — событие пропало
+hot.subscribe(s -&gt; System.out.println("hot A got " + s));
+statuses.tryEmitNext("p1 PAID");
+hot.subscribe(s -&gt; System.out.println("hot B got " + s));
+statuses.tryEmitNext("p2 NEW");</code></pre>
+      <pre class="out">8. Cold vs hot
+  cold A got p1
+  cold A got p2
+  cold A got p3
+  cold B got p1
+  cold B got p2
+  cold B got p3
+  cold: DB queries = 2
+  hot A got p1 PAID
+  hot A got p2 NEW
+  hot B got p2 NEW</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Слева cold: у подписчиков A и B по своему запросу в БД, каждый получает p1, p2, p3 с начала. Справа hot: на шкале времени три события p1 NEW, p1 PAID, p2 NEW. A подписался после первого события и получил два последних, B подписался после второго и получил только p2 NEW. Первое событие не получил никто.">
+            <defs>
+              <marker id="ch-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ch-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <text x="14" y="20" class="dg-cap">COLD: СВОЙ ПРОГОН</text>
+            <text x="370" y="20" class="dg-cap">HOT: ОБЩИЙ ПОТОК</text>
+            <line x1="352" y1="8" x2="352" y2="222" class="dg-sep"/>
+            <!-- cold: два прогона -->
+            <rect x="14" y="40" width="96" height="34" rx="7" class="dg-box"/>
+            <rect x="14" y="120" width="96" height="34" rx="7" class="dg-box"/>
+            <rect x="150" y="40" width="54" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="210" y="40" width="54" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="270" y="40" width="54" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="150" y="120" width="54" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="210" y="120" width="54" height="34" rx="5" class="dg-cell hit"/>
+            <rect x="270" y="120" width="54" height="34" rx="5" class="dg-cell hit"/>
+            <path d="M110 57 L 146 57" class="dg-line ok" marker-end="url(#ch-ok)"/>
+            <path d="M110 137 L 146 137" class="dg-line ok" marker-end="url(#ch-ok)"/>
+            <!-- hot: шкала времени и подписчики -->
+            <path d="M370 196 L 702 196" class="dg-line" marker-end="url(#ch-n)"/>
+            <rect x="380" y="40" width="88" height="34" rx="5" class="dg-cell miss"/>
+            <rect x="490" y="40" width="88" height="34" rx="5" class="dg-cell"/>
+            <rect x="600" y="40" width="88" height="34" rx="5" class="dg-cell"/>
+            <line x1="478" y1="92" x2="478" y2="190" class="dg-sep"/>
+            <line x1="588" y1="140" x2="588" y2="190" class="dg-sep"/>
+            <rect x="490" y="92" width="88" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="600" y="92" width="88" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="600" y="140" width="88" height="30" rx="5" class="dg-cell hit"/>
+            <!-- подписи -->
+            <g text-anchor="middle">
+              <text x="62" y="62" class="dg-t">A</text>
+              <text x="62" y="142" class="dg-t">B</text>
+              <text x="177" y="62" class="dg-in">p1</text><text x="237" y="62" class="dg-in">p2</text><text x="297" y="62" class="dg-in">p3</text>
+              <text x="177" y="142" class="dg-in">p1</text><text x="237" y="142" class="dg-in">p2</text><text x="297" y="142" class="dg-in">p3</text>
+              <text x="237" y="92" class="dg-n">SELECT №1</text>
+              <text x="237" y="172" class="dg-n">SELECT №2</text>
+              <text x="424" y="62" class="dg-in">p1 NEW</text><text x="534" y="62" class="dg-in">p1 PAID</text><text x="644" y="62" class="dg-in">p2 NEW</text>
+              <text x="424" y="92" class="dg-bad">никому</text>
+              <text x="534" y="112" class="dg-in">A</text><text x="644" y="112" class="dg-in">A</text>
+              <text x="644" y="160" class="dg-in">B</text>
+            </g>
+            <text x="14" y="210" class="dg-s">каждый подписчик получает всё с начала</text>
+            <text x="380" y="111" class="dg-s">подписчик A</text>
+            <text x="380" y="159" class="dg-s">подписчик B</text>
+            <text x="370" y="214" class="dg-n">время; пунктир — момент подписки</text>
+          </svg>
+        </div>
+        <figcaption>Cold-издатель — рецепт: две подписки выполняют его дважды. Hot — радио: подписчик слышит эфир с момента включения, а пропущенное не повторяют.</figcaption>
+      </figure>
+      <p>Обе стороны дают свои баги. Cold, подписанный дважды, дважды списывает деньги или дважды ходит в банк. Hot теряет события, которые пришли до подписки. Превратить cold в hot или раздать один прогон нескольким подписчикам можно операторами <code>share</code>, <code>cache</code>, <code>replay</code>, а hot-источник с ручной отправкой — это <code>Sinks</code>; их варианты и отличия разобраны в теме <a href="reactor-operators.html">Reactor Operators</a>.</p>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>С виртуальными потоками backpressure даёт обычная блокировка, и реактивность нужна реже</h2>
+      <p>Reactive Streams понадобился спрос <code>request(n)</code>, потому что в неблокирующем мире у источника нет другого способа узнать, что потребитель не успевает. В блокирующем мире этот способ встроен: <code>write</code> в сокет блокируется, когда TCP-буфер полон, <code>put</code> в ограниченную очередь — когда она заполнена. Поток производителя просто останавливается, и сигнал «притормози» доходит до источника сам. Это видно даже на издателе Flow из JDK: <code>SubmissionPublisher.submit</code> блокирует вызывающий поток, пока у подписчика нет места. Часть 9 демо, буфер на 4 элемента, клиент обрабатывает каждый 100 мс:</p>
+      <pre><code class="language-java">try (var publisher = new SubmissionPublisher&lt;Integer&gt;(delivery, 4)) { // буфер на 4 элемента
+    publisher.subscribe(slowClient);                 // request(1), 100 мс на элемент, снова request(1)
+    for (int i = 1; i &lt;= 8; i++) {
+        publisher.submit(i);                         // блокирует, если буфер полон
+        log.add("submitted " + i + (waited ? " after waiting" : ""));
+    }
+}</code></pre>
+      <pre class="out">9. SubmissionPublisher: submit() blocks when the subscriber is behind
+  submitted 1
+  submitted 2
+  submitted 3
+  submitted 4
+  submitted 5
+  consumed 1
+  submitted 6 after waiting
+  consumed 2
+  submitted 7 after waiting
+  consumed 3
+  submitted 8 after waiting
+  consumed 4
+  consumed 5
+  consumed 6
+  consumed 7
+  consumed 8</pre>
+      <p>Пять элементов прошли сразу: один забрал подписчик, четыре легли в буфер. Дальше каждый <code>submit</code> ждал, пока клиент обработает очередной, и производитель шёл ровно в темпе потребителя. На платформенном потоке такое ожидание дорого, поэтому реактивный подход и избегает его. На виртуальном оно стоит пару килобайт стека в heap. Выписку из первого шага с виртуальными потоками пишут обычным циклом <code>while (rs.next()) out.write(row)</code>: медленный клиент блокирует <code>write</code>, цикл встаёт, а JDBC-драйвер дочитывает строки пачками по <code>fetchSize</code>, только когда цикл их забирает. В PostgreSQL для этого нужен выключенный autocommit, иначе драйвер читает весь результат сразу.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Reactive Streams</th><th>Виртуальные потоки и блокирующий код</th></tr></thead>
+        <tbody>
+          <tr><td>Ожидание сети</td><td>без потока, продолжение по сигналу</td><td>поток спит, носитель свободен</td></tr>
+          <tr><td>Backpressure</td><td>явный спрос <code>request(n)</code></td><td>блокировка на полном буфере или сокете</td></tr>
+          <tr><td>Отмена</td><td><code>cancel()</code> идёт по цепочке до источника</td><td>прерывание потока, structured concurrency</td></tr>
+          <tr><td>Склейка потоков данных</td><td>готовые операторы: merge, zip, окна, retry с backoff</td><td>пишешь сам циклами и очередями</td></tr>
+          <tr><td>Отладка</td><td>стектрейс из операторов, Reactor Context вместо ThreadLocal</td><td>обычный стектрейс, ThreadLocal работает</td></tr>
+          <tr><td>Драйверы</td><td>нужны реактивные: R2DBC, WebClient, Lettuce</td><td>обычные JDBC и HTTP-клиенты</td></tr>
+        </tbody>
+      </table>
+      <p>Реактивность окупается, когда данные и правда идут потоком: стриминг ответов и SSE, тысячи долгих соединений в шлюзе, склейка событий из нескольких источников с окнами и таймаутами, источники, которые не умеют ждать. И когда вся цепочка уже неблокирующая, от драйвера базы до HTTP-клиента. Для сервиса «принял запрос, сходил в базу и в банк, ответил» на Java 21 хватит Spring MVC на виртуальных потоках: та же масштабируемость по ожиданию, а код последовательный. Практические последствия выбора для веб-слоя разобраны в теме <a href="spring-reactive.html">WebFlux</a>, а типичные ошибки реактивного кода — в теме <a href="reactive-pitfalls.html">Reactive Pitfalls</a>.</p>
+      <div class="trap">
+        <p class="myth">С виртуальными потоками Reactor больше не нужен.</p>
+        <p class="fact">Виртуальные потоки закрывают главный мотив — дорогое ожидание I/O. Backpressure для стриминга, отмена по цепочке и операторы для потоков событий остаются сильной стороной реактивного подхода. Выбор теперь зависит от формы данных: запрос-ответ — блокирующий код на виртуальных потоках, поток событий — реактивный.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Асинхронность убирает ожидание из потока, но без обратной связи быстрый источник складывает данные в память. Reactive Streams добавляет спрос: request(n).</li>
+        <li>Контракт: subscribe → onSubscribe → onNext не больше запрошенного → один onError или onComplete. Отмена cancel() доходит до источника.</li>
+        <li>Спрос идёт вверх (pull), данные вниз (push). Операторы с очередью пересчитывают спрос: publishOn просит у источника размер очереди и дозапрашивает по три четверти.</li>
+        <li>Свой Publisher не пишут: правила про рекурсию, последовательные сигналы и переполнение спроса легко нарушить. Источник собирают из Flux.generate, create, using.</li>
+        <li>До subscribe ничего не выполняется, но аргументы Mono.just вычисляются сразу. Cold повторяет работу на каждую подписку, hot теряет события до подписки.</li>
+        <li>Flow в JDK — те же четыре интерфейса без операторов. На виртуальных потоках backpressure даёт обычная блокировка, и реактивность нужна там, где данные идут потоком.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="rs-what" data-freq="2">
+      <h3>Что такое Reactive Streams и зачем они, если есть CompletableFuture?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Reactive Streams — спецификация асинхронной обработки потока данных с неблокирующим backpressure. В ней четыре интерфейса: Publisher, Subscriber, Subscription и Processor. Подписчик подписывается, получает Subscription и через request(n) говорит, сколько элементов готов принять; издатель отдаёт не больше, потом onComplete или onError. Reactor, RxJava и R2DBC реализуют этот контракт, а в JDK он есть как java.util.concurrent.Flow.</p>
+          <p>CompletableFuture асинхронный, но про одно значение, и обратной связи у него нет. Если я выгружаю миллион платежей медленному клиенту колбэками, база прочитается целиком в память. С Reactive Streams клиент запрашивает строки по мере отправки, и курсор читает ровно столько.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ключевые правила: onNext не больше суммы request (1.1), сигналы строго последовательно (1.3), тишина после финального сигнала (1.7), null запрещён (2.13), рекурсия request ↔ onNext ограничена (3.3), request(n ≤ 0) — onError (3.9).</li>
+            <li>Свой Publisher в прикладном коде не пишу: его надо прогонять через TCK. Источник собираю из Flux.generate, Flux.create, Flux.usingWhen.</li>
+            <li>Flow и org.reactivestreams совпадают по методам, но это разные типы; соединяются через FlowAdapters или JdkFlowAdapter. В JDK Flow используют HttpClient (BodyPublisher, BodySubscriber) и SubmissionPublisher.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этим издателем?</summary>
+          <pre><code class="language-java">public void subscribe(Flow.Subscriber&lt;? super Integer&gt; s) {
+    s.onSubscribe(new Flow.Subscription() {
+        int next;
+        public void request(long n) {
+            for (long i = 0; i &lt; n &amp;&amp; next &lt; size; i++) s.onNext(++next);
+            if (next == size) s.onComplete();
+        }
+        public void cancel() { }
+    });
+}</code></pre>
+          <p>Четыре нарушения. Подписчик, который вызывает request(1) из onNext, уходит в рекурсию и на нескольких тысячах элементов получает StackOverflowError (правило 3.3). Каждый request после конца снова вызывает onComplete (1.7). cancel ничего не делает, и издатель продолжает отдавать элементы. Если request придёт из двух потоков, onNext пойдёт параллельно (1.3), а <code>next</code> не защищён. Исправление — счётчик спроса и цикл drain с wip, флаги cancelled и done, а лучше Flux.generate вместо своего класса.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rs-push-pull" data-freq="2">
+      <h3>Reactive Streams — это push или pull?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>И то и другое. Спрос идёт от подписчика к источнику через request(n) — это pull. Данные в пределах спроса источник отдаёт сам, как только они готовы, — это push. Если подписчик успевает и запросил много, получается чистый push без пауз; если не успевает и просит по одному, источник его ждёт. Это называют dynamic push-pull.</p>
+          <p>На практике большинство подписывается лямбдой, а это request(Long.MAX_VALUE). Backpressure при этом работает до ближайшего оператора с очередью: например, publishOn просит у источника 256 элементов и потом дозапрашивает по 192.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Источник, который не умеет ждать (таймер, события, котировки), при нулевом спросе должен выбросить, сохранить или упасть: Flux.interval падает с OverflowException. Стратегию выбирают явно: onBackpressureBuffer, Drop, Latest.</li>
+            <li>limitRate(n) ставят перед источником, которому вреден неограниченный спрос: он дробит запрос на пачки и дозапрашивает по 75%.</li>
+            <li>В WebFlux спрос доходит до сети: Netty не читает сокет, пока цепочка не запросила данные, и отправителя тормозит TCP.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что напечатает источник?</summary>
+          <pre><code class="language-java">Flux.range(1, 20)
+        .doOnRequest(n -&gt; System.out.println("request(" + n + ")"))
+        .publishOn(Schedulers.single(), 8)
+        .subscribe(i -&gt; { });</code></pre>
+          <pre class="out">request(8)
+request(6)
+request(6)
+request(6)</pre>
+          <p>Лямбда запрашивает неограниченно, но publishOn отвечает за свою очередь на 8 элементов. Он запрашивает у источника 8, а каждый раз, когда подписчик забрал 6 (три четверти очереди), дозапрашивает ещё 6. После 8 + 6 + 6 = 20 элементов источник уже завершился, и четвёртый request(6) пришёл в пустоту: doOnRequest его напечатал, но отдавать нечего.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rs-cold-hot" data-freq="2">
+      <h3>Что значит «ничего не происходит до subscribe»? Чем cold отличается от hot?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Операторы вроде map и flatMap только собирают описание конвейера. Работа начинается, когда кто-то подписался: подписка поднимается к источнику, спрос идёт вверх, и только тогда источник делает запрос в базу или в банк. Поэтому Mono, который никто не вернул и не подписал, просто не выполнится.</p>
+          <p>Cold-издатель повторяет работу для каждого подписчика: две подписки на вызов банка — два вызова. Hot работает независимо от подписчиков, как поток статусов платежей: новый подписчик получает только события после подписки. Cold раздают нескольким подписчикам через cache или share, а hot-источник с ручной отправкой делают через Sinks.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ленивость не спасает от Java: аргументы метода вычисляются до вызова. Mono.just(charge()) списывает деньги при сборке, даже без подписки. Работу заворачивают в fromCallable или defer.</li>
+            <li>Hot-источник обычно не умеет ждать, поэтому вопрос backpressure для него — это вопрос стратегии переполнения.</li>
+            <li>Повторная подписка — механизм retry: retryWhen переподписывается на cold-источник и выполняет вызов заново. На hot-источнике повтор не вернёт пропущенное.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Платёж нашёлся в кеше. Будет ли списание?</summary>
+          <pre><code class="language-java">Mono.just("cached")
+        .switchIfEmpty(Mono.just(charge("fallback")))
+        .subscribe(v -&gt; System.out.println("result: " + v));</code></pre>
+          <pre class="out">    bank.charge() called by fallback
+    result: cached</pre>
+          <p>Будет. Результат взят из кеша, и запасной Mono даже не подписан, но <code>charge</code> вызван при сборке: это аргумент <code>Mono.just</code>. Правильно <code>switchIfEmpty(Mono.fromCallable(() -&gt; charge("fallback")))</code> или <code>Mono.defer</code>. Ошибку часто ловят только по двойным списаниям в логах банка.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="rs-vs-virtual" data-freq="2">
+      <h3>Нужна ли реактивность, если есть виртуальные потоки?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Главную причину реактивности — дорогое ожидание I/O в платформенном потоке — виртуальные потоки закрывают: ожидающий поток почти ничего не стоит, и код остаётся последовательным, с обычными стектрейсами и ThreadLocal. Для запрос-ответ сервиса, который ходит в базу и пару API, я возьму MVC на виртуальных потоках.</p>
+          <p>Реактивность оставляю там, где данные идут потоком: стриминг, SSE и WebSocket, шлюзы с тысячами соединений, склейка событий из нескольких источников с окнами, таймаутами и retry. Плюс если вся цепочка уже неблокирующая.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>В блокирующем коде backpressure встроен: write в сокет и put в ограниченную очередь блокируются. Поэтому на виртуальных потоках выгрузку пишут циклом, а JDBC дочитывает строки по fetchSize.</li>
+            <li>Что остаётся за реактивным подходом: отмена, которая проходит по цепочке до драйвера; готовые операторы для потоков; единая модель для источников, которые не умеют ждать.</li>
+            <li>Смешивать дорого: блокирующий вызов в реактивной цепочке требует boundedElastic, а реактивный в блокирующем коде — block(). Выбирают модель на сервис, а не на метод.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://github.com/reactive-streams/reactive-streams-jvm/blob/v1.0.4/README.md">Reactive Streams Specification 1.0.4</a> — основа урока: интерфейсы и все правила с пояснениями, особенно 1.1, 1.3, 2.13, 3.3, 3.9, 3.17.</li>
+      <li><a href="https://projectreactor.io/docs/core/release/reference/">Reactor Reference Guide</a> — разделы Introduction to Reactive Programming (push и pull, assembly и subscription, cold и hot) и Programmatically creating a sequence (generate, create).</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/Flow.html">javadoc java.util.concurrent.Flow</a> и <a href="https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/SubmissionPublisher.html">SubmissionPublisher</a> — Flow в JDK, defaultBufferSize, блокирующий submit и offer с обработчиком потерь.</li>
+      <li><a href="https://openjdk.org/jeps/266">JEP 266: More Concurrency Updates</a> — почему Flow попал в JDK 9 и почему без операторов.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
