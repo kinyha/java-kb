@@ -1,0 +1,817 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Java Upgrade · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="java-upgrade">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Java Upgrade</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Сервис связан с платформой не одним контрактом, а пятью: стандартный API, формат байткода, внутренности JDK, флаги JVM и умолчания поведения. Каждый релиз Java меняет какой-то из этих слоёв, и каждое изменение проявляется на своём этапе: при сборке, при старте JVM, при первом вызове или только под реальной нагрузкой. Миграция — это поиск всех поломок до продакшена и раскатка, где каждый шаг меняет одно и откатывается заменой образа. Что появилось в языке и API, разобрано в <a href="java-versions.html">What's New</a>; здесь — что ломается и почему.</p>
+    </div>
+
+    <section class="step" id="layers">
+      <h2>Сервис собрался на новой JDK и всё равно упал</h2>
+      <p>Сервис платежей живёт на Java 8 и Spring Boot 2.7. Задача — перейти на Java 21, а следом на 25. Команда поднимает JDK в CI до 21, сборка и тесты зелёные, образ уходит на стенд. Дальше по очереди:</p>
+      <ul>
+        <li>Под не стартует: скрипт запуска передаёт <code>-XX:+PrintGCDateStamps</code>, и JVM 21 отвечает <code>Unrecognized VM option</code>.</li>
+        <li>Флаг убрали. Под проходит readiness, а первый платёж падает с <code>NoClassDefFoundError: javax/xml/bind/DatatypeConverter</code> внутри библиотеки банковского шлюза.</li>
+        <li>Аудит пишет платёж старым сериализатором и получает <code>InaccessibleObjectException</code> на поле <code>BigDecimal</code>.</li>
+        <li>Через неделю после перехода на Spring Boot 3 кэш курсов перестал прогреваться, а партнёр не может разобрать время на чеке. Ошибок в логе нет.</li>
+      </ul>
+      <p>Тесты пропустили всё это по разным причинам. Флаги живут в скрипте запуска, а не в сборке. До класса из удалённого модуля тесты не дошли: JVM ищет класс при первом обращении, а не при старте. Рефлексия в классы JDK ломается в рантайме, компилятор её не видит. А изменённые умолчания вообще не бросают исключений: код работает, но иначе.</p>
+      <p>Поэтому миграцию раскладывают по этапам, на которых поломка становится видна, и для каждого этапа заводят проверку, которая поймает её раньше прода.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 292" role="img" aria-label="Четыре колонки этапов слева направо: сборка, старт JVM, первый вызов, поведение. В верхней части каждой колонки красным — что ломается на этом этапе, в нижней зелёным — проверка, которая ловит это раньше, стрелка от проверки к поломкам. Внизу ось: чем правее этап, тем позже видна ошибка и дороже её исправление.">
+            <defs>
+              <marker id="ul-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="ul-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- колонки этапов -->
+            <rect x="14" y="32" width="164" height="206" rx="9" class="dg-sep" fill="none"/>
+            <rect x="190" y="32" width="164" height="206" rx="9" class="dg-sep" fill="none"/>
+            <rect x="366" y="32" width="164" height="206" rx="9" class="dg-sep" fill="none"/>
+            <rect x="542" y="32" width="164" height="206" rx="9" class="dg-sep" fill="none"/>
+            <!-- что ломается -->
+            <rect x="22" y="44" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="22" y="78" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="22" y="112" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="198" y="44" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="198" y="78" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="198" y="112" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="374" y="44" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="374" y="78" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="550" y="44" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="550" y="78" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <rect x="550" y="112" width="148" height="28" rx="6" class="dg-cell miss"/>
+            <!-- чем поймать раньше -->
+            <line x1="14" y1="152" x2="706" y2="152" class="dg-sep"/>
+            <rect x="22" y="170" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="22" y="204" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="198" y="170" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="198" y="204" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="374" y="170" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="374" y="204" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="550" y="170" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <rect x="550" y="204" width="148" height="28" rx="6" class="dg-cell hit"/>
+            <!-- проверка ловит поломку своего этапа -->
+            <path d="M96 168 L 96 144" class="dg-line ok" marker-end="url(#ul-ok)"/>
+            <path d="M272 168 L 272 144" class="dg-line ok" marker-end="url(#ul-ok)"/>
+            <path d="M448 168 L 448 110" class="dg-line ok" marker-end="url(#ul-ok)"/>
+            <path d="M624 168 L 624 144" class="dg-line ok" marker-end="url(#ul-ok)"/>
+            <!-- ось стоимости -->
+            <path d="M20 256 L 700 256" class="dg-line bad" marker-end="url(#ul-bad)"/>
+            <!-- текст -->
+            <text x="14" y="22" class="dg-cap">СБОРКА</text>
+            <text x="190" y="22" class="dg-cap">СТАРТ JVM</text>
+            <text x="366" y="22" class="dg-cap">ПЕРВЫЙ ВЫЗОВ</text>
+            <text x="542" y="22" class="dg-cap">ПОВЕДЕНИЕ</text>
+            <text x="30" y="63" class="dg-in">javax.xml.bind</text>
+            <text x="30" y="97" class="dg-in">major version 69</text>
+            <text x="30" y="131" class="dg-s">старый ASM, Lombok</text>
+            <text x="206" y="63" class="dg-in">PrintGCDateStamps</text>
+            <text x="206" y="97" class="dg-in">MaxRAMFraction</text>
+            <text x="206" y="131" class="dg-in">security.manager</text>
+            <text x="382" y="63" class="dg-in">NoClassDefFound</text>
+            <text x="382" y="97" class="dg-in">InaccessibleObject</text>
+            <text x="558" y="63" class="dg-in">@PostConstruct</text>
+            <text x="558" y="97" class="dg-s">U+202F перед PM</text>
+            <text x="558" y="131" class="dg-s">1 CPU: Serial → G1</text>
+            <text x="30" y="189" class="dg-s">CI на новой JDK</text>
+            <text x="30" y="223" class="dg-s">--release, -Werror</text>
+            <text x="206" y="189" class="dg-s">скрипт прода в CI</text>
+            <text x="206" y="223" class="dg-s">дифф флагов JVM</text>
+            <text x="382" y="189" class="dg-s">jdeps, jdeprscan</text>
+            <text x="382" y="223" class="dg-s">тесты с deny</text>
+            <text x="558" y="189" class="dg-s">канарейка</text>
+            <text x="558" y="223" class="dg-s">сравнение метрик</text>
+            <text x="20" y="278" class="dg-s">чем правее, тем позже видна ошибка и дороже исправление; в последней колонке исключений нет</text>
+          </svg>
+        </div>
+        <figcaption>В колонке «Поведение» проверка — только сравнение со старой версией под живой нагрузкой: там нечему упасть.</figcaption>
+      </figure>
+      <p>Сам путь 8 → 11 → 17 → 21 → 25 удобно держать в голове как список слоёв, которые менялись на каждом прыжке. Колонки ниже — не фичи, а то, что ломает существующий код.</p>
+      <table class="mx">
+        <thead><tr><th>Прыжок</th><th>Сборка и API</th><th>Старт JVM</th><th>Рантайм и поведение</th></tr></thead>
+        <tbody>
+          <tr><td>8 → 11</td><td>Удалены Java EE и CORBA: JAXB, JAX-WS, <code>javax.annotation</code> (JEP 320, JDK 11)</td><td>GC-логи через <code>-Xlog</code> (JEP 271, JDK 9), PermGen-флаги не нужны</td><td>Модули и предупреждения <code>Illegal reflective access</code> (JDK 9), локали CLDR по умолчанию (JEP 252)</td></tr>
+          <tr><td>11 → 17</td><td>Удалены Nashorn (JDK 15), RMI Activation (JDK 17); Spring Boot 3 требует 17</td><td>Удалён CMS (JDK 14), <code>--illegal-access</code> игнорируется (JDK 17)</td><td>Strong encapsulation: <code>InaccessibleObjectException</code> (JEP 396, 403)</td></tr>
+          <tr><td>17 → 21</td><td>Finalization и Security Manager — forRemoval (JEP 421, 411)</td><td>Security Manager по умолчанию запрещён (JDK 18)</td><td>UTF-8 по умолчанию (JEP 400, JDK 18), пробел U+202F в форматах времени (JDK 20), предупреждение о динамических агентах (JEP 451)</td></tr>
+          <tr><td>21 → 25</td><td>Методы памяти <code>sun.misc.Unsafe</code> — forRemoval (JEP 471)</td><td>Security Manager нельзя включить (JEP 486), истекли старые флаги вроде <code>MaxRAMFraction</code></td><td>Предупреждения про Unsafe и JNI (JEP 498, 472), удалён провайдер локалей COMPAT (JDK 23)</td></tr>
+          <tr><td>25 → 27</td><td>Удалён Applet API (JEP 504)</td><td>—</td><td>Предупреждение при изменении final-полей рефлексией (JEP 500), G1 всегда по умолчанию (JEP 523), компактные заголовки объектов (JEP 534)</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="step" id="removed-api">
+      <h2>Удалённый API падает при первом вызове, а не при старте</h2>
+      <p>В JDK 11 из платформы ушли модули Java EE: JAXB (<code>javax.xml.bind</code>), JAX-WS, JavaBeans Activation, Common Annotations (<code>javax.annotation</code>), JTA и CORBA (JEP 320). Причина — у них были свои спецификации и свой цикл развития, а держать их копии внутри JDK значило тормозить обе стороны. Свой код это ломает честно: <code>javac --release 11</code> скажет <code>package javax.xml.bind does not exist</code>. Опасны чужие JAR, которые скомпилированы под Java 8 и приходят в сервис уже готовым байткодом.</p>
+      <p>Опыт: библиотека шлюза собрана под 8 и подписывает запрос через <code>DatatypeConverter</code>. Сервис собран под 21 и запущен на JDK 21.</p>
+      <pre><code class="language-java">// bank-lib.jar: javac --release 8 (в Java 8 этот класс есть)
+import javax.xml.bind.DatatypeConverter;
+public class BankClient {
+    public String sign(byte[] payload) {
+        return DatatypeConverter.printHexBinary(payload);   // ссылка на класс из удалённого модуля
+    }
+}
+
+// сервис: javac --release 21 -cp bank-lib.jar, запуск на JDK 21
+System.out.println("service started on Java " + Runtime.version().feature());
+BankClient client = new BankClient();      // BankClient загружен, DatatypeConverter ещё никто не искал
+System.out.println("health check: OK");
+String signature = client.sign(new byte[] {(byte) 0xCA, (byte) 0xFE});   // здесь</code></pre>
+      <pre class="out">service started on Java 21
+health check: OK
+Exception in thread "main" java.lang.NoClassDefFoundError: javax/xml/bind/DatatypeConverter
+	at bank.BankClient.sign(BankClient.java:9)
+	at app.PaymentService.main(PaymentService.java:10)
+Caused by: java.lang.ClassNotFoundException: javax.xml.bind.DatatypeConverter</pre>
+      <p>Сборка прошла, потому что компилятор сервиса видит только сигнатуры <code>BankClient</code>, а тело метода <code>sign</code> уже скомпилировано. Старт прошёл, потому что JVM разрешает ссылки на классы лениво. В class-файле <code>BankClient</code> имя <code>javax/xml/bind/DatatypeConverter</code> лежит в constant pool как строка, и искать класс JVM начинает только тогда, когда выполнение впервые доходит до инструкции, которая его использует. Пролистай, как это происходит:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 252" role="img" aria-label="Слева bank-lib.jar с классом BankClient и символьной ссылкой на javax/xml/bind/DatatypeConverter в constant pool. В центре классы, загруженные JVM. Справа цепочка загрузчиков app, platform, bootstrap. JVM загружает PaymentService и BankClient, сервис проходит readiness, а при первом вызове sign загрузчики не находят класс, и вызов падает с NoClassDefFoundError.">
+            <defs>
+              <marker id="ur-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ur-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="ur-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- bank-lib.jar -->
+            <rect x="14" y="36" width="200" height="136" rx="9" class="dg-box"/>
+            <rect x="26" y="66" width="176" height="30" rx="6" class="dg-cell"/>
+            <rect x="26" y="112" width="176" height="46" rx="6" class="dg-cell"/>
+            <!-- JVM: загруженные классы -->
+            <rect x="244" y="36" width="212" height="168" rx="9" class="dg-box"/>
+            <rect x="256" y="66" width="188" height="30" rx="6" class="dg-cell hit"/>
+            <rect data-s="2-" x="256" y="108" width="188" height="30" rx="6" class="dg-cell hit"/>
+            <rect data-s="4-" x="256" y="150" width="188" height="30" rx="6" class="dg-cell miss"/>
+            <!-- загрузчики -->
+            <rect x="490" y="44" width="216" height="30" rx="7" class="dg-box"/>
+            <rect x="490" y="98" width="216" height="30" rx="7" class="dg-box"/>
+            <rect x="490" y="152" width="216" height="30" rx="7" class="dg-box"/>
+            <!-- загрузка BankClient -->
+            <path data-s="2" d="M202 81 C 228 81, 226 123, 252 123" class="dg-line ok" marker-end="url(#ur-ok)"/>
+            <!-- поиск DatatypeConverter по цепочке -->
+            <g data-s="4">
+              <path d="M444 163 C 470 163, 466 59, 486 59" class="dg-line" marker-end="url(#ur-n)"/>
+              <path d="M598 74 L 598 94" class="dg-line" marker-end="url(#ur-n)"/>
+              <path d="M598 128 L 598 148" class="dg-line" marker-end="url(#ur-n)"/>
+            </g>
+            <!-- ошибка возвращается в точку вызова -->
+            <path data-s="5" d="M486 66 C 466 66, 468 123, 448 123" class="dg-line bad" marker-end="url(#ur-bad)"/>
+            <!-- текст -->
+            <text x="14" y="22" class="dg-cap">CLASSPATH</text>
+            <text x="244" y="22" class="dg-cap">ПАМЯТЬ JVM</text>
+            <text x="490" y="22" class="dg-cap">ЦЕПОЧКА ЗАГРУЗЧИКОВ</text>
+            <text x="26" y="56" class="dg-t">bank-lib.jar</text>
+            <text x="36" y="86" class="dg-in">BankClient.class</text>
+            <text x="36" y="129" class="dg-n">constant pool: строка</text>
+            <text x="36" y="149" class="dg-in">javax/xml/bind/…</text>
+            <text x="256" y="56" class="dg-t">JVM: загруженные классы</text>
+            <text x="350" y="86" class="dg-in" text-anchor="middle">PaymentService</text>
+            <text data-s="2-" x="350" y="128" class="dg-in" text-anchor="middle">BankClient</text>
+            <text data-s="4-" x="350" y="170" class="dg-bad" text-anchor="middle">DatatypeConverter?</text>
+            <text x="502" y="64" class="dg-t">app: classpath</text>
+            <text x="502" y="118" class="dg-t">platform</text>
+            <text x="502" y="172" class="dg-t">boot: java.base, …</text>
+            <g data-s="4-"><text x="490" y="204" class="dg-bad">ни в одном модуле нет</text><text x="490" y="222" class="dg-s">и на classpath тоже</text></g>
+            <!-- состояние сервиса -->
+            <g data-s="1-2"><text x="14" y="228" class="dg-t">readiness: ещё нет</text><text x="14" y="244" class="dg-s">идёт старт</text></g>
+            <g data-s="3"><text x="14" y="228" class="dg-ok">readiness: OK</text><text x="14" y="244" class="dg-s">под получает трафик</text></g>
+            <g data-s="4"><text x="14" y="228" class="dg-t">первый платёж</text><text x="14" y="244" class="dg-s">sign() разрешает ссылку</text></g>
+            <g data-s="5"><text x="14" y="228" class="dg-bad">NoClassDefFoundError</text><text x="14" y="244" class="dg-s">повтор даст ту же ошибку</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>JVM стартует и загружает главный класс PaymentService. Про BankClient и тем более про DatatypeConverter она ещё ничего не знает.</li>
+          <li><code>new BankClient()</code>: загрузчик app находит BankClient.class в bank-lib.jar. Для проверки байткода этот класс не нужен, поэтому имя javax/xml/bind/DatatypeConverter остаётся строкой в constant pool.</li>
+          <li>Health check зелёный, под попадает в балансировщик. Ни один код ещё не дошёл до вызова удалённого класса.</li>
+          <li>Первый платёж выполняет <code>sign()</code>, и JVM разрешает ссылку: загрузчик app передаёт запрос platform, тот — bootstrap. Пакета javax.xml.bind нет ни в одном модуле JDK 11+, на classpath его тоже нет.</li>
+          <li>ClassNotFoundException загрузчика превращается в NoClassDefFoundError в точке вызова. Неудачное разрешение ссылки JVM запоминает: следующий платёж получит ту же ошибку, пока класс не появится на classpath и сервис не перезапустят.</li>
+        </ol>
+      </figure>
+      <p>Отсюда первое правило: зелёный readiness ничего не говорит о миграции. Нужна проверка, которая смотрит на байткод всех JAR, а не на выполненные пути. Её делает <code>jdeps</code> из целевой JDK:</p>
+      <pre><code class="language-bash">jdeps bank-lib.jar                       # зависимости по пакетам, jdeps из JDK 21
+bank-lib.jar -> java.base
+bank-lib.jar -> not found                # пакет, которого нет ни в JDK, ни в переданном classpath
+   bank      -> java.lang          java.base
+   bank      -> javax.xml.bind     not found</code></pre>
+      <p>В реальном сервисе <code>jdeps</code> запускают по всем JAR из собранного образа с ключами <code>--class-path</code> и <code>--multi-release 21</code>, а <code>-summary</code> или <code>--missing-deps</code> сокращают вывод до проблемных пакетов. Всё, что помечено <code>not found</code>, — кандидат на <code>NoClassDefFoundError</code>.</p>
+      <h3>Вернуть API — значит выбрать правильное пространство имён</h3>
+      <p>Удалённые модули продолжили жизнь отдельными артефактами в Eclipse Foundation и стали Jakarta EE. В Jakarta EE 9 их переименовали: <code>javax.xml.bind</code> стал <code>jakarta.xml.bind</code>. Переименование пакета ломает бинарную совместимость: в байткоде старой библиотеки зашито полное имя класса, и класс с другим пакетом для JVM — другой класс.</p>
+      <pre><code class="language-bash">jar tf jakarta.xml.bind-api-4.0.5.jar | grep DatatypeConverter.class
+jakarta/xml/bind/DatatypeConverter.class          # пакет jakarta, а библиотеке нужен javax
+java -cp bank-lib.jar:app:jakarta.xml.bind-api-4.0.5.jar app.PaymentService
+Exception in thread "main" java.lang.NoClassDefFoundError: javax/xml/bind/DatatypeConverter</code></pre>
+      <p>Библиотеке под Java 8 нужен API 2.3.x, где пакет ещё <code>javax</code>: <code>jakarta.xml.bind:jakarta.xml.bind-api:2.3.3</code> и реализация <code>org.glassfish.jaxb:jaxb-runtime:2.3.x</code>. Версии 3.0+ — уже <code>jakarta</code>, их берут вместе с кодом, переведённым на новые имена. API без реализации тоже падает, но позже: <code>JAXBContext.newInstance</code> не найдёт провайдера.</p>
+      <div class="trap">
+        <p class="myth">Если сервис стартовал на новой JDK, удалённых API в нём нет.</p>
+        <p class="fact">Классы ищутся лениво, при первом выполнении инструкции, которая их использует. Код за редкой веткой — ошибкой банка, ночным отчётом, SOAP-клиентом для одного партнёра — упадёт через дни. Полноту даёт только статический анализ байткода: <code>jdeps</code> по всем JAR.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: почему повторный вызов падает так же</summary>
+        <p>JVMS §5.4.3: если разрешение символьной ссылки не удалось, последующие попытки разрешить ту же ссылку бросают ту же ошибку. Поэтому подложить JAR в работающий сервис не поможет: нужен перезапуск. <code>NoClassDefFoundError</code> — это <code>LinkageError</code>, то есть ошибка связывания уже загруженного кода. <code>ClassNotFoundException</code> — проверяемое исключение от <code>ClassLoader.loadClass</code> и <code>Class.forName</code>, его увидит код, который сам ищет класс по имени. Цепочка загрузчиков и то, как app передаёт запрос в platform и bootstrap, разобраны в <a href="classloading.html">Class Loading</a>.</p>
+      </details>
+    </section>
+
+    <section class="step" id="bytecode">
+      <h2>Версия class-файла решает, можно ли откатиться</h2>
+      <p>Каждый class-файл начинается с номера формата: байты 6–7, major version. Для Java N это N + 44: 52 у Java 8, 55 у 11, 61 у 17, 65 у 21, 69 у 25, 71 у 27. JVM читает файлы своей версии и всех старших, а более новые отвергает до загрузки, не глядя на содержимое. Поэтому байткод Java 8 работает на JDK 25, а байткод 25 на JDK 21 — нет, даже если в нём нет ни одной новой конструкции.</p>
+      <pre><code class="language-bash">javac -d cv25 Receipt.java                # javac из JDK 25 без --release
+javac --release 21 -d cv21 Receipt.java   # тот же javac, но формат и API Java 21
+javap -v cv25/Receipt.class | grep major
+  major version: 69
+javap -v cv21/Receipt.class | grep major
+  major version: 65
+java -cp cv25 Receipt                     # на JDK 21: откат рантайма после сборки на 25</code></pre>
+      <pre class="out">Error: LinkageError occurred while loading main class Receipt
+	java.lang.UnsupportedClassVersionError: Receipt has been compiled by a more recent version of the Java Runtime (class file version 69.0), this version of the Java Runtime only recognizes class file versions up to 65.0</pre>
+      <p>С <code>cv21</code> тот же JDK 21 печатает <code>receipt printed on Java 21</code>. Из этой асимметрии следует главное правило раскатки. Сначала меняют рантайм, а байткод оставляют старым: тогда откат — это просто прошлый образ. Поднимать <code>--release</code> можно только тогда, когда откат на старую JDK больше не нужен. <code>--release</code> заодно ограничивает доступный API версией N. Почему <code>-source</code>/<code>-target</code> этого не делают и как toolchain выбирает JDK для сборки, разобрано в <a href="build.html">Maven &amp; Gradle</a>.</p>
+      <h3>Байткод читают не только JVM</h3>
+      <p>Номер версии проверяет не одна JVM. Сканеры classpath (Spring, Hibernate), Mockito и Byte Buddy, JaCoCo, APM-агенты и обфускаторы разбирают class-файлы сами, обычно через библиотеку ASM. ASM знает форматы только до версии, которая была на момент её выпуска, и на более новом файле останавливается, хотя сама работает на любой JDK.</p>
+      <pre><code class="language-java">// Так читают байткод сканеры и агенты: через ASM, а не через JVM.
+byte[] bytes = ...;                                          // файл с диска или класс из JDK
+int major = ((bytes[6] &amp; 0xFF) &lt;&lt; 8) | (bytes[7] &amp; 0xFF);   // байты 6–7: major version
+System.out.println("class file major version: " + major);
+new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9) { ... }, 0);</code></pre>
+      <pre class="out">## ASM 9.7.1, Receipt.class от javac 25        (запуск на JDK 21)
+class file major version: 69
+Exception in thread "main" java.lang.IllegalArgumentException: Unsupported class file major version 69
+## ASM 9.8, тот же файл
+class file major version: 69
+ASM parsed: Receipt
+## ASM 9.7.1, java/lang/String.class из JDK, на которой запущен
+JDK 21: class file major version: 65 → ASM parsed: java/lang/String
+JDK 25: class file major version: 69 → IllegalArgumentException: Unsupported class file major version 69</pre>
+      <p>Последние две строки важнее всего. Даже если твой код собран с <code>--release 21</code>, на JDK 25 классы самой платформы имеют версию 69. Агент, который инструментирует <code>java.lang</code> или <code>java.net</code>, и Mockito, который строит подклассы JDK-типов, упадут на новом рантайме. Поэтому порядок такой: сначала обновить всё, что читает байткод (Spring, Byte Buddy, Mockito, JaCoCo, Lombok, агенты APM, плагины сборки), на старой JDK, и только потом менять рантайм.</p>
+      <div class="trap">
+        <p class="myth">Собрали под 21, значит, на JDK 25 ничего, кроме нашего кода, не сломается.</p>
+        <p class="fact"><code>--release</code> управляет только твоими class-файлами. Библиотеки с устаревшим ASM внутри падают на классах самой JDK 25. Их версию проверяют по таблице совместимости библиотеки, а не по версии сборки сервиса.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: multi-release JAR</summary>
+        <p>Библиотеке, которая должна работать и на 8, и на 21, не нужно выбирать минимум. В multi-release JAR (JEP 238, JDK 9) базовые классы лежат в корне, а версии под новые JDK — в <code>META-INF/versions/N/</code>. При <code>Multi-Release: true</code> в манифесте <code>JarFile</code> отдаёт для каждого класса самую новую версию, не старше текущего рантайма. JDK 8 про <code>META-INF/versions</code> ничего не знает и просто читает корень.</p>
+        <pre><code class="language-bash">javac --release 8  -d mr8  base/lib/*.java                 # Workers.forIo(): fixed pool
+javac --release 21 -d mr21 java21/lib/Workers.java         # та же сигнатура: virtual threads
+jar --create --file workers.jar --main-class lib.Main -C mr8 . --release 21 -C mr21 .
+jar tf workers.jar | grep class
+lib/Main.class
+lib/Workers.class
+META-INF/versions/21/lib/Workers.class</code></pre>
+        <pre class="out">Java 21: VirtualThread[#28]/runnable@ForkJoinPool-1-worker-1   # java -jar на JDK 21
+Java 25: VirtualThread[#35]/runnable@ForkJoinPool-1-worker-1   # на JDK 25: берётся versions/21
+Java 21: Thread[#28,pool-1-thread-1,5,main]                     # -Djdk.util.jar.enableMultiRelease=false</pre>
+        <p>Номера потоков меняются от запуска к запуску. На JDK 8 этот JAR не запускался: локально его нет. Публичный API версий обязан совпадать, это проверяет <code>jar --validate</code>. Для сервиса multi-release обычно не нужен: у него один рантайм. Он нужен общей библиотеке, которой пользуются сервисы на разных JDK во время миграции.</p>
+      </details>
+    </section>
+
+    <section class="step" id="encapsulation">
+      <h2>Strong encapsulation: рефлексия больше не открывает JDK</h2>
+      <p>С Java 9 JDK разбита на модули, и модуль сам решает, что показывать. <b>exports</b> открывает пакет для обычного доступа: компилируй и вызывай public-члены. <b>opens</b> разрешает глубокую рефлексию: <code>setAccessible(true)</code> на private-полях и методах. <code>java.base</code> экспортирует <code>java.math</code>, но не открывает его. Весь classpath — это один безымянный модуль (unnamed module), и правила для него те же.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 272" role="img" aria-label="Слева безымянный модуль с LegacySerializer. Справа модуль java.base с пакетами java.math (exports да, opens нет) и jdk.internal.misc (exports нет), ниже модуль jdk.unsupported с sun.misc (exports и opens). Публичный вызов BigDecimal разрешён, setAccessible на его private-поле запрещён, jdk.internal.misc недоступен совсем, sun.misc.Unsafe доступен. Флаг --add-opens java.base/java.math=ALL-UNNAMED превращает запрет на рефлексию в разрешение.">
+            <defs>
+              <marker id="ue-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="ue-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- безымянный модуль -->
+            <rect x="14" y="36" width="196" height="176" rx="9" class="dg-box"/>
+            <rect x="26" y="88" width="172" height="30" rx="6" class="dg-cell"/>
+            <!-- java.base -->
+            <rect x="330" y="24" width="376" height="152" rx="9" class="dg-box"/>
+            <rect x="342" y="54" width="352" height="50" rx="6" class="dg-cell"/>
+            <rect x="342" y="114" width="352" height="50" rx="6" class="dg-cell miss"/>
+            <!-- jdk.unsupported -->
+            <rect x="330" y="188" width="376" height="74" rx="9" class="dg-box"/>
+            <rect x="342" y="218" width="352" height="34" rx="6" class="dg-cell hit"/>
+            <!-- доступ -->
+            <path d="M198 96 C 262 96, 278 70, 338 70" class="dg-line ok" marker-end="url(#ue-ok)"/>
+            <path d="M198 108 C 262 108, 278 90, 338 90" class="dg-line bad" marker-end="url(#ue-bad)"/>
+            <path d="M198 114 C 262 120, 282 140, 338 140" class="dg-line bad" marker-end="url(#ue-bad)"/>
+            <path d="M112 212 C 112 240, 250 236, 338 236" class="dg-line ok" marker-end="url(#ue-ok)"/>
+            <!-- текст -->
+            <text x="14" y="22" class="dg-cap">CLASSPATH</text>
+            <text x="26" y="56" class="dg-t">unnamed module</text>
+            <text x="26" y="74" class="dg-s">весь classpath</text>
+            <text x="36" y="108" class="dg-in">LegacySerializer</text>
+            <text x="26" y="150" class="dg-ok">--add-opens</text>
+            <text x="26" y="168" class="dg-in">java.base/java.math</text>
+            <text x="26" y="186" class="dg-in">=ALL-UNNAMED</text>
+            <text x="26" y="204" class="dg-s">красное → зелёное</text>
+            <text x="342" y="44" class="dg-t">module java.base</text>
+            <text x="354" y="75" class="dg-in">java.math.BigDecimal</text>
+            <text x="354" y="94" class="dg-s">exports: да · opens: нет</text>
+            <text x="354" y="135" class="dg-in">jdk.internal.misc</text>
+            <text x="354" y="154" class="dg-s">exports: нет · opens: нет</text>
+            <text x="342" y="208" class="dg-t">module jdk.unsupported</text>
+            <text x="354" y="240" class="dg-in">sun.misc.Unsafe</text>
+            <text x="550" y="240" class="dg-s">exports + opens</text>
+            <text x="550" y="75" class="dg-ok">вызов: да</text>
+            <text x="550" y="94" class="dg-bad">setAccessible: нет</text>
+            <text x="550" y="145" class="dg-bad">доступа нет</text>
+            <text x="180" y="258" class="dg-n">Unsafe: да</text>
+          </svg>
+        </div>
+        <figcaption><code>sun.misc.Unsafe</code> оставлен доступным сознательно (JEP 260): без замены на него опирались Netty, Kryo, кэши. Его закрывают отдельно и постепенно, об этом следующий шаг.</figcaption>
+      </figure>
+      <p>Закрывали это постепенно. В JDK 9–15 действовал <code>--illegal-access=permit</code>: все пакеты JDK 8 оставались открытыми для classpath, а первое обращение печатало <code>WARNING: Illegal reflective access</code>. Многие годами его игнорировали. В JDK 16 по умолчанию стал <code>deny</code> (JEP 396), в JDK 17 опцию убрали совсем (JEP 403): теперь она только печатает предупреждение. Так выглядит старый сериализатор, который обходит все поля объекта, включая поля классов JDK:</p>
+      <pre><code class="language-java">record Payment(String id, BigDecimal amount) {}
+
+static String dump(Object o) throws IllegalAccessException {
+    if (o == null || o instanceof String || o instanceof Integer || o instanceof Long) return String.valueOf(o);
+    StringBuilder sb = new StringBuilder(o.getClass().getSimpleName()).append('{');
+    for (Field f : o.getClass().getDeclaredFields()) {
+        if (Modifier.isStatic(f.getModifiers())) continue;
+        f.setAccessible(true);          // свой record — можно; поля BigDecimal — глубокая рефлексия в java.base
+        sb.append(' ').append(f.getName()).append('=').append(dump(f.get(o)));
+    }
+    return sb.append(" }").toString();
+}
+
+Field intCompact = BigDecimal.class.getDeclaredField("intCompact");
+System.out.println("trySetAccessible: " + intCompact.trySetAccessible());  // проверка без исключения
+System.out.println(dump(new Payment("pay-42", new BigDecimal("199.90"))));</code></pre>
+      <pre class="out">## java LegacySerializer.java                                 (JDK 21, так же на 25)
+trySetAccessible: false
+Exception in thread "main" java.lang.reflect.InaccessibleObjectException: Unable to make field private final java.math.BigInteger java.math.BigDecimal.intVal accessible: module java.base does not "opens java.math" to unnamed module @5e4c8041
+## java --add-opens java.base/java.math=ALL-UNNAMED LegacySerializer.java
+trySetAccessible: true
+Payment{ id=pay-42 amount=BigDecimal{ intVal=null scale=2 precision=5 stringCache=null intCompact=19990 } }</pre>
+      <p>Сообщение исключения — готовый рецепт: модуль <code>java.base</code>, пакет <code>java.math</code>, получатель <code>unnamed module</code>. Отсюда флаг <code>--add-opens java.base/java.math=ALL-UNNAMED</code>. Хеш после <code>@</code> меняется от запуска к запуску. Обрати внимание: поля самого <code>Payment</code> открылись без флагов, потому что record лежит в том же безымянном модуле.</p>
+      <h3>Как чинить, по порядку</h3>
+      <ol>
+        <li><b>Обновить библиотеку.</b> Почти все популярные библиотеки давно не лезут в JDK или делают это через публичные API: <code>MethodHandles.privateLookupIn</code>, <code>VarHandle</code>, <code>ReflectionFactory</code> для сериализации.</li>
+        <li><b>Заменить вызов.</b> Если в JDK лезет свой код, почти всегда есть публичный путь: <code>BigDecimal.unscaledValue()</code> вместо поля <code>intVal</code>.</li>
+        <li><b>Открыть один пакет.</b> Если обновиться нельзя — узкий <code>--add-opens</code> на конкретный пакет, а не на весь <code>java.base</code>. Флаг нужен везде, где выполняется код: в скрипте запуска, в <code>argLine</code> Surefire и Failsafe, в Gradle <code>jvmArgs</code> тестов.</li>
+      </ol>
+      <p>Если флаги некуда вписать, пригодятся ещё два места. Переменную окружения <code>JDK_JAVA_OPTIONS</code> читает лаунчер <code>java</code> с JDK 9. Атрибут <code>Add-Opens</code> в манифесте работает только для JAR, запущенного через <code>java -jar</code>:</p>
+      <pre><code class="language-bash">printf 'Main-Class: LegacySerializer\nAdd-Opens: java.base/java.math\n' &gt; manifest.txt
+jar --create --file enc.jar --manifest manifest.txt -C classes .
+java -jar enc.jar | head -1              # манифест прочитан лаунчером
+trySetAccessible: true
+java -cp enc.jar LegacySerializer | head -1   # тот же JAR, но не главный: атрибут не действует
+trySetAccessible: false</code></pre>
+      <div class="trap">
+        <p class="myth">Можно один раз прописать <code>--add-opens java.base/java.lang=ALL-UNNAMED</code> и ещё десяток таких же и забыть.</p>
+        <p class="fact">Каждый такой флаг — задокументированный долг: библиотека, которую не обновили. Список флагов растёт от релиза к релизу, а в JDK 26 к нему добавилась отдельная проверка изменения final-полей (JEP 500), которую <code>--add-opens</code> не снимает. Держи флаги рядом с причиной: какая библиотека, какая версия её починит.</p>
+      </div>
+      <p>Близкий флаг <code>--add-exports</code> нужен для другого: доступа к public-классам неэкспортированного пакета, например <code>sun.security.x509</code>, на этапе компиляции и в рантайме. Он не даёт <code>setAccessible</code> на private-члены. Подробнее про рефлексию и модули — в <a href="reflection.html">Annotations &amp; Reflection</a>.</p>
+    </section>
+
+    <section class="step" id="integrity">
+      <h2>Каждый релиз закрывает следующую дверь: warn, deny, remove</h2>
+      <p>После 17 strong encapsulation расширили на всё, чем код может обойти гарантии платформы: <code>sun.misc.Unsafe</code>, JNI, динамическую загрузку агентов, изменение final-полей, Security Manager. В OpenJDK это называют integrity by default. Все такие изменения идут одним маршрутом, растянутым на несколько релизов, и миграция 21 → 25 — это в основном прохождение по нему.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 272" role="img" aria-label="Верхний ряд: жизненный цикл API и проверок рантайма из пяти состояний — deprecated, forRemoval, warn по умолчанию, deny по умолчанию, удалено, под каждым пример и как его увидеть. Нижний ряд: жизненный цикл флагов JVM — deprecated, obsolete, expired, после expired JVM не стартует с ошибкой Unrecognized VM option.">
+            <defs>
+              <marker id="ui-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="ui-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- API: состояния -->
+            <rect x="14" y="32" width="120" height="36" rx="8" class="dg-box"/>
+            <rect x="157" y="32" width="120" height="36" rx="8" class="dg-box"/>
+            <rect x="300" y="32" width="120" height="36" rx="8" class="dg-cell"/>
+            <rect x="443" y="32" width="120" height="36" rx="8" class="dg-cell miss"/>
+            <rect x="586" y="32" width="120" height="36" rx="8" class="dg-cell miss"/>
+            <path d="M134 50 L 153 50" class="dg-line" marker-end="url(#ui-n)"/>
+            <path d="M277 50 L 296 50" class="dg-line" marker-end="url(#ui-n)"/>
+            <path d="M420 50 L 439 50" class="dg-line bad" marker-end="url(#ui-bad)"/>
+            <path d="M563 50 L 582 50" class="dg-line bad" marker-end="url(#ui-bad)"/>
+            <line x1="14" y1="152" x2="706" y2="152" class="dg-sep"/>
+            <!-- флаги: состояния -->
+            <rect x="14" y="184" width="120" height="36" rx="8" class="dg-box"/>
+            <rect x="157" y="184" width="120" height="36" rx="8" class="dg-cell"/>
+            <rect x="300" y="184" width="120" height="36" rx="8" class="dg-cell miss"/>
+            <rect x="443" y="184" width="263" height="36" rx="8" class="dg-cell miss"/>
+            <path d="M134 202 L 153 202" class="dg-line" marker-end="url(#ui-n)"/>
+            <path d="M277 202 L 296 202" class="dg-line bad" marker-end="url(#ui-bad)"/>
+            <path d="M420 202 L 439 202" class="dg-line bad" marker-end="url(#ui-bad)"/>
+            <!-- текст -->
+            <text x="14" y="22" class="dg-cap">API И ПРОВЕРКИ РАНТАЙМА</text>
+            <g text-anchor="middle">
+              <text x="74" y="55" class="dg-t">deprecated</text>
+              <text x="217" y="55" class="dg-t">forRemoval</text>
+              <text x="360" y="55" class="dg-t">warn</text>
+              <text x="503" y="55" class="dg-bad">deny</text>
+              <text x="646" y="55" class="dg-bad">удалено</text>
+            </g>
+            <text x="14" y="90" class="dg-in">Thread.getId()</text>
+            <text x="14" y="108" class="dg-s">javac: warning</text>
+            <text x="157" y="90" class="dg-in">finalize()</text>
+            <text x="157" y="108" class="dg-s">jdeprscan</text>
+            <text x="300" y="90" class="dg-in">Unsafe в 24</text>
+            <text x="300" y="108" class="dg-s">WARNING в логе</text>
+            <text x="443" y="90" class="dg-in">illegal-access</text>
+            <text x="443" y="108" class="dg-s">16: исключение</text>
+            <text x="586" y="90" class="dg-in">SecurityManager</text>
+            <text x="586" y="108" class="dg-s">24: не включить</text>
+            <text x="14" y="134" class="dg-n">работает, предупреждает компилятор</text>
+            <text x="300" y="134" class="dg-n">предупреждает JVM</text>
+            <text x="443" y="134" class="dg-n">падает, есть флаг вернуть</text>
+            <text x="14" y="174" class="dg-cap">ФЛАГИ JVM</text>
+            <g text-anchor="middle">
+              <text x="74" y="207" class="dg-t">deprecated</text>
+              <text x="217" y="207" class="dg-t">obsolete</text>
+              <text x="360" y="207" class="dg-bad">expired</text>
+            </g>
+            <text x="456" y="207" class="dg-bad">Unrecognized VM option</text>
+            <text x="14" y="242" class="dg-in">MaxRAMFraction</text>
+            <text x="14" y="260" class="dg-s">21: warning</text>
+            <text x="157" y="242" class="dg-in">G1UsePreventiveGC</text>
+            <text x="157" y="260" class="dg-s">21: игнорируется</text>
+            <text x="300" y="242" class="dg-s">оба на 25</text>
+            <text x="443" y="242" class="dg-s">JVM не создаётся, под уходит</text>
+            <text x="443" y="260" class="dg-s">в CrashLoopBackOff</text>
+          </svg>
+        </div>
+        <figcaption>Справа от «warn» код уже ломается. Флаг, который возвращает старое поведение, — временный мост: <code>--illegal-access</code> работал с 9 по 16, провайдер COMPAT — до 22, а потом оба исчезли.</figcaption>
+      </figure>
+      <h3>Unsafe: молчит на 21, предупреждает на 25</h3>
+      <p>Методы доступа к памяти в <code>sun.misc.Unsafe</code> (<code>allocateMemory</code>, <code>putLong</code>, <code>getLong</code> и другие) объявлены forRemoval в JDK 23 (JEP 471), потому что у них есть поддерживаемые замены: <code>VarHandle</code> с JDK 9 и Foreign Function &amp; Memory API с JDK 22. С JDK 24 первое обращение печатает предупреждение (JEP 498). Класс ниже скомпилирован один раз и запущен на двух JDK:</p>
+      <pre><code class="language-java">Field f = Unsafe.class.getDeclaredField("theUnsafe");
+f.setAccessible(true);                      // sun.misc открыт модулем jdk.unsupported: исключения нет
+Unsafe unsafe = (Unsafe) f.get(null);
+long address = unsafe.allocateMemory(64);   // метод доступа к памяти
+unsafe.putLong(address, 199_90L);
+System.out.println("off-heap value: " + unsafe.getLong(address));
+unsafe.freeMemory(address);</code></pre>
+      <pre class="out">## JDK 21
+off-heap value: 19990
+## JDK 25
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by OffHeapBuffer (file:&lt;tmp&gt;/int/)
+WARNING: Please consider reporting this to the maintainers of class OffHeapBuffer
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+off-heap value: 19990
+## JDK 25 с --sun-misc-unsafe-memory-access=deny
+Exception in thread "main" java.lang.UnsupportedOperationException: allocateMemory</pre>
+      <p>Предупреждение пишется в stderr один раз за процесс и называет вызывающий класс и его JAR — по ним видно, какую библиотеку обновлять. JEP 498 планирует сделать <code>deny</code> поведением по умолчанию, но и в JDK 26, и в JDK 27 по умолчанию стоит <code>warn</code>: это видно в <code>sun/misc/Unsafe.java</code> обоих релизов. Готовность проверяют заранее: прогоняют тесты с <code>--sun-misc-unsafe-memory-access=deny</code>. Так же работают соседние проверки: <code>--illegal-native-access=deny</code> для JNI (JEP 472, предупреждение с JDK 24), <code>--illegal-final-field-mutation=deny</code> для изменения final-полей (JEP 500, JDK 26). Динамическую загрузку агентов JDK 21 тоже сопровождает предупреждением (JEP 451). Её первым замечает Mockito с inline mock maker: агент подключают явно через <code>-javaagent</code> в тестах.</p>
+      <h3>Security Manager: флаг, который убивает JVM</h3>
+      <p>Security Manager объявлен forRemoval в JDK 17 (JEP 411). С JDK 18 включить его можно только явным <code>-Djava.security.manager=allow</code>. В JDK 24 его отключили навсегда (JEP 486). Классы остались для совместимости, но работать больше не будут:</p>
+      <pre><code class="language-java">System.out.println("security manager: " + System.getSecurityManager());
+System.setSecurityManager(new SecurityManager());   // старый плагинный движок включал песочницу</code></pre>
+      <pre class="out">## JDK 21, -Djava.security.manager=allow
+security manager: null
+WARNING: A terminally deprecated method in java.lang.System has been called
+WARNING: System::setSecurityManager has been called by SandboxProbe (file:&lt;tmp&gt;/int/)
+WARNING: Please consider reporting this to the maintainers of SandboxProbe
+WARNING: System::setSecurityManager will be removed in a future release
+sandbox enabled: true
+## JDK 25, тот же флаг
+Error occurred during initialization of VM
+java.lang.Error: A command line option has attempted to allow or enable the Security Manager. Enabling a Security Manager is not supported.
+## JDK 25 без флага
+security manager: null
+Exception in thread "main" java.lang.UnsupportedOperationException: Setting a Security Manager is not supported</pre>
+      <p>Флаг, который на 21 возвращал старое поведение, на 25 не даёт создать JVM: сообщение нельзя ослабить до предупреждения. Выбор между «стартует и падает при вызове» и «не стартует» сделан в пользу второго, чтобы сервис не работал без защиты, на которую рассчитывает.</p>
+      <h3>Найти всё это заранее</h3>
+      <p><code>jdeprscan</code> ищет в готовых JAR использования API с пометкой <code>@Deprecated</code>, <code>jdeps --jdk-internals</code> — обращения к внутренностям JDK. Оба работают по байткоду, поэтому видят и чужие библиотеки:</p>
+      <pre><code class="language-bash">jdeprscan --for-removal legacy.jar       # только то, что собираются удалить
+class ReportCache uses deprecated method java/lang/Integer::&lt;init&gt;(I)V (forRemoval=true)
+class ReportCache uses deprecated method java/lang/Runtime::runFinalization()V (forRemoval=true)
+class ReportCache overrides deprecated method java/lang/Object::finalize()V (forRemoval=true)
+class SandboxProbe uses deprecated class java/lang/SecurityManager (forRemoval=true)
+class SandboxProbe uses deprecated method java/lang/System::getSecurityManager()Ljava/lang/SecurityManager; (forRemoval=true)
+class SandboxProbe uses deprecated method java/lang/System::setSecurityManager(Ljava/lang/SecurityManager;)V (forRemoval=true)
+jdeps --jdk-internals legacy.jar
+legacy.jar -> jdk.unsupported
+   OffHeapBuffer  -> sun.misc.Unsafe     JDK internal API (jdk.unsupported)</code></pre>
+      <p>Это вывод <code>jdeprscan</code> из JDK 21, и в нём нет <code>allocateMemory</code>: в 21 этот метод ещё не помечен. Список устаревшего зависит от версии JDK, поэтому сканер запускают из целевой JDK или с <code>--release N</code>.</p>
+      <h3>Флаги JVM проходят тот же путь</h3>
+      <p>У флагов HotSpot свой цикл, он записан в таблице <code>special_jvm_flags</code> в <code>arguments.cpp</code>. <b>Deprecated</b> — флаг работает и печатает предупреждение. <b>Obsolete</b> — флаг игнорируется с предупреждением. <b>Expired</b> — флага больше нет, и JVM отказывается стартовать. Один и тот же скрипт запуска на двух JDK:</p>
+      <pre><code class="language-bash">java -XX:-IgnoreUnrecognizedVMOptions -XX:MaxRAMFraction=2 -version      # Java 8: доля памяти в контейнере
+# JDK 21:
+OpenJDK 64-Bit Server VM warning: Option MaxRAMFraction was deprecated in version 10.0 and will likely be removed in a future release.
+# JDK 25:
+Unrecognized VM option 'MaxRAMFraction=2'
+Error: Could not create the Java Virtual Machine.
+
+java -XX:-IgnoreUnrecognizedVMOptions -XX:+G1UsePreventiveGC -version
+# JDK 21:
+OpenJDK 64-Bit Server VM warning: Ignoring option G1UsePreventiveGC; support was removed in 21.0
+# JDK 25:
+Unrecognized VM option 'G1UsePreventiveGC'
+
+java -XX:-IgnoreUnrecognizedVMOptions -XX:+PrintGCDateStamps -version    # GC-лог в стиле Java 8
+# JDK 21 и 25:
+Unrecognized VM option 'PrintGCDateStamps'</code></pre>
+      <p><code>MaxRAMFraction</code> стал obsolete в 23 и expired в 24. Его ставили в Java 8 в контейнерах, а с JDK 10 вместо него есть <code>MaxRAMPercentage</code>, подробнее в <a href="k8s-java.html">Java in Kubernetes</a>. Флаги GC-логов Java 8 исчезли в JDK 9 вместе с переходом на <code>-Xlog</code> (JEP 271): <code>-XX:+PrintGCDetails</code> ещё переводится в <code>-Xlog:gc*</code> с предупреждением, а <code>PrintGCDateStamps</code> уже нет. Проверка до прода — запустить в CI <code>java $JAVA_OPTS -version</code> с настоящими флагами из манифеста деплоя.</p>
+      <div class="note warn">
+        <p>Опыты выше запущены с <code>-XX:-IgnoreUnrecognizedVMOptions</code>. В локальной JBR 21 этот флаг по умолчанию <code>true</code>, и неизвестные опции молча пропускаются. В обычной сборке OpenJDK и в JBR 25 он <code>false</code>. Если дома всё стартует, а в контейнере нет, сравни <code>java -XX:+PrintFlagsFinal -version | grep IgnoreUnrecognized</code>.</p>
+      </div>
+    </section>
+
+    <section class="step" id="silent">
+      <h2>Самое опасное меняется без ошибки</h2>
+      <p>У предыдущих поломок есть стектрейс. У следующих его нет: код выполняется, но результат другой. Их ловит только сравнение старой и новой версии на одинаковых данных — тестом с точным ожидаемым значением или канарейкой с метриками.</p>
+      <h3>Аннотации из чужого пакета просто не видны</h3>
+      <p>Spring Boot 3 стоит на Spring Framework 6 и Jakarta EE 9+: Servlet, JPA, Bean Validation, Common Annotations переехали из <code>javax.*</code> в <code>jakarta.*</code>. Код, который ссылается на <code>javax.servlet.Filter</code>, не скомпилируется, если старого API нет на classpath. Опаснее, когда старый API приходит транзитивно: всё компилируется, а фреймворк такие аннотации и интерфейсы просто не ищет.</p>
+      <pre><code class="language-java">public static class JavaxRateCache {
+    boolean warmed;
+    @javax.annotation.PostConstruct          // так было в Spring Boot 2 (Java EE, пакет javax)
+    void warmUp() { warmed = true; }
+}
+
+public static class JakartaRateCache {
+    boolean warmed;
+    @jakarta.annotation.PostConstruct        // так нужно в Spring Boot 3+ (пакет jakarta)
+    void warmUp() { warmed = true; }
+}
+
+try (var ctx = new AnnotationConfigApplicationContext(JavaxRateCache.class, JakartaRateCache.class)) {
+    System.out.println("Spring " + SpringVersion.getVersion());
+    System.out.println("javax   @PostConstruct called: " + ctx.getBean(JavaxRateCache.class).warmed);
+    System.out.println("jakarta @PostConstruct called: " + ctx.getBean(JakartaRateCache.class).warmed);
+}</code></pre>
+      <pre class="out">Spring 7.0.9
+javax   @PostConstruct called: false
+jakarta @PostConstruct called: true</pre>
+      <p>Оба JAR с аннотациями лежат на classpath, контекст поднялся без единого предупреждения, а кэш курсов не прогрет. Так же молча Hibernate 6 не находит сущность с <code>@javax.persistence.Entity</code>, Hibernate Validator 8 не проверяет <code>@javax.validation.constraints.NotNull</code>, а бин, реализующий <code>javax.servlet.Filter</code>, не попадает в цепочку фильтров Tomcat 10. Поведение зависит даже от минорной версии: исходники <code>CommonAnnotationBeanPostProcessor</code> показывают, что Spring 6.0.0–6.0.10 javax-аннотации не видит, 6.0.11–6.2 снова их поддерживает, а 7.0 убрал эту поддержку.</p>
+      <p>Поэтому перевод на jakarta делают целиком и механически: рецептами OpenRewrite для Spring Boot 3, Eclipse Transformer для чужих JAR без новой версии. После этого проверяют, что в собранном образе не осталось <code>javax.servlet</code>, <code>javax.persistence</code>, <code>javax.validation</code>, <code>javax.annotation</code>: <code>mvn dependency:tree</code> и <code>jdeps</code> по JAR. Пакеты <code>javax.sql</code>, <code>javax.crypto</code>, <code>javax.net</code> — часть Java SE, их это не касается. Переименованные свойства конфигурации Boot подсказывает модуль <code>spring-boot-properties-migrator</code> в логе старта. Подробнее про запуск Boot — в <a href="boot-startup.html">Startup &amp; Packaging</a>.</p>
+      <h3>Форматы и кодировки</h3>
+      <p>С JDK 9 данные локалей берутся из CLDR (JEP 252), а в JDK 20 CLDR 42 поставил между временем и AM/PM узкий неразрывный пробел U+202F. Строка на чеке выглядит так же, а партнёр, который разбирает её старым форматом с обычным пробелом, падает. Обратная проблема тоже есть: наш парсер не принимает строку с обычным пробелом.</p>
+      <pre><code class="language-java">DateTimeFormatter fmt = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(Locale.US);
+String time = fmt.format(LocalTime.of(15, 30));
+char gap = time.charAt(time.length() - 3);                 // символ между "3:30" и "PM"
+System.out.printf("time=%s gap=U+%04X%n", time, (int) gap);
+LocalTime.parse("3:30 PM", fmt);                           // обычный пробел, как в старых тестах и клиентах
+System.out.println("default charset: " + Charset.defaultCharset());</code></pre>
+      <pre class="out">## JDK 21
+time=3:30 PM gap=U+202F
+parse '3:30 PM': DateTimeParseException
+default charset: UTF-8
+## JDK 21, -Djava.locale.providers=COMPAT
+WARNING: COMPAT locale provider will be removed in a future release
+time=3:30 PM gap=U+0020
+parse '3:30 PM': OK
+## JDK 25, -Djava.locale.providers=COMPAT
+INFO: Invalid locale provider adapter "COMPAT" ignored.
+WARNING: COMPAT locale provider has been removed
+time=3:30 PM gap=U+202F
+parse '3:30 PM': DateTimeParseException</pre>
+      <p>На 21 флаг <code>COMPAT</code> возвращал старые форматы. В JDK 23 провайдер удалили, и на 25 тот же флаг даёт строку в логе и CLDR-форматы. JVM не падает, поэтому временная заплатка исчезает незаметно. Строки из лога даты и времени опущены. Надёжная починка — явный шаблон <code>ofPattern("h:mm a", Locale.US)</code> там, где формат — часть контракта с внешней системой.</p>
+      <p>С кодировкой похожая история. До JDK 18 кодировка по умолчанию бралась из ОС, с JDK 18 это UTF-8 (JEP 400). Сервис, который в контейнере с <code>LANG=C</code> писал файлы в US-ASCII, после перехода пишет их в UTF-8. Старое поведение возвращает <code>-Dfile.encoding=COMPAT</code>: на JDK 21 с <code>LANG=C</code> он даёт <code>default charset: US-ASCII</code>, без него — <code>UTF-8</code>.</p>
+      <h3>Эргономика JVM</h3>
+      <p>JVM выбирает сборщик и размеры сама, и эти правила тоже меняются. На JDK 21 и 25 при одном доступном CPU выбирается Serial: <code>-XX:ActiveProcessorCount=1 -Xlog:gc</code> печатает <code>Using Serial</code>. Под в Kubernetes с <code>limits.cpu: 1</code> видит один CPU. В JDK 27 JVM всегда выбирает G1 (JEP 523): в <code>gcConfig.cpp</code> тега <code>jdk-27-ga</code> проверка «серверного класса» машины осталась только для сборок без G1. В том же JDK 27 компактные заголовки объектов включены по умолчанию (JEP 534), заголовок занимает 8 байт вместо 12, и heap становится меньше. JDK 27 локально не запускалась. Это хорошие изменения, но паузы, CPU и память после них другие, поэтому их сравнивают метриками. Как выбирать сборщик — в <a href="gc-choice.html">Choosing a Collector</a>, про заголовки — в <a href="object-layout.html">Object Layout &amp; Allocation</a>.</p>
+      <div class="note exp">
+        <p>Ещё два классических тихих изменения. В апреле 2021 TLS 1.0 и 1.1 отключили по умолчанию в JDK 16, 11.0.11 и 8u291 через <code>jdk.tls.disabledAlgorithms</code>: старый банковский шлюз перестал отвечать на рукопожатие. Java 8 до 8u191 не учитывала лимиты контейнера и считала heap от памяти узла: после переезда в Kubernetes такой сервис получает OOMKill.</p>
+      </div>
+    </section>
+
+    <section class="step" id="rollout">
+      <h2>Раскатка: каждый шаг меняет одно и откатывается образом</h2>
+      <p>Из предыдущих шагов следуют правила порядка. Байткод новее рантайма не запустится, значит, сначала рантайм, потом <code>--release</code>. Библиотеки со своим ASM ломаются на классах новой JDK, значит, их обновляют до смены рантайма. Spring Boot 3 требует Java 17, значит, сначала рантайм, потом фреймворк. Если склеить всё в один релиз, при проблеме непонятно, что откатывать, а откат требует пересборки. Так выглядит путь сервиса платежей с 8 на 21 и затем на 25:</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 262" role="img" aria-label="Таблица фаз миграции слева направо: сейчас, подготовка, рантайм 21, Boot 3, release 21, рантайм 25. По строкам — рантайм, --release, Spring Boot и версия class-файла. На каждом шаге меняется одна строка, а дуга внизу показывает, чем откатиться: заменой образа или откатом кода.">
+            <defs>
+              <marker id="uo-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="uo-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <!-- будущие фазы: пунктир -->
+            <g>
+              <rect x="124" y="36" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="222" y="36" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="320" y="36" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="418" y="36" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="516" y="36" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="614" y="36" width="92" height="30" rx="6" class="dg-sep" fill="none"/>
+              <rect x="124" y="74" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="222" y="74" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="320" y="74" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="418" y="74" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="516" y="74" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="614" y="74" width="92" height="30" rx="6" class="dg-sep" fill="none"/>
+              <rect x="124" y="112" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="222" y="112" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="320" y="112" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="418" y="112" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="516" y="112" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="614" y="112" width="92" height="30" rx="6" class="dg-sep" fill="none"/>
+              <rect x="124" y="150" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="222" y="150" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="320" y="150" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="418" y="150" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="516" y="150" width="92" height="30" rx="6" class="dg-sep" fill="none"/><rect x="614" y="150" width="92" height="30" rx="6" class="dg-sep" fill="none"/>
+            </g>
+            <!-- пройденные фазы: ячейки -->
+            <g data-s="1-"><rect x="124" y="36" width="92" height="30" rx="6" class="dg-cell"/><rect x="124" y="74" width="92" height="30" rx="6" class="dg-cell"/><rect x="124" y="112" width="92" height="30" rx="6" class="dg-cell"/><rect x="124" y="150" width="92" height="30" rx="6" class="dg-cell"/></g>
+            <g data-s="2-"><rect x="222" y="36" width="92" height="30" rx="6" class="dg-cell"/><rect x="222" y="74" width="92" height="30" rx="6" class="dg-cell"/><rect x="222" y="112" width="92" height="30" rx="6" class="dg-cell"/><rect x="222" y="150" width="92" height="30" rx="6" class="dg-cell"/></g>
+            <g data-s="3-"><rect x="320" y="36" width="92" height="30" rx="6" class="dg-cell"/><rect x="320" y="74" width="92" height="30" rx="6" class="dg-cell"/><rect x="320" y="112" width="92" height="30" rx="6" class="dg-cell"/><rect x="320" y="150" width="92" height="30" rx="6" class="dg-cell"/></g>
+            <g data-s="4-"><rect x="418" y="36" width="92" height="30" rx="6" class="dg-cell"/><rect x="418" y="74" width="92" height="30" rx="6" class="dg-cell"/><rect x="418" y="112" width="92" height="30" rx="6" class="dg-cell"/><rect x="418" y="150" width="92" height="30" rx="6" class="dg-cell"/></g>
+            <g data-s="5-"><rect x="516" y="36" width="92" height="30" rx="6" class="dg-cell"/><rect x="516" y="74" width="92" height="30" rx="6" class="dg-cell"/><rect x="516" y="112" width="92" height="30" rx="6" class="dg-cell"/><rect x="516" y="150" width="92" height="30" rx="6" class="dg-cell"/></g>
+            <g data-s="6-"><rect x="614" y="36" width="92" height="30" rx="6" class="dg-cell"/><rect x="614" y="74" width="92" height="30" rx="6" class="dg-cell"/><rect x="614" y="112" width="92" height="30" rx="6" class="dg-cell"/><rect x="614" y="150" width="92" height="30" rx="6" class="dg-cell"/></g>
+            <!-- что изменилось на шаге -->
+            <rect data-s="2" x="222" y="112" width="92" height="30" rx="6" class="dg-cell hit"/>
+            <rect data-s="3" x="320" y="36" width="92" height="30" rx="6" class="dg-cell hit"/>
+            <g data-s="4"><rect x="418" y="74" width="92" height="30" rx="6" class="dg-cell hit"/><rect x="418" y="112" width="92" height="30" rx="6" class="dg-cell hit"/><rect x="418" y="150" width="92" height="30" rx="6" class="dg-cell hit"/></g>
+            <g data-s="5"><rect x="516" y="74" width="92" height="30" rx="6" class="dg-cell hit"/><rect x="516" y="150" width="92" height="30" rx="6" class="dg-cell hit"/></g>
+            <rect data-s="6" x="614" y="36" width="92" height="30" rx="6" class="dg-cell hit"/>
+            <!-- откат -->
+            <path data-s="2" d="M268 184 C 268 208, 170 208, 170 188" class="dg-line ok" marker-end="url(#uo-ok)"/>
+            <path data-s="3" d="M366 184 C 366 208, 268 208, 268 188" class="dg-line ok" marker-end="url(#uo-ok)"/>
+            <path data-s="4" d="M464 184 C 464 208, 366 208, 366 188" class="dg-line bad" marker-end="url(#uo-bad)"/>
+            <path data-s="5" d="M562 184 C 562 208, 464 208, 464 188" class="dg-line ok" marker-end="url(#uo-ok)"/>
+            <path data-s="6" d="M660 184 C 660 208, 562 208, 562 188" class="dg-line ok" marker-end="url(#uo-ok)"/>
+            <!-- текст -->
+            <g class="dg-n" text-anchor="middle">
+              <text x="170" y="26" class="dg-n">сейчас</text><text x="268" y="26" class="dg-n">подготовка</text><text x="366" y="26" class="dg-n">рантайм 21</text>
+              <text x="464" y="26" class="dg-n">Boot 3</text><text x="562" y="26" class="dg-n">release 21</text><text x="660" y="26" class="dg-n">рантайм 25</text>
+            </g>
+            <text x="14" y="56" class="dg-t">рантайм</text>
+            <text x="14" y="94" class="dg-in">--release</text>
+            <text x="14" y="132" class="dg-t">Spring Boot</text>
+            <text x="14" y="170" class="dg-t">class-файл</text>
+            <g text-anchor="middle">
+              <g data-s="1-"><text x="170" y="56" class="dg-in">JDK 8</text><text x="170" y="94" class="dg-in">8</text><text x="170" y="132" class="dg-in">2.7.x</text><text x="170" y="170" class="dg-in">52</text></g>
+              <g data-s="2-"><text x="268" y="56" class="dg-in">JDK 8</text><text x="268" y="94" class="dg-in">8</text><text x="268" y="132" class="dg-in">2.7.18</text><text x="268" y="170" class="dg-in">52</text></g>
+              <g data-s="3-"><text x="366" y="56" class="dg-in">JDK 21</text><text x="366" y="94" class="dg-in">8</text><text x="366" y="132" class="dg-in">2.7.18</text><text x="366" y="170" class="dg-in">52</text></g>
+              <g data-s="4-"><text x="464" y="56" class="dg-in">JDK 21</text><text x="464" y="94" class="dg-in">17</text><text x="464" y="132" class="dg-in">3.x</text><text x="464" y="170" class="dg-in">61</text></g>
+              <g data-s="5-"><text x="562" y="56" class="dg-in">JDK 21</text><text x="562" y="94" class="dg-in">21</text><text x="562" y="132" class="dg-in">3.x</text><text x="562" y="170" class="dg-in">65</text></g>
+              <g data-s="6-"><text x="660" y="56" class="dg-in">JDK 25</text><text x="660" y="94" class="dg-in">21</text><text x="660" y="132" class="dg-in">3.x</text><text x="660" y="170" class="dg-in">65</text></g>
+              <text data-s="1" x="170" y="226" class="dg-s">точка отсчёта</text>
+              <text data-s="2" x="219" y="226" class="dg-ok">откат: прошлый образ</text>
+              <text data-s="3" x="317" y="226" class="dg-ok">откат: образ с JDK 8</text>
+              <text data-s="4" x="415" y="226" class="dg-bad">откат: revert кода</text>
+              <text data-s="5" x="513" y="226" class="dg-ok">откат: образ шага 4</text>
+              <text data-s="6" x="611" y="226" class="dg-ok">откат: образ с JDK 21</text>
+              <text data-s="5" x="513" y="244" class="dg-s">на JDK 8 уже не вернуться</text>
+            </g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Сервис на JDK 8, байткод 52, Spring Boot 2.7. Старт: инвентаризация. <code>jdeps</code> и <code>jdeprscan</code> из целевой JDK по всем JAR образа, список флагов запуска, список библиотек, которые читают байткод.</li>
+          <li>Подготовка на старой JDK. Boot до последней 2.7.18 (она совместима с Java до 21), Byte Buddy, Mockito, Lombok и агент APM обновлены до версий, которые работают и на 8, и на 21, добавлены JAXB 2.3.x. Всё это запускается на 8, поэтому откат — прошлый образ.</li>
+          <li>Меняется только рантайм. Байткод остаётся 52, поэтому откат — образ с JDK 8. На этом шаге всплывают флаги, strong encapsulation и тихие изменения, и каждое лечится отдельно.</li>
+          <li>Spring Boot 3: он требует Java 17, поэтому <code>--release 17</code>, байткод 61. javax → jakarta меняет код, и откат — это revert коммита и пересборка, а не замена образа. Это самый дорогой шаг, его отделяют ото всех остальных.</li>
+          <li>Поднимаем <code>--release</code> до 21: байткод 65, можно использовать новые API. Откатиться можно на образ шага 4, а на JDK 8 — уже нет. Поэтому этот шаг делают последним из тех, что меняют сборку.</li>
+          <li>Следующая LTS. Байткод остаётся 65, меняется только рантайм, и откат снова дешёвый. Проверки шага 3 повторяются: Unsafe, Security Manager, удалённые флаги, COMPAT.</li>
+        </ol>
+      </figure>
+      <h3>CI до прода</h3>
+      <p>Сборка идёт на одной JDK, а тесты — на матрице: текущая версия и целевая. Toolchain позволяет собирать с <code>--release 8</code> на JDK 21 и запускать тесты на другой JDK. Полезно добавить джоб на early-access сборке следующей версии с jdk.java.net: так поломки видны за полгода до релиза. В тестовый запуск на целевой JDK добавляют флаги будущего поведения: <code>--sun-misc-unsafe-memory-access=deny</code>, <code>--illegal-native-access=deny</code>, а на JDK 26+ <code>--illegal-final-field-mutation=deny</code>. Предупреждения превращаются в падения сейчас, а не через релиз.</p>
+      <pre><code class="language-text">// Gradle: собрать на одной JDK, гонять тесты ещё и на целевой
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+tasks.withType(JavaCompile).configureEach { options.release = 8 }   // байткод 52 до шага 4
+tasks.register('testOn25', Test) {
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    jvmArgs '--sun-misc-unsafe-memory-access=deny', '--illegal-native-access=deny'
+}</code></pre>
+      <p>Это фрагмент для иллюстрации, в демо темы Gradle не запускался. Toolchain, <code>release</code> и разница с <code>-source</code>/<code>-target</code> проверены запуском в <a href="build.html">Maven &amp; Gradle</a>.</p>
+      <h3>Канарейка и что сравнивать</h3>
+      <p>Смена рантайма выкатывается на долю подов, как любой рискованный деплой (<a href="deploy-strategies.html">Deploy Strategies</a>). Сравнивают не только ошибки, а то, что меняется тихо. GC: паузы, частоту, выбранный сборщик — его печатает <code>-Xlog:gc</code> первой строкой. Память процесса: RSS и heap, а не только <code>-Xmx</code>. Latency p99, CPU, время старта и прогрева JIT. Флаги сравнивают диффом <code>java -XX:+PrintFlagsFinal -version</code> старой и новой JDK с одинаковыми опциями. На подозрительных подах снимают JFR-запись.</p>
+      <h3>Когда не прыгать и куда прыгать</h3>
+      <ul>
+        <li><b>Только LTS для прода, если не готов обновляться каждые полгода.</b> LTS — 8, 11, 17, 21, 25; Oracle планирует следующую, 29, на сентябрь 2027. Не-LTS 26 и 27 Oracle поддерживает по полгода: Premier Support для 27 — до марта 2027. Premier Support для 17 закончился в сентябре 2026, для 21 — сентябрь 2028, для 25 — сентябрь 2030. Сроки поддержки у Temurin, Corretto и других вендоров свои.</li>
+        <li><b>Промежуточные LTS проходить не обязательно.</b> Прыжок 8 → 21 — это те же поломки, что 8 → 11 → 17 → 21, только сразу. Шаги делят по типу риска, как на схеме, а не по номерам версий.</li>
+        <li><b>Фреймворк задаёт потолок.</b> Spring Boot 2.7.18 совместим с Java до 21, Spring Boot 4.1 — с Java 17–26. В день релиза JDK 27 фреймворк ещё не объявил её поддержку. Новую JDK берут, когда её поддерживают фреймворк, агенты и сборка.</li>
+        <li><b>Иногда дешевле остаться.</b> Сервис, который выводят из эксплуатации, или монолит на сервере приложений Java EE 8 можно держать на 8 или 11 с коммерческой поддержкой. Остальную миграцию тогда тормозят зависимости, которые уходят с 8, а не сама JDK.</li>
+      </ul>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Поломка проявляется на своём этапе: сборка, старт JVM, первый вызов, поведение. Тесты ловят только первые; для остальных нужны <code>jdeps</code>, скрипт прода в CI и канарейка.</li>
+        <li>JVM ищет классы лениво: удалённый API падает <code>NoClassDefFoundError</code> при первом вызове, а не при старте. <code>javax</code> и <code>jakarta</code> — разные классы для JVM.</li>
+        <li>Байткод новее рантайма не запустится. Сначала меняют рантайм, потом <code>--release</code>; до смены рантайма обновляют всё, что читает байткод через ASM.</li>
+        <li>Strong encapsulation закрыла глубокую рефлексию в JDK. Лечение — обновить библиотеку; <code>--add-opens</code> на один пакет — задокументированный долг.</li>
+        <li>Integrity by default идёт маршрутом deprecated → warn → deny → удалено. Флаг, который возвращал старое на 21, на 25 может не дать JVM стартовать.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="upgrade-story" data-freq="3">
+      <h3>Расскажите, как вы переводили сервис на новую версию Java</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала инвентаризация: прогоняю <code>jdeps</code> и <code>jdeprscan</code> из целевой JDK по всем JAR образа, выписываю флаги из скрипта запуска и библиотеки, которые сами читают байткод, — Byte Buddy, Mockito, Lombok, агент APM. Их обновляю ещё на старой JDK. Потом меняю только рантайм, оставляя <code>--release</code> старым: байткод старой версии работает на новой JVM, и откат — это просто прошлый образ.</p>
+          <p>На этом шаге всплывают удалённые флаги, <code>InaccessibleObjectException</code> от рефлексии в JDK и тихие изменения вроде форматов дат. Канарейкой сравниваю GC-паузы, память, p99. Переход на Spring Boot 3 с javax → jakarta делаю отдельным релизом, потому что он меняет код. <code>--release</code> поднимаю в самом конце, когда откат на старую JDK уже не нужен.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Порядок следует из асимметрии class-файлов: JVM 21 отвергает major 69 с <code>UnsupportedClassVersionError</code>, а JVM 25 читает 65. Поэтому рантайм раньше байткода, иначе откат требует пересборки.</li>
+            <li>Даже с <code>--release 21</code> на JDK 25 падают библиотеки со старым ASM: классы самой платформы имеют версию 69, и агенту или Mockito нужно их разобрать.</li>
+            <li>Тесты на целевой JDK гоняю с будущими значениями проверок: <code>--sun-misc-unsafe-memory-access=deny</code>, <code>--illegal-native-access=deny</code>. Ещё держу джоб на early-access следующей версии.</li>
+            <li>Промежуточные LTS проходить не обязательно: 8 → 21 даёт те же поломки, что лестница через 11 и 17. Шаги режу по типу риска, а не по номерам версий.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Сервис собрали на JDK 25 без --release и выкатили на JDK 25. Через час решили откатить рантайм на 21. Что будет?</summary>
+          <p>Под не стартует: <code>UnsupportedClassVersionError ... class file version 69.0, this version of the Java Runtime only recognizes class file versions up to 65.0</code>. Откатить можно только целиком на прошлую сборку, а не заменой базового образа. Если бы сборка шла с <code>--release 21</code>, откат рантайма был бы безопасным.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>После перехода на 21 выросла память пода, ошибок нет. С чего начнёте?</summary>
+          <p>Сравню, что изменилось без моего участия. Какой сборщик выбран (<code>-Xlog:gc</code>: при одном CPU это Serial, в 27 — всегда G1), фактические размеры heap и <code>MaxRAMPercentage</code>, дифф <code>-XX:+PrintFlagsFinal</code> двух версий. Затем Native Memory Tracking (<code>-XX:NativeMemoryTracking=summary</code> и <code>jcmd VM.native_memory</code>), чтобы разделить heap, metaspace, потоки и code cache. Число потоков тоже могло измениться после обновления библиотек.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="strong-encapsulation" data-freq="3">
+      <h3>Что такое InaccessibleObjectException и как его чинить?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Это результат strong encapsulation модулей. Модуль может экспортировать пакет — тогда доступны public-классы — и открыть его — тогда разрешена глубокая рефлексия на private-членах. <code>java.base</code> экспортирует, например, <code>java.math</code>, но не открывает, поэтому <code>setAccessible(true)</code> на поле <code>BigDecimal</code> из кода на classpath бросает <code>InaccessibleObjectException</code>. В JDK 9–15 это было предупреждение <code>Illegal reflective access</code>, в 16 стал запрет по умолчанию, в 17 опцию <code>--illegal-access</code> убрали.</p>
+          <p>Чиню по порядку: обновляю библиотеку, которая лезет в JDK. Если это свой код — меняю на публичный API. Если ни то ни другое невозможно — узкий <code>--add-opens java.base/java.math=ALL-UNNAMED</code> на один пакет, и в скрипте запуска, и в настройках тестов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li><code>--add-exports</code> даёт доступ к public-типам неэкспортированного пакета, <code>--add-opens</code> — рефлексию на private. Первый не заменяет второй.</li>
+            <li><code>sun.misc.Unsafe</code> оставлен доступным через <code>jdk.unsupported</code> (JEP 260), но его методы памяти с JDK 24 печатают предупреждение и пойдут в deny.</li>
+            <li>Флаги можно передать через <code>JDK_JAVA_OPTIONS</code> или атрибут <code>Add-Opens</code> в манифесте; атрибут действует только для JAR, запущенного через <code>java -jar</code>.</li>
+            <li>В JDK 26 изменение final-поля рефлексией печатает отдельное предупреждение (JEP 500), даже если пакет открыт.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>В JAR указан Add-Opens: java.base/java.math. Сервис запускают как java -cp app.jar:libs/* com.pay.Main. Откроется ли пакет?</summary>
+          <p>Нет. Атрибуты <code>Add-Opens</code> и <code>Add-Exports</code> читает только лаунчер для главного JAR при <code>java -jar</code>. В опыте темы тот же JAR при <code>-jar</code> дал <code>trySetAccessible: true</code>, а при <code>-cp</code> — <code>false</code>. Для запуска через <code>-cp</code> флаг передают в командной строке или в <code>JDK_JAVA_OPTIONS</code>.</p>
+        </details>
+        <details data-kind="уточнение">
+          <summary>Почему в проде упало, хотя тесты на той же JDK зелёные и флаг в скрипте запуска есть?</summary>
+          <p>Чаще всего наоборот: флаг есть в <code>argLine</code> тестов, но не в манифесте деплоя, или код рефлексии выполняется только на редкой ветке, до которой тесты не доходят. Ещё вариант — флаг открывает не тот пакет: сообщение исключения называет точный модуль и пакет, и <code>--add-opens</code> должен совпадать с ним буквально.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="jakarta" data-freq="3">
+      <h3>Чем опасен переход на Spring Boot 3 и javax → jakarta?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spring Boot 3 требует Java 17 и стоит на Jakarta EE 9+, где Servlet, JPA, Bean Validation и Common Annotations переименованы из <code>javax.*</code> в <code>jakarta.*</code>. Для JVM это другие классы: старая библиотека, скомпилированная против <code>javax.servlet</code>, с Tomcat 10 не работает, даже если всё остальное совпадает.</p>
+          <p>Самое опасное — то, что не падает. Если javax-аннотации приходят транзитивно, код компилируется, а фреймворк их не ищет: <code>@javax.annotation.PostConstruct</code> не вызывается, сущность с <code>@javax.persistence.Entity</code> не видна, <code>@javax.validation.NotNull</code> не проверяется. Поэтому перевожу всё механически, рецептами OpenRewrite, и проверяю образ на остатки javax-пакетов.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Переход на Boot 3 меняет код, поэтому его откат — revert и пересборка. Его отделяю от смены рантайма: сначала Boot 2.7.18 на новой JDK, потом Boot 3.</li>
+            <li>Для чужих JAR без jakarta-версии есть Eclipse Transformer: он переписывает имена пакетов прямо в байткоде.</li>
+            <li>Поддержка javax-аннотаций плавала даже между минорными версиями: Spring 6.0.0–6.0.10 их не видит, 6.0.11–6.2 видит, 7.0 снова не видит. Опираться на неё нельзя.</li>
+            <li>Не всё javax уходит: <code>javax.sql</code>, <code>javax.crypto</code>, <code>javax.net</code> — часть Java SE и остаются.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Сервис на Spring Boot 3. Что не так с этим бином?</summary>
+          <pre><code class="language-java">import javax.annotation.PostConstruct;     // пришло транзитивно из старого клиента
+
+@Component
+public class RateCache {
+    private Map&lt;String, BigDecimal&gt; rates = Map.of();
+
+    @PostConstruct
+    void warmUp() { rates = ratesClient.loadAll(); }
+}</code></pre>
+          <p>Spring 6.0.0–6.0.10 и 7.x не ищут <code>javax.annotation.PostConstruct</code>, поэтому метод не вызовется, а кэш останется пустым без единой ошибки. В опыте темы Spring 7.0.9 вызвал только jakarta-вариант. Исправление — <code>jakarta.annotation.PostConstruct</code>, а старый API нужно убрать из зависимостей, чтобы такой импорт перестал компилироваться.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="jdk-21-25" data-freq="2">
+      <h3>Что сломается при переходе с Java 21 на 25?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Язык почти не ломает, ломается то, что обходило гарантии платформы. Методы памяти <code>sun.misc.Unsafe</code> на 25 печатают предупреждение при первом вызове, и к ним готовят <code>deny</code>. Security Manager отключён навсегда: <code>-Djava.security.manager=allow</code>, который на 21 возвращал его, на 25 не даёт JVM стартовать. Истекли старые флаги вроде <code>MaxRAMFraction</code>, удалён провайдер локалей COMPAT.</p>
+          <p>Ещё на 25 у классов самой JDK версия class-файла 69, поэтому библиотеки со старым ASM — агенты, Mockito, JaCoCo — нужно обновить заранее. Проверяю всё это тестами на 25 с флагами <code>deny</code> и прогоном скрипта запуска в CI.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>JNI тоже на маршруте: с JDK 24 предупреждение без <code>--enable-native-access</code> (JEP 472). Нативные библиотеки вроде Netty epoll или драйверов это задевает.</li>
+            <li>COMPAT на 25 не падает: JVM пишет в лог, что провайдер удалён, и использует CLDR. Заплатка из JDK 21 исчезает тихо.</li>
+            <li>За 25 идут 26 и 27: предупреждение при изменении final-полей (JEP 500), G1 по умолчанию при любом числе CPU (JEP 523), компактные заголовки (JEP 534).</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Скрипт запуска передаёт -Djava.security.manager=allow -XX:MaxRAMFraction=2. Как поведут себя JDK 21 и JDK 25?</summary>
+          <p>JDK 21 стартует с одним предупреждением: <code>MaxRAMFraction</code> deprecated. <code>allow</code> только разрешает Security Manager, и WARNING появится, когда код вызовет <code>setSecurityManager</code>. JDK 25 не создаст JVM. Первой сработает проверка флагов: <code>Unrecognized VM option 'MaxRAMFraction=2'</code>. Если убрать её, следующей будет <code>java.lang.Error: A command line option has attempted to allow or enable the Security Manager</code>. Обе ошибки видны в первые миллисекунды, если в CI запускать <code>java $JAVA_OPTS -version</code>.</p>
+        </details>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://openjdk.org/jeps/0">Индекс JEP</a> — основа урока: JEP 320 (удаление Java EE), 396 и 403 (strong encapsulation), 411 и 486 (Security Manager), 471 и 498 (Unsafe), 472 (JNI), 500 (final-поля), 523 и 534 (умолчания JDK 27). В каждом JEP раздел Risks and Assumptions описывает, что сломается.</li>
+      <li><a href="https://docs.oracle.com/en/java/javase/21/migrate/">Oracle JDK Migration Guide</a> — удалённые API и инструменты по версиям, <code>jdeps</code> и <code>jdeprscan</code>.</li>
+      <li><a href="https://www.oracle.com/java/technologies/java-se-support-roadmap.html">Oracle Java SE Support Roadmap</a> — LTS и сроки поддержки, проверено 22.10.2026.</li>
+      <li><a href="https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.0-Migration-Guide">Spring Boot 3.0 Migration Guide</a> — javax → jakarta, properties migrator, порядок перехода с 2.7.</li>
+      <li>Исходники OpenJDK, теги <code>jdk-21-ga</code>…<code>jdk-27-ga</code>: <code>runtime/arguments.cpp</code> (жизненный цикл флагов), <code>gc/shared/gcConfig.cpp</code> (выбор GC), <code>sun/misc/Unsafe.java</code> (режим по умолчанию).</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

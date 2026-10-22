@@ -409,6 +409,8 @@ window.KB_TREE = [
       { id: 'modern', title: 'Modern Java', source: 'dev.java: Java Platform Evolution; JEP по версиям 8–25', items: [
         { id: 'java-versions', freq: 2, status: 'empty', title: "What's New",
           scope: 'что появилось в 8, 11, 17, 21, 25: var, text blocks, switch expressions, HttpClient, Sequenced Collections' },
+        { id: 'java-upgrade', freq: 2, status: 'draft', title: 'Java Upgrade',
+          scope: 'путь 8 → 11 → 17 → 21 → 25, где ломается: сборка, старт, первый вызов, поведение; удалённые модули JAXB и JAX-WS, NoClassDefFoundError, версия class-файла и UnsupportedClassVersionError, --release, ASM в библиотеках, strong encapsulation, --add-opens, InaccessibleObjectException, sun.misc.Unsafe и Security Manager в 24–25, флаги JVM deprecated/obsolete/expired, javax → jakarta и Spring Boot 3, CLDR и UTF-8 по умолчанию, jdeps и jdeprscan, multi-release jar, поэтапная раскатка и откат' },
         { id: 'records', freq: 2, status: 'draft', title: 'Records',
           scope: 'семантика record, compact constructor, ограничения, record как DTO и value object' },
         { id: 'sealed-patterns', freq: 2, status: 'draft', title: 'Sealed & Pattern Matching',
