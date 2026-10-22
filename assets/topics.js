@@ -199,6 +199,8 @@ window.KB_TREE = [
           scope: 'связность компонентов REP, CCP и CRP, ацикличность зависимостей, стабильность и абстрактность, package by feature, проверка границ ArchUnit и Spring Modulith' },
         { id: 'app-architecture', freq: 2, status: 'draft', title: 'Clean & Hexagonal Architecture',
           scope: 'слоистая, гексагональная, clean architecture, направление зависимостей, где живёт бизнес-логика' },
+        { id: 'project-structure', freq: 2, status: 'draft', title: 'Project Structure',
+          scope: 'package by layer, package by feature, ports and adapters, package by component, public и package-private, screaming architecture, подпакеты и Spring Modulith, модули Gradle и Maven, api и implementation, переход с layer на feature, FreezingArchRule' },
         { id: 'ddd', freq: 2, status: 'draft', title: 'DDD',
           scope: 'ограниченный контекст, агрегат, сущность и value object, доменные события' },
       ] },

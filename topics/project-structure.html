@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Project Structure · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="project-structure">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Design: Project Structure</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Раскладка пакетов решает не только, где искать файл, но и что компилятор разрешит соседнему коду. Класс без модификатора доступа виден только своему пакету. Поэтому граница держится там, где рядом лежит код одной возможности, а наружу открыт один вход. Если все типы public, четыре известные раскладки отличаются только именами папок. Где компилятора не хватает, границу проверяет тест Spring Modulith или ArchUnit, а дальше — отдельный модуль сборки.</p>
+    </div>
+
+    <section class="step" id="problem">
+      <h2>Обход хранилища прошёл ревью, потому что компилятору нечего было возразить</h2>
+      <p>Платёжный сервис разложен привычно: <code>web</code>, <code>service</code>, <code>repository</code>. Через год в каждом пакете лежат десятки классов платежей, возвратов, выплат и отчётов вперемешку. Новому разработчику нужен экран возврата. Ему проще прочитать платёж прямо из хранилища, чем разбираться в <code>PaymentService</code>:</p>
+      <pre><code class="language-text">kb.layer
+├── web
+│   ├── PaymentController.java
+│   └── RefundController.java        // новый класс
+├── service
+│   └── PaymentService.java          // правила: сумма, статусы, лимит возврата
+├── repository
+│   ├── PaymentRepository.java
+│   └── JdbcPaymentRepository.java
+└── model
+    └── Payment.java</code></pre>
+      <pre><code class="language-java">package kb.layer.web;
+
+import kb.layer.repository.PaymentRepository;
+
+public class RefundController {                   // Новый класс: читает платёж мимо сервиса.
+    private final PaymentRepository store;        // Тип из чужого пакета: javac проверит доступ.
+
+    public RefundController(PaymentRepository store) { this.store = store; }
+
+    public String status(String id) { return store.find(id).status(); }
+}</code></pre>
+      <p>Код компилируется, тесты зелёные, в diff один файл. Правила возврата живут в <code>PaymentService</code>, а новый экран их не вызывает. Компилятор не мог возразить: <code>PaymentRepository</code> обязан быть public, потому что им пользуется <code>PaymentService</code> из соседнего пакета <code>service</code>. Тип, открытый одному соседу, открыт всему приложению.</p>
+      <p>Вторая проблема видна по дереву. Верхние папки сообщают «Spring MVC с базой данных», а не «платежи и возвраты». Возврат размазан по трём каталогам: правка одного сценария трогает три папки, а в каждой рядом лежит чужой код.</p>
+      <p>Отсюда вопрос собеседования: «как ты раскладываешь проект по пакетам и почему». Ответ «по слоям» или «по фичам» — только половина. Вторая половина — что твоя раскладка запрещает и чем это проверяется. Simon Brown в главе «The Missing Chapter» книги Мартина «Чистая архитектура» сравнивает четыре раскладки одного сервиса. Дальше они разобраны на этом платёжном примере.</p>
+      <p>Все примеры лежат в <code>examples/project-structure</code>. Первое демо — <code>java StructureDemo.java</code>, нужен только JDK 21.</p>
+    </section>
+
+    <section class="step" id="four-layouts">
+      <h2>Четыре раскладки отличаются тем, что лежит рядом и что открыто наружу</h2>
+      <p><b>Package by layer</b> режет приложение горизонтально, по технической роли класса. Это раскладка из прошлого шага. Она понятна любому, кто видел Spring-проект, и для маленького сервиса её хватает.</p>
+      <p><b>Package by feature</b> режет вертикально, по возможности системы. Всё для платежей лежит в одном пакете: контроллер, сервис, хранилище, модель. Раз соседи в одном пакете, public им не нужен. У Брауна наружу смотрит один тип — контроллер.</p>
+      <pre><code class="language-text">kb.feature
+├── payments
+│   ├── PaymentController.java       // public: единственный вход
+│   ├── PaymentService.java
+│   ├── PaymentRepository.java
+│   ├── JdbcPaymentRepository.java
+│   └── Payment.java
+└── refunds
+    └── …</code></pre>
+      <p><b>Ports and adapters</b> делит код на ядро и всё остальное. Ядро <code>domain</code> не знает о вебе и базе и объявляет порт <code>Payments</code>; адаптер <code>database</code> его реализует. Браун называет порт по-доменному, <code>Payments</code>, а не <code>PaymentRepository</code>. Почему зависимости смотрят внутрь, разобрано в <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a>. Здесь важнее другое: что из этого должно быть public.</p>
+      <pre><code class="language-text">kb.hex
+├── domain                           // ядро
+│   ├── Payment.java                 // public: его видят адаптеры
+│   ├── PaymentService.java          // public: его вызывает web
+│   └── Payments.java                // public: порт, его реализует database
+├── web
+│   └── PaymentController.java
+└── database
+    └── JdbcPayments.java            // адаптер скрыт, снаружи только порт</code></pre>
+      <p><b>Package by component</b> — вариант самого Брауна. Правила и хранение платежей собраны в один пакет за одним интерфейсом <code>PaymentComponent</code>, а веб лежит отдельно. Веб вынесен потому, что способов доставки бывает несколько: REST, слушатель Kafka, задача по расписанию. Все они вызывают один и тот же компонент и не могут дотянуться до его хранилища.</p>
+      <pre><code class="language-text">kb.component
+├── payments                         // компонент: правила + хранение
+│   ├── PaymentComponent.java        // public: единственный вход
+│   ├── PaymentComponentImpl.java
+│   ├── PaymentRepository.java
+│   ├── JdbcPaymentRepository.java
+│   └── Payment.java                 // public: результат для вызывающих
+└── web
+    └── PaymentController.java</code></pre>
+      <table class="mx">
+        <thead><tr><th>Раскладка</th><th>Верхние пакеты</th><th>Что обязано быть public</th><th>Правка возврата трогает</th></tr></thead>
+        <tbody>
+          <tr><td>by layer</td><td>web, service, repository</td><td>всё, чем пользуется соседний слой</td><td>три каталога</td></tr>
+          <tr><td>by feature</td><td>payments, refunds</td><td>вход фичи</td><td>один пакет</td></tr>
+          <tr><td>ports and adapters</td><td>domain, web, database</td><td>сервисы, модель и порты ядра</td><td>ядро и адаптер</td></tr>
+          <tr><td>by component</td><td>payments, web</td><td>интерфейс компонента и его результат</td><td>компонент и контроллер</td></tr>
+        </tbody>
+      </table>
+      <h3>Кричащая архитектура</h3>
+      <p>У Мартина есть глава «Screaming Architecture»: чертёж библиотеки сразу говорит «библиотека», а не «кирпич и бетон». Так и дерево проекта должно говорить «платежи, возвраты, выплаты», а не «контроллеры, сервисы, репозитории». В раскладках по фичам и компонентам верхние папки называют предметную область, а Spring виден только в аннотациях внутри.</p>
+      <p>Польза практическая. Задача «новое правило возврата» начинается с поиска кода. Если ответ — одна папка <code>refunds</code>, новый человек находит его за минуту, а ревьюер видит, что правка не вышла за пределы фичи. Фреймворк при этом остаётся деталью: его можно обновить, не переименовав ни одного пакета.</p>
+    </section>
+
+    <section class="step" id="compiler">
+      <h2>Компилятор держит границу только там, где тип не public</h2>
+      <p>Тип без модификатора доступа — package-private — виден только классам того же пакета. Именно того же, а не вложенного: для javac <code>payments</code> и <code>payments.persistence</code> — два несвязанных пакета, точка в имени ничего не даёт. Значит, внутри одного модуля сборки Java даёт ровно одну границу, которую проверяет компилятор: границу пакета.</p>
+      <p>Проверим это на всех четырёх раскладках. Демо добавляет в каждую тот же <code>RefundController</code> и смотрит, пустит ли его javac. Вот объявления типов, к которым он тянется:</p>
+      <pre><code class="language-java">// layer: repository/PaymentRepository.java
+public interface PaymentRepository { … }         // Сервис в другом пакете: только public.
+// feature: payments/PaymentRepository.java
+interface PaymentRepository { … }                // Все соседи в том же пакете.
+// hex: domain/Payments.java и database/JdbcPayments.java
+public interface Payments { … }                  // Исходящий порт: его реализует адаптер из database.
+class JdbcPayments implements Payments { … }     // Адаптер: снаружи виден только через порт.
+// component: payments/PaymentRepository.java
+interface PaymentRepository { … }                // Видят только классы компонента.</code></pre>
+      <figure class="fig play">
+        <div class="fig-box">
+            <svg class="dg" viewBox="0 0 720 312" role="img" aria-label="Четыре колонки: package by layer, package by feature, ports and adapters, package by component. В каждой пакеты нарисованы рамками, public-типы выделены. RefundController пытается прочитать хранилище платежей. В layer обход к public PaymentRepository компилируется, в ports and adapters компилируется обход к public-порту Payments. Обходы к package-private PaymentRepository в feature и component и к адаптеру JdbcPayments javac не пускает. Когда все типы становятся public, компилируются все пять обходов.">
+              <defs>
+                <marker id="ps-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+                <marker id="ps-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+              </defs>
+              <!-- разделители колонок -->
+              <path d="M184 10 L 184 302" class="dg-sep"/>
+              <path d="M360 10 L 360 302" class="dg-sep"/>
+              <path d="M536 10 L 536 302" class="dg-sep"/>
+              <!-- by layer -->
+              <rect x="14" y="32" width="164" height="80" rx="8" class="dg-sep" fill="none"/>
+              <rect x="20" y="47" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="20" y="79" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="14" y="120" width="164" height="48" rx="8" class="dg-sep" fill="none"/>
+              <rect x="20" y="135" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="14" y="176" width="164" height="48" rx="8" class="dg-sep" fill="none"/>
+              <rect x="20" y="191" width="140" height="26" rx="6" class="dg-cell"/>
+              <!-- by feature -->
+              <rect x="190" y="32" width="164" height="112" rx="8" class="dg-sep" fill="none"/>
+              <rect x="196" y="47" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="196" y="79" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="196" y="111" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="190" y="152" width="164" height="48" rx="8" class="dg-sep" fill="none"/>
+              <rect x="196" y="167" width="140" height="26" rx="6" class="dg-cell"/>
+              <!-- ports & adapters -->
+              <rect x="366" y="32" width="164" height="80" rx="8" class="dg-sep" fill="none"/>
+              <rect x="372" y="47" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="372" y="79" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="366" y="120" width="164" height="80" rx="8" class="dg-sep" fill="none"/>
+              <rect x="372" y="135" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="372" y="167" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="366" y="208" width="164" height="48" rx="8" class="dg-sep" fill="none"/>
+              <rect x="372" y="223" width="140" height="26" rx="6" class="dg-cell"/>
+              <!-- by component -->
+              <rect x="542" y="32" width="164" height="80" rx="8" class="dg-sep" fill="none"/>
+              <rect x="548" y="47" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="548" y="79" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="542" y="120" width="164" height="80" rx="8" class="dg-sep" fill="none"/>
+              <rect x="548" y="135" width="140" height="26" rx="6" class="dg-cell"/>
+              <rect x="548" y="167" width="140" height="26" rx="6" class="dg-cell"/>
+              <!-- public-типы как написано -->
+              <g data-s="1-">
+                <rect x="20" y="47" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="20" y="135" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="20" y="191" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="196" y="47" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="372" y="47" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="372" y="135" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="372" y="167" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="548" y="47" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="548" y="135" width="140" height="26" rx="6" class="dg-cell hit"/>
+              </g>
+              <!-- шаг 4: public стали все типы сервиса -->
+              <g data-s="4">
+                <rect x="196" y="79" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="196" y="111" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="372" y="223" width="140" height="26" rx="6" class="dg-cell hit"/>
+                <rect x="548" y="167" width="140" height="26" rx="6" class="dg-cell hit"/>
+              </g>
+              <!-- шаг 2-: обходы, которые компилируются как написано -->
+              <path data-s="2-" d="M160 92 C 176 92, 176 204, 164 204" class="dg-line bad" marker-end="url(#ps-bad)"/>
+              <path data-s="2-" d="M512 88 C 524 88, 524 180, 516 180" class="dg-line bad" marker-end="url(#ps-bad)"/>
+              <!-- шаг 3: javac останавливает обход на границе пакета -->
+              <g data-s="3">
+                <path d="M336 180 C 348 180, 348 164, 348 148" class="dg-line" marker-end="url(#ps-n)"/>
+                <path d="M512 96 C 532 96, 532 150, 532 204" class="dg-line" marker-end="url(#ps-n)"/>
+                <path d="M688 92 C 700 92, 700 104, 700 116" class="dg-line" marker-end="url(#ps-n)"/>
+              </g>
+              <!-- шаг 4: без package-private обходы доходят до цели -->
+              <g data-s="4">
+                <path d="M336 180 C 350 180, 350 124, 340 124" class="dg-line bad" marker-end="url(#ps-bad)"/>
+                <path d="M512 96 C 534 96, 534 236, 516 236" class="dg-line bad" marker-end="url(#ps-bad)"/>
+                <path d="M688 92 C 702 92, 702 180, 692 180" class="dg-line bad" marker-end="url(#ps-bad)"/>
+              </g>
+              <!-- текст: заголовки, пакеты, типы -->
+              <text x="14" y="20" class="dg-cap">BY LAYER</text>
+              <text x="22" y="43" class="dg-n">web</text>
+              <text x="22" y="131" class="dg-n">service</text>
+              <text x="22" y="187" class="dg-n">repository</text>
+              <text x="190" y="20" class="dg-cap">BY FEATURE</text>
+              <text x="198" y="43" class="dg-n">payments</text>
+              <text x="198" y="163" class="dg-n">refunds</text>
+              <text x="366" y="20" class="dg-cap">PORTS &amp; ADAPTERS</text>
+              <text x="374" y="43" class="dg-n">web</text>
+              <text x="374" y="131" class="dg-n">domain</text>
+              <text x="374" y="219" class="dg-n">database</text>
+              <text x="542" y="20" class="dg-cap">BY COMPONENT</text>
+              <text x="550" y="43" class="dg-n">web</text>
+              <text x="550" y="131" class="dg-n">payments</text>
+              <g text-anchor="middle">
+                <text x="90" y="64" class="dg-in">PaymentController</text>
+                <text x="90" y="96" class="dg-in">RefundController</text>
+                <text x="90" y="152" class="dg-in">PaymentService</text>
+                <text x="90" y="208" class="dg-in">PaymentRepository</text>
+                <text x="266" y="64" class="dg-in">PaymentController</text>
+                <text x="266" y="96" class="dg-in">PaymentService</text>
+                <text x="266" y="128" class="dg-in">PaymentRepository</text>
+                <text x="266" y="184" class="dg-in">RefundController</text>
+                <text x="442" y="64" class="dg-in">PaymentController</text>
+                <text x="442" y="96" class="dg-in">RefundController</text>
+                <text x="442" y="152" class="dg-in">PaymentService</text>
+                <text x="442" y="184" class="dg-in">Payments</text>
+                <text x="442" y="240" class="dg-in">JdbcPayments</text>
+                <text x="618" y="64" class="dg-in">PaymentController</text>
+                <text x="618" y="96" class="dg-in">RefundController</text>
+                <text x="618" y="152" class="dg-in">PaymentComponent</text>
+                <text x="618" y="184" class="dg-in">PaymentRepository</text>
+              </g>
+              <!-- итог компиляции: отдельный слой на каждый шаг -->
+              <text data-s="2-" x="14" y="276" class="dg-bad">компилируется</text>
+              <text data-s="2-" x="366" y="276" class="dg-bad">порт: компилируется</text>
+              <text data-s="3" x="190" y="276" class="dg-ok">javac: не public</text>
+              <text data-s="3" x="366" y="294" class="dg-ok">адаптер: не public</text>
+              <text data-s="3" x="542" y="276" class="dg-ok">javac: не public</text>
+              <text data-s="4" x="190" y="276" class="dg-bad">компилируется</text>
+              <text data-s="4" x="366" y="294" class="dg-bad">адаптер: компилируется</text>
+              <text data-s="4" x="542" y="276" class="dg-bad">компилируется</text>
+            </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Один сервис в четырёх раскладках. Рамки — пакеты, зелёные ячейки — public-типы. RefundController хочет прочитать платёж прямо из хранилища.</li>
+          <li>В layer обход компилируется: PaymentRepository public, иначе его не увидит сервис. В ports and adapters так же доступен порт Payments: web берёт его и обходит PaymentService.</li>
+          <li>Обходы к package-private PaymentRepository в feature и component и к адаптеру JdbcPayments javac останавливает на границе пакета.</li>
+          <li>Все типы стали public — и компилируются все пять обходов. От раскладок остались только имена папок.</li>
+        </ol>
+      </figure>
+      <p>Демо компилирует каждый вариант с обходом через <code>javax.tools.JavaCompiler</code> и печатает первую ошибку. Второй прогон добавляет <code>public</code> всем типам без модификатора и повторяет то же самое:</p>
+      <pre><code class="language-java">for (boolean allPublic : new boolean[]{false, true}) {
+    for (Case c : CASES) {                                    // Пять обходов из схемы.
+        List&lt;Path&gt; withShortcut = new ArrayList&lt;&gt;(variant);  // Исходники раскладки…
+        withShortcut.addAll(sources(base.resolve("shortcuts").resolve(c.shortcut()))); // …и RefundController.
+        String error = compile(withShortcut, allPublic, out);  // Первая ошибка javac или null.
+        // …печать результата
+    }
+}
+// Только во втором прогоне: типы без модификатора доступа становятся public.
+code = code.replaceAll("(?m)^(final |abstract )?(class|interface|record|enum) ", "public $1$2 ");</code></pre>
+      <pre class="out">== as written
+layer      RefundController -&gt; PaymentRepository  compiles
+feature    RefundController -&gt; PaymentRepository  error: kb.feature.payments.PaymentRepository is not public in kb.feature.payments; cannot be accessed from outside package
+hex        RefundController -&gt; Payments (port)    compiles
+hex        RefundController -&gt; JdbcPayments       error: kb.hex.database.JdbcPayments is not public in kb.hex.database; cannot be accessed from outside package
+component  RefundController -&gt; PaymentRepository  error: kb.component.payments.PaymentRepository is not public in kb.component.payments; cannot be accessed from outside package
+== everything public
+layer      RefundController -&gt; PaymentRepository  compiles
+feature    RefundController -&gt; PaymentRepository  compiles
+hex        RefundController -&gt; Payments (port)    compiles
+hex        RefundController -&gt; JdbcPayments       compiles
+component  RefundController -&gt; PaymentRepository  compiles</pre>
+      <p>В layer и в ports and adapters обход прошёл не по недосмотру, а по устройству раскладки: тип, которым пользуется соседний пакет, обязан быть public. В гексагональной раскладке порт <code>Payments</code> лежит в ядре и реализуется в <code>database</code>, поэтому web может взять его напрямую и пропустить правила <code>PaymentService</code>. Компилятор такое не запретит; нужна проверка структуры.</p>
+      <p>Второй прогон — главная мысль главы Брауна. Если всё public, пакеты становятся способом организации кода, как папки, а не способом его скрыть. Так и выходит в живых проектах: шаблон нового класса в IDE начинается с <code>public class</code>, и через год раскладка по фичам защищает не больше, чем раскладка по слоям.</p>
+      <div class="trap">
+        <p class="myth">Package by feature сам по себе изолирует фичи друг от друга.</p>
+        <p class="fact">Только если внутри фичи типы package-private. С public-типами фича — это папка: обход из соседней фичи компилируется, как во втором прогоне демо.</p>
+      </div>
+      <h3>Цена закрытой фичи</h3>
+      <p>У раскладки по фичам две честные оговорки. Первая: если public только контроллер, другим фичам платёж недоступен иначе как по HTTP. Возвратам нужны данные платежа, поэтому на практике открывают <code>PaymentService</code> или отдельный фасад, и раскладка становится раскладкой по компонентам с веб-слоем внутри.</p>
+      <p>Вторая: внутри пакета компилятор слоёв не видит. <code>PaymentController</code> в пакете <code>payments</code> может позвать <code>PaymentRepository</code> напрямую, и javac промолчит. Package by component выносит веб в отдельный пакет как раз затем, чтобы этот обход стал ошибкой компиляции. Браун предпочитает именно такие границы: ошибку компиляции видно сразу в IDE, а правило в отдельном анализаторе срабатывает позже и только если его запускают.</p>
+      <details class="deep">
+        <summary>Под капотом: что именно проверяет доступ</summary>
+        <p>Правила доступа описаны в JLS §6.6. Для типа верхнего уровня выбор из двух: public или package-private. Про вложенность пакетов JLS §7.1 говорит прямо: иерархия имён нужна для удобной организации, а особого смысла сама по себе не имеет. Поэтому <code>payments.internal</code> не получает доступа к package-private типам <code>payments</code>, и наоборот.</p>
+        <p>JVM проверяет доступ ещё раз при связывании. Если класс собрали, а потом поменяли модификатор у зависимости и не пересобрали вызывающий код, вызов упадёт с <code>IllegalAccessError</code>. Рефлексия устроена иначе: в приложении на classpath все классы лежат в безымянном модуле, и <code>setAccessible(true)</code> открывает package-private конструктор. Поэтому Spring, Jackson и Hibernate создают такие объекты. В модульном приложении JPMS для этого понадобится <code>opens</code>.</p>
+      </details>
+    </section>
+
+    <section class="step" id="spring">
+      <h2>Spring работает с package-private, а разросшуюся фичу держит тест Spring Modulith</h2>
+      <p>Частый страх: Spring не найдёт непубличный класс. Сканирование компонентов читает class-файлы пакета и создаёт бины рефлексией, поэтому package-private класс с package-private конструктором — обычный бин. Тесты кладут в тот же пакет в <code>src/test/java</code>, и им доступно всё, что видно соседям по пакету. Последняя строка Maven-демо поднимает <code>AnnotationConfigApplicationContext</code> и вызывает возврат через такой бин:</p>
+      <pre><code class="language-java">package kb.shop.refunds;
+
+import kb.shop.payments.PaymentService;           // API модуля payments.
+import org.springframework.stereotype.Service;
+
+@Service
+class RefundService {                             // package-private бин: Spring его найдёт и внедрит.
+    private final PaymentService payments;
+
+    RefundService(PaymentService payments) { this.payments = payments; }
+
+    String refund(String id) { return "REFUNDED " + payments.find(id).amount(); }
+}</code></pre>
+      <pre class="out">fixed spring: REFUNDED 2500</pre>
+      <p>Настоящая проблема — размер. Пакет <code>payments</code> дорастает до сорока классов: контроллеры, сервисы, мапперы, сущности, клиенты банка. Хочется подпакетов <code>payments.web</code> и <code>payments.persistence</code>. Но подпакет для javac чужой: <code>PaymentRepository</code> из <code>payments.persistence</code> придётся сделать public, иначе его не увидит <code>PaymentService</code> из <code>payments</code>. Вместе с ним хранилище увидят и возвраты, и отчёты.</p>
+      <p>Выходов три. Можно держать пакет плоским, пока он читается: тридцать классов одной фичи в одном пакете — это нормально. Можно ввести подпакеты и проверять границу тестом. Можно вынести часть в модуль сборки — это следующий шаг. Для второго варианта в Spring есть Spring Modulith: он считает модулями прямые подпакеты пакета приложения, public-типы корневого пакета модуля — его API, а всё вложенное глубже — внутренностями, даже если оно public.</p>
+      <pre><code class="language-java">// broken/kb/shop/refunds/RefundService.java
+import kb.shop.payments.persistence.PaymentRepository; // Внутренний пакет чужого модуля.
+
+// StructureCheck.java: в обычном проекте это одна строка в тесте —
+// ApplicationModules.of(Application.class).verify();
+ApplicationModules modules = ApplicationModules.of("kb.shop");
+var violations = modules.detectViolations();       // verify() бросил бы это же исключением.</code></pre>
+      <pre class="out">broken modules: payments, refunds
+broken verify: FAIL x4 Module 'refunds' depends on non-exposed type kb.shop.payments.persistence.PaymentRepository within module 'payments'!
+fixed modules: payments, refunds
+fixed verify: PASS</pre>
+      <p>javac этот импорт пропустил: <code>PaymentRepository</code> public. Modulith нашёл четыре места в байткоде, где <code>refunds</code> держит чужой внутренний тип: поле, параметры конструктора, вызов метода. В исправленном варианте возвраты ходят через <code>PaymentService</code>, и проверка проходит. Демо вызывает <code>ApplicationModules</code> без запуска приложения; в проекте тест подключает <code>spring-modulith-starter-test</code>.</p>
+      <p>Так тест возвращает то, что Java теряет на подпакетах. Цена — граница держится, только пока тест запускают в CI, и узнаёшь о нарушении после сборки, а не при наборе кода. Как открыть подпакет намеренно через <code>@NamedInterface</code>, ограничить соседей через <code>allowedDependencies</code> и написать те же правила на ArchUnit, разобрано в <a href="components.html#verify-boundaries">Components &amp; Modules</a>.</p>
+    </section>
+
+    <section class="step" id="build-modules">
+      <h2>Модуль сборки делает границу физической: чего нет в зависимостях, того не видно</h2>
+      <p>Следующая ступень — отдельные модули Gradle или Maven. Каждый модуль компилируется со своим classpath. Если класса нет на classpath, javac не находит пакет вовсе: проверять нечего, импорт просто не собирается. Демо в <code>examples/project-structure/gradle</code> собирает три модуля, и <code>app</code> пытается импортировать хранилище в обход <code>payments</code>:</p>
+      <pre><code class="language-text">// settings.gradle.kts
+include("app", "payments", "payments-persistence")
+
+// app/build.gradle.kts
+dependencies {
+    implementation(project(":payments"))             // persistence сюда не попадает.
+}
+
+// payments/build.gradle.kts
+dependencies {
+    // implementation: persistence нужен payments, но не попадает на classpath его потребителей.
+    // С -Pleak демо подключает его через api, как compile-зависимость в Maven, — и app его видит.
+    if (providers.gradleProperty("leak").isPresent) {
+        api(project(":payments-persistence"))
+    } else {
+        implementation(project(":payments-persistence"))
+    }
+}</code></pre>
+      <pre class="out">== implementation
+kb/shop/app/RefundController.java:3: error: package kb.shop.persistence does not exist
+== api
+app compiles</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 232" role="img" aria-label="Две половины. В обеих app зависит от payments, payments зависит от payments-persistence. Слева payments подключает persistence через implementation, и на classpath компиляции app лежит только payments.jar: импорт persistence в app не собирается. Справа payments подключает persistence через api, persistence.jar попадает на classpath app, и импорт компилируется.">
+            <defs>
+              <marker id="pg-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="14" y="22" class="dg-cap">IMPLEMENTATION</text>
+            <text x="376" y="22" class="dg-cap bad">API</text>
+            <path d="M360 10 L 360 222" class="dg-sep"/>
+
+            <!-- слева: модули и classpath app -->
+            <rect x="14" y="40" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="14" y="104" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="14" y="168" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="206" y="40" width="144" height="98" rx="8" class="dg-sep" fill="none"/>
+            <rect x="216" y="58" width="124" height="26" rx="6" class="dg-cell"/>
+            <rect x="216" y="94" width="124" height="26" rx="6" class="dg-sep" fill="none"/>
+
+            <!-- справа: те же модули, persistence протёк -->
+            <rect x="376" y="40" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="376" y="104" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="376" y="168" width="170" height="34" rx="7" class="dg-box"/>
+            <rect x="568" y="40" width="138" height="98" rx="8" class="dg-sep" fill="none"/>
+            <rect x="575" y="58" width="124" height="26" rx="6" class="dg-cell"/>
+            <rect x="575" y="94" width="124" height="26" rx="6" class="dg-cell miss"/>
+
+            <!-- зависимости модулей и путь на classpath app -->
+            <path d="M99 74 L 99 100" class="dg-line" marker-end="url(#pg-n)"/>
+            <path d="M99 138 L 99 164" class="dg-line" marker-end="url(#pg-n)"/>
+            <path d="M184 57 L 202 57" class="dg-line" marker-end="url(#pg-n)"/>
+            <path d="M461 74 L 461 100" class="dg-line" marker-end="url(#pg-n)"/>
+            <path d="M461 138 L 461 164" class="dg-line bad" marker-end="url(#pg-n)"/>
+            <path d="M546 57 L 564 57" class="dg-line" marker-end="url(#pg-n)"/>
+
+            <!-- текст -->
+            <g text-anchor="middle">
+              <text x="99" y="62" class="dg-t">app</text>
+              <text x="99" y="126" class="dg-t">payments</text>
+              <text x="99" y="190" class="dg-t">payments-persistence</text>
+              <text x="278" y="76" class="dg-in">payments.jar</text>
+              <text x="278" y="112" class="dg-s">нет</text>
+              <text x="461" y="62" class="dg-t">app</text>
+              <text x="461" y="126" class="dg-t">payments</text>
+              <text x="461" y="190" class="dg-t">payments-persistence</text>
+              <text x="637" y="76" class="dg-in">payments.jar</text>
+              <text x="637" y="112" class="dg-in">persistence.jar</text>
+            </g>
+            <text x="216" y="52" class="dg-n">classpath app</text>
+            <text x="575" y="52" class="dg-n">classpath app</text>
+            <text x="107" y="92" class="dg-n">implementation</text>
+            <text x="107" y="156" class="dg-n">implementation</text>
+            <text x="469" y="92" class="dg-n">implementation</text>
+            <text x="469" y="156" class="dg-bad">api</text>
+            <text x="206" y="168" class="dg-ok">import persistence:</text>
+            <text x="206" y="186" class="dg-ok">не собирается</text>
+            <text x="568" y="168" class="dg-bad">import persistence:</text>
+            <text x="568" y="186" class="dg-bad">компилируется</text>
+          </svg>
+        </div>
+        <figcaption>Зависимость сборки — это не только «payments может пользоваться persistence», но и «кому persistence достанется вместе с payments».</figcaption>
+      </figure>
+      <p>В Gradle <code>implementation</code> не передаёт зависимость дальше, <code>api</code> передаёт. В Maven зависимость со scope <code>compile</code> транзитивна, то есть ведёт себя как <code>api</code>: <code>app</code> увидит persistence через <code>payments</code>. Поймать это помогает <code>mvn dependency:analyze</code> — он печатает «Used undeclared dependencies» для классов, которыми модуль пользуется через чужую зависимость.</p>
+      <p>Браун для ports and adapters предлагает два дерева исходников: <code>domain</code> и <code>infrastructure</code>. Ядро тогда физически не может импортировать Spring Web или JPA — их нет в его зависимостях. Но внутри <code>infrastructure</code> адаптеры видят друг друга: веб-адаптер может позвать адаптер базы, минуя ядро. Браун называет это анти-паттерном «Périphérique», по кольцевой дороге вокруг Парижа: движение идёт по кругу снаружи и в центр не заходит.</p>
+      <p>Модуль сборки — самая крепкая граница внутри одного приложения, но и самая дорогая. Каждый модуль — свой файл сборки, свои зависимости, медленнее импорт в IDE. Циклы между модулями Gradle и Maven не собирают, и это плюс. Выносить модуль стоит, когда логическая граница уже устоялась и проверена тестом, а не наугад в первый день проекта.</p>
+    </section>
+
+    <section class="step" id="migration">
+      <h2>Живой проект переводят по одной фиче, а новое правило сначала замораживают</h2>
+      <p>Переложить триста файлов одним PR — значит получить конфликты во всех открытых ветках, ревью, которое никто не прочтёт, и сломанный <code>git blame</code>. Переход делают постепенно, и первым шагом идёт правило, а не перенос файлов.</p>
+      <p>Проблема правила в том, что в старом коде нарушений сотни, и тест сразу красный. ArchUnit решает это заморозкой: <code>FreezingArchRule</code> при первом запуске записывает все текущие нарушения в хранилище, а дальше падает только на новых. Во втором Maven-демо правило запрещает трогать <code>payments.persistence</code> снаружи модуля. Вариант <code>later</code> — это <code>broken</code> плюс новый <code>ReportService</code> с тем же обходом:</p>
+      <pre><code class="language-java">ArchRule rule = FreezingArchRule.freeze(noClasses()
+        .that().resideOutsideOfPackage("kb.shop.payments..")
+        .should().dependOnClassesThat().resideInAPackage("kb.shop.payments.persistence.."));
+rule.check(new ClassFileImporter().importPath(classes));</code></pre>
+      <pre><code class="language-text"># archunit.properties. Хранилище замороженных нарушений коммитят вместе с тестом.
+freeze.store.default.path=target/archunit_store
+freeze.store.default.allowStoreCreation=true</code></pre>
+      <pre class="out">broken frozen rule: PASS
+broken stored violations: 3
+later frozen rule: FAIL Constructor &lt;kb.shop.reports.ReportService.&lt;init&gt;(kb.shop.payments.persistence.PaymentRepository)&gt; has parameter of type &lt;kb.shop.payments.persistence.PaymentRepository&gt; in (ReportService.java:0)
+later frozen rule: FAIL Field &lt;kb.shop.reports.ReportService.payments&gt; has type &lt;kb.shop.payments.persistence.PaymentRepository&gt; in (ReportService.java:0)
+later frozen rule: FAIL Method &lt;kb.shop.reports.ReportService.total(java.lang.String)&gt; calls method &lt;kb.shop.payments.persistence.PaymentRepository.find(java.lang.String)&gt; in (ReportService.java:10)
+later stored violations: 3
+fixed frozen rule: PASS
+fixed stored violations: 0</pre>
+      <p>Первый запуск записал три нарушения старого <code>RefundService</code> и прошёл. В <code>later</code> старый обход по-прежнему заморожен, а новый <code>ReportService</code> валит тест, и хранилище при этом не растёт. Когда возвраты перевели на <code>PaymentService</code>, ArchUnit сам убрал исправленные строки: хранилище пустеет вместе с долгом.</p>
+      <div class="note warn">
+        <p>По умолчанию <code>allowStoreCreation</code> выключен. Без хранилища тест падает с <code>StoreInitializationFailedException</code>: «Creating new violation store is disabled». Это защита: если в CI хранилище потерялось, тест не должен молча заморозить все нарушения заново. Включи создание один раз локально, закоммить хранилище и выключи настройку.</p>
+      </div>
+      <p>Дальше порядок такой:</p>
+      <ol>
+        <li><b>Договорись о целевом дереве.</b> Какие фичи на верхнем уровне, что считается API фичи, где живёт общий код. Запиши это правилом — Modulith или ArchUnit с заморозкой.</li>
+        <li><b>Переноси по одной фиче.</b> Move Class в IDE обновит импорты. Перенос — отдельный коммит без правок логики: так git распознает переименование по сходству содержимого, а ревьюер увидит, что смысл не менялся. Крупный перенос делай, когда открытых веток мало, и предупреди команду.</li>
+        <li><b>Сузь доступ.</b> После переноса многие типы public только по привычке. Инспекция IntelliJ «Declaration access can be weaker» находит типы и методы, которыми никто не пользуется снаружи пакета.</li>
+        <li><b>Разрежь данные.</b> Самое трудное — связи между сущностями разных фич. <code>@ManyToOne Customer</code> внутри <code>Payment</code> тянет фичу клиентов в платежи. Храни идентификатор и запрашивай данные через API соседней фичи, как ссылаются друг на друга агрегаты в <a href="ddd.html">DDD</a>.</li>
+        <li><b>Убери старое.</b> Пустые <code>service</code> и <code>repository</code> удали, когда хранилище заморозки опустеет; заморозку по этому правилу сними.</li>
+      </ol>
+    </section>
+
+    <section class="step" id="limits">
+      <h2>Для маленького CRUD это церемония: раскладка окупается, когда растут фичи и команды</h2>
+      <p>Сервис справочника валют с пятью таблицами и десятком эндпоинтов спокойно живёт по слоям. Правил почти нет, обходить нечего, раскладку понимает любой новичок. Компонент с интерфейсом и единственной реализацией на каждую таблицу, порты с мапперами между одинаковыми моделями, отдельный модуль сборки на три класса — это церемония: она добавляет файлы и переходы при чтении, а защищать ей нечего.</p>
+      <table class="mx">
+        <thead><tr><th>Ситуация</th><th>Разумная раскладка</th><th>Почему</th></tr></thead>
+        <tbody>
+          <tr><td>Маленький CRUD, одна команда</td><td>by layer или плоские пакеты фич без правил</td><td>самая дешёвая, правила почти не нужно защищать</td></tr>
+          <tr><td>Растущий монолит, несколько фич</td><td>by feature или by component, package-private, тест Modulith</td><td>правка фичи в одном месте, обходы ловит javac или тест</td></tr>
+          <tr><td>Сложные правила, много внешних систем</td><td>фичи сверху, внутри крупной фичи порты и адаптеры</td><td>ядро тестируется без инфраструктуры, см. <a href="app-architecture.html">Clean &amp; Hexagonal Architecture</a></td></tr>
+          <tr><td>Несколько команд, устоявшиеся границы</td><td>модули сборки, затем, возможно, отдельные сервисы</td><td>граница проверяется сборкой; о цене распределённости — <a href="microservices.html">Microservices</a></td></tr>
+        </tbody>
+      </table>
+      <p>Смешанная раскладка нормальна: фичи на верхнем уровне, внутри крупной фичи — слои или порты и адаптеры, маленькие фичи плоские. Не нужно, чтобы все пакеты выглядели одинаково. Нужно, чтобы граница каждой фичи была видна и проверялась.</p>
+      <p>Пора менять раскладку, если правка одной фичи регулярно трогает три папки, на ревью находят обходы сервисов, а новички не могут найти код сценария. Перестарался, если интерфейсы появляются ради схемы, мапперы копируют поля между одинаковыми классами, а модуль сборки содержит три класса. Вывод Брауна в конце главы — не про конкретную раскладку. Задуманная архитектура теряется, если не решить, как она ляжет на пакеты, модификаторы доступа и модули. Решение зависит от размера и опыта команды, сложности задачи, сроков и бюджета.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Раскладка важна тем, что запрещает. Компилятор внутри модуля проверяет одну границу — пакет, и только для package-private типов.</li>
+        <li>В by layer и в портах ядра public вынужден: тип, нужный соседнему пакету, видят все. Feature и component могут спрятать хранилище за одним входом.</li>
+        <li>Всё public — и четыре раскладки становятся четырьмя способами разложить папки.</li>
+        <li>Подпакеты в Java — чужие пакеты. Разросшуюся фичу с подпакетами держит тест Spring Modulith или ArchUnit, а следующая ступень — модуль сборки.</li>
+        <li>Живой проект переводят по фиче, начиная с замороженного правила: старые нарушения записаны, новые валят сборку.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="how-to-structure" data-freq="3">
+      <h3>Как ты раскладываешь Spring-проект по пакетам и почему?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>На верхнем уровне — по фичам: <code>payments</code>, <code>refunds</code>, <code>payouts</code>. Внутри фичи всё, что меняется вместе: контроллер, сервис, хранилище, модель. Наружу открываю один вход — сервис или фасад фичи, остальное package-private. Spring такие классы находит и внедряет без проблем.</p>
+          <p>Зачем: правка сценария живёт в одной папке, по дереву видно, что делает система, а обход чужого хранилища не компилируется. Когда фича вырастает и нужны подпакеты, границу держит тест Spring Modulith: он считает вложенные пакеты модуля внутренними, даже если типы в них public.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Раскладка ценна тем, что запрещает. Если все типы public, by feature защищает не больше, чем by layer: пакеты превращаются в папки.</li>
+            <li>Внутри пакета фичи слоёв для компилятора нет: контроллер может звать репозиторий. Поэтому для крупных фич выношу веб отдельно — это package by component — или ставлю порты и адаптеры внутри фичи.</li>
+            <li>Маленький CRUD оставляю по слоям, и это нормально. Меняю раскладку, когда правки фичи начинают трогать три папки или на ревью находят обходы.</li>
+            <li>Следующая ступень — модули Gradle с <code>implementation</code>: чего нет в зависимостях, того javac не найдёт. Выношу модуль, когда граница уже устоялась.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Куда тогда класть общее: Money, общие исключения, конфигурацию?</summary>
+          <p>В маленький общий пакет с понятным владельцем: типы-значения вроде <code>Money</code>, базовые исключения, утилиты без бизнес-логики. Сервисы и сущности туда не кладут, иначе <code>common</code> становится местом, от которого зависит всё и которое никто не может поменять. Конфигурация приложения лежит в корневом пакете рядом с классом <code>@SpringBootApplication</code>, а конфигурация фичи — в самой фиче. Почему большой common вредит, разобрано в <a href="components.html#cohesion">Components &amp; Modules</a>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="layer-vs-feature" data-freq="2">
+      <h3>Чем package by layer хуже package by feature?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>By layer раскладывает классы по технической роли: контроллеры, сервисы, репозитории. Один сценарий размазан по трём папкам, а дерево сообщает о фреймворке, а не о предметной области. Главное — сервису нужен репозиторий из соседнего пакета, поэтому репозиторий обязан быть public, и его может взять любой контроллер в обход правил.</p>
+          <p>By feature кладёт сценарий в одну папку. Соседи по пакету видят друг друга без public, поэтому хранилище фичи можно спрятать, а обход из соседней фичи станет ошибкой компиляции.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>By layer не ошибка для маленького сервиса: проблемы проявляются с ростом числа фич и людей.</li>
+            <li>Фича, у которой public только контроллер, недоступна соседям иначе как по HTTP. В реальности открывают сервис или фасад — получается package by component.</li>
+            <li>В ports and adapters порт обязан быть public, потому что адаптер лежит в другом пакете. Поэтому веб-адаптер может обойти сервис ядра, и это ловит только тест.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Скомпилируется ли этот обход в гексагональной раскладке?</summary>
+          <pre><code class="language-java">// kb/hex/domain/Payments.java
+public interface Payments { Payment find(String id); /* … */ }
+
+// kb/hex/web/RefundController.java
+package kb.hex.web;
+import kb.hex.domain.Payments;
+
+public class RefundController {
+    private final Payments store;
+    public RefundController(Payments store) { this.store = store; }
+    public String status(String id) { return store.find(id).status(); }
+}</code></pre>
+          <p>Скомпилируется: демо печатает <code>hex RefundController -&gt; Payments (port) compiles</code>. Порт должен быть public, иначе его не реализует адаптер из <code>database</code>. Поэтому web может читать через порт напрямую и пропускать правила <code>PaymentService</code>. Сделать порт package-private нельзя, не переложив адаптер в пакет ядра. Остаётся правило ArchUnit «классы web не зависят от исходящих портов» или вынос веба и ядра в разные модули сборки с явным API.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="public-everywhere" data-freq="2">
+      <h3>Почему говорят, что public везде стирает архитектуру?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Из всей раскладки компилятор проверяет только модификаторы доступа. Package-private тип виден лишь своему пакету, public — всему приложению. Если всё public, любой класс может импортировать любой, и пакеты остаются просто папками. Я проверял это на четырёх раскладках одного сервиса: как написано, три обхода из пяти не компилируются; после замены модификаторов на public компилируются все пять.</p>
+          <p>Поэтому в фиче я по умолчанию не пишу public и открываю только вход фичи.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Подпакеты не помогают: для javac <code>payments.internal</code> — отдельный пакет, и слово internal — только соглашение. Правилом его делает Spring Modulith или ArchUnit.</li>
+            <li>Причина обычно бытовая: шаблон нового класса в IDE начинается с <code>public class</code>. Инспекция IntelliJ «Declaration access can be weaker» находит лишние public.</li>
+            <li>Фреймворки это не ломает: в приложении на classpath рефлексия открывает package-private конструкторы, поэтому Spring, Jackson и Hibernate работают. С JPMS понадобился бы <code>opens</code>.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Найди проблему в этой границе</summary>
+          <pre><code class="language-java">// kb/shop/payments/persistence/PaymentRepository.java
+package kb.shop.payments.persistence;
+
+/** Внутренний тип платежей. Не использовать вне payments! */
+public interface PaymentRepository { Payment find(String id); }
+
+// kb/shop/refunds/RefundService.java
+import kb.shop.payments.persistence.PaymentRepository;</code></pre>
+          <p>Комментарий ничего не запрещает: тип public, потому что им пользуется <code>PaymentService</code> из родительского пакета, и javac пропускает импорт из refunds. Варианты: вернуть хранилище в пакет <code>payments</code> и сделать его package-private, если пакет ещё читается, или оставить подпакет и добавить тест <code>ApplicationModules.of(Application.class).verify()</code>. В демо Modulith находит ровно это нарушение: «depends on non-exposed type … within module 'payments'».</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="migrate-layer-to-feature" data-freq="2">
+      <h3>Как перевести живой проект с package by layer на package by feature?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Постепенно, по одной фиче. Сначала договариваемся о целевом дереве и сразу включаем правило в тестах, заморозив текущие нарушения через <code>FreezingArchRule</code>: старые записаны в хранилище, новые валят сборку. Потом переносим фичи по одной, отдельными коммитами без правок логики, и после каждой сужаем доступ до package-private.</p>
+          <p>Хранилище заморозки уменьшается само, когда нарушения исправляют. Когда оно пустое, старые пакеты по слоям удаляем.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Самое трудное — данные: JPA-связи между сущностями разных фич и общие таблицы. Связь заменяю хранением id и запросом через API соседней фичи.</li>
+            <li>Перенос файлов конфликтует со всеми открытыми ветками. Делаю его, когда веток мало, и отдельным коммитом, чтобы git распознал переименование, а <code>blame</code> не сломался.</li>
+            <li>В ArchUnit создание хранилища по умолчанию выключено: без закоммиченного хранилища тест падает, а не замораживает всё заново.</li>
+            <li>Модули сборки не делаю первым шагом. Сначала логические границы с тестом; модуль выношу, когда граница устоялась.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li>Роберт Мартин, «Чистая архитектура», глава 34 «The Missing Chapter» (Simon Brown) — основа урока: четыре раскладки, какие типы должны быть public в каждой, organization versus encapsulation, модули сборки и анти-паттерн Périphérique.</li>
+      <li>Роберт Мартин, «Чистая архитектура», глава 21 «Screaming Architecture» — дерево проекта должно говорить о предметной области, а не о фреймворке.</li>
+      <li><a href="https://docs.spring.io/spring-modulith/reference/fundamentals.html">Spring Modulith Reference: Fundamentals</a> — как пакеты становятся модулями, что считается API и внутренностями; раздел Verification — что проверяет verify().</li>
+      <li><a href="https://www.archunit.org/userguide/html/000_Index.html#_freezing_arch_rules">ArchUnit User Guide: Freezing Arch Rules</a> — хранилище нарушений, настройки allowStoreCreation и refreeze.</li>
+      <li><a href="https://docs.gradle.org/current/userguide/java_library_plugin.html">Gradle: The Java Library Plugin</a> — api и implementation, что попадает на classpath потребителей. Правила доступа — JLS §6.6 и §7.1.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
