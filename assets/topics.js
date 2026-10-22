@@ -341,6 +341,8 @@ window.KB_TREE = [
           scope: 'баланс и проводки, перевод между счетами, двойная запись, event sourcing, аудит' },
         { id: 'sd-booking', freq: 2, status: 'draft', title: 'Booking System',
           scope: 'резерв и подтверждение, двойное бронирование, блокировки и версии, истечение брони' },
+        { id: 'sd-flash-sale', freq: 2, status: 'draft', title: 'Flash Sale & Ticketing',
+          scope: 'требования и оценка пика по воронке, горячая строка остатка и почему UPDATE ... WHERE stock > 0 упирается в блокировку, SKIP LOCKED и корзины, атомарный декремент в Redis на Lua и уникальный индекс в базе, сверка после failover, резерв с TTL и атомарный возврат, очередь ожидания и admission control, пропуск и защита от ботов, повторные клики и идемпотентность, CDN для страницы и статуса, деградация и что показывать пользователю' },
         { id: 'sd-url-shortener', freq: 2, status: 'draft', title: 'URL Shortener',
           scope: 'генерация ключа, хранение, чтение под нагрузкой, аналитика' },
         { id: 'sd-notifications', freq: 1, status: 'draft', title: 'Notification Service',

@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Flash Sale &amp; Ticketing · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sd-flash-sale">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Flash Sale &amp; Ticketing</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>В 10:00 открывается продажа 10 000 консолей, а купить хотят миллион человек. 990 000 из них получат отказ. Поэтому главная работа системы — отказать дёшево, честно и быстро, а не продать. Продать лишнее не даст условный UPDATE остатка, но он ставит всех покупателей в очередь к блокировке одной строки: в демо с 64 потоками PostgreSQL оформил около 1 900 заказов в секунду, и почти все соединения ждали блокировку. Поэтому остаток раскладывают: на строку для каждой единицы, на корзины или в атомарный счётчик Redis. Окончательную гарантию по-прежнему даёт уникальный индекс в базе. Перед покупкой ставят очередь ожидания: она пускает столько людей, сколько успевает оформление. Страницу и статус «распродано» отдаёт CDN.</p>
+    </div>
+
+    <section class="step" id="requirements">
+      <h2>Требования и оценка: из двухсот желающих купит один</h2>
+      <p>Задача на собеседовании звучит как «распродажа», «дроп кроссовок» или «продажа билетов на концерт». Сначала уточни, что именно продаётся. Если это N одинаковых единиц, например консоли или билеты в танцпартер, бороться будут за счётчик. Если это конкретные места с выбором на схеме зала, конфликт идёт за строку места, и это ближе к <a href="sd-booking.html">Booking System</a>: временная бронь, подтверждение, двойное бронирование. Здесь проектируем первый вариант. 10 000 консолей по сниженной цене, старт в 10:00, одна штука в одни руки, на оплату 5 минут, ожидается около миллиона желающих.</p>
+      <table class="mx">
+        <thead><tr><th>Функциональные</th><th>Нефункциональные</th></tr></thead>
+        <tbody>
+          <tr><td>Страница товара с таймером до старта</td><td>Ни одной продажи сверх остатка</td></tr>
+          <tr><td>Очередь ожидания с позицией и прогнозом</td><td>Честность: позиция не зависит от скорости бота</td></tr>
+          <tr><td>Покупка: резерв единицы, оплата за 5 минут</td><td>Страница и ответ «распродано» доступны в пик</td></tr>
+          <tr><td>Одна штука на аккаунт, статус заказа</td><td>Остальной магазин не страдает от распродажи</td></tr>
+        </tbody>
+      </table>
+      <p>Оценка нагрузки, как в <a href="sd-estimation.html">Back-of-the-envelope</a>, считается по воронке. Миллион человек за минуту до старта открывают страницу: HTML, скрипты и картинки — около 20 файлов на человека. Получается 1 000 000 × 20 / 60 ≈ 330 000 запросов в секунду. Каждый опрашивает «есть ли ещё» раз в 5 секунд — ещё 200 000 в секунду. В 10:00:00 все одновременно нажимают «Купить», многие по два-три раза. Продать нужно всего 10 000 единиц, и даже база, оформляющая 2 000 заказов в секунду, справится с этим за 5 секунд. Сложность не в продажах, а в 990 000 отказах и в пике, который длится минуты.</p>
+      <table class="mx">
+        <thead><tr><th>Слой</th><th>Пик</th><th>Кто отвечает</th></tr></thead>
+        <tbody>
+          <tr><td>Страница, скрипты, картинки</td><td>≈ 330 000 запросов/с</td><td>CDN, origin почти не видит</td></tr>
+          <tr><td>Статус «есть / распродано»</td><td>≈ 200 000 запросов/с</td><td>CDN, ответ кешируется на 1 секунду</td></tr>
+          <tr><td>Вход в очередь</td><td>1 млн за 30 секунд ≈ 33 000/с</td><td>сервис очереди на Redis</td></tr>
+          <tr><td>Покупка у допущенных</td><td>≈ 200/с, по ёмкости оформления</td><td>API + Redis</td></tr>
+          <tr><td>Заказы в базе</td><td>10 000 за всю распродажу</td><td>PostgreSQL</td></tr>
+        </tbody>
+      </table>
+      <p>Отсюда и форма системы. Каждый слой отвечает сам, сколько может, и пропускает дальше только нужное. Если бы каждое нажатие доходило до базы, ей пришлось бы отклонять сотни тысяч запросов в секунду, и упала бы она не на продажах, а на отказах. Что спросить у интервьюера: конкретные места или любые, лимит на покупателя, нужна ли предрегистрация, сколько держится резерв, допустима ли лотерея вместо «кто первый». Демо <a href="../examples/sd-flash-sale/FlashSaleDemo.java">FlashSaleDemo.java</a> гоняет PostgreSQL 17 и Redis 8 в Docker на Apple M5 Pro; абсолютные числа зависят от машины, важны соотношения.</p>
+<pre><code class="language-http">POST /sales/ps5-drop/queue                # встать в очередь: позиция и токен очереди
+GET  /sales/ps5-drop/queue/me             # WAITING (позиция, прогноз) | ADMITTED (пропуск) | SOLD_OUT
+POST /sales/ps5-drop/purchase             # Pass: пропуск из очереди, Idempotency-Key: ключ клика
+202 Accepted
+{ "unit": 37, "status": "RESERVED", "pay_until": "10:06:12" }   # заказ дописывается в базу асинхронно
+GET  /orders/{id}                         # RESERVED → PAID | EXPIRED | REJECTED</code></pre>
+    </section>
+
+    <section class="step" id="hot-row">
+      <h2>Условный UPDATE не продаёт лишнего, но ставит всех в очередь к одной строке</h2>
+      <p>Первая версия, которую пишут почти все: остаток в строке товара, покупка — транзакция с проверкой остатка. Наивно её делают как «прочитать, проверить в Java, записать», и это ломается так же, как в <a href="sd-wallet.html">Digital Wallet</a>. Правильный вариант делает проверку и уменьшение одним оператором, а ожидание блокировки строки разобрано в <a href="db-locks.html">Locks</a>. Демо запускает 2 000 покупателей в 64 потоках за 100 единиц:</p>
+<pre><code class="language-java">// Наивно: прочитать остаток, проверить в Java, записать новое значение.
+int stock = intQuery(c, "select stock from item where id = 1");
+if (stock &lt;= 0) { c.rollback(); return false; }
+exec(c, "update item set stock = " + (stock - 1) + " where id = 1");   // записываем число, посчитанное по старому чтению
+order(c, user, 0);
+c.commit();
+
+// Условный UPDATE: проверка и уменьшение — одна операция под блокировкой строки.
+if (exec(c, "update item set stock = stock - 1 where id = 1 and stock &gt; 0") == 0) { c.rollback(); return false; }
+order(c, user, 0);                       // блокировка строки item держится до commit
+c.commit();</code></pre>
+      <pre class="out">== 1. 2000 buyers, 64 threads, 100 units in stock
+   read, check, write   orders 2000, oversold 1900, item.stock = 72
+   conditional update   orders  100, oversold    0, item.stock = 0</pre>
+      <p>Наивный вариант продал все 2 000, а остаток при этом показывает 72. Каждый поток читал, например, 80 и записывал 79, перетирая чужие уменьшения. Счётчик убывал гораздо медленнее продаж и до нуля так и не дошёл. Условный UPDATE продал ровно 100. Гарантию дают две вещи. Первая транзакция, изменившая строку, держит блокировку до коммита, остальные UPDATE этой строки ждут. Дождавшись, PostgreSQL в READ COMMITTED не берёт старую версию строки: он перечитывает новую и заново проверяет <code>stock &gt; 0</code>. Это правило из документации уровня READ COMMITTED, и именно поэтому условие в WHERE работает без SERIALIZABLE.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 216" role="img" aria-label="Три транзакции покупают последние две единицы. T1 обновляет строку item и держит её блокировку до конца коммита, T2 и T3 ждут. После коммита T1 транзакция T2 перечитывает новую версию, видит остаток 1 и забирает его. T3 после коммита T2 видит остаток 0, её UPDATE меняет ноль строк. Продано ровно 2.">
+            <defs><marker id="fs-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="fs-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="fs-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">ТРАНЗАКЦИИ</text>
+            <text x="300" y="22" class="dg-cap">СТРОКА И ЗАКАЗЫ</text>
+            <!-- транзакции -->
+            <rect x="20" y="34" width="180" height="46" rx="8" class="dg-box"/>
+            <rect x="20" y="94" width="180" height="46" rx="8" class="dg-box"/>
+            <rect x="20" y="154" width="180" height="46" rx="8" class="dg-box"/>
+            <!-- строка item и таблица orders -->
+            <rect x="300" y="40" width="180" height="46" rx="8" class="dg-cell"/>
+            <rect x="300" y="110" width="180" height="96" rx="8" class="dg-box"/>
+            <rect data-s="2" x="314" y="138" width="152" height="26" rx="6" class="dg-sep" fill="none"/>
+            <rect data-s="3-" x="314" y="138" width="152" height="26" rx="6" class="dg-cell hit"/>
+            <rect data-s="4" x="314" y="172" width="152" height="26" rx="6" class="dg-cell hit"/>
+            <!-- кто держит блокировку, кто ждёт -->
+            <path data-s="1-2" d="M200 57 L 296 57" class="dg-line ok" marker-end="url(#fs-ok)"/>
+            <path data-s="1-2" d="M200 117 C 250 117, 250 70, 296 70" class="dg-line bad" marker-end="url(#fs-bad)"/>
+            <path data-s="3" d="M200 117 C 250 117, 250 70, 296 70" class="dg-line ok" marker-end="url(#fs-ok)"/>
+            <path data-s="1-3" d="M200 177 C 262 177, 262 80, 296 80" class="dg-line bad" marker-end="url(#fs-bad)"/>
+            <path data-s="4" d="M200 177 C 262 177, 262 80, 296 80" class="dg-line" marker-end="url(#fs-a)"/>
+            <!-- подписи транзакций -->
+            <text x="34" y="54" class="dg-in">T1</text>
+            <text x="34" y="114" class="dg-in">T2</text>
+            <text x="34" y="174" class="dg-in">T3</text>
+            <text data-s="1" x="34" y="71" class="dg-n">UPDATE, держит строку</text>
+            <text data-s="2" x="34" y="71" class="dg-n">INSERT, COMMIT + fsync</text>
+            <text data-s="3-" x="34" y="71" class="dg-ok">закоммичена</text>
+            <text data-s="1-2" x="34" y="131" class="dg-bad">ждёт T1</text>
+            <text data-s="3" x="34" y="131" class="dg-n">1 &gt; 0 — взяла строку</text>
+            <text data-s="4" x="34" y="131" class="dg-ok">закоммичена</text>
+            <text data-s="1-2" x="34" y="191" class="dg-bad">ждёт T1</text>
+            <text data-s="3" x="34" y="191" class="dg-bad">ждёт T2</text>
+            <text data-s="4" x="34" y="191" class="dg-n">0 &gt; 0 нет — 0 строк</text>
+            <!-- состояние строки и заказов -->
+            <text x="390" y="60" class="dg-in" text-anchor="middle">item id = 1</text>
+            <text data-s="1-2" x="390" y="77" class="dg-n" text-anchor="middle">stock 2 → 1, версия T1</text>
+            <text data-s="3" x="390" y="77" class="dg-n" text-anchor="middle">stock 1 → 0, версия T2</text>
+            <text data-s="4" x="390" y="77" class="dg-n" text-anchor="middle">stock 0</text>
+            <text x="314" y="128" class="dg-t">orders</text>
+            <text data-s="2" x="390" y="155" class="dg-n" text-anchor="middle">T1, не закоммичен</text>
+            <text data-s="3-" x="390" y="155" class="dg-n" text-anchor="middle">заказ T1</text>
+            <text data-s="4" x="390" y="189" class="dg-n" text-anchor="middle">заказ T2</text>
+            <!-- счётчик справа -->
+            <g data-s="1"><text x="510" y="60" class="dg-t">держит: T1</text><text x="510" y="80" class="dg-s">ждут: T2, T3</text></g>
+            <g data-s="2"><text x="510" y="60" class="dg-t">держит: T1</text><text x="510" y="80" class="dg-s">до конца COMMIT и fsync</text></g>
+            <g data-s="3"><text x="510" y="60" class="dg-t">держит: T2</text><text x="510" y="80" class="dg-s">перечитала новую версию</text></g>
+            <g data-s="4"><text x="510" y="60" class="dg-ok">продано 2 из 2</text><text x="510" y="80" class="dg-s">T3: 0 строк, лишних нет</text></g>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Осталось 2 единицы. T1 выполняет UPDATE и создаёт новую версию строки со stock = 1. Пока T1 не закоммичена, блокировку строки держит она. T2 и T3 пришли следом и ждут её завершения.</li>
+          <li>T1 вставляет заказ и коммитит. Блокировка держится до конца коммита, включая запись WAL на диск. Всё это время строка занята, даже если сам UPDATE занял микросекунды.</li>
+          <li>T1 закоммичена, T2 просыпается. Старую версию она не использует: перечитывает строку, заново проверяет stock &gt; 0 на значении 1 и уменьшает до 0. Теперь T3 ждёт уже T2.</li>
+          <li>T2 закоммичена. T3 перечитывает строку, условие 0 &gt; 0 ложно, UPDATE меняет ноль строк, и покупатель получает отказ. Лишних продаж нет, но три покупки прошли строго по одной.</li>
+        </ol>
+      </figure>
+      <p>Корректность куплена очередью. Пока одна транзакция держит строку, остальные ждут, и пропускная способность ограничена временем удержания блокировки. Демо меряет, сколько заказов в секунду проходит, пока товар не кончается, при разном числе одновременных покупателей. Нагрузку останавливает флаг, а не замер времени на каждой операции. Среднюю задержку демо считает по закону Литтла: число потоков, делённое на пропускную способность.</p>
+      <pre class="out">== 2. orders per second while stock lasts (3 s window after 1 s warm-up)
+   strategy             threads   orders/s   avg latency   waiting on a lock
+   conditional update         1       2656        0.4 ms          0.0 of 1
+   conditional update         8       2993        2.7 ms          6.5 of 8
+   conditional update        64       1866       34.3 ms         61.3 of 64
+   conditional update       256       1158      221.1 ms        252.0 of 256
+     hot update last         64       2698       23.7 ms         59.8 of 64
+     +2 ms under lock        64        290      220.9 ms         62.6 of 64</pre>
+      <p>Один поток оформляет 2 656 заказов в секунду: 0,4 мс на три обращения к базе и коммит. Восемь потоков почти ничего не добавляют, а 64 и 256 работают хуже одного: 1 866 и 1 158 в секунду. Задержка растёт вместе с числом покупателей и при 256 доходит до 221 мс. В других запусках при 64 потоках выходило от 1 866 до 2 393, но картина одна. Колонка справа показывает, что 61 из 64 соединений в любой момент ждут блокировку. Работает одно, остальные стоят в очереди.</p>
+<pre><code class="language-sql">-- во время прогона с 64 потоками: чем заняты соединения покупателей
+select wait_event_type, wait_event, state, count(*) from pg_stat_activity
+where application_name = 'buyer' group by 1, 2, 3 order by 4 desc;</code></pre>
+      <pre class="out"> wait_event_type |  wait_event   | state  | count
+-----------------+---------------+--------+-------
+ LWLock          | LockManager   | active |    32
+ Lock            | transactionid | active |    29
+                 |               | active |     2
+ Client          | ClientRead    | active |     1</pre>
+      <p>Почему пропускная способность падает, а не просто перестаёт расти. 29 соединений ждут блокировку строки: <code>Lock: transactionid</code> означает «жду, пока закончится транзакция-владелец». Ещё 32 ждут <code>LWLock: LockManager</code>, внутреннюю защёлку таблицы блокировок. Толпа ожидающих сама дерётся за структуру, через которую ставят в очередь и будят. Чем больше ожидающих, тем дороже каждое ожидание. Отсюда два практических вывода. Добавлять экземпляры приложения бесполезно: они добавляют ожидающих, а не пропускную способность. А блокировку нужно держать как можно короче. Если поставить горячий UPDATE последним, после вставки заказа, выходит 2 698 в секунду вместо 1 866. Если же внутри транзакции вызвать сервис цен на 2 мс, остаётся 290 в секунду.</p>
+      <div class="trap">
+        <p class="myth">Остаток в строке с условным UPDATE масштабируется: нагрузка выросла — добавь экземпляров приложения и соединений.</p>
+        <p class="fact">Одна строка обслуживает одну транзакцию за раз. В демо 8 потоков дали 2 993 заказа в секунду, 256 — 1 158, а задержка выросла с 2,7 до 221 мс: новые соединения только удлиняют очередь к блокировке. Шардирование базы не помогает, потому что строка живёт на одном шарде.</p>
+      </div>
+      <details class="deep">
+        <summary>Под капотом: что происходит со строкой при тысячах UPDATE</summary>
+        <p>Каждый UPDATE в PostgreSQL создаёт новую версию строки, а старая становится мёртвой (<a href="mvcc.html">MVCC</a>). После двух секунд продаж в 8 потоков статистика таблицы показала:</p>
+        <pre class="out">   item row after 2 s: updates 5910, HOT 5884, dead versions 679</pre>
+        <p>Почти все обновления — HOT: индексируемые колонки не менялись, и новая версия легла в ту же страницу без записи в индекс. Мёртвые версии убирает внутристраничная очистка (pruning) при следующих обращениях к странице, поэтому их не тысячи, а сотни. Ожидающая транзакция, проснувшись, идёт по цепочке версий к последней. В исходниках PostgreSQL этот механизм перепроверки называется EvalPlanQual.</p>
+      </details>
+    </section>
+
+    <section class="step" id="spread">
+      <h2>Остаток раскладывают по строкам или переносят в Redis, чтобы покупки не ждали друг друга</h2>
+      <p>Если одна строка — узкое место, остаток надо держать так, чтобы разные покупатели меняли разные данные. Есть три распространённых способа. Во-первых, строка на каждую единицу товара: покупатель берёт первую свободную и пропускает чужие заблокированные через <code>FOR UPDATE SKIP LOCKED</code>, как воркеры в <a href="background-jobs.html">Background Jobs</a>. Во-вторых, остаток делят на 16 строк-корзин, и каждый начинает со случайной. В-третьих, счётчик держат в Redis: там скрипт выполняется целиком в одном потоке и не держит блокировку между обращениями по сети.</p>
+<pre><code class="language-java">// Строка на каждую единицу товара: каждый берёт первую свободную, занятые пропускает.
+ResultSet r = c.createStatement().executeQuery("""
+    update unit set buyer = %d where id = (
+      select id from unit where buyer is null order by id limit 1 for update skip locked)
+    returning id""".formatted(user));
+if (!r.next()) { c.rollback(); return false; }   // пусто = свободных незаблокированных нет
+
+// Остаток разбит на 16 строк-корзин: начинаем со случайной, пустые обходим.
+int start = ThreadLocalRandom.current().nextInt(16);
+for (int i = 0; i &lt; 16; i++) {
+    int b = (start + i) % 16;
+    if (exec(c, "update bucket set stock = stock - 1 where b = " + b + " and stock &gt; 0") == 1) { order(c, user, 0); c.commit(); return true; }
+}</code></pre>
+<pre><code class="language-lua">-- Redis: проверка и уменьшение — один скрипт, никто не вклинится.
+local left = tonumber(redis.call('GET', KEYS[1]))
+if left &lt;= 0 then return 0 end
+return redis.call('DECR', KEYS[1]) + 1      -- номер единицы: N, N-1, ..., 1</code></pre>
+      <pre class="out">== 1. 2000 buyers, 64 threads, 100 units in stock
+   skip locked units    orders  100, oversold    0
+   16 buckets           orders  100, oversold    0
+   redis Lua take       orders  100, oversold    0
+== 2. orders per second while stock lasts (3 s window after 1 s warm-up)
+   strategy             threads   orders/s   avg latency   waiting on a lock
+   skip locked units         64       9589        6.7 ms          4.1 of 64
+   16 buckets                64       8200        7.8 ms         47.0 of 64
+   redis Lua take            64      16029        4.0 ms          0.0 of 64
+     Lua only, no DB         64      67422        0.9 ms          0.0 of 64</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 232" role="img" aria-label="Четыре раскладки остатка при четырёх одновременных покупателях. Одна строка: все четыре идут в одну строку, трое ждут. Строка на единицу: каждый берёт свою свободную строку. Корзины: двое попали в одну корзину и один ждёт. Redis: скрипты выполняются по одному, но каждый длится микросекунды. Под каждой раскладкой — заказов в секунду из демо при 64 потоках.">
+            <defs><marker id="fl-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="fl-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="fl-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker></defs>
+            <text x="14" y="20" class="dg-cap">ОДНА СТРОКА</text>
+            <text x="191" y="20" class="dg-cap">СТРОКА НА ЕДИНИЦУ</text>
+            <text x="368" y="20" class="dg-cap">КОРЗИНЫ</text>
+            <text x="545" y="20" class="dg-cap">СЧЁТЧИК В REDIS</text>
+            <rect x="14" y="30" width="161" height="150" rx="10" class="dg-sep" fill="none"/>
+            <rect x="191" y="30" width="161" height="150" rx="10" class="dg-sep" fill="none"/>
+            <rect x="368" y="30" width="161" height="150" rx="10" class="dg-sep" fill="none"/>
+            <rect x="545" y="30" width="161" height="150" rx="10" class="dg-sep" fill="none"/>
+            <!-- покупатели: по четыре в каждой панели -->
+            <rect x="24" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="61" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="98" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="135" y="40" width="28" height="20" rx="5" class="dg-box"/>
+            <rect x="201" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="238" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="275" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="312" y="40" width="28" height="20" rx="5" class="dg-box"/>
+            <rect x="378" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="415" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="452" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="489" y="40" width="28" height="20" rx="5" class="dg-box"/>
+            <rect x="555" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="592" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="629" y="40" width="28" height="20" rx="5" class="dg-box"/><rect x="666" y="40" width="28" height="20" rx="5" class="dg-box"/>
+            <!-- одна строка -->
+            <rect x="44" y="120" width="101" height="36" rx="7" class="dg-cell"/>
+            <!-- строка на единицу: первая продана раньше, остальные берут разные -->
+            <rect x="199" y="120" width="26" height="30" rx="5" class="dg-cell miss"/>
+            <rect x="229" y="120" width="26" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="259" y="120" width="26" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="289" y="120" width="26" height="30" rx="5" class="dg-cell hit"/>
+            <rect x="319" y="120" width="26" height="30" rx="5" class="dg-cell hit"/>
+            <!-- корзины -->
+            <rect x="378" y="120" width="30" height="36" rx="5" class="dg-cell hit"/>
+            <rect x="415" y="120" width="30" height="36" rx="5" class="dg-cell hit"/>
+            <rect x="452" y="120" width="30" height="36" rx="5" class="dg-cell"/>
+            <rect x="489" y="120" width="30" height="36" rx="5" class="dg-cell hit"/>
+            <!-- redis -->
+            <rect x="565" y="112" width="121" height="50" rx="8" class="dg-box"/>
+            <!-- стрелки: одна строка -->
+            <path d="M38 60 L 80 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <path d="M75 60 L 88 116" class="dg-line bad" marker-end="url(#fl-bad)"/>
+            <path d="M112 60 L 100 116" class="dg-line bad" marker-end="url(#fl-bad)"/>
+            <path d="M149 60 L 110 116" class="dg-line bad" marker-end="url(#fl-bad)"/>
+            <!-- стрелки: строка на единицу -->
+            <path d="M215 60 L 241 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <path d="M252 60 L 271 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <path d="M289 60 L 301 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <path d="M326 60 L 331 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <!-- стрелки: корзины, двое в одну -->
+            <path d="M392 60 L 428 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <path d="M429 60 L 432 116" class="dg-line bad" marker-end="url(#fl-bad)"/>
+            <path d="M466 60 L 503 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <path d="M503 60 L 395 116" class="dg-line ok" marker-end="url(#fl-ok)"/>
+            <!-- стрелки: redis -->
+            <path d="M569 60 L 606 108" class="dg-line" marker-end="url(#fl-a)"/>
+            <path d="M606 60 L 618 108" class="dg-line" marker-end="url(#fl-a)"/>
+            <path d="M643 60 L 632 108" class="dg-line" marker-end="url(#fl-a)"/>
+            <path d="M680 60 L 645 108" class="dg-line" marker-end="url(#fl-a)"/>
+            <!-- подписи -->
+            <text x="94" y="143" class="dg-in" text-anchor="middle">stock</text>
+            <text x="272" y="168" class="dg-n" text-anchor="middle">чужие пропускаются</text>
+            <text x="448" y="168" class="dg-n" text-anchor="middle">16 в демо</text>
+            <text x="625" y="134" class="dg-t" text-anchor="middle">Lua</text>
+            <text x="625" y="152" class="dg-n" text-anchor="middle">по одному, мкс</text>
+            <text x="94" y="202" class="dg-t" text-anchor="middle">1 866 заказов/с</text>
+            <text x="94" y="220" class="dg-bad" text-anchor="middle">ждут 61 из 64</text>
+            <text x="271" y="202" class="dg-t" text-anchor="middle">9 589 заказов/с</text>
+            <text x="271" y="220" class="dg-ok" text-anchor="middle">ждут 4 из 64</text>
+            <text x="448" y="202" class="dg-t" text-anchor="middle">8 200 заказов/с</text>
+            <text x="448" y="220" class="dg-bad" text-anchor="middle">ждут 47 из 64</text>
+            <text x="625" y="202" class="dg-t" text-anchor="middle">16 029 заказов/с</text>
+            <text x="625" y="220" class="dg-ok" text-anchor="middle">без базы 67 422/с</text>
+          </svg>
+        </div>
+        <figcaption>Сверху в каждой раскладке — четыре одновременных покупателя. Redis тоже выполняет покупки по одной, но его «блокировка» длится микросекунды внутри процесса, а не сетевые обращения и fsync коммита.</figcaption>
+      </figure>
+      <p>Все три способа продали ровно 100 и обогнали одну строку в 4–9 раз. Строка на единицу почти не ждёт: из 64 соединений блокировку в среднем ждут 4. Ограничений два. Строк должно быть столько, сколько единиц товара: для 10 000 консолей или 50 000 билетов это нормально, для миллиона единиц тяжелее. Кроме того, пустой результат <code>SKIP LOCKED</code> означает «свободных незаблокированных нет», а не «распродано». Если другая транзакция держит последнюю единицу и откатится, единица вернётся. Окончательное «распродано» проверяют запросом без SKIP LOCKED.</p>
+      <p>Корзины проще: строк 16, а не 10 000. Но при 64 потоках на 16 строк по-прежнему ждут 47 из 64: четыре покупателя на корзину. Корзин нужно не меньше, чем одновременных покупателей. Под конец корзины пустеют неравномерно, и покупатель обходит пустые, поэтому последние единицы продаются медленнее. Redis с проверкой в Lua дал 16 029 заказов в секунду, но предел здесь уже не Redis: без вставки заказа в базу тот же скрипт выполнился 67 422 раза в секунду. Каждый заказ всё ещё отдельный коммит в PostgreSQL. Остаётся вопрос, кто отвечает за правду, если Redis потеряет запись. Об этом следующий шаг.</p>
+    </section>
+
+    <section class="step" id="redis-gate">
+      <h2>Redis быстро отвечает покупателю, а уникальный индекс в базе не даёт продать лишнее</h2>
+      <p>Схема, к которой приходят в разборах flash sale: Redis — привратник, база — бухгалтер. Скрипт в Redis за один шаг проверяет, не покупал ли уже этот пользователь, уменьшает остаток, выдаёт номер единицы и кладёт заявку в поток (Redis Stream). Покупатель сразу получает ответ «резерв №37, оформляем». Отдельный писатель читает поток пачками по 100 и вставляет заказы одной транзакцией на пачку. Горячей строки в базе нет: каждый заказ — новая строка, а гарантию «не больше 500» дают ограничения на номер единицы.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 226" role="img" aria-label="Покупатель отправляет запрос в API, API вызывает в Redis скрипт BUY. Скрипт меняет stock, buyers и поток orders и возвращает номер единицы. Писатель читает поток пачками и вставляет заказы в PostgreSQL, где уникальные индексы на номер единицы и на пользователя отклоняют лишнее. Сверка сравнивает базу с Redis и пересобирает Redis из базы.">
+            <defs><marker id="fg-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="fg-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker></defs>
+            <!-- компоненты -->
+            <rect x="14" y="40" width="100" height="44" rx="9" class="dg-box"/>
+            <rect x="146" y="40" width="120" height="44" rx="9" class="dg-box"/>
+            <rect x="320" y="26" width="200" height="96" rx="10" class="dg-box"/>
+            <rect x="332" y="48" width="176" height="20" rx="5" class="dg-cell"/>
+            <rect x="332" y="72" width="176" height="20" rx="5" class="dg-cell"/>
+            <rect x="332" y="96" width="176" height="20" rx="5" class="dg-cell"/>
+            <rect x="566" y="40" width="140" height="44" rx="9" class="dg-box"/>
+            <rect x="540" y="150" width="166" height="62" rx="9" class="dg-cell hit"/>
+            <rect x="316" y="166" width="170" height="40" rx="9" class="dg-box"/>
+            <!-- потоки -->
+            <path d="M114 56 L 142 56" class="dg-line" marker-end="url(#fg-a)"/>
+            <path d="M146 72 L 118 72" class="dg-line ok" marker-end="url(#fg-ok)"/>
+            <path d="M266 56 L 316 56" class="dg-line" marker-end="url(#fg-a)"/>
+            <path d="M320 74 L 270 74" class="dg-line ok" marker-end="url(#fg-ok)"/>
+            <path d="M520 106 C 545 106, 560 84, 600 86" class="dg-line" marker-end="url(#fg-a)"/>
+            <path d="M636 84 L 636 146" class="dg-line" marker-end="url(#fg-a)"/>
+            <path d="M540 186 L 490 186" class="dg-line" marker-end="url(#fg-a)"/>
+            <path d="M400 166 L 400 126" class="dg-line" marker-end="url(#fg-a)"/>
+            <!-- подписи -->
+            <text x="64" y="67" class="dg-t" text-anchor="middle">покупатель</text>
+            <text x="206" y="60" class="dg-t" text-anchor="middle">API</text>
+            <text x="206" y="76" class="dg-n" text-anchor="middle">пропуск, лимиты</text>
+            <text x="420" y="42" class="dg-t" text-anchor="middle">Redis, скрипт BUY</text>
+            <text x="342" y="62" class="dg-n">stock: 500 → 499</text>
+            <text x="342" y="86" class="dg-n">buyers: user → № единицы</text>
+            <text x="342" y="110" class="dg-n">поток orders: заявка</text>
+            <text x="636" y="60" class="dg-t" text-anchor="middle">писатель</text>
+            <text x="636" y="76" class="dg-n" text-anchor="middle">пачки по 100</text>
+            <text x="623" y="170" class="dg-t" text-anchor="middle">PostgreSQL</text>
+            <text x="623" y="187" class="dg-n" text-anchor="middle">unique (sale, unit_no)</text>
+            <text x="623" y="202" class="dg-n" text-anchor="middle">unique (sale, user_id)</text>
+            <text x="401" y="184" class="dg-t" text-anchor="middle">сверка</text>
+            <text x="401" y="199" class="dg-n" text-anchor="middle">Redis ← база</text>
+            <text x="14" y="108" class="dg-n">«резерв №37,</text>
+            <text x="14" y="122" class="dg-n">оформляем»</text>
+            <text x="628" y="132" class="dg-n" text-anchor="end">транзакция на пачку</text>
+            <text x="408" y="150" class="dg-n">пересобрать</text>
+          </svg>
+        </div>
+        <figcaption>Redis решает быстро, база — окончательно: номер единицы, выданный дважды, отклонит уникальный индекс.</figcaption>
+      </figure>
+<pre><code class="language-lua">-- KEYS: stock, buyers, orders; ARGV[1] = пользователь
+local unit = redis.call('HGET', KEYS[2], ARGV[1])
+if unit then return {'DUP', tonumber(unit)} end           -- повторный клик: та же единица
+local left = tonumber(redis.call('GET', KEYS[1]))
+if left &lt;= 0 then return {'SOLD_OUT', 0} end
+unit = redis.call('DECR', KEYS[1]) + 1
+redis.call('HSET', KEYS[2], ARGV[1], unit)
+redis.call('XADD', KEYS[3], '*', 'user', ARGV[1], 'unit', unit)   -- заявка для записи в базу
+return {'OK', unit}</code></pre>
+<pre><code class="language-sql">create table orders(sale int, user_id int, unit_no int check (unit_no between 1 and 500),
+                    unique (sale, unit_no), unique (sale, user_id));
+insert into orders values (1, ?, ?) on conflict do nothing;   -- пачкой по 100, одна транзакция</code></pre>
+      <pre class="out">== 3. 2000 users click 1-3 times at once, 500 units
+   plain take       requests 3986, ok 500, units went to 464 users
+   Lua buy          requests 3986, {DUP=653, OK=500, SOLD_OUT=2833}, buyers 500
+   order writer     batches 5, inserted 500, rejected by unique 0, orders in DB 500</pre>
+      <p>2 000 пользователей нажали «Купить» от одного до трёх раз — 3 986 запросов. Скрипт без проверки пользователя продал все 500 единиц всего 464 пользователям: 36 единиц ушли тем, кто нажал повторно. Двойной клик — это два запроса, и каждый честно взял единицу. Скрипт BUY отвечает на повторный клик той же единицей, что и в первый раз (653 ответа DUP). Здесь лимит «одна в руки» и идемпотентность совпадают. Если можно купить до четырёх штук, лимит считают отдельно, а повтор узнают по ключу клика (<code>Idempotency-Key</code>), как в <a href="idempotency.html">Idempotency</a>. Писатель записал 500 заказов за 5 транзакций. Отклонять пока было нечего.</p>
+      <p>Зачем ограничения в базе, если Redis уже всё проверил. Реплика Redis получает изменения асинхронно, и при failover новый мастер может не знать о последних подтверждённых записях. Настоящая потеря при переключении разобрана в <a href="redis-ops.html">Redis in Production</a>. Демо эмулирует её последствия: удаляет из Redis 40 последних покупок и возвращает 40 единиц в остаток. Затем приходят 300 запросов: 40 «потерянных» покупателей проверяют, прошёл ли заказ, и 260 новых.</p>
+      <pre class="out">== 4. failover: the new master missed the last 40 writes
+   after failover   stock 40, buyers 460
+   300 more requests: ok 40
+   order writer     batches 1, inserted 0, rejected by unique 40, orders in DB 500
+   reconcile        Redis buyers 500, DB orders 500, Redis-only 38, DB-only 38
+   rebuilt from DB  stock 0, buyers 500</pre>
+      <p>Redis после переключения считает, что осталось 40 единиц, и снова выдаёт номера 40…1, которые уже проданы. Писатель пытается их вставить, уникальный индекс <code>(sale, unit_no)</code> отклоняет все 40, и в базе по-прежнему ровно 500 заказов. Сверка показывает, где разошлись данные. 38 пользователей Redis считает покупателями, а в базе их заказов нет. Это новые покупатели, получившие «резерв» на уже проданные номера, им отвечают «к сожалению, распродано». Ещё у 38 заказ в базе есть, а Redis о них забыл. Двое из 40 потерянных нажали снова, получили новый номер и попали в обе стороны, поэтому 38, а не 40. Источник истины — база, и Redis пересобирают из неё: остаток 0, 500 покупателей.</p>
+      <p>Из этого следует, что показывать пользователю. Ответ Redis — «резерв получен, оформляем», а не «куплено». Окончательный статус и переход к оплате появляются, когда заказ закоммичен в базе: обычно это доли секунды, писатель отстаёт на одну пачку. Деньги списывают только после этого, иначе пришлось бы возвращать их 38 людям. Можно уменьшить окно потери: <code>WAIT 1</code> после скрипта ждёт подтверждения реплики, AOF с <code>appendfsync always</code> сохраняет на диск каждую запись. Но это замедляет каждую покупку и всё равно не заменяет проверку в базе.</p>
+      <div class="note warn">
+        <p>Сам писатель и сверка — тоже часть системы со своими сбоями. Писатель должен продолжать с последней записанной заявки, а не с начала потока (Redis Streams consumer group с подтверждением после коммита). Пачка вставляется с <code>on conflict do nothing</code>, поэтому повтор после сбоя безопасен. События «заказ создан» для оплаты и уведомлений лучше публиковать из базы через <a href="outbox.html">Transactional Outbox</a>, а не из Redis.</p>
+      </div>
+    </section>
+
+    <section class="step" id="holds">
+      <h2>Неоплаченный резерв возвращается в остаток ровно один раз</h2>
+      <p>Из получивших резерв часть не оплатит: передумали, не прошла карта, закрыли вкладку. Их единицы должны вернуться в продажу, иначе распродажа закончится с непроданным товаром. В <a href="sd-booking.html">Booking System</a> срок брони хранится в строке и проверяется при захвате. Здесь остаток живёт в Redis, поэтому и срок держат там: сортированное множество <code>holds</code>, где у каждого пользователя оценка — момент истечения. Чистильщик каждые несколько миллисекунд забирает истёкшие и возвращает единицы в остаток. Опасный момент — оплата ровно на границе срока.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 230" role="img" aria-label="Гонка чистильщика и покупателя 42 на границе срока. Чистильщик читает список истёкших резервов, в нём 42. Покупатель проверяет, что резерв на месте, и оплачивает, удаляя резерв. Чистильщик, не проверив, удалил ли резерв именно он, увеличивает остаток. Единица и оплачена, и снова в продаже. В атомарном варианте каждый скрипт проверяет и удаляет резерв за один шаг, поэтому единицу получает только один из них.">
+            <defs><marker id="fh-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="fh-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker></defs>
+            <text x="20" y="22" class="dg-cap">ЧИСТИЛЬЩИК</text>
+            <text x="360" y="22" class="dg-cap" text-anchor="middle">REDIS</text>
+            <text x="700" y="22" class="dg-cap" text-anchor="end">ПОКУПАТЕЛЬ 42</text>
+            <path d="M240 34 L 240 190" class="dg-sep"/>
+            <path d="M480 34 L 480 190" class="dg-sep"/>
+            <!-- состояние Redis -->
+            <rect x="260" y="40" width="200" height="30" rx="6" class="dg-cell"/>
+            <rect x="260" y="90" width="200" height="30" rx="6" class="dg-cell"/>
+            <rect x="260" y="140" width="200" height="30" rx="6" class="dg-cell"/>
+            <rect data-s="4" x="260" y="90" width="200" height="30" rx="6" class="dg-cell miss"/>
+            <rect data-s="5" x="260" y="90" width="200" height="30" rx="6" class="dg-cell hit"/>
+            <!-- стрелки наивного варианта -->
+            <path data-s="2" d="M256 55 L 200 55" class="dg-line" marker-end="url(#fh-a)"/>
+            <path data-s="3" d="M500 55 L 464 55" class="dg-line" marker-end="url(#fh-a)"/>
+            <path data-s="3" d="M500 155 L 464 155" class="dg-line" marker-end="url(#fh-a)"/>
+            <path data-s="4" d="M186 105 L 256 105" class="dg-line bad" marker-end="url(#fh-bad)"/>
+            <!-- стрелки атомарного варианта -->
+            <path data-s="5" d="M226 105 L 256 105" class="dg-line" marker-end="url(#fh-a)"/>
+            <path data-s="5" d="M494 55 L 464 55" class="dg-line" marker-end="url(#fh-a)"/>
+            <!-- подписи состояния -->
+            <text data-s="1-2" x="360" y="60" class="dg-in" text-anchor="middle">holds: 42 до 10:05:00</text>
+            <text data-s="3-" x="360" y="60" class="dg-in" text-anchor="middle">holds: пусто</text>
+            <text data-s="1-3" x="360" y="110" class="dg-in" text-anchor="middle">stock 0</text>
+            <text data-s="4" x="360" y="110" class="dg-bad" text-anchor="middle">stock 1</text>
+            <text data-s="5" x="360" y="110" class="dg-ok" text-anchor="middle">stock 1</text>
+            <text data-s="1-2" x="360" y="160" class="dg-in" text-anchor="middle">paid: —</text>
+            <text data-s="3-4" x="360" y="160" class="dg-in" text-anchor="middle">paid: 42</text>
+            <text data-s="5" x="360" y="160" class="dg-in" text-anchor="middle">paid: —</text>
+            <!-- действия наивного варианта -->
+            <text data-s="2-4" x="20" y="59" class="dg-in">ZRANGEBYSCORE → [42]</text>
+            <text data-s="4" x="20" y="109" class="dg-in">INCR stock</text>
+            <text data-s="4" x="20" y="146" class="dg-n">ZREM 42 → 0, не важно</text>
+            <text data-s="3-4" x="510" y="59" class="dg-in">ZSCORE 42 → есть</text>
+            <text data-s="3-4" x="510" y="159" class="dg-in">SADD paid, ZREM</text>
+            <!-- атомарный вариант -->
+            <text data-s="5" x="20" y="96" class="dg-in">SWEEP (Lua):</text>
+            <text data-s="5" x="20" y="114" class="dg-ok">ZREM = 1 → INCR</text>
+            <text data-s="5" x="510" y="51" class="dg-in">PAY (Lua):</text>
+            <text data-s="5" x="510" y="69" class="dg-bad">срок прошёл → 0</text>
+            <text data-s="5" x="510" y="87" class="dg-n">деньги вернуть</text>
+            <!-- итог шага -->
+            <text data-s="1" x="20" y="214" class="dg-t">10:05:00.000 — срок резерва 42 истёк</text>
+            <text data-s="2" x="20" y="214" class="dg-t">чистильщик запомнил список истёкших</text>
+            <text data-s="3" x="20" y="214" class="dg-t">резерв ещё на месте — оплата прошла</text>
+            <text data-s="4" x="20" y="214" class="dg-bad">единица 42 оплачена и снова в продаже</text>
+            <text data-s="5" x="20" y="214" class="dg-ok">атомарно: единица одна — в остатке, оплата отклонена</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Резерв пользователя 42 в множестве holds с оценкой 10:05:00. Срок только что истёк, остаток 0, оплат нет.</li>
+          <li>Чистильщик запрашивает истёкшие резервы и получает список с 42. Список теперь лежит в памяти чистильщика, а в Redis ничего не изменилось.</li>
+          <li>Покупатель жмёт «Оплатить» и проверяет, на месте ли резерв. Резерв на месте, поэтому оплата засчитана, а резерв удалён.</li>
+          <li>Чистильщик идёт по своему списку: увеличивает остаток и удаляет резерв. ZREM вернул 0 — резерв уже удалил покупатель, — но чистильщик результат не проверяет. Единица продана и одновременно снова в остатке. Следующий покупатель получит её второй раз.</li>
+          <li>Атомарный вариант: оплата и очистка — скрипты, которые проверяют и удаляют резерв за один шаг по часам Redis. Оплата после срока получает отказ и автоматический возврат денег. Чистильщик возвращает единицу, только если ZREM удалил резерв именно он.</li>
+        </ol>
+      </figure>
+<pre><code class="language-lua">-- PAY: оплата засчитывается, только если резерв ещё наш и срок не прошёл — по часам Redis.
+local deadline = redis.call('ZSCORE', KEYS[1], ARGV[1])
+local t = redis.call('TIME')
+if not deadline or tonumber(deadline) &lt; t[1] * 1000 + math.floor(t[2] / 1000) then return 0 end
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+return 1
+
+-- SWEEP: вернуть единицу в остаток только за тот резерв, который удалил сам; не больше 100 за вызов.
+local t = redis.call('TIME')
+local now = t[1] * 1000 + math.floor(t[2] / 1000)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, 100)
+for _, user in ipairs(expired) do
+  if redis.call('ZREM', KEYS[1], user) == 1 then redis.call('INCR', KEYS[2]) end
+end</code></pre>
+      <pre class="out">== 5. 1000 holds for 300 ms, 600 buyers pay around the deadline
+   naive sweeper  paid 495, late 105, back in stock 592, held 0 -> units 1087 of 1000, sold twice 87
+   atomic Lua     paid 277, late 323, back in stock 723, held 0 -> units 1000 of 1000, sold twice 0</pre>
+      <p>Демо выдаёт 1 000 резервов на 300 мс, и 600 покупателей платят в случайный момент от 30 мс до срока до 30 мс после него. С наивным чистильщиком оплачено 495, в остаток вернулось 592: всего 1 087 единиц при 1 000 в наличии. 87 единиц продано дважды. Чистильщик забрал список из сотен истёкших резервов разом и шёл по нему поэлементно, по два обращения к Redis на резерв. Покупатели в это время находили свои резервы на месте. С атомарными скриптами сумма сходится до единицы. Оплат меньше, 277, потому что оплата после срока теперь отклоняется, а не проскакивает, пока до неё не дошёл чистильщик.</p>
+      <p>Почему не поставить на каждый резерв ключ с TTL и не ловить его истечение через keyspace notifications. Документация Redis прямо говорит о двух свойствах. Pub/Sub работает по принципу «отправил и забыл»: если подписчик в этот момент переподключался, события пропали. А событие <code>expired</code> генерируется, когда Redis фактически удаляет ключ при обращении или фоновой проверке, а не в момент, когда TTL дошёл до нуля. Потерянное событие означает единицу, которая не вернулась в продажу никогда. Сортированное множество со сроками и регулярный чистильщик не теряют ничего: чистильщик, упавший на минуту, после перезапуска заберёт всё, что истекло. Срок сравнивают по часам Redis (<code>TIME</code>), чтобы расхождение часов у экземпляров API не меняло исход. Чистильщик берёт не больше 100 резервов за вызов: скрипт Lua блокирует единственный поток Redis, и долгий скрипт задержит все покупки (<a href="redis.html">Redis Basics</a>).</p>
+      <p>В схеме с номерами единиц из предыдущего шага вернувшийся номер кладут в список возвратов, и скрипт покупки сначала берёт номер оттуда. Заказ в базе переходит в EXPIRED, а уникальный индекс делают частичным, только по живым заказам. Срок резерва на распродаже короче, чем в бронировании: 5–10 минут, а не полчаса. Почему это важно, видно в модели очереди на следующем шаге.</p>
+    </section>
+
+    <section class="step" id="waiting-room">
+      <h2>Очередь ожидания пускает к покупке столько людей, сколько успевает оформление</h2>
+      <p>Из замера на втором шаге следует, что 256 одновременных покупателей проходят не быстрее 8, они только дольше ждут. Значит, держать в оформлении всех желающих бессмысленно. Пусть ждут там, где ожидание ничего не стоит и где им видна позиция. Это виртуальная очередь ожидания (waiting room). Она стоит перед всем путём покупки и выдаёт допущенным подписанный пропуск. Без пропуска API покупки отвечает отказом, ни к чему не обращаясь.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 196" role="img" aria-label="Путь покупателя: CDN отдаёт страницу, очередь выдаёт позиции, оформление принимает только с пропуском, остаток уменьшается. До старта пришедшие ждут в пред-очереди без номеров. В 10:00 им раздают случайные места. Очередь пускает не больше двух тысяч человек в оформлении и не больше, чем нужно на оставшийся товар. Когда остаток кончается, очередь ждёт возвратов, а после последнего резерва закрывается, и оставшиеся 283 197 человек сразу получают ответ «распродано».">
+            <defs><marker id="fw-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="fw-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker></defs>
+            <!-- компоненты -->
+            <rect x="14" y="50" width="96" height="50" rx="9" class="dg-box"/>
+            <rect x="136" y="50" width="120" height="50" rx="9" class="dg-box"/>
+            <rect x="282" y="50" width="130" height="50" rx="9" class="dg-box"/>
+            <rect data-s="1" x="438" y="50" width="130" height="50" rx="9" class="dg-cell miss"/>
+            <rect data-s="2-" x="438" y="50" width="130" height="50" rx="9" class="dg-box"/>
+            <rect x="594" y="50" width="112" height="50" rx="9" class="dg-cell"/>
+            <rect data-s="5" x="282" y="50" width="130" height="50" rx="9" class="dg-cell miss"/>
+            <!-- путь -->
+            <path d="M110 70 L 132 70" class="dg-line" marker-end="url(#fw-a)"/>
+            <path d="M256 70 L 278 70" class="dg-line" marker-end="url(#fw-a)"/>
+            <path data-s="3-4" d="M412 70 L 434 70" class="dg-line" marker-end="url(#fw-a)"/>
+            <path data-s="3-4" d="M568 70 L 590 70" class="dg-line" marker-end="url(#fw-a)"/>
+            <path data-s="5" d="M136 88 L 114 88" class="dg-line bad" marker-end="url(#fw-bad)"/>
+            <!-- названия -->
+            <text x="62" y="80" class="dg-t" text-anchor="middle">люди</text>
+            <text x="196" y="72" class="dg-t" text-anchor="middle">CDN</text>
+            <text x="196" y="90" class="dg-n" text-anchor="middle">страница, таймер</text>
+            <text x="347" y="72" class="dg-t" text-anchor="middle">очередь</text>
+            <text x="347" y="90" class="dg-n" text-anchor="middle">Redis: позиции</text>
+            <text x="503" y="72" class="dg-t" text-anchor="middle">оформление</text>
+            <text x="503" y="90" class="dg-n" text-anchor="middle">по пропуску</text>
+            <text x="650" y="80" class="dg-t" text-anchor="middle">остаток</text>
+            <!-- время -->
+            <text data-s="1" x="14" y="30" class="dg-cap">09:55</text>
+            <text data-s="2" x="14" y="30" class="dg-cap">10:00:00</text>
+            <text data-s="3" x="14" y="30" class="dg-cap">10:00:00 – 10:01:10</text>
+            <text data-s="4" x="14" y="30" class="dg-cap">10:01:10 – 10:08:50</text>
+            <text data-s="5" x="14" y="30" class="dg-cap">10:08:50</text>
+            <!-- шаг 1: пред-очередь -->
+            <g data-s="1" text-anchor="middle"><text x="62" y="124" class="dg-n">заходят</text><text x="62" y="140" class="dg-n">заранее</text>
+              <text x="347" y="124" class="dg-n">пред-очередь</text><text x="347" y="140" class="dg-n">без номеров</text>
+              <text x="503" y="124" class="dg-n">закрыто</text><text x="650" y="124" class="dg-n">10 000</text></g>
+            <!-- шаг 2: перемешивание -->
+            <g data-s="2" text-anchor="middle"><text x="347" y="124" class="dg-n">случайные места</text><text x="347" y="140" class="dg-n">1 … 300 000</text>
+              <text x="503" y="124" class="dg-n">открыто</text><text x="650" y="124" class="dg-n">10 000</text>
+              <text x="62" y="124" class="dg-n">поздние —</text><text x="62" y="140" class="dg-n">в конец</text></g>
+            <!-- шаг 3: допуск -->
+            <g data-s="3" text-anchor="middle"><text x="347" y="124" class="dg-n">пускает ≤ 2 000</text><text x="347" y="140" class="dg-n">и ≤ остаток / 0,7</text>
+              <text x="503" y="124" class="dg-n">2 000 человек</text><text x="503" y="140" class="dg-n">за 10 секунд</text>
+              <text x="650" y="124" class="dg-n">8 597 → 0</text></g>
+            <!-- шаг 4: возвраты -->
+            <g data-s="4" text-anchor="middle"><text x="347" y="124" class="dg-n">ждёт возвратов</text><text x="347" y="140" class="dg-n">+2 524, 5 волн</text>
+              <text x="650" y="124" class="dg-n">0, в резерве</text><text x="650" y="140" class="dg-n">1 645 → 0</text></g>
+            <!-- шаг 5: закрыта -->
+            <g data-s="5" text-anchor="middle"><text x="347" y="124" class="dg-bad">закрыта</text>
+              <text x="196" y="124" class="dg-n">«распродано»</text><text x="196" y="140" class="dg-n">всем сразу</text>
+              <text x="62" y="124" class="dg-n">283 197</text><text x="62" y="140" class="dg-n">не ждали зря</text>
+              <text x="650" y="124" class="dg-ok">продано 10 000</text></g>
+            <!-- итог шага -->
+            <text data-s="1" x="14" y="180" class="dg-s">ранний приход не даёт преимущества: номеров ещё нет</text>
+            <text data-s="2" x="14" y="180" class="dg-s">лотерея среди пришедших до старта, дальше — по порядку прихода</text>
+            <text data-s="3" x="14" y="180" class="dg-s">допуск по ёмкости оформления и по оставшемуся товару</text>
+            <text data-s="4" x="14" y="180" class="dg-s">остаток 0, но резервы не оплачены: часть единиц вернётся</text>
+            <text data-s="5" x="14" y="180" class="dg-bad">последний резерв закрыт: ответ «распродано» отдаёт CDN</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>За пять минут до старта люди открывают страницу, её отдаёт CDN. Сервис очереди записывает их в пред-очередь без номеров. Кто пришёл в 09:55, а кто в 09:59:59, неважно: у бота, который зашёл первым, преимущества нет.</li>
+          <li>В 10:00:00 пред-очередь перемешивают и раздают случайные места, как в лотерее. Пришедшие позже встают в конец по порядку прихода. Так работают пред-очередь Queue-it и перемешивание в Cloudflare Waiting Room.</li>
+          <li>Каждые 10 секунд очередь пускает людей: не больше 2 000 одновременно в оформлении и не больше, чем нужно на оставшийся товар, — остаток / 0,7, если 70 % допущенных берут резерв. Допущенный получает пропуск, остальные видят позицию.</li>
+          <li>Через 70 секунд остаток 0, но 1 645 единиц в неоплаченных резервах. Очередь не закрывают: брошенные резервы возвращаются, и пятью волнами пропускают ещё 2 524 человека.</li>
+          <li>Последний резерв оплачен или истёк, распродано все 10 000. Очередь закрыта, и 283 197 оставшихся сразу получают «распродано». Им не приходится ждать своей очереди, чтобы узнать это.</li>
+        </ol>
+      </figure>
+      <p>Числа на схеме — из модели допуска в демо. Это не нагрузочный тест, а расчёт с шагом 10 секунд. 300 000 человек в очереди, 10 000 единиц, в оформлении помещается 2 000 человек. 70 % допущенных берут резерв, 85 % резервов оплачивают, брошенные возвращаются через 2 минуты.</p>
+<pre><code class="language-java">// Допуск: не больше мест в оформлении и не больше, чем нужно на оставшийся товар.
+int admit = Math.min(Math.min(2000, waiting), (int) Math.ceil(stock / 0.7));</code></pre>
+      <pre class="out">== 6. waiting room model: 300000 in queue, 10000 units, checkout fits 2000 users
+   time   admitted   in stock   held   sold   waiting
+      0s       2000       8597   1403      0    298000
+     10s       4000       7225   1581   1194    296000
+     20s       6000       5807   1841   2352    294000
+     30s       8000       4384   2066   3550    292000
+     40s      10000       2996   2241   4763    290000
+     50s      12000       1599   2436   5965    288000
+     60s      14000        195   2651   7154    286000
+     70s      14279          0   1645   8355    285721
+     80s      14279          0   1481   8519    285721
+   stock first hit 0 at 70s; returned holds let in 2524 more users in 5 waves
+   sold out for good at 530s: 283197 users get the answer without reaching checkout</pre>
+      <p>Из модели видно три вещи. Темп допуска задаёт ёмкость оформления, а не число желающих: 2 000 человек за шаг, пока товара хватает. На 70-й секунде допущено 279, а не 2 000: на 195 единиц больше людей не нужно. Остаток обнулился за 70 секунд, но окончательно товар разошёлся только через 530 секунд: каждая волна возвратов ждёт истечения 2-минутного срока, и часть новых резервов снова бросают. Хвост распродажи — это несколько сроков резерва подряд, поэтому срок делают коротким. Ёмкость оформления выводят по закону Литтла: если оформление в среднем длится 10 секунд, а бэкенд выдерживает 200 покупок в секунду, одновременно в нём могут быть 200 × 10 = 2 000 человек.</p>
+      <p>Пропуск — подписанный токен с пользователем, распродажей и сроком действия, например HMAC от <code>user|sale|expires</code>. API покупки проверяет подпись локально, без обращения к очереди, и сверяет пользователя с сессией. Чужой или просроченный пропуск ничего не даёт. Бот, который бьёт в API покупки напрямую, получает отказ сразу и ничего не нагружает. Защиту от ботов ставят на входе в очередь, потому что дальше пройти можно только с пропуском. Одно место в очереди на аккаунт, а аккаунт с историей покупок или подтверждённым телефоном. На входе — CAPTCHA или proof-of-work, ограничение частоты по IP и устройству, как в <a href="rate-limiting.html">Rate Limiting</a>. Для самых дефицитных товаров — предрегистрация с проверкой заранее.</p>
+      <div class="trap">
+        <p class="myth">Очередь ожидания — это rate limiter: лишние запросы получают 429, и система защищена.</p>
+        <p class="fact">Лимитер отказывает конкретному запросу, и человек нажимает снова, поэтому повторы увеличивают нагрузку, а шанс достаётся тому, кто жмёт чаще, то есть боту. Очередь хранит человека в дешёвом состоянии с позицией, пускает по ёмкости и в конце честно отвечает «распродано» всем оставшимся сразу. Лимитер нужен внутри неё — на входе и в API, — но не вместо неё.</p>
+      </div>
+    </section>
+
+    <section class="step" id="degrade">
+      <h2>Статику отдаёт CDN, а пользователь всегда видит честный статус</h2>
+      <p>330 000 запросов страницы в секунду не должны доходить до серверов магазина. Поэтому страница распродажи одинакова для всех. Её HTML, скрипты и картинки отдаёт CDN, адреса файлов версионированы. Персональное — корзину, имя, позицию в очереди — подгружает маленький отдельный запрос. Индикатор «есть / распродано» — крошечный JSON с <code>Cache-Control: public, max-age=1, stale-while-revalidate=5</code>. Узел CDN спрашивает origin примерно раз в секунду и отвечает всем своим посетителям из кеша. 200 000 опросов в секунду превращаются в несколько запросов к origin на узел. Механика заголовков и устаревания — в <a href="http-cache.html">HTTP Cache &amp; CDN</a>, обработка кеш-промахов под нагрузкой — в <a href="caching.html">Caching Strategies</a>.</p>
+      <p>Таймер на странице — только интерфейс. Кнопка «Купить» активируется по часам браузера, но продажу открывает сервер: очередь начинает выдавать пропуска в 10:00 по своим часам. Если перевести часы на компьютере или вызвать API заранее, получишь отказ. Всё, что не нужно для покупки, на время пика отключают флагами: рекомендации, отзывы, персональные цены, «похожие товары». Распродажу разворачивают отдельно от остального магазина: свои экземпляры, свой пул соединений, свой Redis. Тогда перегрузка распродажи не утянет каталог и заказы других товаров. Экземпляры поднимают и прогревают заранее, до 10:00: автомасштабирование за минуты не успеет за пиком в секунды. Если что-то всё же перегружено, лишнее отсекают быстрым 503 с <code>Retry-After</code> и случайной задержкой повтора на клиенте, а не очередью в пулах (<a href="overload.html">Overload</a>).</p>
+      <table class="mx">
+        <thead><tr><th>Что видит покупатель</th><th>Когда</th><th>Откуда ответ</th></tr></thead>
+        <tbody>
+          <tr><td>«Продажа начнётся в 10:00»</td><td>до старта, в пред-очереди</td><td>CDN, сервис очереди</td></tr>
+          <tr><td>«Вы 48 213-й, примерно 4 минуты»</td><td>в очереди</td><td>сервис очереди</td></tr>
+          <tr><td>«Резерв №37, оформляем»</td><td>Redis выдал единицу, заказа в базе ещё нет</td><td>API</td></tr>
+          <tr><td>«Оплатите до 10:06:12»</td><td>заказ закоммичен в базе</td><td>API</td></tr>
+          <tr><td>«Сейчас всё в резервах, возможны возвраты»</td><td>остаток 0, резервы не закрыты</td><td>CDN, статус</td></tr>
+          <tr><td>«Распродано»</td><td>последний резерв закрыт</td><td>CDN, статус</td></tr>
+          <tr><td>«Сбой, ваше место в очереди сохранено»</td><td>ошибка на пути покупки</td><td>API</td></tr>
+        </tbody>
+      </table>
+      <p>Границы решения. Если пик ниже нескольких сотен заказов в секунду или товара больше, чем желающих, хватит одной строки с условным UPDATE: в демо она оформляла 2 000–2 600 заказов в секунду. Redis, писатель и сверка добавляют компонентов и способов разойтись, и окупаются только на настоящем пике. Если спрос превышает предложение в сотни раз, «кто первый» превращается в соревнование ботов. Тогда честнее лотерея: регистрация в течение дня, случайный выбор победителей, право купить в течение часа. Пика нет совсем, а система — обычная форма и фоновая задача. Если продаются места с выбором на схеме зала, конфликт идёт за конкретную строку места: это разбор <a href="sd-booking.html">Booking System</a> плюс очередь ожидания отсюда.</p>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Миллион желающих на 10 000 единиц: система в основном отказывает, и отказ должен стоить дёшево — CDN, очередь, Redis, а не база.</li>
+        <li>Условный UPDATE не продаёт лишнего, но строка обслуживает одну транзакцию за раз. В демо 8 потоков — 2 993 заказа/с, 256 — 1 158/с, и 61 соединение из 64 ждёт блокировку.</li>
+        <li>Остаток раскладывают так, чтобы покупатели не ждали друг друга: строка на единицу со SKIP LOCKED — 9 589/с, корзины — 8 200/с, Redis — 16 029/с.</li>
+        <li>Redis — привратник, база — бухгалтер: номер единицы с уникальным индексом отклонил 40 повторных выдач после эмулированного failover; сверка пересобирает Redis из базы.</li>
+        <li>Возврат резерва и оплата на границе срока — атомарные скрипты по часам Redis; наивный чистильщик продал 87 единиц дважды.</li>
+        <li>Очередь ожидания пускает по ёмкости оформления и по остатку, выдаёт подписанный пропуск и в конце сразу отвечает «распродано» всем оставшимся.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="fs-design" data-freq="3">
+      <h3>Спроектируйте распродажу: 10 000 консолей, миллион покупателей в 10:00</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Сначала уточню: одинаковые единицы или места с выбором, лимит на покупателя, срок оплаты, нужна ли честность против ботов. Оценка показывает, что продать 10 000 единиц нетрудно. Трудно ответить 990 000 отказами и выдержать сотни тысяч запросов в секунду к странице. Поэтому делаю воронку. Страницу и статус «распродано» отдаёт CDN. Перед покупкой стоит очередь ожидания: позиции, допуск по ёмкости оформления, подписанный пропуск. Покупка — Lua-скрипт в Redis: проверка лимита пользователя, уменьшение остатка, номер единицы, заявка в поток. Писатель вставляет заказы в PostgreSQL пачками, а уникальный индекс на номер единицы не даёт продать лишнее. Резерв со сроком 5 минут, возврат брошенных — атомарным чистильщиком.</p>
+          <p>Пользователю показываю честные статусы: позицию в очереди, «резерв получен, оформляем», «оплатите до …», «распродано». Деньги списываю только после того, как заказ закоммичен в базе.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Источник истины — база; Redis после failover может забыть последние записи, сверка пересобирает его из базы.</li>
+            <li>Распродажа развёрнута отдельно от магазина (bulkhead), экземпляры прогреты заранее, второстепенное отключено флагами.</li>
+            <li>Если спрос в сотни раз выше предложения, предложу лотерею вместо «кто первый»: пика нет, ботам нечего выигрывать.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="fs-hot-row" data-freq="3">
+      <h3>Почему UPDATE ... WHERE stock &gt; 0 не выдерживает старт продаж и что с этим делать?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Он корректен: проверка и уменьшение — один оператор, а ожидающий UPDATE в READ COMMITTED после коммита владельца перепроверяет условие на новой версии строки. Но строка одна, и блокировка держится от UPDATE до конца коммита. Покупки идут строго по одной, пропускная способность — единица, делённая на время удержания. Добавление потоков только удлиняет очередь: в демо 8 потоков дали около 3 000 заказов в секунду, 256 — около 1 200 при задержке 220 мс.</p>
+          <p>Что делаю: держу блокировку коротко (горячий UPDATE последним, никаких внешних вызовов внутри транзакции) и раскладываю остаток: строка на единицу со SKIP LOCKED, корзины или атомарный счётчик в Redis с проверкой в базе по уникальному индексу.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ожидающие соединения дерутся ещё и за LWLock LockManager, поэтому пропускная способность при росте числа потоков падает, а не просто перестаёт расти.</li>
+            <li>Пустой ответ SKIP LOCKED — «нет свободных незаблокированных», а не «распродано».</li>
+            <li>Корзин нужно не меньше, чем одновременных покупателей; последние единицы продаются медленнее.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с этой покупкой?</summary>
+          <pre><code class="language-java">@Transactional
+public Order buy(long itemId, long userId) {
+    Item item = items.findById(itemId).orElseThrow();
+    if (item.getStock() &lt;= 0) throw new SoldOut();
+    item.setStock(item.getStock() - 1);
+    Price price = pricing.quote(itemId, userId);     // HTTP-вызов, 20–50 мс
+    return orders.save(new Order(itemId, userId, price));
+}</code></pre>
+          <p>Чтение без блокировки и запись вычисленного значения: в READ COMMITTED одновременные покупки прочитают одно и то же число и перетрут уменьшения друг друга. В демо так продали 2 000 единиц при остатке 100. Нужен условный UPDATE <code>stock = stock - 1 where stock &gt; 0</code> с проверкой числа изменённых строк. Вторая беда — HTTP-вызов внутри транзакции. С условным UPDATE строка будет заблокирована на всё время вызова, и пропускная способность упадёт до десятков покупок в секунду. Цену нужно получить до транзакции, а горячий UPDATE поставить последним.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="fs-redis" data-freq="2">
+      <h3>Остаток держим в Redis. Что пойдёт не так и как это закрыть?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Три места. Первое — неатомарность: GET и DECR двумя командами продадут лишнее, поэтому проверка, уменьшение, лимит на пользователя и запись заявки — один Lua-скрипт. Второе — потеря записей: репликация асинхронная, при failover новый мастер может не знать о последних продажах и выдаст те же единицы снова. Поэтому Redis выдаёт номер единицы, а база хранит заказы с уникальным индексом на номер: лишнее отклоняется, и сверка пересобирает Redis из базы. Третье — возврат резервов: ключ с TTL и keyspace notifications ненадёжны, единицы могут не вернуться. Беру сортированное множество со сроками и атомарного чистильщика, который возвращает единицу, только если сам удалил резерв.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Ответ Redis — «резерв, оформляем», окончательный статус и оплата — после коммита в базе.</li>
+            <li>WAIT и AOF always сужают окно потери, но не заменяют проверку в базе.</li>
+            <li>Срок сравнивают по часам Redis (TIME), чистильщик обрабатывает пачками, чтобы не блокировать единственный поток.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему не вернуть единицу по событию expired, повесив TTL на ключ резерва?</summary>
+          <p>Keyspace notifications идут через Pub/Sub, а он работает по принципу «отправил и забыл»: если подписчик в этот момент переподключался или упал, событие потеряно навсегда, и единица не вернётся в продажу. Кроме того, Redis генерирует <code>expired</code>, когда фактически удаляет ключ, а не когда истёк TTL, и при большом числе ключей задержка бывает заметной. Сортированное множество со сроками и регулярный чистильщик ничего не теряют: после перезапуска чистильщик заберёт всё истёкшее.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="fs-queue" data-freq="2">
+      <h3>Зачем очередь ожидания и как не отдать распродажу ботам?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Оформление выдерживает ограниченное число одновременных покупателей. Если пустить всех, пропускная способность не вырастет, вырастут задержка и число таймаутов. Очередь держит людей в дешёвом состоянии с позицией и пускает по ёмкости, которую считаю по закону Литтла: темп покупок × длительность оформления. Пускаю и не больше, чем нужно на оставшийся товар. Допущенный получает подписанный пропуск, API без пропуска отвечает отказом сразу. Когда остаток и резервы кончились, очередь закрывается, и все оставшиеся сразу видят «распродано».</p>
+          <p>Против ботов: пред-очередь с перемешиванием в момент старта, чтобы скорость прихода ничего не давала. Одно место на аккаунт, CAPTCHA или proof-of-work на входе, лимиты по IP и устройству, предрегистрация для самого дефицитного.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Rate limiter отказывает запросу, и люди жмут снова; очередь — нет, поэтому лимитер стоит внутри очереди, а не вместо неё.</li>
+            <li>После обнуления остатка очередь не закрывают сразу: брошенные резервы возвращаются волнами, хвост длится несколько сроков резерва.</li>
+            <li>Пропуск проверяется локально по подписи и привязан к пользователю и сроку: его нельзя передать или использовать повторно после покупки.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li><a href="https://www.hellointerview.com/learn/system-design/problem-breakdowns/ticketmaster">Hello Interview: Design Ticketmaster</a> — основа порядка разбора: требования, резерв со сроком, виртуальная очередь, кеширование просмотра.</li>
+      <li><a href="https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED">PostgreSQL: Read Committed Isolation Level</a> — как ожидающий UPDATE перепроверяет WHERE на новой версии строки.</li>
+      <li><a href="https://redis.io/docs/latest/develop/pubsub/keyspace-notifications/">Redis: Keyspace notifications</a> — раздел «Timing of expired events» и пометка о fire and forget.</li>
+      <li><a href="https://queue-it.com/pre-queue/">Queue-it: pre-queue</a> и <a href="https://developers.cloudflare.com/waiting-room/about/">Cloudflare Waiting Room</a> — пред-очередь с перемешиванием, лимит новых пользователей в минуту и активных одновременно.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
