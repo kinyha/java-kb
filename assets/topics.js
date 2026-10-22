@@ -508,6 +508,14 @@ window.KB_TREE = [
         { id: 'java-testing', freq: 3, status: 'draft', title: 'Testing',
           scope: 'JUnit 5, Mockito, AssertJ, Testcontainers, что мокать' },
       ] },
+      { id: 'kotlin', title: 'Kotlin', items: [
+        { id: 'kotlin-for-java', freq: 2, status: 'empty', title: 'Kotlin for Java Devs',
+          scope: 'байткод Kotlin и javap, val и var, свойства, object и companion, null safety и platform types, !! и lateinit, data class и record, extension functions, sealed и when, inline и reified, read-only коллекции, final по умолчанию' },
+        { id: 'kotlin-coroutines', freq: 2, status: 'empty', title: 'Coroutines',
+          scope: 'suspend и continuation, state machine, structured concurrency, coroutineScope и Job, отмена, Dispatchers.IO и Default, async и await, SupervisorJob, Flow cold и hot, сравнение с virtual threads и Reactor' },
+        { id: 'kotlin-spring', freq: 1, status: 'empty', title: 'Kotlin with Spring & JPA',
+          scope: 'kotlin-spring и all-open, CGLIB-прокси, kotlin-jpa и no-arg, JPA-сущность на Kotlin, data class и equals/hashCode, Jackson Kotlin module, null safety и JSpecify, suspend-контроллеры в MVC и WebFlux' },
+      ] },
     ],
   },
   {
