@@ -513,7 +513,7 @@ window.KB_TREE = [
           scope: 'байткод Kotlin и javap, val и var, свойства, object и companion, null safety и platform types, !! и lateinit, data class и record, extension functions, sealed и when, inline и reified, read-only коллекции, final по умолчанию' },
         { id: 'kotlin-coroutines', freq: 2, status: 'draft', title: 'Coroutines',
           scope: 'suspend и continuation, state machine, structured concurrency, coroutineScope и Job, отмена, Dispatchers.IO и Default, async и await, SupervisorJob, Flow cold и hot, сравнение с virtual threads и Reactor' },
-        { id: 'kotlin-spring', freq: 1, status: 'empty', title: 'Kotlin with Spring & JPA',
+        { id: 'kotlin-spring', freq: 1, status: 'draft', title: 'Kotlin with Spring & JPA',
           scope: 'kotlin-spring и all-open, CGLIB-прокси, kotlin-jpa и no-arg, JPA-сущность на Kotlin, data class и equals/hashCode, Jackson Kotlin module, null safety и JSpecify, suspend-контроллеры в MVC и WebFlux' },
       ] },
     ],

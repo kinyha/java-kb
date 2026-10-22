@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kotlin with Spring &amp; JPA · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="kotlin-spring">
+
+<main class="page">
+
+  <header class="topic-head">
+    <h1>Kotlin with Spring &amp; JPA</h1>
+  </header>
+
+  <div class="lesson">
+
+    <div class="note tip">
+      <p>Spring и Hibernate написаны для Java: они наследуются от твоих классов, создают объекты через конструктор без аргументов и читают параметры конструктора по именам. Kotlin по умолчанию делает классы final, конструктор без аргументов не генерирует, а null-проверки вставляет прямо в конструктор. Поэтому Kotlin-сервис на Spring держится на нескольких плагинах компилятора и модулях. Без них он ломается так, что из кода причину не видно. Дальше — что именно ломается, с запуском на Spring 7.0.9 и Hibernate 7.4.1, и что каждый плагин чинит.</p>
+    </div>
+
+    <section class="step" id="proxy-final">
+      <h2>Без all-open Spring не может построить прокси, а final-метод выполняется на пустом прокси</h2>
+      <p>Платёжный сервис переписывают на Kotlin. Для <code>@Transactional</code>, <code>@Async</code>, <code>@Cacheable</code> и <code>@Configuration</code> Spring создаёт CGLIB-прокси — подкласс твоего бина, который переопределяет методы и добавляет поведение (<a href="spring-aop.html">AOP &amp; Proxies</a>). В Kotlin классы и методы final по умолчанию. Тот же код собран дважды: обычным <code>kotlinc</code> и с плагином <code>kotlin-spring</code>:</p>
+      <pre><code class="language-kotlin">@Component
+class PaymentService(private val ledger: Ledger) {            // без плагина: final class
+    @Transactional
+    fun pay(id: String) = ledger.save(id)
+}
+
+@Component
+open class RefundService(private val ledger: Ledger) {         // класс открыли руками...
+    @Transactional
+    fun refund(id: String) = ledger.save(id)                   // ...а метод остался final
+}
+
+@Configuration                                                  // full mode: тоже CGLIB-подкласс
+class FeeConfig {
+    @Bean fun feeRate() = 15
+}
+// Менеджер транзакций в опыте только печатает BEGIN и COMMIT</code></pre>
+      <pre class="out">=== без плагина
+final class + @Transactional:
+    IllegalArgumentException: Cannot subclass final class pay.proxy.PaymentService
+open class, final method:
+    bean class: RefundService$$SpringCGLIB$$0
+    NullPointerException: Cannot invoke "pay.proxy.Ledger.save(String)" because "this.ledger" is null
+final @Configuration:
+    BeanDefinitionParsingException: Configuration problem: @Configuration class 'FeeConfig' may not be final. Remove the final modifier to continue.
+=== с kotlin-spring
+final class + @Transactional:
+    bean class: PaymentService$$SpringCGLIB$$0
+    BEGIN
+    COMMIT
+    result: saved p-1
+open class, final method:
+    bean class: RefundService$$SpringCGLIB$$0
+    BEGIN
+    COMMIT
+    result: saved r-1
+final @Configuration:
+    bean class: FeeConfig$$SpringCGLIB$$0
+    result: feeRate=15</pre>
+      <p>Без плагина два случая из трёх честно падают на старте: первый — с <code>BeanCreationException: Could not generate CGLIB subclass</code>, корневая причина напечатана выше. Опасен средний. Класс открыт, CGLIB построил подкласс, бин создан, и Spring только предупредил в лог: <code>Public final method [...refund...] cannot get proxied via CGLIB</code>. Вызов <code>refund</code> не попал в перехватчик: транзакции нет, BEGIN не напечатан. Тело метода выполнилось на самом прокси, а у прокси поля пустые — <code>ledger</code> равен null, хотя в Kotlin он объявлен не-null. Если бы метод не трогал поля, он бы просто молча отработал без транзакции.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 280" role="img" aria-label="Слева open-метод: вызов идёт в прокси, прокси переопределил метод и передаёт его TransactionInterceptor, тот открывает транзакцию и вызывает настоящий бин, у которого ledger заполнен. Справа final-метод: прокси не может его переопределить, тело метода выполняется прямо на объекте прокси, где ledger равен null; перехватчик и настоящий бин не вызываются.">
+            <defs>
+              <marker id="sp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="sp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+              <marker id="sp-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow bad"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap">OPEN-МЕТОД</text>
+            <text x="384" y="22" class="dg-cap bad">FINAL-МЕТОД</text>
+            <line x1="360" y1="10" x2="360" y2="272" class="dg-sep"/>
+
+            <!-- слева -->
+            <rect x="24" y="36" width="150" height="34" rx="7" class="dg-box"/>
+            <rect x="24" y="104" width="150" height="56" rx="8" class="dg-box"/>
+            <rect x="196" y="104" width="150" height="56" rx="8" class="dg-box"/>
+            <rect x="196" y="194" width="150" height="56" rx="8" class="dg-cell hit"/>
+            <path d="M99 70 L 99 100" class="dg-line" marker-end="url(#sp-n)"/>
+            <path d="M174 132 L 192 132" class="dg-line ok" marker-end="url(#sp-ok)"/>
+            <path d="M271 160 L 271 190" class="dg-line ok" marker-end="url(#sp-ok)"/>
+
+            <!-- справа -->
+            <rect x="388" y="36" width="150" height="34" rx="7" class="dg-box"/>
+            <rect x="388" y="104" width="150" height="56" rx="8" class="dg-cell miss"/>
+            <rect x="556" y="104" width="150" height="56" rx="8" class="dg-sep" fill="none"/>
+            <rect x="556" y="194" width="150" height="56" rx="8" class="dg-sep" fill="none"/>
+            <path d="M463 70 L 463 100" class="dg-line" marker-end="url(#sp-n)"/>
+            <path d="M420 160 C 420 196, 506 196, 506 164" class="dg-line bad" marker-end="url(#sp-bad)"/>
+
+            <!-- текст -->
+            <text x="36" y="58" class="dg-in">refund("r-1")</text>
+            <text x="36" y="125" class="dg-t">прокси CGLIB</text>
+            <text x="36" y="144" class="dg-s">ledger = null</text>
+            <text x="208" y="125" class="dg-t">TxInterceptor</text>
+            <text x="208" y="144" class="dg-ok">BEGIN … COMMIT</text>
+            <text x="208" y="215" class="dg-t">RefundService</text>
+            <text x="208" y="234" class="dg-s">ledger = Ledger</text>
+            <text x="200" y="182" class="dg-s" text-anchor="end">proceed()</text>
+            <text x="24" y="270" class="dg-ok">прокси переопределил метод</text>
+
+            <text x="400" y="58" class="dg-in">refund("r-1")</text>
+            <text x="400" y="125" class="dg-t">прокси CGLIB</text>
+            <text x="400" y="144" class="dg-s">ledger = null</text>
+            <text x="568" y="125" class="dg-s">перехватчик</text>
+            <text x="568" y="144" class="dg-s">не вызван</text>
+            <text x="568" y="215" class="dg-s">настоящий бин</text>
+            <text x="568" y="234" class="dg-s">не вызван</text>
+            <text x="392" y="222" class="dg-bad">this.ledger → NPE</text>
+            <text x="388" y="270" class="dg-bad">тело выполняется на самом прокси</text>
+          </svg>
+        </div>
+        <figcaption>У прокси свои поля, и Spring их не заполняет: он передаёт вызов настоящему бину. final-метод этот путь пропускает.</figcaption>
+      </figure>
+      <h3>Что делает плагин all-open</h3>
+      <p>Плагин <code>kotlin("plugin.spring")</code> — это all-open с готовым набором аннотаций. Класс, помеченный <code>@Component</code>, <code>@Async</code>, <code>@Transactional</code>, <code>@Cacheable</code> или <code>@SpringBootTest</code>, компилируется открытым вместе со всеми членами. Мета-аннотации тоже считаются, поэтому <code>@Service</code>, <code>@Repository</code>, <code>@Controller</code> и <code>@Configuration</code>, помеченные <code>@Component</code>, попадают в список автоматически.</p>
+      <pre><code class="language-text">$ javap -p RefundService PaymentService          # без плагина
+public class pay.proxy.RefundService {
+  public final java.lang.String refund(java.lang.String);     # open class, но метод final
+public final class pay.proxy.PaymentService {
+  public final java.lang.String pay(java.lang.String);
+
+$ javap -p RefundService PaymentService          # с kotlin-spring
+public class pay.proxy.RefundService {
+  public java.lang.String refund(java.lang.String);           # открыт плагином
+public class pay.proxy.PaymentService {
+  public java.lang.String pay(java.lang.String);</code></pre>
+      <p>Плагин открывает только классы с этими аннотациями. Обычный класс без них, например <code>Ledger</code>, остаётся final. В проекте со Spring Initializr плагин подключён сразу; если модуль собирали руками, его стоит проверить первым, когда <code>@Transactional</code> «не работает».</p>
+      <div class="trap">
+        <p class="myth">Достаточно написать <code>open class</code>, и прокси заработает.</p>
+        <p class="fact"><code>open</code> на классе не открывает методы: каждый метод final, пока не помечен <code>open</code>. CGLIB построит подкласс, но не переопределит final-методы, и вызов пройдёт мимо перехватчика. Ошибки не будет, только предупреждение в логе.</p>
+      </div>
+    </section>
+
+    <section class="step" id="jpa-entity">
+      <h2>JPA-сущность на Kotlin: конструктор без аргументов, открытый класс и не data class</h2>
+      <p>Hibernate создаёт сущность при загрузке из базы так: вызывает конструктор без аргументов через reflection, затем заполняет поля из строки результата. Для ленивой связи он генерирует подкласс-прокси, как Spring. Kotlin-класс с первичным конструктором не даёт ни того, ни другого:</p>
+      <pre><code class="language-kotlin">@Entity
+class Merchant(@Id val id: Long, var name: String)
+
+@Entity
+class Payment(
+    @Id val id: Long,
+    var amount: Long,
+    @ManyToOne(fetch = FetchType.LAZY) val merchant: Merchant,   // хотим загрузку по требованию
+)
+
+val p = em.find(Payment::class.java, 10L)
+println("merchant class=${p.merchant.javaClass.simpleName}, " +
+    "initialized=${Hibernate.isInitialized(p.merchant)}, statements=${stats.prepareStatementCount}")</code></pre>
+      <pre class="out">=== без плагинов
+InstantiationException: No default constructor for entity 'pay.jpa.Payment'
+=== kotlin-jpa (no-arg)
+merchant class=Merchant, initialized=true, statements=2
+=== kotlin-jpa + all-open для @Entity
+merchant class=Merchant$HibernateProxy, initialized=false, statements=1</pre>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 176" role="img" aria-label="Слева Merchant final: find загружает Payment первым запросом и сразу вторым запросом настоящий Merchant, итого два запроса. Справа Merchant открыт: в поле merchant лежит прокси-подкласс с одним id, запрос за продавцом будет только при первом обращении к его полям.">
+            <defs>
+              <marker id="sj-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <text x="20" y="22" class="dg-cap bad">MERCHANT FINAL</text>
+            <text x="384" y="22" class="dg-cap">MERCHANT OPEN</text>
+            <line x1="360" y1="10" x2="360" y2="170" class="dg-sep"/>
+
+            <!-- слева: прокси невозможен, связь загружена сразу -->
+            <rect x="20" y="40" width="140" height="50" rx="8" class="dg-cell"/>
+            <rect x="200" y="40" width="146" height="50" rx="8" class="dg-cell miss"/>
+            <path d="M160 65 L 196 65" class="dg-line" marker-end="url(#sj-n)"/>
+
+            <!-- справа: в поле лежит прокси -->
+            <rect x="384" y="40" width="140" height="50" rx="8" class="dg-cell"/>
+            <rect x="560" y="40" width="146" height="50" rx="8" class="dg-sep" fill="none"/>
+            <path d="M524 65 L 556 65" class="dg-line" marker-end="url(#sj-n)"/>
+
+            <text x="32" y="61" class="dg-t">Payment #10</text>
+            <text x="32" y="78" class="dg-s">SELECT №1</text>
+            <text x="212" y="61" class="dg-t">Merchant #1</text>
+            <text x="212" y="78" class="dg-s">SELECT №2 сразу</text>
+            <text x="20" y="124" class="dg-bad">statements=2 при каждом find</text>
+            <text x="20" y="144" class="dg-s">список из 100 платежей — до 100 лишних</text>
+            <text x="20" y="160" class="dg-s">запросов, LAZY в аннотации ничего не меняет</text>
+
+            <text x="396" y="61" class="dg-t">Payment #10</text>
+            <text x="396" y="78" class="dg-s">SELECT №1</text>
+            <text x="572" y="61" class="dg-t">Merchant$Proxy</text>
+            <text x="572" y="78" class="dg-s">только id = 1</text>
+            <text x="384" y="124" class="dg-ok">statements=1</text>
+            <text x="384" y="144" class="dg-s">SELECT за продавцом — при первом</text>
+            <text x="384" y="160" class="dg-s">обращении к merchant.name</text>
+          </svg>
+        </div>
+        <figcaption>Ленивость держится на подклассе. Нет подкласса — нечего положить в поле вместо настоящего объекта, и Hibernate загружает его сразу.</figcaption>
+      </figure>
+      <p>Без плагинов сохранение прошло, а загрузка упала: конструктора без аргументов нет. Плагин <code>kotlin("plugin.jpa")</code> — это no-arg с набором <code>@Entity</code>, <code>@Embeddable</code>, <code>@MappedSuperclass</code>. Он добавляет синтетический конструктор без аргументов, который видит только reflection: из Kotlin и Java его не вызвать. Инициализаторы свойств этот конструктор не выполняет — значения ставит Hibernate.</p>
+      <p>Со вторым результатом сложнее, потому что он выглядит рабочим. Сущность загрузилась, но <code>LAZY</code> не сработал: Merchant final, прокси-подкласс построить нельзя, и Hibernate молча загрузил продавца вторым запросом. Ни ошибки, ни предупреждения нет; на списке из сотни платежей это сотня лишних запросов (<a href="jpa.html">JPA</a>). Только с all-open для JPA-аннотаций продавец стал прокси, и запрос остался один. <code>kotlin("plugin.spring")</code> сущности не открывает: это делается отдельно в Gradle.</p>
+      <pre><code class="language-kotlin">// build.gradle.kts
+plugins {
+    kotlin("plugin.spring") version "2.4.10"     // all-open для @Component, @Transactional и др.
+    kotlin("plugin.jpa") version "2.4.10"        // no-arg для @Entity, @Embeddable, @MappedSuperclass
+}
+allOpen {                                        // сущности тоже должны быть open — для lazy-прокси
+    annotation("jakarta.persistence.Entity")
+    annotation("jakarta.persistence.MappedSuperclass")
+    annotation("jakarta.persistence.Embeddable")
+}</code></pre>
+      <h3>Почему сущность не data class</h3>
+      <p>data class генерирует <code>equals</code>, <code>hashCode</code> и <code>toString</code> по всем свойствам конструктора. Для сущности это ломает три вещи сразу:</p>
+      <pre><code class="language-kotlin">@Entity
+data class Refund(                                                // так делать не надо
+    @Id @GeneratedValue var id: Long? = null,
+    var amount: Long,
+    @ManyToOne(fetch = FetchType.LAZY) var merchant: Merchant? = null,
+)
+
+val refund = Refund(amount = 100, merchant = em.getReference(Merchant::class.java, 1L))
+val pending = hashSetOf(refund)
+em.persist(refund)                          // id присвоен при сохранении
+println("refund id=${refund.id}, still in set: ${refund in pending}")
+
+val detached = em.createQuery("select r from Refund r", Refund::class.java).singleResult
+em.close()
+println(detached)                           // toString читает merchant</code></pre>
+      <pre class="out">refund id=1, still in set: false
+LazyInitializationException: Could not initialize proxy [pay.jpa.Merchant#1] - no session</pre>
+      <ul>
+        <li><b>hashCode меняется.</b> До <code>persist</code> id равен null, после — 1. Сущность «теряется» в <code>HashSet</code>, в котором лежала, как изменённый ключ.</li>
+        <li><b>toString и equals трогают ленивые связи.</b> Внутри сессии это лишние запросы, вне её — <code>LazyInitializationException</code>. Здесь хватило <code>println</code> в логе. Без all-open для сущностей этого исключения не было бы: связь загрузилась бы сразу, о чём шла речь выше.</li>
+        <li><b>copy и equals по всем полям</b> противоречат тождеству сущности: две загрузки одной строки с разным <code>amount</code> — это одна сущность в разных состояниях, а не два разных значения.</li>
+      </ul>
+      <p>Сущность — обычный класс с равенством по идентификатору:</p>
+      <pre><code class="language-kotlin">@Entity
+class Payment(
+    @Id val id: UUID = UUID.randomUUID(),        // id известен до persist: hashCode не меняется
+    var amount: Long,
+    @ManyToOne(fetch = FetchType.LAZY) val merchant: Merchant,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is Payment) return false      // прокси Hibernate — подкласс, проверку проходит
+        return id == other.id                    // id у прокси читается без загрузки
+    }
+    override fun hashCode() = id.hashCode()
+    override fun toString() = "Payment(id=$id, amount=$amount)"   // без ленивых связей
+}</code></pre>
+      <p>Если id генерирует база (<code>@GeneratedValue</code>), равенство пишут как «оба id не null и равны», а <code>hashCode</code> делают постоянным для класса, например <code>javaClass.hashCode()</code>. Тогда объект не теряется в коллекции при <code>persist</code>.</p>
+    </section>
+
+    <section class="step" id="jackson">
+      <h2>Jackson без Kotlin-модуля не знает про значения по умолчанию и null safety</h2>
+      <p>REST-контроллер принимает запрос на оплату. Его удобно описать data class со значением по умолчанию для валюты:</p>
+      <pre><code class="language-kotlin">data class PaymentRequest(
+    val id: String,
+    val amount: Long,
+    val currency: String = "RUB",        // клиент может не присылать
+    val comment: String? = null,
+)
+
+val mapper = JsonMapper.builder().build()           // Jackson 3, без Kotlin-модуля
+for (json in listOf(
+    """{"id":"p-1","amount":350,"currency":"EUR"}""",
+    """{"id":"p-2","amount":350}""",
+    """{"amount":350}""",
+)) println("$json -> " + runCatching { mapper.readValue(json, PaymentRequest::class.java) }…)</code></pre>
+      <p>Результат зависит от флага компилятора. Без <code>-java-parameters</code> имён параметров конструктора в байткоде нет, и Jackson не видит, как создать объект. С флагом — видит, но работает с конструктором как с Java-конструктором:</p>
+      <pre class="out">== kotlinc без флагов
+{"id":"p-1","amount":350,"currency":"EUR"} -> InvalidDefinitionException: Cannot construct instance of `pay.jackson.PaymentRequest` (no Creators, like default constructor, exist): cannot deserialize from Object value (no delegate- or property-based Creator)
+== kotlinc -java-parameters
+{"id":"p-1","amount":350,"currency":"EUR"} -> PaymentRequest(id=p-1, amount=350, currency=EUR, comment=null)
+{"id":"p-2","amount":350} -> ValueInstantiationException: Cannot construct instance of `pay.jackson.PaymentRequest`, problem: Parameter specified as non-null is null: method pay.jackson.PaymentRequest.&lt;init&gt;, parameter currency
+{"amount":350} -> ValueInstantiationException: Cannot construct instance of `pay.jackson.PaymentRequest`, problem: Parameter specified as non-null is null: method pay.jackson.PaymentRequest.&lt;init&gt;, parameter id</pre>
+      <p>Второй запрос валиден по контракту API: валюта не пришла, должна стать RUB. Jackson же передал в конструктор null, и сработала проверка параметра из темы <a href="kotlin-for-java.html">Kotlin for Java Devs</a>. Значение по умолчанию живёт в синтетическом конструкторе с битовой маской, и Java-библиотека про него не знает. Третий запрос должен падать, но падает с внутренним NPE вместо понятной ошибки «нет поля id».</p>
+      <p>Это чинит <code>jackson-module-kotlin</code>. Он читает метаданные Kotlin через kotlin-reflect: какие параметры nullable, у каких есть значения по умолчанию. Отсутствующий <code>currency</code> модуль пропускает, и подставляется <code>"RUB"</code>. Отсутствующий не-null <code>id</code> превращается в <code>KotlinInvalidNullException</code> с именем поля. Это подкласс <code>InvalidNullException</code> из Jackson, и Spring отвечает на него 400 Bad Request, а не 500. Тот же код с модулем в classpath, причём <code>-java-parameters</code> уже не нужен: модуль берёт имена из метаданных Kotlin:</p>
+      <pre><code class="language-kotlin">val mapper = JsonMapper.builder()
+    .addModule(KotlinModule.Builder().build())      // это делает Spring Boot, если модуль в classpath
+    .build()</code></pre>
+      <pre class="out">== jackson-module-kotlin 3.1.5 + kotlin-reflect, kotlinc без флагов
+{"id":"p-1","amount":350,"currency":"EUR"} -> PaymentRequest(id=p-1, amount=350, currency=EUR, comment=null)
+{"id":"p-2","amount":350} -> PaymentRequest(id=p-2, amount=350, currency=RUB, comment=null)
+{"amount":350} -> KotlinInvalidNullException: Instantiation of [simple type, class pay.jackson.PaymentRequest] value failed for JSON property id due to missing (therefore NULL) value for creator parameter id which is a non-nullable type</pre>
+      <p>Spring Boot регистрирует модуль сам, если он есть в classpath, а Spring Initializr добавляет его в Kotlin-проект вместе с <code>kotlin-reflect</code>. Boot 4 работает с Jackson 3, поэтому артефакт — <code>tools.jackson.module:jackson-module-kotlin</code>; у Jackson 2 он был в группе <code>com.fasterxml.jackson.module</code>. Флаг <code>-java-parameters</code> Spring Boot Gradle plugin ставит Kotlin-компиляции сам.</p>
+    </section>
+
+    <section class="step" id="null-safety">
+      <h2>Spring читает nullability Kotlin, а Kotlin читает JSpecify-аннотации Spring</h2>
+      <p>Null safety работает в обе стороны. Spring смотрит на типы Kotlin и делает nullable-параметры необязательными. Kotlin смотрит на аннотации Spring и не даёт забыть, что метод может вернуть null.</p>
+      <h3>Nullable — значит необязательно</h3>
+      <p>SMS-шлюз подключён не во всех окружениях. В Java необязательную зависимость пишут через <code>Optional</code>, <code>ObjectProvider</code> или <code>@Autowired(required = false)</code> (<a href="optional.html">Optional</a>). В Kotlin достаточно nullable-типа:</p>
+      <pre><code class="language-kotlin">class SmsGateway
+
+@Component
+class Notifier(private val sms: SmsGateway?) {       // nullable: зависимость необязательна
+    fun channels() = if (sms == null) "email only" else "email + sms"
+}
+
+AnnotationConfigApplicationContext(Notifier::class.java).use { ctx -&gt;   // SmsGateway не зарегистрирован
+    println("notifier: " + ctx.getBean(Notifier::class.java).channels())
+}</code></pre>
+      <pre class="out">-- без kotlin-reflect в classpath
+NoSuchBeanDefinitionException: No qualifying bean of type 'pay.nulls.SmsGateway' available
+-- с kotlin-reflect
+notifier: email only</pre>
+      <p>Тип <code>SmsGateway?</code> в байткоде — обычный <code>SmsGateway</code>, nullability хранится в метаданных Kotlin. Spring читает их через kotlin-reflect. Без этой библиотеки он видит обязательный параметр, и контекст не стартует. По той же причине в Spring MVC <code>@RequestParam comment: String?</code> необязателен. Поэтому <code>kotlin-reflect</code> — обязательная зависимость Kotlin-проекта на Spring.</p>
+      <h3>Spring 7 размечен JSpecify</h3>
+      <p>Spring Framework 7 и Spring Boot 4 перешли на JSpecify: пакеты помечены <code>@NullMarked</code>, а методы, которые могут вернуть null, — <code>@Nullable</code>. Kotlin 2.1+ считает несоответствие ошибкой компиляции, поэтому platform types на стыке со Spring пропали:</p>
+      <pre><code class="language-kotlin">// queryForObject объявлен как @Nullable T
+val count: Long = jdbc.queryForObject("select count(*) from payment", Long::class.java)</code></pre>
+      <pre><code class="language-text">JdbcNulls.kt:7:21: error: initializer type mismatch: expected 'Long', actual 'Long?'.</code></pre>
+      <p>На Spring 6 тот же код компилировался, и null из пустого результата проходил в <code>Long</code> через platform type. Теперь компилятор требует решить: <code>?: 0</code>, <code>?: error("…")</code> или nullable-тип. При переходе на Boot 4 такие ошибки компиляции ожидаемы: это места, где null и раньше был возможен. Флаг <code>-Xjsr305=strict</code>, который Spring Initializr по-прежнему добавляет, относится к аннотациям JSR-305: на них были размечены Spring 5 и 6 и часть других библиотек. Для JSpecify строгий режим включён по умолчанию.</p>
+      <div class="note warn">
+        <p>Аннотации на свойствах из первичного конструктора: до Kotlin 2.2 <code>@NotBlank val id: String</code> попадала только на параметр конструктора, и Bean Validation, которая смотрит на поле, её не видела — поэтому в старом коде пишут <code>@field:NotBlank</code>. Kotlin 2.2 ввёл новое правило: аннотация без цели ставится и на параметр, и на поле. Spring Initializr включает его флагом <code>-Xannotation-default-target=param-property</code>; на Kotlin 2.4.10 в <code>javap</code> аннотация видна на обоих местах и без флага. На старых версиях Kotlin <code>@field:</code> по-прежнему нужен.</p>
+      </div>
+    </section>
+
+    <section class="step" id="coroutines">
+      <h2>suspend-контроллер: Spring вызывает его через Reactor и Dispatchers.Unconfined</h2>
+      <p>Spring MVC и WebFlux принимают suspend-функции в контроллерах и <code>Flow</code> как тело ответа (<a href="kotlin-coroutines.html">Coroutines</a>). Снаружи это обычный метод:</p>
+      <pre><code class="language-kotlin">@RestController
+class PaymentController(private val gateway: BankGateway) {
+    @GetMapping("/payments/{id}")
+    suspend fun status(@PathVariable id: String): PaymentStatus =
+        gateway.status(id)                       // suspend-вызов банка, поток не держится
+}</code></pre>
+      <p>Как Spring вызывает такой метод, видно в байткоде <code>spring-core</code> 7.0.9. Обработчик проверяет <code>KotlinDetector.isSuspendingFunction</code> и уходит в <code>CoroutinesUtils.invokeSuspendingFunction</code>. Тот запускает функцию внутри <code>mono { }</code> из <code>kotlinx-coroutines-reactor</code> с контекстом <code>Dispatchers.Unconfined</code> и возвращает <code>Publisher</code>:</p>
+      <pre><code class="language-text">$ javap -c -p -cp spring-core-7.0.9.jar org.springframework.core.CoroutinesUtils
+public static Publisher&lt;?&gt; invokeSuspendingFunction(Method, Object, Object...);
+   6: invokestatic  Dispatchers.getUnconfined          # контекст по умолчанию
+public static Publisher&lt;?&gt; invokeSuspendingFunction(CoroutineContext, Method, Object, Object...);
+  50: invokestatic  kotlinx/coroutines/reactor/MonoKt.mono   # корутина завёрнута в Mono</code></pre>
+      <p>Что это значит на практике, видно на MockMvc. Контроллер печатает поток до и после приостановки; поток теста назван как поток Tomcat:</p>
+      <pre><code class="language-kotlin">@RestController
+class PaymentController {
+    @GetMapping("/payments/{id}")
+    suspend fun status(@PathVariable id: String): String {
+        val before = thread()                 // поток запроса
+        delay(50)                             // «ответ банка»: точка приостановки
+        val after = thread()                  // кто нас возобновил
+        return "$id PAID; before delay: $before; after delay: $after"
+    }
+}
+
+Thread.currentThread().name = "http-nio-1"
+val started = mvc.perform(get("/payments/p-1")).andReturn()
+println("async started: ${started.request.isAsyncStarted}, response yet: '${started.response.contentAsString}'")
+started.getAsyncResult(2_000)
+val done = mvc.perform(asyncDispatch(started)).andReturn()
+println("status ${done.response.status}: ${done.response.contentAsString}")</code></pre>
+      <pre class="out">async started: true, response yet: ''
+status 200: p-1 PAID; before delay: http-nio-1; after delay: kotlinx.coroutines.DefaultExecutor</pre>
+      <p>Обработчик вернулся сразу, запрос перешёл в асинхронный режим, и поток запроса освободился. После <code>delay</code> функция продолжила работу в <code>kotlinx.coroutines.DefaultExecutor</code> — служебном потоке таймера kotlinx.coroutines, одном на всё приложение. Без <code>kotlinx-coroutines-reactor</code> в classpath тот же запрос падает с <code>NoClassDefFoundError: kotlinx/coroutines/reactor/MonoKt</code>.</p>
+      <p>Отсюда три практических следствия.</p>
+      <ul>
+        <li><b>Нужны зависимости.</b> <code>kotlinx-coroutines-reactor</code> и reactor-core должны быть в classpath даже в Spring MVC. Результат-<code>Publisher</code> MVC обрабатывает как асинхронный запрос Servlet API.</li>
+        <li><b>Unconfined — это «где придётся».</b> До первой приостановки функция идёт в потоке запроса, после — в том потоке, который её возобновил: потоке HTTP-клиента или, как здесь, таймера DefaultExecutor. Блокирующий вызов после <code>delay</code> займёт этот общий поток и задержит все таймеры приложения, поэтому JDBC и другие блокирующие вызовы оборачивают в <code>withContext(Dispatchers.IO)</code>.</li>
+        <li><b>ThreadLocal не переезжает.</b> MDC, <code>SecurityContextHolder</code>, транзакция, привязанная к потоку, после приостановки могут оказаться в другом потоке. Для логов есть <code>MDCContext</code>, для Security в WebFlux — реактивный контекст, а не ThreadLocal.</li>
+      </ul>
+      <h3>@Transactional на suspend-функции</h3>
+      <p><code>TransactionAspectSupport</code> в spring-tx 7.0.9 поддерживает suspend-функции только в реактивной ветке: если менеджер транзакций — <code>ReactiveTransactionManager</code> (R2DBC, реактивный MongoDB). JPA и JDBC используют <code>PlatformTransactionManager</code>, который хранит транзакцию в ThreadLocal. Что получается, если всё же поставить <code>@Transactional</code> на suspend-функцию с таким менеджером:</p>
+      <pre><code class="language-kotlin">@Component
+class RefundService {
+    @Transactional
+    suspend fun refund(id: String): String {
+        println("    before delay: tx active=${TransactionSynchronizationManager.isActualTransactionActive()}")
+        delay(50)
+        return "refunded $id"
+    }
+}
+// менеджер — блокирующий AbstractPlatformTransactionManager, печатает BEGIN и COMMIT с потоком
+println("    result: " + runBlocking { service.refund("r-1") })</code></pre>
+      <pre class="out">    BEGIN on main
+    COMMIT on main
+    before delay: tx active=false
+    result: refunded r-1</pre>
+      <p>Транзакция открылась и закрылась раньше, чем выполнилась первая строка метода. Прокси вызвал suspend-функцию через <code>CoroutinesUtils</code>, получил ленивый <code>Mono</code> и счёл вызов завершённым: COMMIT. Тело выполнилось позже, при подписке, уже без транзакции. Ни ошибки, ни предупреждения нет, а запись в базу в таком методе пройдёт вне транзакции, и откатить её будет нечем. Для JPA в Kotlin-сервисе транзакционный код оставляют обычной функцией и вызывают из корутины через <code>withContext(Dispatchers.IO)</code>, либо работают на виртуальных потоках без suspend.</p>
+    </section>
+
+    <section class="step" id="build-limits">
+      <h2>Без какого плагина что сломается: чек-лист Kotlin-модуля на Spring</h2>
+      <p>Почти все проблемы этой темы — молчаливые: сервис стартует, а поведение не то. Поэтому настройку сборки проверяют по списку, а не по симптомам. Сам Gradle и Kotlin DSL разобраны в <a href="build.html">Maven &amp; Gradle</a>.</p>
+      <table class="mx">
+        <thead><tr><th>Что</th><th>Зачем</th><th>Без этого</th></tr></thead>
+        <tbody>
+          <tr><td><code>kotlin("plugin.spring")</code></td><td>Открывает классы с аннотациями Spring</td><td>Падение CGLIB на старте или final-метод мимо прокси: нет транзакции, NPE на пустом прокси</td></tr>
+          <tr><td><code>kotlin("plugin.jpa")</code></td><td>Синтетический конструктор без аргументов для сущностей</td><td><code>InstantiationException</code> при загрузке</td></tr>
+          <tr><td><code>allOpen { annotation(Entity) … }</code></td><td>Открывает сущности для lazy-прокси</td><td>LAZY молча становится EAGER: лишние запросы</td></tr>
+          <tr><td><code>kotlin-reflect</code></td><td>Spring и Jackson читают nullability и значения по умолчанию</td><td>Nullable-зависимость обязательна, параметры по умолчанию не работают</td></tr>
+          <tr><td><code>jackson-module-kotlin</code></td><td>Конструкторы data class, значения по умолчанию, понятные ошибки</td><td>NPE вместо 400, значение по умолчанию не подставляется</td></tr>
+          <tr><td><code>-java-parameters</code></td><td>Имена параметров в байткоде для Java-библиотек</td><td>Jackson без Kotlin-модуля не находит конструктор; сам Spring читает имена через kotlin-reflect</td></tr>
+          <tr><td><code>kotlinx-coroutines-reactor</code></td><td>Вызов suspend-контроллеров и <code>Flow</code></td><td>suspend-методы контроллера не вызываются</td></tr>
+        </tbody>
+      </table>
+      <p>Spring Initializr для Kotlin-проекта с JPA и WebFlux добавляет всё из таблицы, включая <code>allOpen</code> для сущностей. Чек-лист нужен, когда модуль собирали руками или переводили с Java: там чаще всего забывают <code>allOpen</code> и <code>kotlin-reflect</code>.</p>
+      <h3>Где Kotlin со Spring не окупается</h3>
+      <ul>
+        <li><b>Lombok в Java-классах того же модуля.</b> Kotlin компилируется раньше и сгенерированных геттеров не видит. Сущности с Lombok обычно переписывают на Kotlin целиком или держат в отдельном Java-модуле.</li>
+        <li><b>JPA и корутины вместе.</b> Транзакция JPA привязана к потоку. Если сервис построен на JPA, корутины дают немного: виртуальные потоки решают ту же задачу без переписывания (<a href="virtual-threads.html">Virtual Threads</a>).</li>
+      </ul>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Spring и Hibernate наследуются от твоих классов. В Kotlin это требует all-open: <code>plugin.spring</code> для бинов и отдельный <code>allOpen</code> для сущностей.</li>
+        <li>final-метод в open-классе — худший случай: прокси создан, вызов мимо перехватчика, поля прокси пустые.</li>
+        <li>Сущность — обычный open-класс с no-arg конструктором от <code>plugin.jpa</code> и равенством по id, а не data class.</li>
+        <li>kotlin-reflect и jackson-module-kotlin переводят nullability и значения по умолчанию из метаданных Kotlin в поведение Spring и Jackson.</li>
+        <li>Spring 7 размечен JSpecify: Kotlin-компилятор видит, где Spring может вернуть null.</li>
+        <li>suspend-контроллер Spring запускает через <code>mono { }</code> на Unconfined. <code>@Transactional</code> на suspend-функции с JPA-менеджером коммитит пустую транзакцию до выполнения тела.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="all-open" data-freq="1">
+      <h3>Зачем в Kotlin-проекте на Spring плагин kotlin-spring?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Spring строит CGLIB-прокси для <code>@Transactional</code>, <code>@Async</code>, <code>@Cacheable</code> и full-mode <code>@Configuration</code>. Прокси — подкласс бина, а Kotlin делает классы и методы final по умолчанию. Плагин kotlin-spring — это all-open с набором аннотаций Spring: такие классы и их методы компилируются открытыми.</p>
+          <p>Без него final-класс с <code>@Transactional</code> не стартует: CGLIB не может его унаследовать, а final <code>@Configuration</code> отклоняется при разборе конфигурации. Хуже, если класс открыть руками, а метод оставить final: бин создастся, вызов пройдёт мимо перехватчика без транзакции, и метод выполнится на прокси с пустыми полями.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Плагин учитывает мета-аннотации: <code>@Service</code> и <code>@Configuration</code> открываются через <code>@Component</code>. Классы без аннотаций остаются final.</li>
+            <li>Сущности JPA kotlin-spring не открывает: для lazy-прокси Hibernate нужен отдельный <code>allOpen</code> для <code>@Entity</code>.</li>
+            <li>Альтернатива — JDK-прокси через интерфейс, но в Boot по умолчанию <code>proxyTargetClass = true</code>, и CGLIB используется даже при наличии интерфейса.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Почему здесь не откатывается транзакция?</summary>
+          <pre><code class="language-kotlin">@Service
+open class RefundService(private val repo: RefundRepository) {
+    @Transactional
+    fun refund(cmd: RefundCommand) {
+        repo.save(Refund(cmd))
+        if (cmd.amount &gt; LIMIT) throw LimitExceeded()
+    }
+}
+// Gradle: плагин kotlin-spring не подключён</code></pre>
+          <p><code>open</code> открыл класс, но <code>refund</code> остался final. CGLIB его не переопределил, и вызов пошёл в тело метода на самом прокси, без перехватчика транзакций. У прокси <code>repo</code> равен null, поэтому здесь будет NPE; если бы метод обращался к полям иначе, он бы отработал без транзакции, и откатывать было бы нечего. Исправление — подключить <code>kotlin("plugin.spring")</code> и убрать ручной <code>open</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="jpa-entity-kotlin" data-freq="1">
+      <h3>Как правильно писать JPA-сущность на Kotlin и почему не data class?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Hibernate создаёт сущность через конструктор без аргументов и строит прокси-подклассы для ленивых связей. Поэтому нужен плагин kotlin-jpa, который генерирует синтетический no-arg конструктор, и <code>allOpen</code> для <code>@Entity</code>, иначе lazy-связи молча загружаются сразу.</p>
+          <p>Data class не подходит: <code>equals</code> и <code>hashCode</code> по всем полям меняются после <code>persist</code>, когда появляется id, а <code>toString</code> трогает ленивые связи и даёт лишние запросы или LazyInitializationException. Я пишу обычный класс с равенством по id и <code>toString</code> без связей.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>С id из базы делаю <code>equals</code> «оба id не null и равны» и постоянный <code>hashCode</code>; с UUID, заданным в коде, — обычное равенство по id.</li>
+            <li>Проверка <code>other !is Payment</code> работает с прокси Hibernate: это подкласс. <code>other.javaClass != javaClass</code> на прокси даст неравенство.</li>
+            <li>No-arg конструктор не выполняет инициализаторы свойств: значение по умолчанию вроде <code>val items = mutableListOf()</code> будет null, пока его не заполнит Hibernate. Опция <code>invokeInitializers</code> это меняет.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="задача">
+          <summary>Что выведет этот код, если сущности не открыты для прокси?</summary>
+          <pre><code class="language-kotlin">// kotlin-jpa подключён, allOpen для @Entity — нет
+@Entity class Merchant(@Id val id: Long, var name: String)
+@Entity class Payment(
+    @Id val id: Long, var amount: Long,
+    @ManyToOne(fetch = FetchType.LAZY) val merchant: Merchant,
+)
+
+val p = em.find(Payment::class.java, 10L)
+println("initialized=${Hibernate.isInitialized(p.merchant)}, statements=${stats.prepareStatementCount}")</code></pre>
+          <pre class="out">initialized=true, statements=2</pre>
+          <p>Merchant final, прокси-подкласс построить нельзя, и Hibernate 7.4.1 без предупреждения загружает связь вторым запросом. С <code>allOpen</code> для <code>@Entity</code> будет <code>initialized=false, statements=1</code>.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="spring-nullability" data-freq="1">
+      <h3>Как Spring и Jackson понимают null safety Kotlin?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Nullability и значения по умолчанию хранятся в метаданных Kotlin, а не в байткоде, поэтому Spring и Jackson читают их через kotlin-reflect. Spring делает nullable-параметр конструктора необязательной зависимостью, а <code>@RequestParam x: String?</code> — необязательным параметром. jackson-module-kotlin подставляет значения по умолчанию и превращает отсутствующее не-null поле в понятную ошибку, а не в NPE из конструктора.</p>
+          <p>В обратную сторону Spring 7 размечен JSpecify, и Kotlin видит, где методы Spring возвращают null: <code>queryForObject</code> возвращает <code>T?</code>, и присвоить его в не-null переменную компилятор не даст.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Без kotlin-reflect nullable-зависимость становится обязательной: <code>NoSuchBeanDefinitionException</code> на старте.</li>
+            <li>Без Kotlin-модуля Jackson 3 с <code>-java-parameters</code> создаёт data class через конструктор, но null из отсутствующего поля падает на проверке параметра, а значение по умолчанию не подставляется. С модулем отсутствующее не-null поле даёт <code>KotlinInvalidNullException</code>, то есть 400.</li>
+            <li>До Kotlin 2.2 аннотации на свойствах конструктора попадали только на параметр, и Bean Validation их не видела, поэтому писали <code>@field:NotBlank</code>.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+
+    <article class="q" id="suspend-controller" data-freq="1">
+      <h3>Можно ли писать suspend-контроллеры в Spring MVC? Что с транзакциями?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Да, и в MVC, и в WebFlux. Spring видит suspend-метод и вызывает его через <code>CoroutinesUtils</code>: функция запускается в <code>mono { }</code> из kotlinx-coroutines-reactor на <code>Dispatchers.Unconfined</code>. В MVC это асинхронный запрос Servlet API, и поток Tomcat не ждёт ответа банка.</p>
+          <p>С транзакциями JPA осторожно. <code>@Transactional</code> на suspend-функции поддерживается только с <code>ReactiveTransactionManager</code>. С блокирующим менеджером транзакция открывается и коммитится до выполнения тела, и метод работает вне транзакции без всякой ошибки. Поэтому транзакционный JPA-код оставляю обычной функцией и вызываю из корутины через <code>withContext(Dispatchers.IO)</code>.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Unconfined продолжает корутину в том потоке, который её возобновил: после <code>delay</code> это <code>kotlinx.coroutines.DefaultExecutor</code>. Блокирующий вызов там задержит все таймеры приложения.</li>
+            <li>ThreadLocal-контекст — MDC, SecurityContext — после приостановки теряется; для логов есть <code>MDCContext</code>.</li>
+            <li>Если сервис на JPA, виртуальные потоки обычно проще корутин: код остаётся блокирующим, и транзакции работают как раньше.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+
+  <div class="refs">
+    <ul>
+      <li><a href="https://docs.spring.io/spring-framework/reference/languages/kotlin.html">Spring Framework Reference: Kotlin</a> — основа урока: требования, null safety, классы и интерфейсы, корутины, Spring Projects in Kotlin.</li>
+      <li><a href="https://kotlinlang.org/docs/all-open-plugin.html">Kotlin docs: All-open</a> и <a href="https://kotlinlang.org/docs/no-arg-plugin.html">No-arg compiler plugin</a> — пресеты spring и jpa, мета-аннотации, <code>invokeInitializers</code>.</li>
+      <li><a href="https://spring.io/guides/tutorials/spring-boot-kotlin">Spring guide: Building web applications with Spring Boot and Kotlin</a> — эталонный build.gradle.kts с allOpen для сущностей и обоснованием.</li>
+      <li><a href="https://github.com/FasterXML/jackson-module-kotlin">jackson-module-kotlin</a> — что модуль делает с nullability и значениями по умолчанию, настройки KotlinFeature.</li>
+      <li><a href="https://kotlinlang.org/docs/annotations.html">Kotlin docs: Annotations</a> — use-site targets и правило по умолчанию с Kotlin 2.2.</li>
+    </ul>
+  </div>
+
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>
