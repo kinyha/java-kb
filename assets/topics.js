@@ -509,7 +509,7 @@ window.KB_TREE = [
           scope: 'JUnit 5, Mockito, AssertJ, Testcontainers, что мокать' },
       ] },
       { id: 'kotlin', title: 'Kotlin', items: [
-        { id: 'kotlin-for-java', freq: 2, status: 'empty', title: 'Kotlin for Java Devs',
+        { id: 'kotlin-for-java', freq: 2, status: 'draft', title: 'Kotlin for Java Devs',
           scope: 'байткод Kotlin и javap, val и var, свойства, object и companion, null safety и platform types, !! и lateinit, data class и record, extension functions, sealed и when, inline и reified, read-only коллекции, final по умолчанию' },
         { id: 'kotlin-coroutines', freq: 2, status: 'empty', title: 'Coroutines',
           scope: 'suspend и continuation, state machine, structured concurrency, coroutineScope и Job, отмена, Dispatchers.IO и Default, async и await, SupervisorJob, Flow cold и hot, сравнение с virtual threads и Reactor' },
