@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chat System · Java KB</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&amp;display=swap">
+<link rel="stylesheet" href="../assets/kb.css">
+<script src="../assets/topics.js"></script>
+<script src="../assets/search.js"></script>
+</head>
+<body data-page="topic" data-root="../" data-topic="sd-chat">
+
+<main class="page">
+  <header class="topic-head">
+    <h1>Chat System</h1>
+  </header>
+
+  <div class="lesson">
+    <div class="note tip">
+      <p>Мессенджер держит постоянное соединение с каждым устройством, и это соединение живёт на конкретном сервере-шлюзе. Сообщение Анны приходит на один шлюз, а телефон Бориса подключён к другому, поэтому сервис чата ищет шлюз получателя в реестре «пользователь → шлюз». Сообщение сначала записывают в лог чата и выдают ему порядковый номер seq, и только потом доставляют. После записи сообщение уже не потеряется: если живая доставка не удалась, устройство заберёт его при следующей синхронизации («дай всё после seq 41»). Порядок задаёт seq, а не часы: в демо два получателя одной группы увидели разный порядок в 200 прогонах из 200, а по seq — одинаковый во всех. Статусы «доставлено» и «прочитано» хранят не на каждое сообщение, а как два числа на участника чата: до какого seq доставлено и до какого прочитано.</p>
+    </div>
+
+    <section class="step" id="requirements">
+      <h2>Требования и оценка: 23 тысячи сообщений в секунду и 10 миллионов соединений</h2>
+      <p>Функционально: личные чаты и группы до 500 участников, текст и вложения, история хранится всегда, у пользователя несколько устройств — телефон, ноутбук, веб, — и на всех одна и та же переписка. Отправитель видит статусы: отправлено (одна галочка), доставлено (две), прочитано. Показываем, кто в сети и когда был последний раз. Если приложение закрыто, приходит push. Нефункционально: сообщение доходит за доли секунды внутри региона; после галочки «отправлено» сообщение не теряется; дублей нет; у всех участников чата одинаковый порядок.</p>
+      <p>Что уточнить у интервьюера. Размер групп: 500 человек и канал на 200 тысяч устроены по-разному, это видно в шаге про группы. Сквозное шифрование: с ним сервер видит только шифротекст, поиск по истории на сервере невозможен, а синхронизация устройств требует обмена ключами. Обычно его выносят за рамки разбора. Срок хранения истории, нужен ли поиск, есть ли редактирование и удаление.</p>
+      <table class="mx">
+        <thead><tr><th>Оценка</th><th>Расчёт</th><th>Результат</th></tr></thead>
+        <tbody>
+          <tr><td>Сообщения</td><td>50 млн DAU × 40 в день = 2 млрд / 86 400</td><td>≈ 23 000 в секунду, пик ×3 ≈ 70 000</td></tr>
+          <tr><td>Доставки</td><td>в среднем 3 устройства на сообщение</td><td>≈ 70 000 в секунду, пик ≈ 210 000</td></tr>
+          <tr><td>Хранение</td><td>2 млрд × 200 байт = 400 ГБ в сутки × 365</td><td>≈ 146 ТБ в год, с тремя репликами ≈ 440 ТБ</td></tr>
+          <tr><td>Соединения</td><td>в пик онлайн 20 % пользователей</td><td>≈ 10 млн; по 100 000 на шлюз — 100 шлюзов</td></tr>
+          <tr><td>Heartbeat</td><td>10 млн соединений / раз в 30 с</td><td>≈ 330 000 в секунду — больше, чем сообщений</td></tr>
+        </tbody>
+      </table>
+      <p>Выводы из таблицы. Это система с тяжёлой записью, в отличие от <a href="sd-url-shortener.html">URL Shortener</a>: каждое сообщение — запись, и история растёт без конца. Значит, хранилище должно масштабироваться горизонтально и делиться по чату. Соединения — отдельный ресурс со своим числом машин, поэтому их держит отдельный слой. Heartbeat-ов больше, чем сообщений, поэтому они не должны доходить до базы. Как считать такие оценки по шагам — в <a href="sd-estimation.html">Back-of-the-envelope</a>.</p>
+      <p>100 000 соединений на шлюз — осторожная цифра. На соединение уходят десятки килобайт: буферы TLS и сокета, состояние сессии. WhatsApp в 2012 году держал больше 2 млн TCP-соединений на одной машине, но позже стал оставлять запас: когда шлюз падает, его клиенты переподключаются к соседям, и тем нужно место.</p>
+    </section>
+
+    <section class="step" id="connections">
+      <h2>Соединение живёт на шлюзе: реестр подсказывает, куда доставить</h2>
+      <p>Чтобы сервер мог сам отправить сообщение клиенту, клиент держит постоянное соединение. Для чата это WebSocket: клиент и пишет, и читает часто, а задержка должна быть минимальной. Чем WebSocket отличается от long polling и SSE, разобрано в <a href="realtime.html">Real-time</a>. Здесь важно другое: соединение — это TCP-соединение с конкретной машиной. Пока оно открыто, всё, что адресовано этому устройству, должно прийти именно на эту машину.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 250" role="img" aria-label="Анна и Борис подключены через L4-балансировщик к разным шлюзам: Анна к gw-03, Борис к gw-17. Сообщение Анны идёт с gw-03 в chat service, тот записывает его в лог сообщений, спрашивает реестр, на каком шлюзе Борис, и отправляет сообщение на gw-17, а тот — Борису. Если в реестре Бориса нет, chat service отправляет push. Шлюз gw-17 сам записал Бориса в реестр при подключении.">
+            <defs>
+              <marker id="ca-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- слой шлюзов -->
+            <rect x="216" y="24" width="120" height="176" rx="10" class="dg-sep" fill="none"/>
+            <!-- клиенты и балансировщик -->
+            <rect x="20" y="40" width="86" height="40" rx="8" class="dg-box"/>
+            <rect x="20" y="150" width="86" height="40" rx="8" class="dg-box"/>
+            <rect x="130" y="40" width="64" height="150" rx="8" class="dg-box"/>
+            <!-- шлюзы -->
+            <rect x="224" y="40" width="104" height="40" rx="8" class="dg-box"/>
+            <rect x="224" y="150" width="104" height="40" rx="8" class="dg-box"/>
+            <!-- сервисы и хранилища -->
+            <rect x="372" y="40" width="150" height="40" rx="8" class="dg-box"/>
+            <rect x="560" y="40" width="140" height="40" rx="8" class="dg-cell hit"/>
+            <rect x="372" y="150" width="150" height="40" rx="8" class="dg-cell"/>
+            <rect x="560" y="150" width="140" height="40" rx="8" class="dg-box"/>
+            <!-- путь сообщения -->
+            <path d="M106 60 L 126 60" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M194 60 L 220 60" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M328 60 L 368 60" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M522 60 L 556 60" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M447 80 L 447 146" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M384 80 C 362 118, 356 160, 332 164" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M224 170 L 198 170" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M130 170 L 110 170" class="dg-line" marker-end="url(#ca-n)"/>
+            <path d="M512 80 C 545 108, 600 118, 626 146" class="dg-line" marker-end="url(#ca-n)"/>
+            <!-- регистрация соединения -->
+            <path d="M328 182 L 368 182" class="dg-line" marker-end="url(#ca-n)"/>
+            <!-- подписи -->
+            <text x="63" y="65" class="dg-t" text-anchor="middle">Анна</text>
+            <text x="63" y="175" class="dg-t" text-anchor="middle">Борис</text>
+            <text x="162" y="119" class="dg-t" text-anchor="middle">L4 LB</text>
+            <text x="276" y="65" class="dg-in" text-anchor="middle">gw-03</text>
+            <text x="276" y="175" class="dg-in" text-anchor="middle">gw-17</text>
+            <text x="276" y="216" class="dg-n" text-anchor="middle">шлюзы WebSocket</text>
+            <text x="447" y="58" class="dg-t" text-anchor="middle">chat service</text>
+            <text x="447" y="73" class="dg-n" text-anchor="middle">dedup, seq, fan-out</text>
+            <text x="630" y="58" class="dg-t" text-anchor="middle">лог сообщений</text>
+            <text x="630" y="73" class="dg-n" text-anchor="middle">Cassandra</text>
+            <text x="447" y="168" class="dg-t" text-anchor="middle">реестр, Redis</text>
+            <text x="447" y="183" class="dg-in" text-anchor="middle">boris → gw-17</text>
+            <text x="630" y="168" class="dg-t" text-anchor="middle">push</text>
+            <text x="630" y="183" class="dg-n" text-anchor="middle">APNs / FCM</text>
+            <text x="348" y="54" class="dg-n" text-anchor="middle">1</text>
+            <text x="539" y="54" class="dg-n" text-anchor="middle">2</text>
+            <text x="455" y="117" class="dg-n">3</text>
+            <text x="350" y="126" class="dg-n" text-anchor="middle">4</text>
+            <text x="586" y="114" class="dg-n">5: офлайн</text>
+            <text x="348" y="198" class="dg-n" text-anchor="middle">HSET</text>
+            <text x="20" y="238" class="dg-s">1 отправка, 2 запись в лог, 3 поиск шлюза Бориса, 4 доставка; нет соединения — 5 push</text>
+          </svg>
+        </div>
+        <figcaption>Шлюзы держат соединения и не содержат логики. Всё, что решает судьбу сообщения, делает chat service без состояния.</figcaption>
+      </figure>
+      <p>Шлюз делает минимум: принимает соединение, проверяет токен при рукопожатии, отвечает на ping и передаёт кадры между клиентом и chat service. Логику держат в chat service без состояния. Причина в цене деплоя: перезапуск шлюза рвёт сто тысяч соединений, и все эти клиенты разом переподключаются. Тонкий шлюз меняется редко, а chat service выкатывают сколько угодно раз в день.</p>
+      <p>Перед шлюзами стоит балансировщик уровня L4 или L7 с поддержкой Upgrade и долгим таймаутом простоя, как в <a href="load-balancing.html">Load Balancing</a>. Отдельная настройка sticky sessions для WebSocket не нужна: одно соединение — одно TCP-соединение, и оно и так всё время идёт на одну машину. Sticky sessions нужны запасным транспортам вроде long polling, где каждый новый HTTP-запрос должен попасть на сервер с состоянием сессии. Главное другое: после обрыва клиент переподключится к любому шлюзу. Поэтому маршрут хранят отдельно — в реестре.</p>
+<pre><code class="language-text"># gw-17 при подключении телефона Бориса; поле — устройство, значение — шлюз
+HSET   conn:boris phone gw-17
+HEXPIRE conn:boris 90 FIELDS 1 phone      # Redis 7.4+: срок у поля; шлюз продлевает, пока соединение живо
+# chat service перед доставкой: все устройства Бориса и их шлюзы
+HGETALL conn:boris                        # phone → gw-17, laptop → gw-03
+# при штатном закрытии соединения
+HDEL   conn:boris phone</code></pre>
+      <p>Если шлюз упал, он не успел удалить свои записи. Они живут до истечения срока, и chat service какое-то время отправляет сообщения на мёртвый шлюз. Это не потеря: отправка на gw-17 падает, chat service считает устройство офлайн и отправляет push, а сообщение уже лежит в логе, и телефон заберёт его при переподключении. Срок записи берут в 2–3 интервала продления, чтобы короткая пауза не выкинула живое устройство из реестра.</p>
+      <p>Другой вариант — без реестра: шлюз выбирается по хешу пользователя на кольце, как в <a href="consistent-hashing.html">Consistent Hashing</a>, и chat service вычисляет адрес сам. Но тогда балансировщик должен знать пользователя ещё до рукопожатия. Добавление шлюза переносит часть пользователей, и их соединения приходится рвать. А при падении шлюза все пользователи его участка кольца уходят на одного соседа. Поэтому чаще берут «любой шлюз и реестр».</p>
+      <div class="trap">
+        <p class="myth">Достаточно разослать каждое сообщение всем шлюзам через Redis Pub/Sub: каждый сам найдёт своих клиентов.</p>
+        <p class="fact">Для одного экрана с уведомлениями так и делают. Для чата это 210 000 доставок в секунду на каждый из 100 шлюзов — 21 млн обработанных событий в секунду, из которых полезна одна сотая. Адресная доставка через реестр отправляет сообщение только на шлюзы, где есть получатели.</p>
+      </div>
+      <p>Протокол поверх WebSocket — свои JSON-кадры. История и догрузка идут обычным HTTP, их удобно кешировать и ограничивать:</p>
+<pre><code class="language-text">→ {"type":"send", "chat":"c9", "client_msg_id":"c-81", "text":"Купи хлеб"}
+← {"type":"ack",  "chat":"c9", "client_msg_id":"c-81", "seq":42}        # записано: одна галочка
+← {"type":"msg",  "chat":"c9", "seq":43, "from":"boris", "text":"Уже иду"}
+→ {"type":"delivered", "chat":"c9", "up_to":43}                          # устройство получило всё до 43
+→ {"type":"read",      "chat":"c9", "up_to":43}                          # пользователь дочитал до 43
+GET /v1/chats/c9/messages?after=40&amp;limit=100                              # догрузка после обрыва</code></pre>
+    </section>
+
+    <section class="step" id="send">
+      <h2>Сначала записать, потом доставить: путь одного сообщения</h2>
+      <p>Главное правило мессенджера: сообщение сначала надёжно записывают, потом пытаются доставить. Галочка «отправлено» означает «записано в лог чата и получило seq», а не «ушло получателю». После записи сообщение уже никуда не денется: живая доставка через WebSocket — ускорение, а гарантию даёт синхронизация по seq при подключении. Если делать наоборот, падение chat service между доставкой и записью оставит сообщение на телефоне Бориса, которого нет в истории.</p>
+      <figure class="fig play">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 292" role="img" aria-label="Диаграмма последовательности: Анна, gw-03, chat service, лог чата, реестр, gw-17, Борис. Анна отправляет c-81, chat service записывает сообщение с seq 42 и отвечает ack. Затем находит в реестре gw-17 и доставляет сообщение Борису, Борис подтверждает доставку, и Анна видит две галочки. Если Бориса нет в реестре, уходит push, а сообщение ждёт в логе.">
+            <defs>
+              <marker id="cp-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+              <marker id="cp-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow ok"/></marker>
+            </defs>
+            <!-- участники и линии жизни -->
+            <rect x="12" y="14" width="84" height="32" rx="7" class="dg-box"/>
+            <rect x="114" y="14" width="84" height="32" rx="7" class="dg-box"/>
+            <rect x="216" y="14" width="84" height="32" rx="7" class="dg-box"/>
+            <rect x="318" y="14" width="84" height="32" rx="7" class="dg-cell hit"/>
+            <rect x="420" y="14" width="84" height="32" rx="7" class="dg-cell"/>
+            <rect x="522" y="14" width="84" height="32" rx="7" class="dg-box"/>
+            <rect x="624" y="14" width="84" height="32" rx="7" class="dg-box"/>
+            <path d="M54 46 L 54 256" class="dg-sep" fill="none"/>
+            <path d="M156 46 L 156 256" class="dg-sep" fill="none"/>
+            <path d="M258 46 L 258 256" class="dg-sep" fill="none"/>
+            <path d="M360 46 L 360 256" class="dg-sep" fill="none"/>
+            <path d="M462 46 L 462 256" class="dg-sep" fill="none"/>
+            <path d="M564 46 L 564 256" class="dg-sep" fill="none"/>
+            <path d="M666 46 L 666 256" class="dg-sep" fill="none"/>
+            <!-- запись в логе и офлайн-устройство -->
+            <rect data-s="2-" x="330" y="100" width="60" height="22" rx="5" class="dg-cell hit"/>
+            <rect data-s="5" x="626" y="150" width="80" height="24" rx="6" class="dg-cell miss"/>
+            <!-- 1: отправка -->
+            <path data-s="1-" d="M54 70 L 152 70" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="1-" d="M156 70 L 254 70" class="dg-line" marker-end="url(#cp-n)"/>
+            <!-- 2: запись и ack -->
+            <path data-s="2-" d="M258 94 L 326 94" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="2-" d="M258 132 L 160 132" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="2-" d="M156 132 L 58 132" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <!-- 3: реестр -->
+            <path data-s="3-" d="M258 150 L 458 150" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="3-" d="M462 170 L 262 170" class="dg-line" marker-end="url(#cp-n)"/>
+            <!-- 4: живая доставка и подтверждение -->
+            <path data-s="4" d="M258 194 L 560 194" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="4" d="M564 194 L 662 194" class="dg-line" marker-end="url(#cp-n)"/>
+            <path data-s="4" d="M666 216 L 568 216" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="4" d="M564 216 L 262 216" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="4" d="M258 240 L 160 240" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <path data-s="4" d="M156 240 L 58 240" class="dg-line ok" marker-end="url(#cp-ok)"/>
+            <!-- 5: Бориса нет в сети -->
+            <path data-s="5" d="M258 194 L 662 194" class="dg-line" marker-end="url(#cp-n)"/>
+            <!-- подписи участников -->
+            <g text-anchor="middle">
+              <text x="54" y="35" class="dg-t">Анна</text>
+              <text x="156" y="35" class="dg-in">gw-03</text>
+              <text x="258" y="35" class="dg-t">chat</text>
+              <text x="360" y="35" class="dg-t">лог чата</text>
+              <text x="462" y="35" class="dg-t">реестр</text>
+              <text x="564" y="35" class="dg-in">gw-17</text>
+              <text x="666" y="35" class="dg-t">Борис</text>
+            </g>
+            <!-- подписи сообщений -->
+            <g text-anchor="middle">
+              <text data-s="1-" x="105" y="64" class="dg-n">send c-81</text>
+              <text data-s="2-" x="360" y="116" class="dg-in">#42</text>
+              <text data-s="2-" x="292" y="88" class="dg-n">seq</text>
+              <text data-s="2-" x="207" y="126" class="dg-ok">ack 42</text>
+              <text data-s="3-" x="411" y="144" class="dg-n">где boris?</text>
+              <text data-s="3-4" x="411" y="164" class="dg-n">gw-17</text>
+              <text data-s="5" x="411" y="164" class="dg-bad">пусто</text>
+              <text data-s="4" x="511" y="188" class="dg-n">#42</text>
+              <text data-s="4" x="411" y="210" class="dg-ok">delivered 42</text>
+              <text data-s="4" x="207" y="234" class="dg-ok">delivered 42</text>
+              <text data-s="5" x="460" y="188" class="dg-n">push через APNs/FCM</text>
+              <text data-s="5" x="666" y="166" class="dg-bad">офлайн</text>
+            </g>
+            <!-- что видит Анна: отдельный слой на шаг -->
+            <text data-s="1" x="12" y="280" class="dg-t">у Анны: «Купи хлеб» с часиками — ждёт ack</text>
+            <text data-s="2" x="12" y="280" class="dg-t">у Анны: #42 ✓ отправлено — записано в лог</text>
+            <text data-s="3" x="12" y="280" class="dg-t">у Анны: #42 ✓ отправлено</text>
+            <text data-s="4" x="12" y="280" class="dg-ok">у Анны: #42 ✓✓ доставлено на телефон Бориса</text>
+            <text data-s="5" x="12" y="280" class="dg-t">у Анны: #42 ✓ — Борис получит при синхронизации</text>
+          </svg>
+        </div>
+        <ol class="play-steps">
+          <li>Клиент Анны сразу показывает сообщение с часиками и отправляет его с client_msg_id c-81 — номером, который придумал сам клиент. Шлюз передаёт кадр в chat service.</li>
+          <li>Chat service проверяет, не видел ли он уже c-81 в этом чате, выдаёт seq 42 и дописывает сообщение в лог чата. Только после записи Анна получает ack: часики сменяются одной галочкой.</li>
+          <li>Chat service спрашивает реестр, где устройства Бориса. Реестр отвечает: телефон на gw-17.</li>
+          <li>Сообщение уходит на gw-17 и дальше Борису. Телефон подтверждает: получено всё до 42. Это подтверждение возвращается Анне как вторая галочка.</li>
+          <li>Другой исход: Бориса нет в сети, реестр пуст. Chat service отправляет push через APNs или FCM, а сообщение остаётся в логе. Телефон заберёт его при подключении запросом «всё после моего курсора».</li>
+        </ol>
+      </figure>
+      <p>TCP не спасает от потерь. Он гарантирует порядок и доставку внутри одного соединения, а мобильное соединение рвётся постоянно: при входе в лифт, при смене Wi-Fi на LTE. Всё, что было в буферах сокета в момент обрыва, пропадает, и отправитель не знает, дошёл ли кадр. Поэтому подтверждения делают на уровне приложения. Клиент ждёт ack с seq и, не дождавшись, после переподключения отправляет сообщение снова. Тогда возникает обратная проблема: chat service мог записать сообщение, а потерялся только ack.</p>
+<pre><code class="language-java">long send(String chat, String clientMsgId, String text) {
+    if (dedup) {
+        Long seen = byClientId.get(chat + "/" + clientMsgId);
+        if (seen != null) return seen;                  // повтор: тот же seq, что в первый раз
+    }
+    log.add(text);                                      // запись в лог чата выдаёт следующий seq
+    long seq = log.size();
+    byClientId.put(chat + "/" + clientMsgId, seq);
+    return seq;
+}
+
+s.send("anna-boris", "c-81", "anna: Купи хлеб");       // записано, но ack до Анны не дошёл
+s.send("anna-boris", "b-17", "boris: Уже иду");
+long ack = s.send("anna-boris", "c-81", "anna: Купи хлеб"); // повтор с тем же client_msg_id</code></pre>
+      <pre class="out">== anna's ack is lost; boris writes; anna's client reconnects and resends c-81
+   no dedup               retry ack seq=3, chat: #1 anna: Купи хлеб; #2 boris: Уже иду; #3 anna: Купи хлеб;
+   dedup by client_msg_id retry ack seq=1, chat: #1 anna: Купи хлеб; #2 boris: Уже иду;</pre>
+      <p>Без дедупликации Борис видит «Купи хлеб» дважды, и второй раз — после своего ответа, как будто Анна повторила просьбу. С дедупликацией повтор получает не ошибку «дубль», а исходный seq 1. Клиенту нужен именно он: по нему клиент ставит сообщение на настоящее место в переписке и снимает часики. Ключ дедупликации — пара (чат, client_msg_id). Хранить её нужно дольше, чем клиент может повторять: клиент мог пролежать офлайн сутки с неотправленным сообщением. Как устроены такие ключи в целом, разобрано в <a href="idempotency.html">Idempotency</a>.</p>
+      <p>В демо проверка ключа и запись — один метод под одной блокировкой. В распределённой системе это должна быть одна атомарная операция в хранилище. Подходят условная вставка ключа (<code>SET NX</code> в Redis или вставка с уникальным индексом) или выдача seq тем же владельцем чата, который хранит недавние client_msg_id. Если сначала проверять ключ, а потом писать, два повтора, пришедшие одновременно через разные шлюзы, оба пройдут проверку.</p>
+    </section>
+
+    <section class="step" id="order">
+      <h2>Порядок задаёт сервер: seq внутри чата, а не часы</h2>
+      <p>Первая идея — сортировать сообщения по времени отправки. Она ломается сразу: часы телефонов врут на секунды и минуты, а пользователь может перевести их вручную. Время приёма на сервере лучше, но экземпляров chat service много, и их часы, синхронизированные по NTP, расходятся на миллисекунды. Демо считает три порядка для одной переписки: Анна спрашивает, бот отвечает через 20 мс, Борис — через 2 секунды.</p>
+<pre><code class="language-java">int chat2Skew = -50;                            // часы экземпляра chat-2 отстают от chat-1 на 50 мс
+int borisPhoneSkew = -3000;                     // часы телефона Бориса отстают на 3 с
+List&lt;Msg&gt; chat = List.of(
+        // Анна: часы точные, сообщение принял chat-1 через 40 мс; seq выдаёт владелец чата.
+        new Msg("anna", "Встреча в 7?", t0, t0 + 40, 1),
+        // Бот получил вопрос и ответил через 20 мс; его сообщение принял chat-2.
+        new Msg("bot", "Создал событие на 19:00", t0 + 60, t0 + 65 + chat2Skew, 2),
+        // Борис ответил через 2 с; сообщение принял chat-1.
+        new Msg("boris", "Давай в 8", t0 + 2000 + borisPhoneSkew, t0 + 2040, 3));</code></pre>
+      <pre class="out">== anna asks, a bot answers in 20 ms, boris answers in 2 s
+   anna: Встреча в 7? | bot: Создал событие на 19:00 | boris: Давай в 8
+   by sender clock   boris 11:59:59.000 | anna 12:00:00.000 | bot 12:00:00.060
+   by server clock   bot 12:00:00.015 | anna 12:00:00.040 | boris 12:00:02.040
+   by chat seq       anna #1 | bot #2 | boris #3</pre>
+      <p>По часам отправителя ответ Бориса оказался первым: его телефон отстаёт на 3 секунды, и это больше, чем прошло между вопросом и ответом. По часам сервера человеческие ответы встают правильно, ведь 2 секунды гораздо больше расхождения часов. Но бот ответил быстрее, чем разошлись часы двух экземпляров, и его ответ встал раньше вопроса. Seq выдаёт одно место на чат, поэтому порядок совпадает с порядком записи. Ответ всегда получает номер больше вопроса: ответить можно только на уже записанное сообщение, у которого номер уже есть.</p>
+      <p>Одинаковая запись ещё не значит одинаковый показ. Сообщения группы доставляются параллельно: каждому получателю отдельно, через разные потоки и шлюзы, со своей задержкой. Поэтому Вера и Глеб получают сообщения в разном порядке, хотя в логе он один.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 240" role="img" aria-label="Время идёт слева направо. Анна отправляет A, Борис — B. Лог чата записывает их как #1 и #2. Вера получает #1, потом #2. Путь до Глеба для #1 медленнее, поэтому Глеб получает #2 раньше #1. На экране по приходу у Веры порядок #1 #2, у Глеба #2 #1. На экране по seq у обоих #1 #2: Глеб держит #2, пока не придёт #1.">
+            <defs>
+              <marker id="co-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="dg-arrow"/></marker>
+            </defs>
+            <!-- дорожки -->
+            <path d="M96 50 L 480 50" class="dg-sep" fill="none"/>
+            <path d="M96 100 L 480 100" class="dg-sep" fill="none"/>
+            <path d="M96 150 L 480 150" class="dg-sep" fill="none"/>
+            <path d="M96 200 L 480 200" class="dg-sep" fill="none"/>
+            <path d="M496 30 L 496 220" class="dg-sep" fill="none"/>
+            <!-- сообщения -->
+            <rect x="100" y="40" width="28" height="20" rx="4" class="dg-cell"/>
+            <rect x="150" y="40" width="28" height="20" rx="4" class="dg-cell"/>
+            <rect x="130" y="90" width="28" height="20" rx="4" class="dg-cell hit"/>
+            <rect x="180" y="90" width="28" height="20" rx="4" class="dg-cell hit"/>
+            <rect x="200" y="140" width="28" height="20" rx="4" class="dg-cell"/>
+            <rect x="290" y="140" width="28" height="20" rx="4" class="dg-cell"/>
+            <rect x="300" y="190" width="28" height="20" rx="4" class="dg-cell"/>
+            <rect x="440" y="190" width="28" height="20" rx="4" class="dg-cell"/>
+            <!-- #2 у Глеба ждёт, пока закроется дыра -->
+            <rect x="332" y="196" width="104" height="8" rx="3" class="dg-cell miss"/>
+            <!-- запись и доставка -->
+            <path d="M114 60 L 140 86" class="dg-line" marker-end="url(#co-n)"/>
+            <path d="M164 60 L 190 86" class="dg-line" marker-end="url(#co-n)"/>
+            <path d="M150 110 L 211 137" class="dg-line" marker-end="url(#co-n)"/>
+            <path d="M146 111 C 158 170, 200 176, 260 176 L 420 176 C 440 176, 452 178, 453 186" class="dg-line" marker-end="url(#co-n)"/>
+            <path d="M198 110 L 301 137" class="dg-line" marker-end="url(#co-n)"/>
+            <path d="M200 110 L 311 187" class="dg-line" marker-end="url(#co-n)"/>
+            <!-- подписи -->
+            <text x="20" y="54" class="dg-n">отправители</text>
+            <text x="20" y="104" class="dg-n">лог чата</text>
+            <text x="20" y="154" class="dg-n">Вера</text>
+            <text x="20" y="204" class="dg-n">Глеб</text>
+            <g text-anchor="middle">
+              <text x="114" y="54" class="dg-in">A</text>
+              <text x="164" y="54" class="dg-in">B</text>
+              <text x="144" y="104" class="dg-in">#1</text>
+              <text x="194" y="104" class="dg-in">#2</text>
+              <text x="214" y="154" class="dg-in">#1</text>
+              <text x="304" y="154" class="dg-in">#2</text>
+              <text x="314" y="204" class="dg-in">#2</text>
+              <text x="454" y="204" class="dg-in">#1</text>
+              <text x="384" y="228" class="dg-bad">#2 ждёт дыру #1</text>
+            </g>
+            <text x="480" y="236" class="dg-n" text-anchor="end">время →</text>
+            <text x="510" y="50" class="dg-cap">ПО ПРИХОДУ</text>
+            <text x="510" y="74" class="dg-in">Вера: #1 #2</text>
+            <text x="510" y="94" class="dg-bad">Глеб: #2 #1</text>
+            <text x="510" y="136" class="dg-cap">ПО SEQ</text>
+            <text x="510" y="160" class="dg-ok">Вера: #1 #2</text>
+            <text x="510" y="180" class="dg-ok">Глеб: #1 #2</text>
+          </svg>
+        </div>
+        <figcaption>Seq не мешает сообщениям обгонять друг друга в пути. Он даёт клиенту восстановить порядок и заметить, что чего-то не хватает.</figcaption>
+      </figure>
+      <p>Демо проверяет это на группе: Анна и Борис одновременно отправляют по 50 сообщений, лог выдаёт seq, а доставка каждому получателю — отдельная задача на виртуальном потоке со случайной задержкой 0–2 мс:</p>
+<pre><code class="language-java">long seq = log.append("msg");                       // один писатель на чат выдаёт номер
+for (List&lt;Long&gt; screen : List.of(vera, gleb)) {     // fan-out: каждому получателю отдельно
+    net.submit(() -&gt; {
+        sleepMicros(ThreadLocalRandom.current().nextInt(2000));   // сеть и очереди
+        screen.add(seq);                            // экран по приходу
+    });
+}
+// Клиент по seq: показывает следующий номер, а пришедшие после дыры держит, пока она не закроется.
+if (seq &gt; expected) { gaps++; held.add(seq); }</code></pre>
+      <pre class="out">== group chat: anna and boris send 50 messages each, vera and gleb receive, 200 runs
+   screens in arrival order differ:   200 of 200 runs
+   screens ordered by seq differ:       0 of 200 runs
+   gaps a client noticed: 72.4 per 100 messages, at most 16 messages waiting behind a gap</pre>
+      <p>По приходу экраны Веры и Глеба разошлись во всех 200 прогонах, по seq совпали во всех. Последняя строка меняется от запуска и зависит от темпа: здесь сообщения идут чаще, чем раз в 0,3 мс, при разбросе задержки до 2 мс. В спокойном чате, где сообщения идут раз в несколько секунд, дыры редки. В активной группе и после переподключения они обычны. Непрерывный seq позволяет клиенту отличить «ещё не пришло» от «потеряно». Пришёл #45 после #43 — значит, #44 в пути или потерян. Клиент ждёт доли секунды, потом сам запрашивает «всё после 43». Так работает Telegram: у каждого ящика сообщений свой счётчик pts, клиент сверяет его с пришедшим обновлением и при дыре ждёт до 0,5 с, а потом вызывает <code>getDifference</code>.</p>
+      <table class="mx">
+        <thead><tr><th>Кто выдаёт seq</th><th>Как</th><th>Подвох</th></tr></thead>
+        <tbody>
+          <tr><td>Счётчик в строке чата</td><td><code>update chat set last_seq = last_seq + 1 returning last_seq</code> в одной транзакции со вставкой</td><td>Блокировка строки — горячая точка в активной группе</td></tr>
+          <tr><td>Redis <code>INCR seq:c9</code></td><td>Атомарно и быстро</td><td>При failover на асинхронную реплику последние инкременты теряются, и номер выдаётся повторно</td></tr>
+          <tr><td>Владелец чата</td><td>Чат закреплён за одним экземпляром по хешу, счётчик в памяти с записью в хранилище</td><td>Смена владельца при падении: новый должен прочитать последний записанный seq</td></tr>
+          <tr><td>Партиция Kafka по chat_id</td><td>Один потребитель партиции — единственный писатель чата</td><td>Offset общий на партицию, seq чата всё равно считает потребитель</td></tr>
+          <tr><td>Snowflake id</td><td>Уникален и растёт со временем, координация не нужна</td><td>Номера не подряд: дыру не обнаружить, порядок близких по времени сообщений с разных узлов приблизителен</td></tr>
+        </tbody>
+      </table>
+      <p>Порядок нужен только внутри чата. Глобальный порядок всех сообщений системы никому не нужен и не масштабируется, а счётчик на чат делится по чатам так же естественно, как и хранилище. Тот же принцип даёт Kafka: порядок гарантирован внутри партиции, поэтому ключ — chat_id, как в <a href="kafka-basics.html">Kafka Basics</a>. Discord использует Snowflake: их id растут со временем, а дыры клиенты не ищут, они догружают историю запросом «после id». Про устройство Snowflake — в <a href="id-generation.html">Unique ID Generation</a>.</p>
+      <div class="trap">
+        <p class="myth">Сообщения можно сортировать по времени отправки с устройства, если часы синхронизированы.</p>
+        <p class="fact">Часы телефона пользователь может перевести, а сеть их не исправит. В демо ответ Бориса с отставанием часов на 3 с встал раньше вопроса. Даже часы серверов поставили ответ бота раньше вопроса из-за разницы в 50 мс. Порядок должен выдавать один писатель на чат — seq.</p>
+      </div>
+    </section>
+
+    <section class="step" id="sync">
+      <h2>Офлайн, несколько устройств и статусы — это курсоры по seq</h2>
+      <p>Раз в логе чата сообщения пронумерованы подряд, состояние любого устройства описывает одно число: до какого seq оно получило сообщения. Это курсор устройства. При подключении устройство присылает курсор по каждому чату и получает всё, что после него. Офлайн, обрыв посреди сообщения, новое устройство, переустановка приложения — один и тот же механизм с разным курсором. У нового устройства курсор 0, и оно догружает историю страницами.</p>
+      <p>Статусы для отправителя получаются из тех же чисел. На каждого участника чата сервер хранит два: <code>delivered_up_to</code> — максимум из курсоров его устройств, и <code>read_up_to</code> — до какого сообщения он дочитал на любом устройстве. Сообщение #5 Бориса для Анны «доставлено», если <code>delivered_up_to</code> Анны ≥ 5, и «прочитано», если <code>read_up_to</code> ≥ 5. Хранить статус на каждое сообщение не нужно: при 2 млрд сообщений в сутки это ещё две-три записи на каждое, а курсор участника просто сдвигается.</p>
+      <figure class="fig">
+        <div class="fig-box">
+          <svg class="dg" viewBox="0 0 720 210" role="img" aria-label="Лог чата Анны и Бориса из семи сообщений. Анна прочитала до #3, на её устройства доставлено до #6, #7 только отправлено. Курсор ноутбука стоит после #3, при подключении он получит #4–#7. Курсор телефона стоит после #6, он получит #7.">
+            <!-- лог чата -->
+            <rect x="120" y="78" width="70" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="196" y="78" width="70" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="272" y="78" width="70" height="34" rx="6" class="dg-cell hit"/>
+            <rect x="348" y="78" width="70" height="34" rx="6" class="dg-cell"/>
+            <rect x="424" y="78" width="70" height="34" rx="6" class="dg-cell"/>
+            <rect x="500" y="78" width="70" height="34" rx="6" class="dg-cell"/>
+            <rect x="576" y="78" width="70" height="34" rx="6" class="dg-cell miss"/>
+            <!-- курсоры -->
+            <path d="M345 44 L 345 140" class="dg-line"/>
+            <path d="M573 44 L 573 140" class="dg-line"/>
+            <!-- подписи -->
+            <text x="20" y="38" class="dg-n">сервер, Анна:</text>
+            <text x="20" y="100" class="dg-t">лог чата</text>
+            <text x="20" y="156" class="dg-n">устройства:</text>
+            <g text-anchor="middle">
+              <text x="155" y="100" class="dg-in">#1</text>
+              <text x="231" y="100" class="dg-in">#2</text>
+              <text x="307" y="100" class="dg-in">#3</text>
+              <text x="383" y="100" class="dg-in">#4</text>
+              <text x="459" y="100" class="dg-in">#5</text>
+              <text x="535" y="100" class="dg-in">#6</text>
+              <text x="611" y="100" class="dg-in">#7</text>
+            </g>
+            <text x="341" y="38" class="dg-ok" text-anchor="end">read_up_to = 3</text>
+            <text x="569" y="38" class="dg-in" text-anchor="end">delivered_up_to = 6</text>
+            <text x="351" y="156" class="dg-in">ноутбук after=3</text>
+            <text x="351" y="174" class="dg-s">получит #4–#7</text>
+            <text x="579" y="156" class="dg-in">телефон after=6</text>
+            <text x="579" y="174" class="dg-s">получит #7</text>
+            <text x="20" y="200" class="dg-s">зелёное — прочитано, белое — доставлено, пунктир — только отправлено</text>
+          </svg>
+        </div>
+        <figcaption>Четыре числа описывают всё: что показать Борису галочками и что отдать каждому устройству Анны при подключении.</figcaption>
+      </figure>
+      <p>Демо проходит этот сценарий. У Анны телефон в сети и ноутбук, выключенный после #3. Борис пишет, телефон теряет сеть, потом Анна открывает ноутбук:</p>
+<pre><code class="language-java">// Статус сообщения для отправителя — не поле сообщения, а сравнение с двумя курсорами получателя.
+s &lt;= annaRead ? "read" : s &lt;= annaDelivered ? "delivered" : "sent"
+
+// Подключение устройства: всё после его курсора, курсор сдвигается на конец лога.
+for (long s = after + 1; s &lt;= lastSeq; s++) sb.append(" #").append(s);</code></pre>
+      <pre class="out">== anna has a phone (online) and a laptop (offline), both synced up to #3
+   boris sends #4 -&gt; live to [phone]
+   boris sends #5 -&gt; live to [phone]
+   boris sends #6 -&gt; live to [phone]
+   boris sees #4 delivered #5 delivered #6 delivered
+   -- phone loses network
+   boris sends #7 -&gt; no live device, push via APNs/FCM
+   boris sees #4 delivered #5 delivered #6 delivered #7 sent
+   laptop connects with after=3, gets: #4 #5 #6 #7; read_up_to=3
+   laptop: anna reads up to #6 -&gt; read_up_to=6, boris sees #4 read #5 read #6 read #7 delivered
+   phone connects with after=6, gets: #7; read_up_to=6
+   phone unread badge: 1</pre>
+      <p>Ноутбук получил только пропущенное, телефон — только #7, хотя оба были офлайн. Анна прочитала до #6 на ноутбуке, и телефон узнал об этом из <code>read_up_to</code>: счётчик непрочитанного на нём — 1, а не 4. Борис видит статусы из тех же двух чисел. #7 стал «доставлено», как только его получил ноутбук: доставки на одно любое устройство достаточно. Изменения курсоров рассылаются тем же путём, что сообщения: <code>read_up_to</code> Анны уходит на её другие устройства и отправителю.</p>
+      <p>У пользователя сотни чатов, и спрашивать при подключении каждый — сотни запросов. Поэтому сервер держит для пользователя список чатов с последним seq каждого. Клиент сравнивает его со своими курсорами и догружает только изменившиеся чаты. Telegram идёт дальше: у пользователя есть общий счётчик обновлений pts для личных чатов и небольших групп, и одна разница по нему отвечает на вопрос «что изменилось, пока меня не было». Подтверждения <code>delivered</code> клиент шлёт пачкой — «получил всё до 43», а не на каждое сообщение. Иначе при догрузке тысячи сообщений будет тысяча кадров.</p>
+    </section>
+
+    <section class="step" id="storage">
+      <h2>История и группы: один лог на чат, разложенный по партициям</h2>
+      <p>Почти все чтения истории одинаковы: последние N сообщений чата или сообщения чата после seq X. Запись — дописать в конец. Обновления редки: редактирование, удаление, реакции. Объём — сотни терабайт в год. Под такую нагрузку подходит широкое колоночное хранилище: Cassandra, ScyllaDB, HBase. Запись в них дешёвая — дописывание в журнал и память, а чтение диапазона внутри партиции идёт по сортированному ключу. Как Cassandra раскладывает строки по узлам, разобрано в <a href="cassandra.html">Cassandra</a>.</p>
+<pre><code class="language-sql">CREATE TABLE messages (
+  chat_id       bigint,
+  bucket        int,              -- seq / 100000: партиция не растёт бесконечно
+  seq           bigint,
+  sender_id     bigint,
+  client_msg_id text,
+  body          text,
+  created_at    timestamp,        -- для показа «12:03», не для порядка
+  PRIMARY KEY ((chat_id, bucket), seq)
+) WITH CLUSTERING ORDER BY (seq DESC);
+
+-- последние 50 сообщений чата: одна партиция, чтение подряд с конца
+SELECT * FROM messages WHERE chat_id = 9 AND bucket = 4 LIMIT 50;
+-- догрузка после курсора
+SELECT * FROM messages WHERE chat_id = 9 AND bucket = 4 AND seq &gt; 412345;</code></pre>
+      <p>Ключ партиции — чат плюс корзина. Без корзины чат, живущий годами, превращается в одну огромную партицию на одних и тех же узлах. Discord начинал с той же схемы: <code>((channel_id, bucket), message_id)</code>, корзина — 10 дней, чтобы партиция самых активных каналов не превышала 100 МБ. При 200 байтах на сообщение корзина в 100 000 сообщений — около 20 МБ. Номер корзины вычисляется из seq, поэтому запрос «после seq X» сразу знает, куда идти. Пользователи, чаты и состав участников — в обычной реляционной базе: данных мало, нужны транзакции и связи.</p>
+      <p>PostgreSQL, поделённый по chat_id, тоже рабочий вариант, особенно в начале. Колоночное хранилище выбирают за линейное масштабирование записи и репликацию между дата-центрами из коробки. Цена тоже есть. Выдачу seq и дедупликацию нельзя сделать транзакцией вместе со вставкой: нужна лёгкая транзакция (LWT) или отдельный владелец чата. Удаление оставляет tombstone, и канал с миллионами удалённых сообщений тормозит чтение — Discord на этом обжигался. Discord в итоге перешёл на ScyllaDB и поставил перед базой сервисы, которые склеивают одинаковые одновременные запросы к горячему каналу в один.</p>
+      <p>Группа меняет главный вопрос: класть ли сообщение один раз в лог чата или копию каждому участнику в его ящик.</p>
+      <table class="mx">
+        <thead><tr><th></th><th>Копия в ящик каждому (fan-out on write)</th><th>Один лог чата (fan-out on read)</th></tr></thead>
+        <tbody>
+          <tr><td>Сообщение в группу на 500</td><td>500 записей</td><td>1 запись</td></tr>
+          <tr><td>Синхронизация</td><td>Одна лента пользователя, один курсор на всё</td><td>Курсор на каждый чат, нужен список чатов с последним seq</td></tr>
+          <tr><td>Удаление, редактирование</td><td>Поправить все копии</td><td>Одно место</td></tr>
+          <tr><td>Где применяют</td><td>Личные чаты и малые группы: обычные группы Telegram до 200, малые группы WeChat</td><td>Большие группы и каналы: супергруппы Telegram до 200 000, Discord, Slack</td></tr>
+        </tbody>
+      </table>
+      <p>Хранение и доставка — разные fan-out. Даже при одном логе живую доставку получает каждое онлайн-устройство каждого участника. Её выгоднее делать по шлюзам, а не по пользователям: chat service отправляет сообщение один раз на каждый шлюз, где есть участники чата, а шлюз раздаёт своим соединениям. В канале на 100 000 участников, где 20 000 онлайн, это 100 отправок на 100 шлюзов вместо 20 000. Так устроен Slack: сервер канала рассылает сообщение шлюзам, подписанным на канал. Статусы в большой группе тоже дорожают. «Прочитано» от каждого из 500 участников, разосланное всем, — 250 000 событий на одно сообщение. Поэтому прочтения отправляют только автору или показывают только счётчиком, а в каналах не показывают совсем.</p>
+    </section>
+
+    <section class="step" id="presence">
+      <h2>Presence, push и сбои: что делать, когда соединения нет</h2>
+      <p>«В сети» — самая дорогая мелочь мессенджера. Наивно — писать в базу каждый heartbeat и рассылать всем контактам каждое изменение. При 10 млн соединений и heartbeat раз в 30 секунд это 330 000 записей в секунду. Пользователь со слабой сетью к тому же «мигает» онлайн-офлайн, и каждое мигание уходит сотням контактов. Поэтому presence строят на тех, кто уже знает о соединении, — на шлюзах. Шлюз сам отвечает на ping и раз в 30 секунд одной пачкой продлевает в Redis ключи всех своих пользователей: <code>online:boris</code> со сроком 60 секунд. Нет ключа — пользователь не в сети. При отключении шлюз записывает <code>last_seen</code> и выжидает несколько секунд: переход с Wi-Fi на LTE не должен выглядеть как выход из сети.</p>
+      <p>Изменения presence рассылают только тем, кто сейчас на них смотрит: собеседнику в открытом чате, пользователю с открытым списком контактов. Клиент подписывается на presence видимых людей и отписывается, уходя с экрана. В больших группах presence участников не рассылают, а запрашивают при открытии. Индикатор «печатает…» ещё легче: его не хранят, клиент шлёт его не чаще раза в несколько секунд, а у получателя он гаснет сам через несколько секунд.</p>
+      <p>Push нужен, когда у получателя нет ни одного живого устройства в реестре или устройство не подтвердило доставку за несколько секунд. Push идёт через APNs и FCM, а их доставку не гарантирует никто. Поэтому push — только сигнал «проснись и синхронизируйся», а сообщения приложение забирает по курсору. Текст в push можно не класть, а несколько сообщений одного чата сворачивать в одно уведомление. Отправка, лимиты провайдеров и тихие часы — в <a href="sd-notifications.html">Notification Service</a>.</p>
+      <table class="mx">
+        <thead><tr><th>Сбой</th><th>Что видит пользователь</th><th>Что делаем</th></tr></thead>
+        <tbody>
+          <tr><td>Упал шлюз gw-17</td><td>100 000 клиентов теряют соединение</td><td>Переподключение к любому шлюзу со случайной экспоненциальной задержкой; записи gw-17 в реестре истекают по сроку; доставка на мёртвый шлюз — как офлайн: push и синхронизация, сообщения в логе</td></tr>
+          <tr><td>Потерялся ack</td><td>Сообщение с часиками</td><td>Повтор с тем же client_msg_id возвращает исходный seq</td></tr>
+          <tr><td>Chat service упал после записи, до доставки</td><td>Сообщение пришло с задержкой</td><td>Устройство заберёт его по курсору при следующей синхронизации или по push</td></tr>
+          <tr><td>Реестр недоступен</td><td>Живой доставки нет</td><td>Push и периодическая синхронизация по курсору: медленнее, но без потерь</td></tr>
+          <tr><td>Выдача seq повторила номер после failover</td><td>Два сообщения с одним номером</td><td>Seq не держат только в памяти: условная запись в хранилище или владелец чата, читающий последний записанный seq</td></tr>
+          <tr><td>Деплой шлюзов</td><td>Шторм переподключений</td><td>Выводить шлюз из ротации постепенно, закрывать соединения порциями; шлюзы тонкие и меняются редко</td></tr>
+        </tbody>
+      </table>
+      <p>Границы модели. Канал с миллионом подписчиков — уже не чат, а рассылка. Писатель один, ответов нет, и живая доставка каждому заменяется лентой, которую клиент читает при открытии. Сквозное шифрование оставляет серверу только маршрутизацию: поиск, превью в push и модерацию приходится переносить на клиент. Вложения в лог не кладут. Клиент загружает файл в объектное хранилище по подписанной ссылке, а в сообщении лежит только ссылка и метаданные.</p>
+      <div class="trap">
+        <p class="myth">Галочка «отправлено» значит, что сообщение ушло получателю, а «доставлено» нужно хранить у каждого сообщения.</p>
+        <p class="fact">«Отправлено» значит «записано в лог и получило seq»: после этого сообщение не потеряется, даже если живая доставка не удалась. «Доставлено» и «прочитано» — сравнение seq с двумя курсорами получателя. В демо Борис видел «#7 sent», пока телефон Анны был офлайн, и «delivered», как только ноутбук забрал #4–#7 по курсору after=3.</p>
+      </div>
+    </section>
+
+    <div class="summary">
+      <ul>
+        <li>Соединение живёт на шлюзе; реестр «пользователь → устройства → шлюз» со сроком жизни говорит chat service, куда доставлять. Рассылка всем шлюзам не масштабируется.</li>
+        <li>Сначала записать в лог и выдать seq, потом доставлять. Живая доставка — ускорение, гарантия — синхронизация по курсору.</li>
+        <li>Повтор с тем же client_msg_id получает исходный seq, а не новую запись и не ошибку.</li>
+        <li>Порядок выдаёт один писатель на чат. Часы телефона поставили ответ раньше вопроса, а по приходу два получателя разошлись в 200 прогонах из 200.</li>
+        <li>Доставлено и прочитано — два числа на участника; офлайн и несколько устройств — курсор на устройство.</li>
+        <li>История — партиции (чат, корзина) с сортировкой по seq; малые группы — копия каждому, большие — один лог и доставка по шлюзам.</li>
+      </ul>
+    </div>
+  </div>
+
+  <section class="interview" id="interview">
+    <h2>На собеседовании</h2>
+
+    <article class="q" id="ch-design" data-freq="3">
+      <h3>Спроектируйте мессенджер вроде WhatsApp или Telegram</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Уточняю размер групп, число устройств, нужны ли статусы, presence и сквозное шифрование, и оцениваю: 50 млн DAU по 40 сообщений — около 23 тысяч в секунду, 10 млн одновременных соединений. Клиенты держат WebSocket к слою шлюзов, шлюзы регистрируют устройства в реестре «пользователь → шлюз» в Redis. Сообщение идёт через шлюз в chat service без состояния. Тот отбрасывает повторы по client_msg_id, выдаёт seq внутри чата, записывает в лог и отвечает отправителю ack. Потом по реестру находит шлюзы получателей и доставляет, а если устройств в сети нет — отправляет push.</p>
+          <p>История — в Cassandra, партиция по чату и корзине, сортировка по seq. Устройства хранят курсор по каждому чату и при подключении забирают всё после него. Статусы «доставлено» и «прочитано» — два курсора на участника.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Шлюзы тонкие: деплой шлюза — шторм переподключений, логика живёт в chat service.</li>
+            <li>Heartbeat-ов больше, чем сообщений: presence продлевают пачками со шлюза, а не записью в базу на каждый ping.</li>
+            <li>Малые группы — копия в ящик каждому, большие — один лог и доставка по шлюзам; для канала на 100 000 это 100 отправок вместо 20 000.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Как сделать индикатор «в сети» для миллионов пользователей?</summary>
+          <p>Источник правды — шлюз: он знает, живо ли соединение, потому что сам отвечает на ping. Раз в 30 секунд шлюз одной пачкой продлевает в Redis ключи своих пользователей со сроком 60 секунд; нет ключа — не в сети. При отключении записывается last_seen с задержкой в несколько секунд против мигания при смене сети. Изменения рассылают только подписчикам, которые сейчас видят этого пользователя, а в больших группах presence запрашивают при открытии. Писать каждый heartbeat в базу — 330 000 записей в секунду при 10 млн соединений.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ch-routing" data-freq="3">
+      <h3>Как сообщение найдёт получателя, подключённого к другому серверу?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Соединения держат шлюзы, и при подключении шлюз записывает в реестр, например Redis-хеш <code>conn:boris</code>, какое устройство на каком шлюзе, со сроком жизни, который продлевает, пока соединение живо. Chat service перед доставкой читает реестр и отправляет сообщение на нужные шлюзы, а они — в соединения. Нет записей — пользователь офлайн, уходит push, а сообщение он заберёт по курсору при подключении.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Упавший шлюз оставляет записи до истечения срока; отправка на него падает и обрабатывается как офлайн — потерь нет, потому что сообщение уже в логе.</li>
+            <li>Sticky sessions не решают задачу: после обрыва клиент попадёт на любой шлюз, а отправитель и так сидит на другом.</li>
+            <li>Широковещательная рассылка всем шлюзам через Pub/Sub — 21 млн событий в секунду при 100 шлюзах; адресная доставка нужна по реестру.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="ревью">
+          <summary>Что не так с обработчиком сообщения?</summary>
+          <pre><code class="language-java">void onSend(SendFrame f) {
+    Message m = new Message(f.chatId(), f.from(), f.text(), Instant.now());
+    String gw = registry.get(f.to());                 // один шлюз на пользователя
+    if (gw != null) gateways.send(gw, m);             // живая доставка
+    else push.send(f.to(), m.text());
+    messages.save(m);                                 // история
+    ack(f.from(), m.createdAt());
+}</code></pre>
+          <p>Запись идёт после доставки: если сервис упадёт между ними или <code>gateways.send</code> бросит исключение на мёртвом шлюзе, получатель увидит сообщение, которого нет в истории, а отправитель не получит ack и отправит снова. Повтор создаст дубль: client_msg_id не проверяется. Порядок задают часы экземпляра, а не seq чата, поэтому нельзя ни упорядочить, ни найти дыры. Реестр хранит один шлюз на пользователя, а устройств несколько. Правильно: дедупликация, seq и запись, потом ack с seq, потом доставка на все устройства, а для упавших отправок — push.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ch-order" data-freq="3">
+      <h3>Как гарантировать порядок сообщений и не терять и не дублировать их?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Порядок выдаёт сервер: у каждого чата свой счётчик seq, и номер выдаёт один писатель — владелец чата, атомарный счётчик или потребитель партиции Kafka с ключом chat_id. Клиенты показывают по seq, а не по времени: часы телефонов врут, и ответ может встать раньше вопроса. Потерь нет, потому что сообщение сначала записывается, а устройство при подключении забирает всё после своего курсора. Дублей нет, потому что клиент отправляет client_msg_id, и повтор после потерянного ack получает исходный seq.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Непрерывный seq позволяет найти дыру: пришёл #45 после #43 — подождать долю секунды и запросить «после 43», как getDifference в Telegram.</li>
+            <li>Глобальный порядок не нужен — только внутри чата; это и делает счётчик масштабируемым.</li>
+            <li>Redis INCR после failover на асинхронную реплику может выдать номер повторно; счётчик подкрепляют условной записью в хранилище.</li>
+          </ul>
+        </div>
+      </div>
+      <div class="check">
+        <details data-kind="уточнение">
+          <summary>Почему бы не взять Snowflake id вместо seq?</summary>
+          <p>Snowflake уникален и растёт со временем без координации, поэтому как ключ сортировки он годится: так делает Discord. Но номера идут не подряд, и клиент не может понять, пропустил ли он что-то, — только догрузить «после id». Порядок близких сообщений с разных узлов определяется их часами. Seq требует одного писателя на чат, зато даёт точный порядок записи и обнаружение дыр.</p>
+        </details>
+      </div>
+    </article>
+
+    <article class="q" id="ch-receipts" data-freq="2">
+      <h3>Как сделать статусы «доставлено» и «прочитано» и синхронизацию между устройствами?</h3>
+      <div class="answer">
+        <div data-level="middle">
+          <p>Каждое устройство хранит курсор по чату — последний полученный seq — и подтверждает пачкой: получил всё до 43. На участника сервер хранит delivered_up_to, максимум курсоров его устройств, и read_up_to. Статус любого сообщения для отправителя — сравнение его seq с этими числами, поэтому не нужно хранить статус у каждого сообщения. Прочтение на одном устройстве рассылается остальным, и счётчик непрочитанного на телефоне обновляется сам.</p>
+        </div>
+        <div data-level="senior">
+          <ul>
+            <li>Чтобы при подключении не опрашивать сотни чатов, сервер отдаёт список чатов с последним seq или ведёт общий счётчик обновлений пользователя, как pts в Telegram.</li>
+            <li>В группе на 500 прочтения всем — 250 000 событий на сообщение: их шлют только автору, показывают счётчиком или отключают.</li>
+          </ul>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <div class="qa"></div>
+  <div class="refs">
+    <ul>
+      <li>Alex Xu, «System Design Interview», том 1, глава 12 «Design a Chat System» — основа урока: шлюзы чата, синхронизация устройств по последнему id, presence через heartbeat.</li>
+      <li><a href="https://core.telegram.org/api/updates">Telegram API: Working with Updates</a> — pts и обнаружение дыр, ожидание 0,5 с и getDifference; <a href="https://core.telegram.org/api/channel">Channels, supergroups and groups</a> — общий ящик обычных групп до 200 и свой у супергрупп.</li>
+      <li><a href="https://discord.com/blog/how-discord-stores-billions-of-messages">Discord: How Discord Stores Billions of Messages</a> — схема Cassandra, корзины по 10 дней, tombstone; <a href="https://discord.com/blog/how-discord-stores-trillions-of-messages">How Discord Stores Trillions of Messages</a> — переход на ScyllaDB и склеивание запросов.</li>
+      <li><a href="https://slack.engineering/real-time-messaging/">Slack Engineering: Real-time Messaging</a> — серверы каналов на кольце хешей и рассылка по шлюзам.</li>
+      <li><a href="https://blog.whatsapp.com/1-million-is-so-2011">WhatsApp: 1 million is so 2011</a> — 2 млн соединений на одной машине.</li>
+    </ul>
+  </div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="../assets/kb.js"></script>
+</body>
+</html>

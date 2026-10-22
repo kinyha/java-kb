@@ -343,6 +343,8 @@ window.KB_TREE = [
           scope: 'генерация ключа, хранение, чтение под нагрузкой, аналитика' },
         { id: 'sd-notifications', freq: 1, status: 'draft', title: 'Notification Service',
           scope: 'каналы доставки, очереди, повторы, шаблоны, лимиты' },
+        { id: 'sd-chat', freq: 2, status: 'draft', title: 'Chat System',
+          scope: 'требования и оценка, WebSocket-шлюзы и реестр «пользователь → шлюз», сначала записать, потом доставить, client_msg_id и дедупликация, порядок по seq внутри чата, статусы отправлено, доставлено, прочитано как курсоры, офлайн и несколько устройств, группы и fan-out, хранение истории в Cassandra, presence, push' },
       ] },
     ],
   },
